@@ -1,0 +1,31 @@
+[package]
+name = "neat_ai_lamarck"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Experimental Lamarck-style optimiser for already-fit NEAT-AI creatures."
+repository = "https://github.com/stSoftwareAU/NEAT-AI-Lamarck"
+readme = "../README.md"
+
+[lints]
+workspace = true
+
+[lib]
+name = "neat_ai_lamarck"
+path = "src/lib.rs"
+
+[[bin]]
+name = "neat_ai_lamarck"
+path = "src/main.rs"
+
+[dependencies]
+# Keep this sibling path aligned with NEAT-AI-scorer until/unless workspace
+# orchestration changes. CI will need to check out NEAT-AI-core beside this repo.
+neat-core = { path = "../../NEAT-AI-core/neat-core" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
