@@ -8,7 +8,9 @@ use crate::config::LamarckConfig;
 use crate::focus::{FixedFocusSelector, FocusSelector, RandomFocusSelector, collect_focus_stats};
 use crate::log;
 use crate::observations::ensure_statistics;
-use crate::scorer::{DirectoryScorer, ScoreResult, accepts_improvement, select_winner};
+use crate::scorer::{
+    DirectoryScorer, ScoreResult, accepts_improvement, log_scorer_batch_stats, select_winner,
+};
 use neat_core::{
     TrainingDataConfig, compile_creature, creature_to_json_pretty, parse_creature_json,
 };
@@ -223,7 +225,7 @@ pub fn run_optimisation(
             }
         };
         let scorer_ms = scorer_start.elapsed().as_millis();
-        log::ok(&format!("scorer finished in {scorer_ms}ms"));
+        log_scorer_batch_stats(&scores, scorer_ms, config.min_improvement);
 
         let baseline = scores
             .get("baseline")
@@ -231,7 +233,6 @@ pub fn run_optimisation(
         if best_score.is_infinite() {
             best_score = baseline.score;
         }
-        log::detail(&format!("baseline score={}", baseline.score));
 
         let winner = select_winner(&scores, config.min_improvement).map_err(|e| e.to_string())?;
         let mut accepted = false;
@@ -259,6 +260,8 @@ pub fn run_optimisation(
             acceptances += 1;
             improvement = Some(delta);
             winner_stem = Some(stem.to_string());
+        } else {
+            log::detail("no candidate met the acceptance threshold");
         }
 
         let score_map = scores.iter().map(|(k, v)| (k.clone(), v.score)).collect();

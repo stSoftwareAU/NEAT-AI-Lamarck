@@ -20,4 +20,4 @@ pub use config::{
 };
 pub use report::{JournalReport, print_run_summary, report_from_journal};
 pub use run::{ExperimentRecord, RunResult, run_optimisation};
-pub use scorer::{ExternalScorer, ScoreResult, accepts_improvement};
+pub use scorer::{ExternalScorer, ScoreResult, accepts_improvement, log_scorer_batch_stats};
