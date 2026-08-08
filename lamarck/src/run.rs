@@ -167,6 +167,22 @@ pub fn run_optimisation(
             "focus scan: {} records in {focus_scan_ms}ms",
             focus_stats.record_count
         ));
+        match (focus_stats.mean_error, focus_stats.mean_abs_error) {
+            (Some(me), Some(mae)) => log::detail(&format!(
+                "focus error: mean={me:.6e}  mae={mae:.6e}  post_mean={:.6e}  bias={:.6e}",
+                focus_stats.post_mean,
+                incumbent
+                    .neurons
+                    .iter()
+                    .find(|n| n.uuid == focus)
+                    .map(|n| n.bias)
+                    .unwrap_or(f64::NAN)
+            )),
+            _ => log::detail(&format!(
+                "focus (no target error): post_mean={:.6e}  pre_mean={:.6e}",
+                focus_stats.post_mean, focus_stats.pre_mean
+            )),
+        }
         let gen_ctx = CandidateGenContext {
             incumbent: &incumbent,
             focus_uuid: &focus,

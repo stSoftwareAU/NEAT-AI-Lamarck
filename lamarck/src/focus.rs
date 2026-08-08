@@ -73,6 +73,12 @@ pub struct FocusNeuronStats {
     pub near_zero_fraction: f64,
     /// Fraction of saturated activations (squash-aware heuristic).
     pub saturation_fraction: f64,
+    /// Mean signed error `target - post` when the focus is an output neuron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_error: Option<f64>,
+    /// Mean absolute error when the focus is an output neuron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_abs_error: Option<f64>,
     /// Records scanned.
     pub record_count: u64,
 }
@@ -113,6 +119,16 @@ pub fn collect_focus_stats(
         .filter(|s| s.to_uuid == focus_uuid)
         .count();
 
+    let output_index = if neuron.neuron_type == "output" {
+        creature
+            .neurons
+            .iter()
+            .filter(|n| n.neuron_type == "output")
+            .position(|n| n.uuid == focus_uuid)
+    } else {
+        None
+    };
+
     let config = TrainingDataConfig::new(creature.input, creature.output);
     let mut iter = TrainingDataIterator::new(training_data, config).map_err(|e| e.to_string())?;
 
@@ -125,6 +141,9 @@ pub fn collect_focus_stats(
     let mut near_zero = 0u64;
     let mut saturated = 0u64;
     let mut count = 0u64;
+    let mut err_sum = 0.0;
+    let mut abs_err_sum = 0.0;
+    let mut err_count = 0u64;
 
     let squash = neuron.squash.clone();
     while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
@@ -157,7 +176,25 @@ pub fn collect_focus_stats(
         if is_saturated(squash.as_deref(), post) {
             saturated += 1;
         }
+        if let Some(out_i) = output_index
+            && out_i < record.outputs.len()
+        {
+            let target = f64::from(record.outputs[out_i]);
+            let err = target - post;
+            err_sum += err;
+            abs_err_sum += err.abs();
+            err_count += 1;
+        }
     }
+
+    let (mean_error, mean_abs_error) = if err_count > 0 {
+        (
+            Some(err_sum / err_count as f64),
+            Some(abs_err_sum / err_count as f64),
+        )
+    } else {
+        (None, None)
+    };
 
     Ok(FocusNeuronStats {
         neuron_uuid: focus_uuid.to_string(),
@@ -187,6 +224,8 @@ pub fn collect_focus_stats(
         } else {
             0.0
         },
+        mean_error,
+        mean_abs_error,
         record_count: count,
     })
 }

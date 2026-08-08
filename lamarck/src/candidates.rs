@@ -15,6 +15,8 @@ use std::path::Path;
 pub enum CandidateStrategy {
     /// Conventional backprop-derived bias/weight change.
     Backprop,
+    /// Output-neuron bias += measured mean error (`target - post`).
+    MeanErrorBias,
     /// Statistics-guided weight change.
     StatsWeight,
     /// Statistics-guided bias change.
@@ -82,8 +84,18 @@ pub fn generate_candidates(
         CandidateStrategy::Random,
     ];
 
-    for i in 0..count {
-        let strategy = strategies[i % strategies.len()];
+    // Always try mean-error bias first when the focus is an output with a
+    // measured residual — this is the classic "nudge bias by average error".
+    let mut start = 0usize;
+    if ctx.focus_stats.mean_error.is_some()
+        && let Some(candidate) = build_candidate(ctx, CandidateStrategy::MeanErrorBias, rng)
+    {
+        out.push(candidate);
+        start = 1;
+    }
+
+    for i in start..count {
+        let strategy = strategies[(i - start) % strategies.len()];
         if let Some(candidate) = build_candidate(ctx, strategy, rng) {
             out.push(candidate);
         }
@@ -108,12 +120,33 @@ fn build_candidate(
     let old_bias = creature.neurons[neuron_pos].bias;
 
     let (mutation, old_value, new_value) = match strategy {
+        CandidateStrategy::MeanErrorBias => {
+            let mean_err = focus_stats.mean_error?;
+            let new_bias =
+                (old_bias + mean_err).clamp(-backprop.limit_bias_scale, backprop.limit_bias_scale);
+            creature.neurons[neuron_pos].bias = new_bias;
+            (
+                format!("mean-error bias Δ {mean_err} ({old_bias} -> {new_bias})"),
+                Some(old_bias),
+                Some(new_bias),
+            )
+        }
         CandidateStrategy::Backprop => {
             let lr = backprop.learning_rate;
-            let fallback = BiasSignal {
-                count: 1.0,
-                total_adjusted_bias: old_bias + focus_stats.pre_mean * 0.01,
-                no_change: false,
+            // Prefer a real accumulated learning signal. Without one, fall back
+            // to mean-error (outputs) or a tiny pre-activation nudge (hidden).
+            let fallback = if let Some(mean_err) = focus_stats.mean_error {
+                BiasSignal {
+                    count: 1.0,
+                    total_adjusted_bias: old_bias + mean_err,
+                    no_change: false,
+                }
+            } else {
+                BiasSignal {
+                    count: 1.0,
+                    total_adjusted_bias: old_bias + focus_stats.pre_mean * 0.01,
+                    no_change: false,
+                }
             };
             let signal = learning
                 .and_then(|l| l.biases.get(neuron_pos))
@@ -299,5 +332,54 @@ mod tests {
         assert_eq!(a[0].provenance.mutation, b[0].provenance.mutation);
         assert_eq!(incumbent, original);
         assert!(incumbent.forward_only);
+    }
+
+    #[test]
+    fn mean_error_bias_nudge_is_first_when_error_known() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_error: Some(0.25),
+            mean_abs_error: Some(0.25),
+            ..FocusNeuronStats::default()
+        };
+        let observations = ObservationsStatistics {
+            format_version: "1.0.0".into(),
+            algorithm_version: "1.0.0".into(),
+            mode: crate::observations::StatsMode::Full,
+            sample_record_limit: None,
+            input_count: 1,
+            output_count: 1,
+            record_count: 0,
+            corpus_identity: "x".into(),
+            created_at_unix: 0,
+            inputs: vec![],
+            outputs: vec![],
+            input_correlations: vec![],
+            input_target_correlations: vec![],
+        };
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            observations: &observations,
+            learning: None,
+            backprop: &cfg,
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+        let candidates = generate_candidates(&ctx, 4, &mut rng);
+        assert_eq!(
+            candidates[0].provenance.strategy,
+            CandidateStrategy::MeanErrorBias
+        );
+        let out_bias = candidates[0]
+            .creature
+            .neurons
+            .iter()
+            .find(|n| n.uuid == "o1")
+            .unwrap()
+            .bias;
+        assert!((out_bias - 0.25).abs() < 1e-12);
     }
 }

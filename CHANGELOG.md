@@ -22,3 +22,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   paths).
 - `--focus-neuron <uuid>` locks experiments to a chosen non-input neuron (e.g.
   `output-0`); `--quick` also caps focus-stat scans to the sample size.
+- Output focus scans measure mean/`mae` error; a `mean_error_bias` candidate
+  applies `bias += mean(target - post)`.

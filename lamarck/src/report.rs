@@ -120,6 +120,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
 fn strategy_name(strategy: CandidateStrategy) -> String {
     match strategy {
         CandidateStrategy::Backprop => "backprop".into(),
+        CandidateStrategy::MeanErrorBias => "mean_error_bias".into(),
         CandidateStrategy::StatsWeight => "stats_weight".into(),
         CandidateStrategy::StatsBias => "stats_bias".into(),
         CandidateStrategy::Random => "random".into(),
