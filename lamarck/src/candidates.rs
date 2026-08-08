@@ -257,6 +257,8 @@ mod tests {
         let observations = ObservationsStatistics {
             format_version: "1.0.0".into(),
             algorithm_version: "1.0.0".into(),
+            mode: crate::observations::StatsMode::Full,
+            sample_record_limit: None,
             input_count: 1,
             output_count: 1,
             record_count: 0,

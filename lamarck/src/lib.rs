@@ -9,6 +9,7 @@ pub mod backprop;
 pub mod candidates;
 pub mod config;
 pub mod focus;
+pub mod log;
 pub mod observations;
 pub mod report;
 pub mod run;

@@ -148,7 +148,20 @@ observations.statistics
 
 If it is absent, Lamarck scans the complete training corpus and creates it.
 
-Because this is expected to be a one-time operation for a training dataset, generation should collect more than the first mutation strategy strictly requires.
+For smoke tests and short runs, pass `--quick` to build/reuse a sampled cache
+instead:
+
+```text
+observations-quick.statistics
+```
+
+Quick mode scans only the first `--quick-sample-records` records (default
+`25000`) so generation finishes in minutes rather than ~an hour on GRQ-scale
+data. Full-mode caches remain the production default.
+
+Because full generation is expected to be a one-time operation for a training
+dataset, it should collect more than the first mutation strategy strictly
+requires.
 
 ### Format
 

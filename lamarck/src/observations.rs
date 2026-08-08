@@ -1,11 +1,15 @@
-//! Versioned human-readable `observations.statistics` cache.
+//! Versioned human-readable observations statistics caches.
+//!
+//! - Full: `observations.statistics` (complete corpus)
+//! - Quick: `observations-quick.statistics` (sampled prefix for tests / smoke runs)
 
+use crate::log::{self, Spinner};
 use neat_core::{TrainingDataConfig, TrainingDataIterator, find_bin_files};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Current on-disk format semver.
 pub const FORMAT_VERSION: &str = "1.0.0";
@@ -13,8 +17,25 @@ pub const FORMAT_VERSION: &str = "1.0.0";
 /// Current statistics algorithm semver.
 pub const ALGORITHM_VERSION: &str = "1.0.0";
 
-/// Filename written into the training-data directory.
+/// Filename for a full-corpus statistics cache.
 pub const STATISTICS_FILENAME: &str = "observations.statistics";
+
+/// Filename for a quick/sampled statistics cache (tests and smoke runs).
+pub const QUICK_STATISTICS_FILENAME: &str = "observations-quick.statistics";
+
+/// Default max records scanned in quick mode (~minutes on GRQ-scale, not hours).
+pub const DEFAULT_QUICK_SAMPLE_RECORDS: u64 = 25_000;
+
+/// Which observations cache to build or reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum StatsMode {
+    /// Scan the complete training corpus into `observations.statistics`.
+    #[default]
+    Full,
+    /// Scan only a record prefix into `observations-quick.statistics`.
+    Quick,
+}
 
 /// Per-observation (or per-target) streaming statistics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,11 +75,17 @@ pub struct ObservationsStatistics {
     pub format_version: String,
     /// Algorithm semver.
     pub algorithm_version: String,
+    /// Cache mode (`full` or `quick`).
+    #[serde(default)]
+    pub mode: StatsMode,
+    /// When set, generation stopped after this many records (quick mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_record_limit: Option<u64>,
     /// Input observation count.
     pub input_count: usize,
     /// Output count.
     pub output_count: usize,
-    /// Record count.
+    /// Record count actually scanned into this cache.
     pub record_count: u64,
     /// Deterministic corpus identity.
     pub corpus_identity: String,
@@ -72,6 +99,24 @@ pub struct ObservationsStatistics {
     pub input_correlations: Vec<f64>,
     /// Input/target Pearson correlations (inputs × outputs).
     pub input_target_correlations: Vec<f64>,
+}
+
+impl StatsMode {
+    /// On-disk filename for this mode.
+    pub fn filename(self) -> &'static str {
+        match self {
+            Self::Full => STATISTICS_FILENAME,
+            Self::Quick => QUICK_STATISTICS_FILENAME,
+        }
+    }
+
+    /// Human label for logs.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Quick => "quick",
+        }
+    }
 }
 
 /// Errors while loading or generating statistics.
@@ -268,9 +313,9 @@ pub fn corpus_identity(
     Ok(format!("{state:016x}"))
 }
 
-/// Path to the statistics file inside a training-data directory.
-pub fn statistics_path(training_data: &Path) -> PathBuf {
-    training_data.join(STATISTICS_FILENAME)
+/// Path to the statistics file inside a training-data directory for `mode`.
+pub fn statistics_path(training_data: &Path, mode: StatsMode) -> PathBuf {
+    training_data.join(mode.filename())
 }
 
 /// Load statistics JSON from disk.
@@ -285,6 +330,8 @@ pub fn validate_statistics(
     stats: &ObservationsStatistics,
     training_data: &Path,
     config: &TrainingDataConfig,
+    mode: StatsMode,
+    sample_record_limit: Option<u64>,
 ) -> Result<(), ObservationsError> {
     if stats.format_version != FORMAT_VERSION {
         return Err(ObservationsError::Stale(format!(
@@ -296,6 +343,18 @@ pub fn validate_statistics(
         return Err(ObservationsError::Stale(format!(
             "unsupported algorithm_version {} (want {ALGORITHM_VERSION})",
             stats.algorithm_version
+        )));
+    }
+    if stats.mode != mode {
+        return Err(ObservationsError::Stale(format!(
+            "mode mismatch (cache {:?}, want {:?})",
+            stats.mode, mode
+        )));
+    }
+    if stats.sample_record_limit != sample_record_limit {
+        return Err(ObservationsError::Stale(format!(
+            "sample_record_limit mismatch (cache {:?}, want {:?})",
+            stats.sample_record_limit, sample_record_limit
         )));
     }
     if stats.input_count != config.num_inputs || stats.output_count != config.num_outputs {
@@ -313,12 +372,99 @@ pub fn validate_statistics(
     Ok(())
 }
 
-/// Scan the corpus and write a fresh statistics file.
+fn corpus_byte_total(training_data: &Path) -> Result<(usize, u64), ObservationsError> {
+    let files =
+        find_bin_files(training_data).map_err(|e| ObservationsError::Training(e.to_string()))?;
+    let mut total = 0u64;
+    for path in &files {
+        total += fs::metadata(path)?.len();
+    }
+    Ok((files.len(), total))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.2} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_duration(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "?".into();
+    }
+    let secs = seconds.round() as u64;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}h{m:02}m{s:02}s")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Scan the corpus (or a quick sample) and write a fresh statistics file.
 pub fn generate_statistics(
     training_data: &Path,
     config: &TrainingDataConfig,
+    mode: StatsMode,
+    sample_record_limit: Option<u64>,
 ) -> Result<ObservationsStatistics, ObservationsError> {
+    let (file_count, total_bytes) = corpus_byte_total(training_data)?;
+    let record_bytes = config.bytes_per_record() as u64;
+    let approx_records = total_bytes.checked_div(record_bytes).unwrap_or(0);
+    let pair_ops = (config.num_inputs as u64) * (config.num_inputs as u64 + 1) / 2;
+    let record_target = match mode {
+        StatsMode::Full => approx_records,
+        StatsMode::Quick => sample_record_limit
+            .unwrap_or(DEFAULT_QUICK_SAMPLE_RECORDS)
+            .min(approx_records),
+    };
+    let bytes_target = record_target.saturating_mul(record_bytes);
+
+    log::info(&format!(
+        "observations-{}: generating {}",
+        mode.label(),
+        mode.filename()
+    ));
+    log::detail(&format!(
+        "corpus: {} files, {}, ~{} records ({} inputs × {} outputs)",
+        file_count,
+        format_bytes(total_bytes),
+        approx_records,
+        config.num_inputs,
+        config.num_outputs
+    ));
+    match mode {
+        StatsMode::Quick => log::detail(&format!(
+            "quick sample: first {record_target} records (~{})",
+            format_bytes(bytes_target)
+        )),
+        StatsMode::Full => log::detail(&format!(
+            "full scan: each record updates ~{pair_ops} correlation cells (heavier than scoring)"
+        )),
+    }
+
+    log::detail("computing corpus identity...");
+    let identity_started = Instant::now();
     let identity = corpus_identity(training_data, config)?;
+    log::ok(&format!(
+        "corpus identity {identity} ({:.1}s)",
+        identity_started.elapsed().as_secs_f64()
+    ));
+
     let mut input_acc: Vec<OnlineMoment> = (0..config.num_inputs)
         .map(|_| OnlineMoment::new())
         .collect();
@@ -326,7 +472,6 @@ pub fn generate_statistics(
         .map(|_| OnlineMoment::new())
         .collect();
 
-    // Pairwise accumulators for Pearson (streaming covariance).
     let n_in = config.num_inputs;
     let n_out = config.num_outputs;
     let mut in_sum = vec![0.0f64; n_in];
@@ -336,14 +481,27 @@ pub fn generate_statistics(
     let mut in_cross = vec![0.0f64; n_in * n_in];
     let mut in_out_cross = vec![0.0f64; n_in * n_out];
     let mut record_count = 0u64;
+    let mut bytes_seen = 0u64;
 
+    let scan_started = Instant::now();
+    let mut spinner = Spinner::new(Duration::from_millis(200));
+
+    log::info("scanning training records...");
     let mut iter = TrainingDataIterator::new(training_data, config.clone())
         .map_err(|e| ObservationsError::Training(e.to_string()))?;
     while let Some(record) = iter
         .next_record()
         .map_err(|e| ObservationsError::Training(e.to_string()))?
     {
+        if matches!(mode, StatsMode::Quick)
+            && let Some(limit) = sample_record_limit.or(Some(DEFAULT_QUICK_SAMPLE_RECORDS))
+            && record_count >= limit
+        {
+            break;
+        }
+
         record_count += 1;
+        bytes_seen += record_bytes;
         for (i, &v) in record.inputs.iter().enumerate() {
             input_acc[i].push(v);
             let vf = f64::from(v);
@@ -365,7 +523,38 @@ pub fn generate_statistics(
                 in_out_cross[i * n_out + j] += vi * f64::from(record.outputs[j]);
             }
         }
+
+        if let Some(glyph) = spinner.tick() {
+            let elapsed = scan_started.elapsed().as_secs_f64().max(1e-6);
+            let rec_per_s = record_count as f64 / elapsed;
+            let denom = if record_target > 0 {
+                record_target
+            } else {
+                approx_records.max(1)
+            };
+            let pct = (record_count as f64 / denom as f64 * 100.0).min(100.0);
+            let eta = if rec_per_s > 0.0 && denom > record_count {
+                (denom - record_count) as f64 / rec_per_s
+            } else {
+                0.0
+            };
+            log::progress(
+                glyph,
+                &format!(
+                    "{pct:5.1}%  records={record_count}/{denom} ({rec_per_s:.0}/s)  {}  eta={}",
+                    format_bytes(bytes_seen),
+                    format_duration(eta)
+                ),
+            );
+        }
     }
+
+    log::progress_done(&format!(
+        "scan complete: {record_count} records in {} ({:.1}/s)",
+        format_duration(scan_started.elapsed().as_secs_f64()),
+        record_count as f64 / scan_started.elapsed().as_secs_f64().max(1e-6)
+    ));
+    log::detail("finalising correlations and writing JSON...");
 
     let n = record_count as f64;
     let pearson = |sum_a: f64, sum_b: f64, sum_ab: f64, sq_a: f64, sq_b: f64| -> f64 {
@@ -413,9 +602,16 @@ pub fn generate_statistics(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let stored_limit = match mode {
+        StatsMode::Quick => Some(sample_record_limit.unwrap_or(DEFAULT_QUICK_SAMPLE_RECORDS)),
+        StatsMode::Full => None,
+    };
+
     let stats = ObservationsStatistics {
         format_version: FORMAT_VERSION.into(),
         algorithm_version: ALGORITHM_VERSION.into(),
+        mode,
+        sample_record_limit: stored_limit,
         input_count: n_in,
         output_count: n_out,
         record_count,
@@ -427,10 +623,15 @@ pub fn generate_statistics(
         input_target_correlations,
     };
 
-    let path = statistics_path(training_data);
+    let path = statistics_path(training_data, mode);
     let json = serde_json::to_string_pretty(&stats)?;
     let mut file = fs::File::create(&path)?;
     file.write_all(json.as_bytes())?;
+    log::ok(&format!(
+        "wrote {} ({})",
+        path.display(),
+        format_bytes(json.len() as u64)
+    ));
     Ok(stats)
 }
 
@@ -438,24 +639,49 @@ pub fn generate_statistics(
 pub fn ensure_statistics(
     training_data: &Path,
     config: &TrainingDataConfig,
+    mode: StatsMode,
+    sample_record_limit: Option<u64>,
 ) -> Result<ObservationsStatistics, ObservationsError> {
-    let path = statistics_path(training_data);
+    let limit = match mode {
+        StatsMode::Quick => Some(sample_record_limit.unwrap_or(DEFAULT_QUICK_SAMPLE_RECORDS)),
+        StatsMode::Full => None,
+    };
+    let path = statistics_path(training_data, mode);
     if path.is_file() {
+        log::info(&format!(
+            "found {} cache at {}",
+            mode.label(),
+            path.display()
+        ));
         match load_statistics(&path) {
-            Ok(stats) => match validate_statistics(&stats, training_data, config) {
-                Ok(()) => return Ok(stats),
-                Err(ObservationsError::Stale(_)) => {
-                    // Regenerate on identity/version mismatch.
+            Ok(stats) => match validate_statistics(&stats, training_data, config, mode, limit) {
+                Ok(()) => {
+                    log::ok(&format!(
+                        "reusing {} cache ({} records, identity {})",
+                        mode.label(),
+                        stats.record_count,
+                        stats.corpus_identity
+                    ));
+                    return Ok(stats);
+                }
+                Err(ObservationsError::Stale(reason)) => {
+                    log::warn(&format!("cache stale — {reason}; regenerating"));
                 }
                 Err(e) => return Err(e),
             },
-            Err(ObservationsError::Json(_)) => {
-                // Corrupt JSON — regenerate.
+            Err(ObservationsError::Json(e)) => {
+                log::warn(&format!("cache corrupt ({e}); regenerating"));
             }
             Err(e) => return Err(e),
         }
+    } else {
+        log::info(&format!(
+            "no {} cache at {} — generating",
+            mode.label(),
+            path.display()
+        ));
     }
-    generate_statistics(training_data, config)
+    generate_statistics(training_data, config, mode, limit)
 }
 
 #[cfg(test)]
@@ -486,14 +712,38 @@ mod tests {
             ],
         );
         let config = TrainingDataConfig::new(2, 1);
-        let stats = ensure_statistics(dir.path(), &config).unwrap();
+        let stats = ensure_statistics(dir.path(), &config, StatsMode::Full, None).unwrap();
         assert_eq!(stats.record_count, 3);
         assert_eq!(stats.inputs.len(), 2);
         assert!(nearly_mean(&stats.inputs[0], 3.0));
+        assert_eq!(stats.mode, StatsMode::Full);
 
-        let reused = ensure_statistics(dir.path(), &config).unwrap();
+        let reused = ensure_statistics(dir.path(), &config, StatsMode::Full, None).unwrap();
         assert_eq!(reused.corpus_identity, stats.corpus_identity);
         assert_eq!(reused.created_at_unix, stats.created_at_unix);
+    }
+
+    #[test]
+    fn quick_mode_respects_sample_limit() {
+        let dir = tempdir().unwrap();
+        // 5 records, quick limit 2.
+        write_bin(
+            dir.path(),
+            "0.bin",
+            &[
+                1.0, 0.0, 0.0, //
+                2.0, 0.0, 0.0, //
+                3.0, 0.0, 0.0, //
+                4.0, 0.0, 0.0, //
+                5.0, 0.0, 0.0,
+            ],
+        );
+        let config = TrainingDataConfig::new(2, 1);
+        let stats = ensure_statistics(dir.path(), &config, StatsMode::Quick, Some(2)).unwrap();
+        assert_eq!(stats.mode, StatsMode::Quick);
+        assert_eq!(stats.sample_record_limit, Some(2));
+        assert_eq!(stats.record_count, 2);
+        assert!(dir.path().join(QUICK_STATISTICS_FILENAME).is_file());
     }
 
     #[test]
@@ -501,9 +751,9 @@ mod tests {
         let dir = tempdir().unwrap();
         write_bin(dir.path(), "0.bin", &[1.0, 0.0, 0.0]);
         let config = TrainingDataConfig::new(2, 1);
-        let first = ensure_statistics(dir.path(), &config).unwrap();
+        let first = ensure_statistics(dir.path(), &config, StatsMode::Full, None).unwrap();
         write_bin(dir.path(), "0.bin", &[9.0, 0.0, 0.0]);
-        let second = ensure_statistics(dir.path(), &config).unwrap();
+        let second = ensure_statistics(dir.path(), &config, StatsMode::Full, None).unwrap();
         assert_ne!(first.corpus_identity, second.corpus_identity);
     }
 

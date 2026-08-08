@@ -1,6 +1,7 @@
 //! NEAT-AI-Lamarck CLI entry point.
 
 use clap::{Parser, Subcommand};
+use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_TIMEOUT_SECONDS, ExternalScorer,
     LamarckConfig, report_from_journal, run_optimisation,
@@ -51,6 +52,14 @@ struct Cli {
     /// Preserve rejected candidate directories.
     #[arg(long, default_value_t = false)]
     preserve_losers: bool,
+
+    /// Use sampled `observations-quick.statistics` instead of a full-corpus cache.
+    #[arg(long, default_value_t = false)]
+    quick: bool,
+
+    /// Max records for `--quick` observations sampling.
+    #[arg(long, default_value_t = DEFAULT_QUICK_SAMPLE_RECORDS)]
+    quick_sample_records: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -100,6 +109,12 @@ fn main() -> ExitCode {
         scorer_path: cli.scorer.clone(),
         output_dir: cli.output_dir,
         preserve_losers: cli.preserve_losers,
+        stats_mode: if cli.quick {
+            StatsMode::Quick
+        } else {
+            StatsMode::Full
+        },
+        quick_sample_records: cli.quick_sample_records,
     };
 
     let scorer = ExternalScorer { binary: cli.scorer };
