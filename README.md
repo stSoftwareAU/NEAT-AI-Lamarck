@@ -1,2 +1,440 @@
 # NEAT-AI-Lamarck
-The creature has already evolved. It then “experiences” the training environment, learns from that experience, and we attempt to encode useful acquired improvements back into the creature.
+
+> The creature has already evolved. It then experiences the training environment, learns from that experience, and we attempt to encode useful acquired improvements back into the creature.
+
+NEAT-AI-Lamarck is an experimental Rust optimiser for already-fit [NEAT-AI](https://github.com/stSoftwareAU/NEAT-AI) creatures.
+
+It does **not** replace normal NEAT evolution. Instead, it takes the current fittest creature, studies how that creature behaves across the training data, generates small statistically informed / backpropagation-informed / exploratory variants, and asks the existing [NEAT-AI-scorer](https://github.com/stSoftwareAU/NEAT-AI-scorer) to decide whether any candidate is genuinely fitter.
+
+The experiment is intentionally conservative: candidate generation may be adventurous, but acceptance is not.
+
+## Core principle
+
+```text
+current fittest creature
+        |
+        v
+analyse one selected neuron
+        |
+        +----------------+----------------+----------------+
+        |                |                |                |
+        v                v                v                v
+ statistical         backprop        structural         random
+ candidates          candidates      candidates         candidates
+        |                |                |                |
+        +----------------+--------+-------+----------------+
+                                  |
+                                  v
+                         candidate population
+                                  |
+                                  v
+                     NEAT-AI-scorer batch scoring
+                                  |
+                         improvement >= threshold?
+                           /                 \
+                         yes                 no
+                          |                   |
+                          v                   v
+                   new incumbent        keep incumbent
+                          \                   /
+                           +--------+----------+
+                                    |
+                                    v
+                                   repeat
+```
+
+Only the standard scorer may declare a winner.
+
+## Why "Lamarck"?
+
+The name is deliberately playful rather than biologically literal. The experiment starts with an evolved creature, lets it "experience" its training environment, and attempts to convert useful acquired information into heritable changes to the creature.
+
+## Related repositories
+
+- [NEAT-AI](https://github.com/stSoftwareAU/NEAT-AI) — TypeScript evolutionary trainer and current backpropagation implementation.
+- [NEAT-AI-core](https://github.com/stSoftwareAU/NEAT-AI-core) — shared Rust creature/network implementation used by this project.
+- [NEAT-AI-scorer](https://github.com/stSoftwareAU/NEAT-AI-scorer) — authoritative Rust scorer. Its directory/batch scoring path is used to evaluate Lamarck candidate populations.
+
+This repository follows the Rust workspace/tooling conventions of NEAT-AI-scorer where practical.
+
+## Goals
+
+Version 1 should answer one practical question:
+
+> Can information gathered from the training observations, the current creature's internal behaviour, and conventional backpropagation produce useful mutations faster than ordinary evolutionary search alone?
+
+A successful mutation may come from statistics, backpropagation, a structural hypothesis, or dumb luck. Lamarck only cares that the authoritative score improves.
+
+Secondary goals are to record enough information to learn which candidate-generation strategies are actually useful.
+
+## Non-goals
+
+Version 1 is not:
+
+- a replacement for the normal NEAT evolutionary process;
+- a wholesale rewrite of NEAT-AI training;
+- an optimiser allowed to accept predicted improvements without full scoring;
+- an online/live trading optimiser;
+- an attempt to modify many unrelated areas of a creature at once.
+
+## Runtime model
+
+Lamarck is expected to run alongside the normal evolutionary system on other machines.
+
+The supplied creature is therefore **perishable**: while Lamarck is working, evolution may discover a new global champion elsewhere.
+
+The default wall-clock runtime is:
+
+```text
+45 minutes
+```
+
+The timeout must be configurable.
+
+This constraint should influence implementation choices. A theoretically better analysis that consumes most of the 45-minute window may be less useful than several cheaper attempts.
+
+## Inputs
+
+The CLI will ultimately require:
+
+- current fittest creature JSON;
+- training-data directory;
+- candidate count, default `50`;
+- timeout, default `45m`;
+- minimum meaningful improvement;
+- optional deterministic random seed;
+- optional mutation-strategy configuration.
+
+The exact CLI is intentionally allowed to evolve during the first implementation issues.
+
+## Safety invariants
+
+These rules are non-negotiable:
+
+1. The supplied fittest creature is never modified in place.
+2. Lamarck's custom analysis cannot declare a creature fitter.
+3. Every accepted candidate must be scored against the normal complete training dataset by NEAT-AI-scorer.
+4. The incumbent is included in each candidate scoring batch as a control.
+5. A candidate must improve by more than the configured meaningful-improvement threshold.
+6. A failed experiment leaves the incumbent unchanged.
+7. Creature topology/serialization must remain compatible with NEAT-AI-core and NEAT-AI-scorer.
+8. The original creature is always recoverable.
+
+## Phase 0 — authoritative baseline and parity
+
+Before optimisation starts:
+
+1. Score the supplied creature using NEAT-AI-scorer.
+2. Run Lamarck's own analysis path over the same creature/data.
+3. Where Lamarck calculates quantities that overlap with the scorer, verify parity within an explicit tolerance.
+4. Abort optimisation on unexplained disagreement.
+
+This prevents Lamarck from accidentally optimising a subtly different metric.
+
+## Phase 1 — `observations.statistics`
+
+The training-data directory contains, or will contain, a one-time statistics cache:
+
+```text
+observations.statistics
+```
+
+If it is absent, Lamarck scans the complete training corpus and creates it.
+
+Because this is expected to be a one-time operation for a training dataset, generation should collect more than the first mutation strategy strictly requires.
+
+### Dataset identity
+
+The file must contain enough metadata to reject stale statistics, including at least:
+
+- format version;
+- statistics algorithm version;
+- input observation count;
+- output count;
+- record count;
+- deterministic identity/checksum of the training corpus;
+- creation timestamp.
+
+A statistics file for different training data must never be silently reused.
+
+### Per-observation statistics
+
+For each raw input observation collect at least:
+
+- count;
+- mean;
+- variance / standard deviation;
+- minimum / maximum;
+- zero and non-zero counts;
+- non-finite count;
+- quantiles: 1%, 5%, 25%, 50%, 75%, 95%, 99%;
+- mean absolute value;
+- RMS;
+- skewness and kurtosis where practical.
+
+### Relationships
+
+For version 1 also collect, where memory/runtime permits:
+
+- observation/observation covariance;
+- Pearson correlation;
+- observation/target covariance;
+- observation/target correlation.
+
+For the current observation count, a full symmetric correlation matrix is acceptable. The file format should be versioned so this can change later.
+
+## Phase 2 — select a focus neuron
+
+Each optimisation iteration focuses on one non-input neuron.
+
+Version 1 may choose randomly, but selection must sit behind a strategy abstraction so later policies can prefer neurons based on:
+
+- downstream influence;
+- estimated contribution to loss;
+- activation variance/saturation;
+- previous successful/failed attempts;
+- time since last investigation.
+
+Random selection remains useful and should not be removed merely because smarter strategies are added.
+
+## Phase 3 — creature-specific analysis
+
+Static observation statistics describe the dataset. Hidden-neuron statistics depend on the current incumbent and must be measured against that creature.
+
+For the selected neuron collect streaming statistics for at least:
+
+### Pre-activation
+
+- mean / variance / standard deviation;
+- min / max;
+- useful quantiles where practical.
+
+### Post-activation
+
+- mean / variance / standard deviation;
+- min / max;
+- near-zero fraction where relevant;
+- activation saturation fraction where relevant.
+
+### Incoming sources
+
+For each incoming connection gather useful source statistics and relationships with the selected neuron's learning/error signal.
+
+Raw observation sources may reuse `observations.statistics` where mathematically equivalent. Hidden sources must be measured from the current creature.
+
+## Backpropagation
+
+NEAT-AI already contains conventional TypeScript backpropagation. Version 1 of Lamarck will port that behaviour to Rust rather than inventing a new learning algorithm.
+
+The first port should favour **behavioural parity over redesign**:
+
+- same learning-rate semantics;
+- same weight/bias limiting behaviour;
+- same squash-specific propagation behaviour;
+- same sparse-selection behaviour where applicable;
+- same update/application semantics;
+- deterministic tests where randomness is involved.
+
+The existing implementation spans more than the TypeScript `BackPropagation` configuration class; creature/neuron propagation and learning application behaviour must be included in the parity work.
+
+Initially the Rust implementation lives in this repository. Once stable and proven useful, generic backpropagation code may migrate into NEAT-AI-core.
+
+### Separate analysis from application
+
+Where practical, the Rust port should expose the learning signal separately from committing mutations.
+
+Conceptually:
+
+```text
+analyse(record, expected)
+        |
+        v
+PropagationTrace / LearningSignal
+        |
+        +--> conventional backprop candidate
+        |
+        +--> statistical candidate generation
+```
+
+Lamarck needs the signal, not merely the ability to silently update a creature.
+
+A hidden neuron does not have a natural target value, so Lamarck should not invent `expected_hidden - actual_hidden`. Use the propagated learning/error contribution from the conventional backprop machinery as the initial definition of neuron blame/sensitivity.
+
+## Phase 4 — candidate generation
+
+Default candidate population size:
+
+```text
+50
+```
+
+This is configurable.
+
+Candidates are descendants of the current incumbent. Version 1 should generally prefer small, interpretable changes and avoid changing many unrelated neurons in one candidate.
+
+Candidate generators may include:
+
+- conventional backprop-derived weight/bias changes;
+- statistics-guided incoming-weight changes;
+- statistics-guided bias changes;
+- adding a plausible upstream connection;
+- weakening/removing an apparently useless connection;
+- random/exploratory mutations.
+
+There is no fixed quota for random controls. Random accidents are valid improvements and should be accepted if they win.
+
+Every candidate records the strategy and exact mutation that produced it so later analysis can compare approaches.
+
+### Statistical mutation guidance
+
+Candidate changes should use measured source scale and neuron behaviour rather than arbitrary absolute deltas where possible.
+
+For example, for a source activation `x` and weight change `Δw`, estimate the induced pre-activation change from `Δw * x` and generate several conservative changes around a preferred direction/magnitude.
+
+Do not trust a single estimated optimum. Produce alternatives around it and allow opposite-direction/exploratory candidates.
+
+Bias proposals should similarly consider the selected neuron's measured pre-activation distribution and squash saturation.
+
+## Phase 5 — authoritative candidate scoring
+
+Write the incumbent plus all candidate creatures to a temporary directory, for example:
+
+```text
+candidates/
+    baseline.json
+    candidate-000.json
+    candidate-001.json
+    ...
+```
+
+Invoke NEAT-AI-scorer's existing directory/batch scoring mode against the normal training-data directory.
+
+The incumbent is included in the same batch to avoid comparison against a stale score and to provide an immediate control.
+
+The implementation must explicitly understand the score direction (larger-is-better or smaller-is-better); do not infer it from ordering accidentally.
+
+A candidate is accepted only when its improvement exceeds the configured meaningful-improvement threshold.
+
+After acceptance, the winner becomes the new incumbent immediately. Creature-specific analysis from the old incumbent is then considered stale and is recomputed as required.
+
+## Phase 6 — repeat until budget expires
+
+Continue selecting neurons and testing candidates until:
+
+- the default/configured wall-clock timeout expires;
+- a configured maximum experiment count is reached;
+- explicit cancellation occurs;
+- another explicit stopping rule fires.
+
+A failed neuron experiment simply moves on to another attempt.
+
+The optimisation path is cumulative:
+
+```text
+C0 -> C1 -> C2 -> C3 -> ...
+```
+
+Every edge represents an independently full-corpus-scored improvement.
+
+## Experiment journal
+
+Write a machine-readable JSON Lines journal, proposed filename:
+
+```text
+experiments.jsonl
+```
+
+Record at least:
+
+- experiment number;
+- timestamp;
+- random seed/state needed for reproduction;
+- incumbent checksum/identifier;
+- baseline authoritative score;
+- selected neuron;
+- selected neuron squash and incoming connection count;
+- relevant neuron statistics;
+- backprop/blame statistics;
+- candidate strategy and exact mutation description;
+- candidate scores;
+- winning candidate, if any;
+- absolute/relative improvement;
+- accepted/rejected;
+- analysis time;
+- batch-scoring time.
+
+This journal is part of the experiment, not merely debug logging.
+
+## Outputs
+
+At minimum:
+
+```text
+best.json
+experiments.jsonl
+```
+
+Optionally preserve accepted intermediate creatures under:
+
+```text
+winners/
+```
+
+Failed candidates should normally be removed unless a debug/preserve flag is enabled.
+
+## Reproducibility
+
+All Lamarck-controlled randomness must come from a recordable seed.
+
+Given identical:
+
+- starting creature;
+- training data;
+- `observations.statistics`;
+- configuration;
+- software versions;
+- random seed;
+
+candidate generation should be reproducible.
+
+## Experimental questions
+
+The implementation should eventually let us answer:
+
+1. Do statistically informed candidates beat ordinary random mutation often enough to justify their analysis cost?
+2. How useful is conventional backpropagation when its proposed changes must survive whole-corpus evolutionary scoring?
+3. Which mutation classes produce accepted improvements most often?
+4. Are saturated/dead neurons particularly good targets?
+5. Are observation correlations useful when adding or removing connections?
+6. Does the propagated neuron blame/sensitivity predict successful mutation direction?
+7. As the incumbent improves, how quickly does the hit rate fall?
+8. Given the 45-minute useful-life constraint, how much analysis is economically justified before trying another candidate batch?
+
+## Initial repository layout
+
+```text
+NEAT-AI-Lamarck/
+├── Cargo.toml
+├── rust-toolchain.toml
+├── quality.sh
+├── README.md
+├── docs/
+│   └── architecture.md
+└── lamarck/
+    ├── Cargo.toml
+    └── src/
+        ├── lib.rs
+        └── main.rs
+```
+
+The issue plan will grow this incrementally. Avoid premature framework-building: each issue should leave a runnable/testable project behind.
+
+## Development rules
+
+- Rust edition 2024.
+- Pin the Rust toolchain, matching NEAT-AI-scorer initially.
+- Use TDD for behaviour changes.
+- `cargo fmt --all -- --check`, Clippy with warnings denied, tests, and docs form the minimum quality gate.
+- Keep dependencies modest and justified.
+- Prefer streaming training-data analysis; the corpus is large.
+- Preserve compatibility with NEAT-AI-core/NEAT-AI-scorer rather than duplicating their stable functionality.
