@@ -5,7 +5,11 @@ use crate::candidates::{
     CandidateGenContext, CandidateProvenance, generate_candidates, write_candidate_batch,
 };
 use crate::config::LamarckConfig;
-use crate::focus::{FixedFocusSelector, FocusSelector, RandomFocusSelector, collect_focus_stats};
+use crate::focus::{
+    FixedFocusSelector, FocusPolicy, FocusSelector, HighErrorFocusSelector, RandomFocusSelector,
+    UnsaturatedFocusSelector, collect_focus_stats, collect_incoming_source_stats,
+};
+use crate::learning::accumulate_focus_learning;
 use crate::log;
 use crate::observations::ensure_statistics;
 use crate::scorer::{
@@ -52,6 +56,9 @@ pub struct ExperimentRecord {
     pub analysis_ms: u128,
     /// Scorer elapsed milliseconds.
     pub scorer_ms: u128,
+    /// Scorer error message when the batch failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer_error: Option<String>,
 }
 
 /// Result of a completed Lamarck run.
@@ -67,6 +74,12 @@ pub struct RunResult {
     pub experiments: u64,
     /// Accepted improvements.
     pub acceptances: u64,
+    /// Scorer batch failures.
+    pub scorer_failures: u64,
+    /// Successful scorer batches.
+    pub scorer_successes: u64,
+    /// Opening Phase-0 baseline score when recorded.
+    pub opening_baseline_score: Option<f64>,
 }
 
 /// Run the Lamarck optimisation loop until the wall-clock budget expires.
@@ -91,6 +104,12 @@ pub fn run_optimisation(
         incumbent.input,
         incumbent.output
     ));
+    if matches!(config.stats_mode, crate::observations::StatsMode::Quick) {
+        log::warn(&format!(
+            "quick mode: analysis uses first {} records; scorer still evaluates the full corpus",
+            config.quick_sample_records
+        ));
+    }
     let sample_limit = match config.stats_mode {
         crate::observations::StatsMode::Quick => Some(config.quick_sample_records),
         crate::observations::StatsMode::Full => None,
@@ -100,14 +119,44 @@ pub fn run_optimisation(
         &train_cfg,
         config.stats_mode,
         sample_limit,
+        config.compute_correlations,
     )
     .map_err(|e| e.to_string())?;
+
+    let mut opening_baseline_score = None;
+    if config.phase0_parity {
+        log::info("Phase-0: scoring incumbent baseline via authoritative scorer");
+        let phase0_dir = config.output_dir.join("phase0-baseline");
+        match score_single_creature_dir(&incumbent, &config.training_data, scorer, &phase0_dir) {
+            Ok(baseline) => {
+                if !baseline.score.is_finite() || !baseline.error.is_finite() {
+                    return Err(format!(
+                        "Phase-0 parity failed: non-finite score/error (score={} error={})",
+                        baseline.score, baseline.error
+                    ));
+                }
+                opening_baseline_score = Some(baseline.score);
+                log::ok(&format!(
+                    "Phase-0 baseline score={:.12} error={:.12}",
+                    baseline.score, baseline.error
+                ));
+                if !config.preserve_losers {
+                    let _ = fs::remove_dir_all(&phase0_dir);
+                }
+            }
+            Err(e) => {
+                return Err(format!("Phase-0 parity gate failed (scorer): {e}"));
+            }
+        }
+    }
 
     let mut rng = match config.seed {
         Some(seed) => StdRng::seed_from_u64(seed),
         None => StdRng::from_os_rng(),
     };
     let mut random_focus = RandomFocusSelector;
+    let mut unsaturated_focus = UnsaturatedFocusSelector;
+    let mut high_error_focus = HighErrorFocusSelector;
     let mut fixed_focus = config
         .focus_neuron
         .as_ref()
@@ -121,7 +170,10 @@ pub fn run_optimisation(
     let deadline = Instant::now() + config.timeout;
     let mut experiments = 0u64;
     let mut acceptances = 0u64;
-    let mut best_score = f64::NEG_INFINITY;
+    let mut scorer_failures = 0u64;
+    let mut scorer_successes = 0u64;
+    let mut consecutive_scorer_failures = 0u32;
+    let mut best_score = opening_baseline_score.unwrap_or(f64::NEG_INFINITY);
     log::info(&format!(
         "starting optimisation loop (timeout={}s, candidates={})",
         config.timeout.as_secs(),
@@ -129,6 +181,8 @@ pub fn run_optimisation(
     ));
     if let Some(uuid) = &config.focus_neuron {
         log::detail(&format!("focus locked to {uuid}"));
+    } else {
+        log::detail(&format!("focus policy: {}", config.focus_policy.label()));
     }
 
     while Instant::now() < deadline {
@@ -147,9 +201,12 @@ pub fn run_optimisation(
                 )
             })?
         } else {
-            random_focus
-                .select(&incumbent, &mut rng)
-                .ok_or_else(|| "no focus neuron available".to_string())?
+            match config.focus_policy {
+                FocusPolicy::Random => random_focus.select(&incumbent, &mut rng),
+                FocusPolicy::Unsaturated => unsaturated_focus.select(&incumbent, &mut rng),
+                FocusPolicy::HighError => high_error_focus.select(&incumbent, &mut rng),
+            }
+            .ok_or_else(|| "no focus neuron available".to_string())?
         };
         log::detail(&format!("focus neuron: {focus}"));
         let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
@@ -167,28 +224,60 @@ pub fn run_optimisation(
             "focus scan: {} records in {focus_scan_ms}ms",
             focus_stats.record_count
         ));
-        match (focus_stats.mean_error, focus_stats.mean_abs_error) {
-            (Some(me), Some(mae)) => log::detail(&format!(
-                "focus error: mean={me:.6e}  mae={mae:.6e}  post_mean={:.6e}  bias={:.6e}",
-                focus_stats.post_mean,
-                incumbent
-                    .neurons
-                    .iter()
-                    .find(|n| n.uuid == focus)
-                    .map(|n| n.bias)
-                    .unwrap_or(f64::NAN)
+        match (
+            focus_stats.mean_error,
+            focus_stats.mean_abs_error,
+            focus_stats.mean_adjusted_error,
+            focus_stats.mean_derivative,
+        ) {
+            (Some(me), Some(mae), Some(madj), Some(md)) => log::detail(&format!(
+                "focus error: mean={me:.6e}  mae={mae:.6e}  adj={madj:.6e}  deriv={md:.4}  sat={:.3}",
+                focus_stats.saturation_fraction
             )),
             _ => log::detail(&format!(
                 "focus (no target error): post_mean={:.6e}  pre_mean={:.6e}",
                 focus_stats.post_mean, focus_stats.pre_mean
             )),
         }
+        if matches!(config.stats_mode, crate::observations::StatsMode::Quick) {
+            log::detail(&format!(
+                "analysis sample={} records; acceptance uses full-corpus scorer",
+                focus_stats.record_count
+            ));
+        }
+
+        let incoming = collect_incoming_source_stats(
+            &incumbent,
+            &mut network,
+            &config.training_data,
+            &focus,
+            focus_sample_limit,
+            Some(&observations),
+        )?;
+        log::detail(&format!("incoming sources: {}", incoming.len()));
+
+        log::detail("accumulating focus learning signal...");
+        let learn_start = Instant::now();
+        let learning = accumulate_focus_learning(
+            &incumbent,
+            &mut network,
+            &config.training_data,
+            &focus,
+            focus_sample_limit,
+        )?;
+        log::ok(&format!(
+            "learning signal in {}ms (bias_count={:.0})",
+            learn_start.elapsed().as_millis(),
+            learning.biases.iter().map(|b| b.count).sum::<f64>()
+        ));
+
         let gen_ctx = CandidateGenContext {
             incumbent: &incumbent,
             focus_uuid: &focus,
             focus_stats: &focus_stats,
+            incoming: &incoming,
             observations: &observations,
-            learning: None,
+            learning: Some(&learning),
             backprop: &backprop,
         };
         let gen_start = Instant::now();
@@ -214,6 +303,9 @@ pub fn run_optimisation(
         let scores = match scorer.score_directory(&batch_dir, &config.training_data) {
             Ok(s) => s,
             Err(e) => {
+                scorer_failures += 1;
+                consecutive_scorer_failures += 1;
+                log::warn(&format!("scorer failed: {e}"));
                 append_journal(
                     &journal_path,
                     &ExperimentRecord {
@@ -230,16 +322,22 @@ pub fn run_optimisation(
                         accepted: false,
                         analysis_ms,
                         scorer_ms: scorer_start.elapsed().as_millis(),
+                        scorer_error: Some(e.to_string()),
                     },
                 )?;
                 if !config.preserve_losers {
                     let _ = fs::remove_dir_all(&batch_dir);
                 }
-                // Failed experiment — keep incumbent, continue.
-                let _ = e;
+                if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
+                    return Err(format!(
+                        "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
+                    ));
+                }
                 continue;
             }
         };
+        consecutive_scorer_failures = 0;
+        scorer_successes += 1;
         let scorer_ms = scorer_start.elapsed().as_millis();
         log_scorer_batch_stats(&scores, scorer_ms, config.min_improvement);
 
@@ -249,6 +347,9 @@ pub fn run_optimisation(
         if best_score.is_infinite() {
             best_score = baseline.score;
         }
+        if opening_baseline_score.is_none() {
+            opening_baseline_score = Some(baseline.score);
+        }
 
         let winner = select_winner(&scores, config.min_improvement).map_err(|e| e.to_string())?;
         let mut accepted = false;
@@ -257,6 +358,11 @@ pub fn run_optimisation(
         if let Some((stem, result, delta)) = winner
             && accepts_improvement(result.score, baseline.score, config.min_improvement)
         {
+            if matches!(config.stats_mode, crate::observations::StatsMode::Quick) {
+                log::detail(
+                    "accepting on full-corpus scorer (analysis used a quick sample; directions may differ)",
+                );
+            }
             log::ok(&format!(
                 "accepted {stem}: score={} (+{delta:.3e})",
                 result.score
@@ -297,6 +403,7 @@ pub fn run_optimisation(
                 accepted,
                 analysis_ms,
                 scorer_ms,
+                scorer_error: None,
             },
         )?;
 
@@ -305,12 +412,21 @@ pub fn run_optimisation(
         }
     }
 
+    if experiments > 0 && scorer_successes == 0 {
+        return Err(format!(
+            "no successful scorer batches ({scorer_failures} failures); check rust_scorer path/binary"
+        ));
+    }
+
     Ok(RunResult {
         best_path,
         journal_path,
         best_score,
         experiments,
         acceptances,
+        scorer_failures,
+        scorer_successes,
+        opening_baseline_score,
     })
 }
 
@@ -391,7 +507,6 @@ mod tests {
                     complexity_penalty: 0.0,
                 },
             );
-            // List candidate files and give the first a winning score once.
             if let Ok(rd) = fs::read_dir(candidates_dir) {
                 for entry in rd.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -399,7 +514,7 @@ mod tests {
                         if stem == "baseline" {
                             continue;
                         }
-                        let score = if *calls == 1 && stem == "candidate-000" {
+                        let score = if *calls <= 2 && stem == "candidate-000" {
                             0.5 + 2e-6
                         } else {
                             0.5
@@ -419,13 +534,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn loop_accepts_winner_and_writes_journal() {
-        let dir = tempdir().unwrap();
-        let creature_path = dir.path().join("creature.json");
-        let training = dir.path().join("data");
+    struct FailingScorer;
+
+    impl DirectoryScorer for FailingScorer {
+        fn score_directory(
+            &self,
+            _candidates_dir: &Path,
+            _training_data: &Path,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            Err(crate::scorer::ScorerError::Process("boom".into()))
+        }
+    }
+
+    fn tiny_setup(dir: &Path) -> (PathBuf, PathBuf) {
+        let creature_path = dir.join("creature.json");
+        let training = dir.join("data");
         fs::create_dir_all(&training).unwrap();
-        // Tiny 1-in/1-out bin with one record.
         fs::write(
             training.join("0.bin"),
             [1.0f32, 0.5f32]
@@ -449,12 +573,18 @@ mod tests {
             }"#,
         )
         .unwrap();
+        (creature_path, training)
+    }
 
+    #[test]
+    fn loop_accepts_winner_and_writes_journal() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
         let out = dir.path().join("out");
         let config = LamarckConfig {
             creature: creature_path,
             training_data: training,
-            timeout: Duration::from_millis(200),
+            timeout: Duration::from_millis(500),
             candidates: 4,
             min_improvement: 1e-6,
             seed: Some(1),
@@ -463,7 +593,11 @@ mod tests {
             preserve_losers: true,
             stats_mode: crate::observations::StatsMode::Quick,
             quick_sample_records: 8,
-            focus_neuron: Some("h1".into()),
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            phase0_parity: true,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -472,7 +606,34 @@ mod tests {
         assert!(result.journal_path.is_file());
         assert!(result.best_path.is_file());
         assert!(result.experiments >= 1);
+        assert!(result.scorer_successes >= 1);
         let journal = fs::read_to_string(result.journal_path).unwrap();
         assert!(journal.lines().next().unwrap().contains("experimentNumber"));
+    }
+
+    #[test]
+    fn consecutive_scorer_failures_abort() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let config = LamarckConfig {
+            creature: creature_path,
+            training_data: training,
+            timeout: Duration::from_secs(30),
+            candidates: 2,
+            min_improvement: 1e-6,
+            seed: Some(1),
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir: dir.path().join("out"),
+            preserve_losers: true,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 2,
+            phase0_parity: false,
+        };
+        let err = run_optimisation(&config, &FailingScorer).unwrap_err();
+        assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));
     }
 }

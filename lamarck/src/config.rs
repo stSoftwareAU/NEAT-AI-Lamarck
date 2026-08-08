@@ -1,5 +1,6 @@
 //! Shared Lamarck configuration defaults and run options.
 
+use crate::focus::FocusPolicy;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,6 +15,9 @@ pub const DEFAULT_CANDIDATE_COUNT: usize = 50;
 ///
 /// GRQ `costOfGrowth` is `1e-7`; this threshold is deliberately larger.
 pub const DEFAULT_MIN_IMPROVEMENT: f64 = 1e-6;
+
+/// Abort after this many consecutive scorer failures.
+pub const DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES: u32 = 3;
 
 /// Run-time knobs for a Lamarck optimisation session.
 #[derive(Debug, Clone)]
@@ -40,8 +44,16 @@ pub struct LamarckConfig {
     pub stats_mode: StatsMode,
     /// Max records for quick-mode observations (ignored in full mode).
     pub quick_sample_records: u64,
-    /// When set, always focus this neuron UUID instead of random selection.
+    /// When set, always focus this neuron UUID instead of policy selection.
     pub focus_neuron: Option<String>,
+    /// Focus selection policy when `focus_neuron` is unset.
+    pub focus_policy: FocusPolicy,
+    /// Compute expensive input×input correlations in observations.
+    pub compute_correlations: bool,
+    /// Abort after this many consecutive scorer failures.
+    pub max_consecutive_scorer_failures: u32,
+    /// Run Phase-0 baseline score gate before optimising.
+    pub phase0_parity: bool,
 }
 
 impl Default for LamarckConfig {
@@ -59,6 +71,10 @@ impl Default for LamarckConfig {
             stats_mode: StatsMode::Full,
             quick_sample_records: DEFAULT_QUICK_SAMPLE_RECORDS,
             focus_neuron: None,
+            focus_policy: FocusPolicy::Random,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
+            phase0_parity: true,
         }
     }
 }
