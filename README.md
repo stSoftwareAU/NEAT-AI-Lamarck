@@ -95,17 +95,24 @@ This constraint should influence implementation choices. A theoretically better 
 
 ## Inputs
 
-The CLI will ultimately require:
+The CLI requires:
 
 - current fittest creature JSON;
 - training-data directory;
 - candidate count, default `50`;
 - timeout, default `45m`;
-- minimum meaningful improvement;
+- minimum meaningful improvement, default `1e-6` (absolute score delta, strict `>`);
 - optional deterministic random seed;
+- optional scorer binary path and output directory;
 - optional mutation-strategy configuration.
 
-The exact CLI is intentionally allowed to evolve during the first implementation issues.
+### Production scale target
+
+The intended production creature is the GRQ champion
+(`../GRQ-cluster/network.json`): about `2511` inputs, `1` output,
+`~1590` hidden neurons, `~21k` synapses, `forwardOnly: true`. Design choices
+(streaming stats, 45-minute budget, cheap candidate proposals) should remain
+viable at that scale.
 
 ## Safety invariants
 
@@ -143,12 +150,20 @@ If it is absent, Lamarck scans the complete training corpus and creates it.
 
 Because this is expected to be a one-time operation for a training dataset, generation should collect more than the first mutation strategy strictly requires.
 
+### Format
+
+`observations.statistics` is human-readable **JSON** with **semver** format and
+algorithm versions. Trust a matching file; regenerate or refuse on unsupported
+version or corpus-identity mismatch. Prefer JSON for debuggability at GRQ
+observation counts (~2511 inputs); compact binary only if profiling proves JSON
+I/O dominates.
+
 ### Dataset identity
 
 The file must contain enough metadata to reject stale statistics, including at least:
 
-- format version;
-- statistics algorithm version;
+- format version (semver);
+- statistics algorithm version (semver);
 - input observation count;
 - output count;
 - record count;
@@ -235,6 +250,10 @@ The first port should favour **behavioural parity over redesign**:
 - same update/application semantics;
 - deterministic tests where randomness is involved.
 
+Parity tests use ordinary floating-point tolerances (about `1e-9`–`1e-6`), not
+bit-identical TypeScript. The port must be accurate enough to propose sensible
+bias/weight deltas.
+
 The existing implementation spans more than the TypeScript `BackPropagation` configuration class; creature/neuron propagation and learning application behaviour must be included in the parity work.
 
 Initially the Rust implementation lives in this repository. Once stable and proven useful, generic backpropagation code may migrate into NEAT-AI-core.
@@ -307,13 +326,25 @@ candidates/
     ...
 ```
 
-Invoke NEAT-AI-scorer's existing directory/batch scoring mode against the normal training-data directory.
+Invoke NEAT-AI-scorer's existing directory/batch scoring mode against the normal training-data directory:
+
+```text
+rust_scorer <candidates_dir> <training_data_dir>
+```
+
+Do **not** pass `--gpu` or `--cost`; scorer defaults decide backend and loss.
 
 The incumbent is included in the same batch to avoid comparison against a stale score and to provide an immediate control.
 
-The implementation must explicitly understand the score direction (larger-is-better or smaller-is-better); do not infer it from ordering accidentally.
+Acceptance uses the scorer JSON **`score`** field (**larger-is-better**). Never
+accept on `error` alone. A candidate is accepted only when:
 
-A candidate is accepted only when its improvement exceeds the configured meaningful-improvement threshold.
+```text
+candidate.score - baseline.score > 1e-6
+```
+
+(default absolute threshold; strict greater-than). GRQ `costOfGrowth` is
+`1e-7`; `1e-6` is deliberately above growth noise.
 
 After acceptance, the winner becomes the new incumbent immediately. Creature-specific analysis from the old incumbent is then considered stale and is recomputed as required.
 
@@ -417,24 +448,57 @@ NEAT-AI-Lamarck/
 ├── Cargo.toml
 ├── rust-toolchain.toml
 ├── quality.sh
-├── README.md
-├── docs/
-│   └── architecture.md
-└── lamarck/
-    ├── Cargo.toml
-    └── src/
-        ├── lib.rs
-        └── main.rs
+├── deny.toml
+├── SECURITY.md
+├── .github/workflows/   # scorer-aligned quality gates
+├── scripts/
+├── docs/architecture.md
+└── lamarck/src/
+    ├── backprop.rs
+    ├── observations.rs
+    ├── focus.rs
+    ├── candidates.rs
+    ├── scorer.rs
+    ├── run.rs
+    └── report.rs
 ```
-
-The issue plan will grow this incrementally. Avoid premature framework-building: each issue should leave a runnable/testable project behind.
 
 ## Development rules
 
 - Rust edition 2024.
-- Pin the Rust toolchain, matching NEAT-AI-scorer initially.
+- Pin the Rust toolchain, matching NEAT-AI-scorer initially (`1.95.0`).
 - Use TDD for behaviour changes.
-- `cargo fmt --all -- --check`, Clippy with warnings denied, tests, and docs form the minimum quality gate.
 - Keep dependencies modest and justified.
 - Prefer streaming training-data analysis; the corpus is large.
 - Preserve compatibility with NEAT-AI-core/NEAT-AI-scorer rather than duplicating their stable functionality.
+
+## Build and quality gate
+
+Clone **NEAT-AI-core** beside this repository:
+
+```text
+parent/
+  NEAT-AI-core/
+  NEAT-AI-Lamarck/
+```
+
+Local gate (mirrors CI):
+
+```bash
+./quality.sh < /dev/null
+```
+
+Requires **shellcheck**, **cargo-deny** (`cargo install cargo-deny --locked`),
+and **codespell** (`pip install --user codespell`).
+
+CI runs on pull requests to `Develop` and includes fmt/clippy/tests/docs,
+cargo-deny, gitleaks, cargo-audit, dependency-review, Semgrep, markdownlint,
+actionlint, SBOM, shellcheck, and codespell. Branch protection should require
+the aggregator check **CI Required Checks**.
+
+### neat-core breaking-bump gate
+
+The `neat-core` path dependency is unpinned. CI fails when the sibling
+neat-core presents a breaking SemVer bump above
+[`neat-core.expected-version`](./neat-core.expected-version). Clear the gate by
+updating Lamarck for the change and bumping that baseline in the same PR.

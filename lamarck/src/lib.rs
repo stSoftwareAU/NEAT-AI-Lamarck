@@ -1,10 +1,22 @@
 //! NEAT-AI-Lamarck experimental optimiser library.
 //!
-//! Behaviour is intentionally introduced through small, independently tested
-//! issues. See the repository README for the experiment architecture.
+//! Behaviour is introduced through independently tested modules. See the
+//! repository README for the experiment architecture and locked contracts.
 
-/// Default wall-clock budget for one Lamarck run, in seconds.
-pub const DEFAULT_TIMEOUT_SECONDS: u64 = 45 * 60;
+#![warn(missing_docs)]
 
-/// Default number of candidate creatures generated per experiment.
-pub const DEFAULT_CANDIDATE_COUNT: usize = 50;
+pub mod backprop;
+pub mod candidates;
+pub mod config;
+pub mod focus;
+pub mod observations;
+pub mod report;
+pub mod run;
+pub mod scorer;
+
+pub use config::{
+    DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_TIMEOUT_SECONDS, LamarckConfig,
+};
+pub use report::{JournalReport, report_from_journal};
+pub use run::{ExperimentRecord, RunResult, run_optimisation};
+pub use scorer::{ExternalScorer, ScoreResult, accepts_improvement};

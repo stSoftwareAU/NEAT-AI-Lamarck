@@ -42,6 +42,14 @@ Lamarck must not duplicate this authority.
 8. Treat creature-specific statistics as stale after an acceptance.
 9. Repeat until the wall-clock budget (45 minutes by default) expires.
 
+## Locked contracts
+
+- Accept only on authoritative scorer JSON **`score`** (larger-is-better).
+- Default meaningful improvement: absolute **`1e-6`**, strict `>`.
+- Scorer argv: `rust_scorer <candidates_dir> <training_data_dir>` — no `--gpu` / `--cost`.
+- `observations.statistics` is versioned human-readable JSON (semver).
+- Production scale target: GRQ `network.json` (~2511 inputs, ~1590 hidden, ~21k synapses).
+
 ## Design bias
 
 The normal evolutionary system runs concurrently, so the starting champion has a limited useful lifetime. Prefer cheap, repeatable experiments over expensive analyses whose expected value does not justify consuming the run budget.
