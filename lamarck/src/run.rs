@@ -152,6 +152,7 @@ pub fn run_optimisation(
         log::detail(&format!("focus neuron: {focus}"));
         let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
         log::detail("scanning incumbent for focus stats...");
+        let focus_scan_start = Instant::now();
         let focus_stats = collect_focus_stats(
             &incumbent,
             &mut network,
@@ -159,6 +160,11 @@ pub fn run_optimisation(
             &focus,
             focus_sample_limit,
         )?;
+        let focus_scan_ms = focus_scan_start.elapsed().as_millis();
+        log::ok(&format!(
+            "focus scan: {} records in {focus_scan_ms}ms",
+            focus_stats.record_count
+        ));
         let gen_ctx = CandidateGenContext {
             incumbent: &incumbent,
             focus_uuid: &focus,
@@ -167,10 +173,12 @@ pub fn run_optimisation(
             learning: None,
             backprop: &backprop,
         };
+        let gen_start = Instant::now();
         let candidates = generate_candidates(&gen_ctx, config.candidates, &mut rng);
+        let generate_ms = gen_start.elapsed().as_millis();
         let analysis_ms = analysis_start.elapsed().as_millis();
         log::ok(&format!(
-            "generated {} candidates in {analysis_ms}ms",
+            "generated {} candidates in {generate_ms}ms (analysis total {analysis_ms}ms)",
             candidates.len()
         ));
 
