@@ -1,0 +1,21 @@
+[workspace]
+members = ["lamarck"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.release.package."*"]
+opt-level = 3
+
+[profile.release.package.neat_ai_lamarck]
+codegen-units = 1
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused = "deny"
+
+[workspace.lints.clippy]
+collapsible_if = "deny"
+filter_next = "deny"
