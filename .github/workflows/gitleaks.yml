@@ -69,16 +69,21 @@ jobs:
           gitleaks version
 
       - name: Fetch base ref for diff scan
+        env:
+          # Intermediate env avoids Semgrep run-shell-injection on github.* in run:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
           # Ensure origin/<base_ref> resolves locally before gitleaks uses it
           # in --log-opts. actions/checkout fetches the PR merge ref but not
           # always the base branch tip.
-          git fetch --no-tags origin "${{ github.base_ref }}"
-          echo "Base ref: origin/${{ github.base_ref }} -> $(git rev-parse "origin/${{ github.base_ref }}")"
+          git fetch --no-tags origin "${BASE_REF}"
+          echo "Base ref: origin/${BASE_REF} -> $(git rev-parse "origin/${BASE_REF}")"
           echo "HEAD:     $(git rev-parse HEAD)"
 
       - name: Run Gitleaks on PR diff range
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
           # --log-opts scopes the scan to commits introduced by this PR.
@@ -88,6 +93,6 @@ jobs:
           # that is the intended strict-failure semantics.
           gitleaks detect \
             --source . \
-            --log-opts="origin/${{ github.base_ref }}..HEAD" \
+            --log-opts="origin/${BASE_REF}..HEAD" \
             --redact \
             --verbose
