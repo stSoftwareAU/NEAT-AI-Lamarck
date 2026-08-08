@@ -416,11 +416,15 @@ fn format_duration(seconds: f64) -> String {
 }
 
 /// Scan the corpus (or a quick sample) and write a fresh statistics file.
+///
+/// When `compute_correlations` is false, skip the O(inputs²) input×input
+/// correlation matrix (still compute cheap input↔target correlations).
 pub fn generate_statistics(
     training_data: &Path,
     config: &TrainingDataConfig,
     mode: StatsMode,
     sample_record_limit: Option<u64>,
+    compute_correlations: bool,
 ) -> Result<ObservationsStatistics, ObservationsError> {
     let (file_count, total_bytes) = corpus_byte_total(training_data)?;
     let record_bytes = config.bytes_per_record() as u64;
@@ -452,9 +456,12 @@ pub fn generate_statistics(
             "quick sample: first {record_target} records (~{})",
             format_bytes(bytes_target)
         )),
-        StatsMode::Full => log::detail(&format!(
+        StatsMode::Full if compute_correlations => log::detail(&format!(
             "full scan: each record updates ~{pair_ops} correlation cells (heavier than scoring)"
         )),
+        StatsMode::Full => log::detail(
+            "full scan: lean mode (input×input correlations gated off; use --compute-correlations)",
+        ),
     }
 
     log::detail("computing corpus identity...");
@@ -478,7 +485,11 @@ pub fn generate_statistics(
     let mut out_sum = vec![0.0f64; n_out];
     let mut in_sq = vec![0.0f64; n_in];
     let mut out_sq = vec![0.0f64; n_out];
-    let mut in_cross = vec![0.0f64; n_in * n_in];
+    let mut in_cross = if compute_correlations {
+        vec![0.0f64; n_in * n_in]
+    } else {
+        Vec::new()
+    };
     let mut in_out_cross = vec![0.0f64; n_in * n_out];
     let mut record_count = 0u64;
     let mut bytes_seen = 0u64;
@@ -516,8 +527,10 @@ pub fn generate_statistics(
         }
         for i in 0..n_in {
             let vi = f64::from(record.inputs[i]);
-            for j in i..n_in {
-                in_cross[i * n_in + j] += vi * f64::from(record.inputs[j]);
+            if compute_correlations {
+                for j in i..n_in {
+                    in_cross[i * n_in + j] += vi * f64::from(record.inputs[j]);
+                }
             }
             for j in 0..n_out {
                 in_out_cross[i * n_out + j] += vi * f64::from(record.outputs[j]);
@@ -554,7 +567,7 @@ pub fn generate_statistics(
         format_duration(scan_started.elapsed().as_secs_f64()),
         record_count as f64 / scan_started.elapsed().as_secs_f64().max(1e-6)
     ));
-    log::detail("finalising correlations and writing JSON...");
+    log::detail("finalising statistics and writing JSON...");
 
     let n = record_count as f64;
     let pearson = |sum_a: f64, sum_b: f64, sum_ab: f64, sq_a: f64, sq_b: f64| -> f64 {
@@ -573,15 +586,17 @@ pub fn generate_statistics(
     };
 
     let mut input_correlations = Vec::new();
-    for i in 0..n_in {
-        for j in i..n_in {
-            input_correlations.push(pearson(
-                in_sum[i],
-                in_sum[j],
-                in_cross[i * n_in + j],
-                in_sq[i],
-                in_sq[j],
-            ));
+    if compute_correlations {
+        for i in 0..n_in {
+            for j in i..n_in {
+                input_correlations.push(pearson(
+                    in_sum[i],
+                    in_sum[j],
+                    in_cross[i * n_in + j],
+                    in_sq[i],
+                    in_sq[j],
+                ));
+            }
         }
     }
     let mut input_target_correlations = Vec::with_capacity(n_in * n_out);
@@ -641,6 +656,7 @@ pub fn ensure_statistics(
     config: &TrainingDataConfig,
     mode: StatsMode,
     sample_record_limit: Option<u64>,
+    compute_correlations: bool,
 ) -> Result<ObservationsStatistics, ObservationsError> {
     let limit = match mode {
         StatsMode::Quick => Some(sample_record_limit.unwrap_or(DEFAULT_QUICK_SAMPLE_RECORDS)),
@@ -681,7 +697,7 @@ pub fn ensure_statistics(
             path.display()
         ));
     }
-    generate_statistics(training_data, config, mode, limit)
+    generate_statistics(training_data, config, mode, limit, compute_correlations)
 }
 
 #[cfg(test)]
@@ -712,13 +728,14 @@ mod tests {
             ],
         );
         let config = TrainingDataConfig::new(2, 1);
-        let stats = ensure_statistics(dir.path(), &config, StatsMode::Full, None).unwrap();
+        let stats = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
         assert_eq!(stats.record_count, 3);
         assert_eq!(stats.inputs.len(), 2);
         assert!(nearly_mean(&stats.inputs[0], 3.0));
         assert_eq!(stats.mode, StatsMode::Full);
+        assert!(stats.input_correlations.is_empty());
 
-        let reused = ensure_statistics(dir.path(), &config, StatsMode::Full, None).unwrap();
+        let reused = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
         assert_eq!(reused.corpus_identity, stats.corpus_identity);
         assert_eq!(reused.created_at_unix, stats.created_at_unix);
     }
@@ -739,7 +756,8 @@ mod tests {
             ],
         );
         let config = TrainingDataConfig::new(2, 1);
-        let stats = ensure_statistics(dir.path(), &config, StatsMode::Quick, Some(2)).unwrap();
+        let stats =
+            ensure_statistics(dir.path(), &config, StatsMode::Quick, Some(2), false).unwrap();
         assert_eq!(stats.mode, StatsMode::Quick);
         assert_eq!(stats.sample_record_limit, Some(2));
         assert_eq!(stats.record_count, 2);
@@ -751,10 +769,23 @@ mod tests {
         let dir = tempdir().unwrap();
         write_bin(dir.path(), "0.bin", &[1.0, 0.0, 0.0]);
         let config = TrainingDataConfig::new(2, 1);
-        let first = ensure_statistics(dir.path(), &config, StatsMode::Full, None).unwrap();
+        let first = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
         write_bin(dir.path(), "0.bin", &[9.0, 0.0, 0.0]);
-        let second = ensure_statistics(dir.path(), &config, StatsMode::Full, None).unwrap();
+        let second = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
         assert_ne!(first.corpus_identity, second.corpus_identity);
+    }
+
+    #[test]
+    fn correlations_computed_when_requested() {
+        let dir = tempdir().unwrap();
+        write_bin(
+            dir.path(),
+            "0.bin",
+            &[1.0, 2.0, 0.5, 3.0, 4.0, 1.0, 5.0, 6.0, 1.5],
+        );
+        let config = TrainingDataConfig::new(2, 1);
+        let stats = ensure_statistics(dir.path(), &config, StatsMode::Full, None, true).unwrap();
+        assert_eq!(stats.input_correlations.len(), 3);
     }
 
     fn nearly_mean(stats: &ScalarStats, expected: f64) -> bool {

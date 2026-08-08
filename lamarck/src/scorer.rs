@@ -1,10 +1,11 @@
 //! Authoritative NEAT-AI-scorer integration.
 
 use crate::config::DEFAULT_MIN_IMPROVEMENT;
+use crate::log;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Parsed fields from a scorer result object.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -68,20 +69,85 @@ impl DirectoryScorer for ExternalScorer {
         training_data: &Path,
     ) -> Result<BTreeMap<String, ScoreResult>, ScorerError> {
         // Locked contract: do NOT pass --gpu / --cost.
+        // Inherit stderr so any scorer diagnostics stream live while we wait
+        // on the single directory batch call; keep stdout piped for JSON.
         let output = Command::new(&self.binary)
             .arg(candidates_dir)
             .arg(training_data)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
             .output()
             .map_err(|e| ScorerError::Process(format!("failed to spawn scorer: {e}")))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(ScorerError::Process(format!(
-                "scorer exited {}: stderr={stderr} stdout={stdout}",
+                "scorer exited {}: stdout={stdout}",
                 output.status
             )));
         }
         parse_scorer_stdout(&output.stdout)
+    }
+}
+
+/// Log a compact summary of one scorer batch (timing + score spread).
+pub fn log_scorer_batch_stats(
+    scores: &BTreeMap<String, ScoreResult>,
+    scorer_ms: u128,
+    min_improvement: f64,
+) {
+    let n = scores.len();
+    let per = if n > 0 {
+        scorer_ms as f64 / n as f64
+    } else {
+        0.0
+    };
+    log::ok(&format!(
+        "scorer batch: {n} creatures in {scorer_ms}ms ({per:.0} ms/creature, one directory call)"
+    ));
+
+    let Some(baseline) = scores.get("baseline") else {
+        log::warn("scorer batch missing baseline");
+        return;
+    };
+    log::detail(&format!(
+        "baseline: score={:.12}  error={:.12}  complexity={}",
+        baseline.score, baseline.error, baseline.complexity_penalty
+    ));
+
+    let mut deltas: Vec<(&str, f64, f64)> = scores
+        .iter()
+        .filter(|(stem, _)| stem.as_str() != "baseline")
+        .map(|(stem, r)| (stem.as_str(), r.score, r.score - baseline.score))
+        .collect();
+    deltas.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    if deltas.is_empty() {
+        return;
+    }
+
+    let best = deltas[0];
+    let worst = *deltas.last().unwrap();
+    let above = deltas
+        .iter()
+        .filter(|(_, _, d)| *d > min_improvement)
+        .count();
+    let improved = deltas.iter().filter(|(_, _, d)| *d > 0.0).count();
+    log::detail(&format!(
+        "candidates: best Δ {:+.6e} ({})  worst Δ {:+.6e} ({})  >0: {improved}/{}  >threshold: {above}/{}",
+        best.2,
+        best.0,
+        worst.2,
+        worst.0,
+        deltas.len(),
+        deltas.len()
+    ));
+
+    let show = deltas.len().min(5);
+    for (stem, score, delta) in deltas.iter().take(show) {
+        log::detail(&format!("  {stem}: score={score:.12}  Δ {delta:+.6e}"));
+    }
+    if deltas.len() > show {
+        log::detail(&format!("  … {} more candidates", deltas.len() - show));
     }
 }
 

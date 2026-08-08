@@ -29,6 +29,8 @@ pub struct JournalReport {
     pub experiments: u64,
     /// Accepted improvements.
     pub acceptances: u64,
+    /// Scorer batch failures recorded in the journal.
+    pub scorer_failures: u64,
     /// First experiment baseline score (opening incumbent).
     pub opening_baseline_score: Option<f64>,
     /// Time to first acceptance (ms of wall timestamps unavailable — use scorer+analysis sums).
@@ -37,8 +39,16 @@ pub struct JournalReport {
     pub total_analysis_ms: u128,
     /// Total scorer milliseconds.
     pub total_scorer_ms: u128,
+    /// Candidates scored (sum of scored stems excluding failures).
+    pub candidates_scored: u64,
+    /// Candidates scored per minute of scorer wall time.
+    pub candidates_per_scorer_minute: f64,
+    /// Analysis share of (analysis+scorer) time.
+    pub analysis_time_fraction: f64,
     /// Absolute score improvement from first baseline to last accepted.
     pub total_score_improvement: Option<f64>,
+    /// Focus neurons seen (uuid → experiment count).
+    pub focus_counts: BTreeMap<String, u64>,
     /// Per-strategy win counts.
     pub strategies: Vec<StrategyStats>,
 }
@@ -49,13 +59,16 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let reader = BufReader::new(file);
     let mut experiments = 0u64;
     let mut acceptances = 0u64;
+    let mut scorer_failures = 0u64;
     let mut total_analysis_ms = 0u128;
     let mut total_scorer_ms = 0u128;
+    let mut candidates_scored = 0u64;
     let mut time_to_first = None;
     let mut elapsed = 0u128;
     let mut first_baseline = None;
     let mut last_best = None;
     let mut wins: BTreeMap<String, u64> = BTreeMap::new();
+    let mut focus_counts: BTreeMap<String, u64> = BTreeMap::new();
 
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -67,6 +80,12 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         total_analysis_ms += record.analysis_ms;
         total_scorer_ms += record.scorer_ms;
         elapsed += record.analysis_ms + record.scorer_ms;
+        *focus_counts.entry(record.focus_neuron.clone()).or_default() += 1;
+        if record.scorer_error.is_some() {
+            scorer_failures += 1;
+        } else {
+            candidates_scored += record.scores.len().saturating_sub(1) as u64;
+        }
         if first_baseline.is_none() {
             first_baseline = Some(record.baseline_score);
         }
@@ -104,15 +123,31 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         (Some(first), Some(last)) => Some(last - first),
         _ => None,
     };
+    let total_ms = (total_analysis_ms + total_scorer_ms) as f64;
+    let analysis_time_fraction = if total_ms > 0.0 {
+        total_analysis_ms as f64 / total_ms
+    } else {
+        0.0
+    };
+    let candidates_per_scorer_minute = if total_scorer_ms > 0 {
+        candidates_scored as f64 / (total_scorer_ms as f64 / 60_000.0)
+    } else {
+        0.0
+    };
 
     Ok(JournalReport {
         experiments,
         acceptances,
+        scorer_failures,
         opening_baseline_score: first_baseline,
         time_to_first_acceptance_ms: time_to_first,
         total_analysis_ms,
         total_scorer_ms,
+        candidates_scored,
+        candidates_per_scorer_minute,
+        analysis_time_fraction,
         total_score_improvement,
+        focus_counts,
         strategies,
     })
 }
@@ -120,8 +155,11 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
 fn strategy_name(strategy: CandidateStrategy) -> String {
     match strategy {
         CandidateStrategy::Backprop => "backprop".into(),
+        CandidateStrategy::MeanErrorBias => "mean_error_bias".into(),
         CandidateStrategy::StatsWeight => "stats_weight".into(),
         CandidateStrategy::StatsBias => "stats_bias".into(),
+        CandidateStrategy::StructuralAdd => "structural_add".into(),
+        CandidateStrategy::StructuralWeaken => "structural_weaken".into(),
         CandidateStrategy::Random => "random".into(),
     }
 }
@@ -141,12 +179,15 @@ fn format_ms(ms: u128) -> String {
 pub fn print_run_summary(result: &RunResult) {
     log::info("run summary");
     log::detail(&format!(
-        "experiments:  {}  (accepted {})",
-        result.experiments, result.acceptances
+        "experiments:  {}  (accepted {}  scorer_ok {}  scorer_fail {})",
+        result.experiments, result.acceptances, result.scorer_successes, result.scorer_failures
     ));
 
     if let Ok(report) = report_from_journal(&result.journal_path) {
-        if let Some(open) = report.opening_baseline_score {
+        let open = result
+            .opening_baseline_score
+            .or(report.opening_baseline_score);
+        if let Some(open) = open {
             let delta = result.best_score - open;
             if result.acceptances == 0 {
                 log::detail(&format!(
@@ -165,13 +206,27 @@ pub fn print_run_summary(result: &RunResult) {
 
         let total_ms = report.total_analysis_ms + report.total_scorer_ms;
         log::detail(&format!(
-            "time:          analysis {}  + scorer {}  = {}",
+            "time:          analysis {}  + scorer {}  = {}  (analysis {:.0}%)",
             format_ms(report.total_analysis_ms),
             format_ms(report.total_scorer_ms),
-            format_ms(total_ms)
+            format_ms(total_ms),
+            report.analysis_time_fraction * 100.0
+        ));
+        log::detail(&format!(
+            "throughput:    {:.1} candidates/scorer-minute ({} scored)",
+            report.candidates_per_scorer_minute, report.candidates_scored
         ));
         if let Some(ms) = report.time_to_first_acceptance_ms {
             log::detail(&format!("first accept:  {}", format_ms(ms)));
+        }
+        if !report.focus_counts.is_empty() {
+            let focuses = report
+                .focus_counts
+                .iter()
+                .map(|(k, v)| format!("{k}×{v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::detail(&format!("focus hits:    {focuses}"));
         }
         if !report.strategies.is_empty() {
             let wins = report
@@ -188,6 +243,12 @@ pub fn print_run_summary(result: &RunResult) {
 
     log::detail(&format!("best.json:     {}", result.best_path.display()));
     log::detail(&format!("journal:       {}", result.journal_path.display()));
+    if result.scorer_failures > 0 {
+        log::warn(&format!(
+            "scorer failures during run: {}",
+            result.scorer_failures
+        ));
+    }
     if result.acceptances > 0 {
         log::ok(&format!(
             "finished with {} acceptance(s)",
@@ -228,6 +289,7 @@ mod tests {
             accepted: true,
             analysis_ms: 10,
             scorer_ms: 20,
+            scorer_error: None,
         };
         writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
         let report = report_from_journal(file.path()).unwrap();

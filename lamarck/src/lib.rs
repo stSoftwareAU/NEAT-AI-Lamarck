@@ -9,6 +9,7 @@ pub mod backprop;
 pub mod candidates;
 pub mod config;
 pub mod focus;
+pub mod learning;
 pub mod log;
 pub mod observations;
 pub mod report;
@@ -16,8 +17,10 @@ pub mod run;
 pub mod scorer;
 
 pub use config::{
-    DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_TIMEOUT_SECONDS, LamarckConfig,
+    DEFAULT_CANDIDATE_COUNT, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES, DEFAULT_MIN_IMPROVEMENT,
+    DEFAULT_TIMEOUT_SECONDS, LamarckConfig,
 };
+pub use focus::FocusPolicy;
 pub use report::{JournalReport, print_run_summary, report_from_journal};
 pub use run::{ExperimentRecord, RunResult, run_optimisation};
-pub use scorer::{ExternalScorer, ScoreResult, accepts_improvement};
+pub use scorer::{ExternalScorer, ScoreResult, accepts_improvement, log_scorer_batch_stats};

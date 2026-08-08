@@ -1,6 +1,7 @@
 //! NEAT-AI-Lamarck CLI entry point.
 
 use clap::{Parser, Subcommand};
+use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_TIMEOUT_SECONDS, ExternalScorer,
@@ -54,12 +55,31 @@ struct Cli {
     preserve_losers: bool,
 
     /// Use sampled `observations-quick.statistics` instead of a full-corpus cache.
+    ///
+    /// Analysis (focus/learning) uses the sample; the authoritative scorer still
+    /// evaluates the full training corpus.
     #[arg(long, default_value_t = false)]
     quick: bool,
 
-    /// Max records for `--quick` observations sampling.
+    /// Max records for `--quick` observations / focus / learning sampling.
     #[arg(long, default_value_t = DEFAULT_QUICK_SAMPLE_RECORDS)]
     quick_sample_records: u64,
+
+    /// Lock focus to this neuron UUID (overrides `--focus-policy`).
+    #[arg(long)]
+    focus_neuron: Option<String>,
+
+    /// Focus selection policy: random | unsaturated | high-error.
+    #[arg(long, default_value = "random")]
+    focus_policy: String,
+
+    /// Compute expensive input×input correlations in observations.
+    #[arg(long, default_value_t = false)]
+    compute_correlations: bool,
+
+    /// Skip Phase-0 baseline scorer gate.
+    #[arg(long, default_value_t = false)]
+    skip_phase0: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -99,6 +119,14 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    let focus_policy = FocusPolicy::parse(&cli.focus_policy).unwrap_or_else(|| {
+        eprintln!(
+            "unknown --focus-policy '{}'; expected random|unsaturated|high-error",
+            cli.focus_policy
+        );
+        std::process::exit(2);
+    });
+
     let config = LamarckConfig {
         creature,
         training_data,
@@ -115,6 +143,11 @@ fn main() -> ExitCode {
             StatsMode::Full
         },
         quick_sample_records: cli.quick_sample_records,
+        focus_neuron: cli.focus_neuron,
+        focus_policy,
+        compute_correlations: cli.compute_correlations,
+        max_consecutive_scorer_failures: neat_ai_lamarck::DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
+        phase0_parity: !cli.skip_phase0,
     };
 
     let scorer = ExternalScorer { binary: cli.scorer };
@@ -122,7 +155,11 @@ fn main() -> ExitCode {
     match run_optimisation(&config, &scorer) {
         Ok(result) => {
             print_run_summary(&result);
-            ExitCode::SUCCESS
+            if result.experiments > 0 && result.scorer_successes == 0 {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => {
             eprintln!("Lamarck failed: {e}");

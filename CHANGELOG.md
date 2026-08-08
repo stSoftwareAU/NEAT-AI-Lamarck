@@ -20,3 +20,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   25k records) plus coloured stderr progress for interactive runs.
 - Coloured end-of-run summary (experiments, score delta, analysis/scorer time,
   paths).
+- `--focus-neuron <uuid>` locks experiments to a chosen non-input neuron (e.g.
+  `output-0`); `--quick` also caps focus-stat scans to the sample size.
+- Output focus scans measure mean/`mae`/squash-aware adjusted error; a
+  `mean_error_bias` candidate applies `bias += mean((target-post)*deriv)`.
+- Real focus `LearningSignal` accumulation wired into the loop; backprop
+  candidates propose from accumulated bias/weight signals.
+- Incoming-source stats, structural add/weaken candidates, focus policies,
+  Phase-0 scorer gate, scorer-failure abort/logging, lean observations
+  (correlations opt-in), and richer journal economics reporting.
