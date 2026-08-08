@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Current on-disk format semver.
 pub const FORMAT_VERSION: &str = "1.0.0";
@@ -313,12 +313,80 @@ pub fn validate_statistics(
     Ok(())
 }
 
+fn corpus_byte_total(training_data: &Path) -> Result<(usize, u64), ObservationsError> {
+    let files =
+        find_bin_files(training_data).map_err(|e| ObservationsError::Training(e.to_string()))?;
+    let mut total = 0u64;
+    for path in &files {
+        total += fs::metadata(path)?.len();
+    }
+    Ok((files.len(), total))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.2} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_duration(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "?".into();
+    }
+    let secs = seconds.round() as u64;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}h{m:02}m{s:02}s")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 /// Scan the corpus and write a fresh statistics file.
 pub fn generate_statistics(
     training_data: &Path,
     config: &TrainingDataConfig,
 ) -> Result<ObservationsStatistics, ObservationsError> {
+    let (file_count, total_bytes) = corpus_byte_total(training_data)?;
+    let record_bytes = config.bytes_per_record() as u64;
+    let approx_records = total_bytes.checked_div(record_bytes).unwrap_or(0);
+    let pair_ops = (config.num_inputs as u64) * (config.num_inputs as u64 + 1) / 2;
+
+    eprintln!("observations.statistics: generating cache");
+    eprintln!(
+        "  corpus: {} files, {}, ~{} records ({} inputs × {} outputs)",
+        file_count,
+        format_bytes(total_bytes),
+        approx_records,
+        config.num_inputs,
+        config.num_outputs
+    );
+    eprintln!(
+        "  note: each record updates ~{pair_ops} input×input correlation cells — much heavier than scoring"
+    );
+    eprintln!("  computing corpus identity...");
+    let identity_started = Instant::now();
     let identity = corpus_identity(training_data, config)?;
+    eprintln!(
+        "  corpus identity {} ({:.1}s)",
+        identity,
+        identity_started.elapsed().as_secs_f64()
+    );
+
     let mut input_acc: Vec<OnlineMoment> = (0..config.num_inputs)
         .map(|_| OnlineMoment::new())
         .collect();
@@ -336,7 +404,13 @@ pub fn generate_statistics(
     let mut in_cross = vec![0.0f64; n_in * n_in];
     let mut in_out_cross = vec![0.0f64; n_in * n_out];
     let mut record_count = 0u64;
+    let mut bytes_seen = 0u64;
 
+    let scan_started = Instant::now();
+    let mut last_report = Instant::now();
+    let report_every = Duration::from_secs(2);
+
+    eprintln!("  scanning training records...");
     let mut iter = TrainingDataIterator::new(training_data, config.clone())
         .map_err(|e| ObservationsError::Training(e.to_string()))?;
     while let Some(record) = iter
@@ -344,6 +418,7 @@ pub fn generate_statistics(
         .map_err(|e| ObservationsError::Training(e.to_string()))?
     {
         record_count += 1;
+        bytes_seen += record_bytes;
         for (i, &v) in record.inputs.iter().enumerate() {
             input_acc[i].push(v);
             let vf = f64::from(v);
@@ -365,7 +440,38 @@ pub fn generate_statistics(
                 in_out_cross[i * n_out + j] += vi * f64::from(record.outputs[j]);
             }
         }
+
+        if last_report.elapsed() >= report_every {
+            let elapsed = scan_started.elapsed().as_secs_f64().max(1e-6);
+            let rec_per_s = record_count as f64 / elapsed;
+            let bytes_per_s = bytes_seen as f64 / elapsed;
+            let pct = if total_bytes > 0 {
+                (bytes_seen as f64 / total_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+            let eta = if bytes_per_s > 0.0 && total_bytes > bytes_seen {
+                (total_bytes - bytes_seen) as f64 / bytes_per_s
+            } else {
+                0.0
+            };
+            eprintln!(
+                "  progress: {pct:5.1}%  records={record_count} ({rec_per_s:.0}/s)  {}/{}  elapsed={}  eta={}",
+                format_bytes(bytes_seen),
+                format_bytes(total_bytes),
+                format_duration(elapsed),
+                format_duration(eta)
+            );
+            last_report = Instant::now();
+        }
     }
+
+    eprintln!(
+        "  scan complete: {record_count} records in {} ({:.1} records/s)",
+        format_duration(scan_started.elapsed().as_secs_f64()),
+        record_count as f64 / scan_started.elapsed().as_secs_f64().max(1e-6)
+    );
+    eprintln!("  finalising correlations and writing JSON...");
 
     let n = record_count as f64;
     let pearson = |sum_a: f64, sum_b: f64, sum_ab: f64, sq_a: f64, sq_b: f64| -> f64 {
@@ -431,6 +537,11 @@ pub fn generate_statistics(
     let json = serde_json::to_string_pretty(&stats)?;
     let mut file = fs::File::create(&path)?;
     file.write_all(json.as_bytes())?;
+    eprintln!(
+        "  wrote {} ({})",
+        path.display(),
+        format_bytes(json.len() as u64)
+    );
     Ok(stats)
 }
 
@@ -441,19 +552,31 @@ pub fn ensure_statistics(
 ) -> Result<ObservationsStatistics, ObservationsError> {
     let path = statistics_path(training_data);
     if path.is_file() {
+        eprintln!("observations.statistics: found cache at {}", path.display());
         match load_statistics(&path) {
             Ok(stats) => match validate_statistics(&stats, training_data, config) {
-                Ok(()) => return Ok(stats),
-                Err(ObservationsError::Stale(_)) => {
-                    // Regenerate on identity/version mismatch.
+                Ok(()) => {
+                    eprintln!(
+                        "observations.statistics: reusing cache ({} records, identity {})",
+                        stats.record_count, stats.corpus_identity
+                    );
+                    return Ok(stats);
+                }
+                Err(ObservationsError::Stale(reason)) => {
+                    eprintln!("observations.statistics: cache stale — {reason}; regenerating");
                 }
                 Err(e) => return Err(e),
             },
-            Err(ObservationsError::Json(_)) => {
-                // Corrupt JSON — regenerate.
+            Err(ObservationsError::Json(e)) => {
+                eprintln!("observations.statistics: cache corrupt ({e}); regenerating");
             }
             Err(e) => return Err(e),
         }
+    } else {
+        eprintln!(
+            "observations.statistics: no cache at {} — generating (one-time, slow)",
+            path.display()
+        );
     }
     generate_statistics(training_data, config)
 }
