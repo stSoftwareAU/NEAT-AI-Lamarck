@@ -1,5 +1,6 @@
 //! Shared Lamarck configuration defaults and run options.
 
+use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -35,6 +36,10 @@ pub struct LamarckConfig {
     pub output_dir: PathBuf,
     /// When true, keep rejected candidate JSON files.
     pub preserve_losers: bool,
+    /// Observations cache mode (`full` or `quick` sample).
+    pub stats_mode: StatsMode,
+    /// Max records for quick-mode observations (ignored in full mode).
+    pub quick_sample_records: u64,
 }
 
 impl Default for LamarckConfig {
@@ -49,6 +54,8 @@ impl Default for LamarckConfig {
             scorer_path: PathBuf::from("rust_scorer"),
             output_dir: PathBuf::from("."),
             preserve_losers: false,
+            stats_mode: StatsMode::Full,
+            quick_sample_records: DEFAULT_QUICK_SAMPLE_RECORDS,
         }
     }
 }

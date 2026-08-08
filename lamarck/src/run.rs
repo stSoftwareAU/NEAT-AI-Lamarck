@@ -6,6 +6,7 @@ use crate::candidates::{
 };
 use crate::config::LamarckConfig;
 use crate::focus::{FocusSelector, RandomFocusSelector, collect_focus_stats};
+use crate::log;
 use crate::observations::ensure_statistics;
 use crate::scorer::{DirectoryScorer, ScoreResult, accepts_improvement, select_winner};
 use neat_core::{
@@ -82,12 +83,23 @@ pub fn run_optimisation(
     fs::write(&best_path, &original_text).map_err(|e| e.to_string())?;
 
     let train_cfg = TrainingDataConfig::new(incumbent.input, incumbent.output);
-    eprintln!(
-        "Lamarck: ensuring observations.statistics (inputs={} outputs={})",
-        incumbent.input, incumbent.output
-    );
-    let observations =
-        ensure_statistics(&config.training_data, &train_cfg).map_err(|e| e.to_string())?;
+    log::info(&format!(
+        "ensuring observations-{} (inputs={} outputs={})",
+        config.stats_mode.label(),
+        incumbent.input,
+        incumbent.output
+    ));
+    let sample_limit = match config.stats_mode {
+        crate::observations::StatsMode::Quick => Some(config.quick_sample_records),
+        crate::observations::StatsMode::Full => None,
+    };
+    let observations = ensure_statistics(
+        &config.training_data,
+        &train_cfg,
+        config.stats_mode,
+        sample_limit,
+    )
+    .map_err(|e| e.to_string())?;
 
     let mut rng = match config.seed {
         Some(seed) => StdRng::seed_from_u64(seed),
@@ -100,26 +112,26 @@ pub fn run_optimisation(
     let mut experiments = 0u64;
     let mut acceptances = 0u64;
     let mut best_score = f64::NEG_INFINITY;
-    eprintln!(
-        "Lamarck: starting optimisation loop (timeout={}s, candidates={})",
+    log::info(&format!(
+        "starting optimisation loop (timeout={}s, candidates={})",
         config.timeout.as_secs(),
         config.candidates
-    );
+    ));
 
     while Instant::now() < deadline {
         experiments += 1;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        eprintln!(
-            "Lamarck: experiment {experiments} ({}s remaining, acceptances={acceptances})",
+        log::info(&format!(
+            "experiment {experiments} ({}s remaining, acceptances={acceptances})",
             remaining.as_secs()
-        );
+        ));
         let analysis_start = Instant::now();
         let focus = focus_selector
             .select(&incumbent, &mut rng)
             .ok_or_else(|| "no focus neuron available".to_string())?;
-        eprintln!("  focus neuron: {focus}");
+        log::detail(&format!("focus neuron: {focus}"));
         let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
-        eprintln!("  scanning incumbent for focus stats...");
+        log::detail("scanning incumbent for focus stats...");
         let focus_stats =
             collect_focus_stats(&incumbent, &mut network, &config.training_data, &focus)?;
         let gen_ctx = CandidateGenContext {
@@ -132,21 +144,21 @@ pub fn run_optimisation(
         };
         let candidates = generate_candidates(&gen_ctx, config.candidates, &mut rng);
         let analysis_ms = analysis_start.elapsed().as_millis();
-        eprintln!(
-            "  generated {} candidates in {analysis_ms}ms",
+        log::ok(&format!(
+            "generated {} candidates in {analysis_ms}ms",
             candidates.len()
-        );
+        ));
 
         let batch_dir = config
             .output_dir
             .join(format!("candidates-exp-{experiments}"));
         write_candidate_batch(&batch_dir, &incumbent, &candidates)?;
 
-        eprintln!(
-            "  scoring baseline + {} candidates via {}",
+        log::detail(&format!(
+            "scoring baseline + {} candidates via {}",
             candidates.len(),
             config.scorer_path.display()
-        );
+        ));
         let scorer_start = Instant::now();
         let scores = match scorer.score_directory(&batch_dir, &config.training_data) {
             Ok(s) => s,
@@ -178,7 +190,7 @@ pub fn run_optimisation(
             }
         };
         let scorer_ms = scorer_start.elapsed().as_millis();
-        eprintln!("  scorer finished in {scorer_ms}ms");
+        log::ok(&format!("scorer finished in {scorer_ms}ms"));
 
         let baseline = scores
             .get("baseline")
@@ -186,7 +198,7 @@ pub fn run_optimisation(
         if best_score.is_infinite() {
             best_score = baseline.score;
         }
-        eprintln!("  baseline score={}", baseline.score);
+        log::detail(&format!("baseline score={}", baseline.score));
 
         let winner = select_winner(&scores, config.min_improvement).map_err(|e| e.to_string())?;
         let mut accepted = false;
@@ -195,7 +207,10 @@ pub fn run_optimisation(
         if let Some((stem, result, delta)) = winner
             && accepts_improvement(result.score, baseline.score, config.min_improvement)
         {
-            eprintln!("  accepted {stem}: score={} (+{delta:.3e})", result.score);
+            log::ok(&format!(
+                "accepted {stem}: score={} (+{delta:.3e})",
+                result.score
+            ));
             let winner_path = batch_dir.join(format!("{stem}.json"));
             let winner_json = fs::read_to_string(&winner_path).map_err(|e| e.to_string())?;
             incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
@@ -394,6 +409,8 @@ mod tests {
             scorer_path: PathBuf::from("rust_scorer"),
             output_dir: out.clone(),
             preserve_losers: true,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
