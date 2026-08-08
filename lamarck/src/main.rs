@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_TIMEOUT_SECONDS, ExternalScorer,
-    LamarckConfig, report_from_journal, run_optimisation,
+    LamarckConfig, print_run_summary, report_from_journal, run_optimisation,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -121,14 +121,7 @@ fn main() -> ExitCode {
 
     match run_optimisation(&config, &scorer) {
         Ok(result) => {
-            println!(
-                "Lamarck finished: experiments={} acceptances={} best_score={} best={} journal={}",
-                result.experiments,
-                result.acceptances,
-                result.best_score,
-                result.best_path.display(),
-                result.journal_path.display()
-            );
+            print_run_summary(&result);
             ExitCode::SUCCESS
         }
         Err(e) => {
