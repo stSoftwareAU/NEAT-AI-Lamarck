@@ -18,6 +18,6 @@ pub mod scorer;
 pub use config::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_TIMEOUT_SECONDS, LamarckConfig,
 };
-pub use report::{JournalReport, report_from_journal};
+pub use report::{JournalReport, print_run_summary, report_from_journal};
 pub use run::{ExperimentRecord, RunResult, run_optimisation};
 pub use scorer::{ExternalScorer, ScoreResult, accepts_improvement};

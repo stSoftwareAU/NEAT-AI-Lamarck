@@ -18,3 +18,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `experiments.jsonl`, and journal economics reporting.
 - `--quick` mode writes/reuses `observations-quick.statistics` (default sample
   25k records) plus coloured stderr progress for interactive runs.
+- Coloured end-of-run summary (experiments, score delta, analysis/scorer time,
+  paths).

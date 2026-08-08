@@ -1,7 +1,8 @@
 //! Benchmark / strategy economics reporting from `experiments.jsonl`.
 
 use crate::candidates::CandidateStrategy;
-use crate::run::ExperimentRecord;
+use crate::log;
+use crate::run::{ExperimentRecord, RunResult};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -28,6 +29,8 @@ pub struct JournalReport {
     pub experiments: u64,
     /// Accepted improvements.
     pub acceptances: u64,
+    /// First experiment baseline score (opening incumbent).
+    pub opening_baseline_score: Option<f64>,
     /// Time to first acceptance (ms of wall timestamps unavailable — use scorer+analysis sums).
     pub time_to_first_acceptance_ms: Option<u128>,
     /// Total analysis milliseconds.
@@ -105,6 +108,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     Ok(JournalReport {
         experiments,
         acceptances,
+        opening_baseline_score: first_baseline,
         time_to_first_acceptance_ms: time_to_first,
         total_analysis_ms,
         total_scorer_ms,
@@ -119,6 +123,78 @@ fn strategy_name(strategy: CandidateStrategy) -> String {
         CandidateStrategy::StatsWeight => "stats_weight".into(),
         CandidateStrategy::StatsBias => "stats_bias".into(),
         CandidateStrategy::Random => "random".into(),
+    }
+}
+
+fn format_ms(ms: u128) -> String {
+    if ms >= 60_000 {
+        let secs = ms as f64 / 1000.0;
+        format!("{secs:.1}s")
+    } else if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+/// Print a coloured human summary of a completed optimisation run to stderr.
+pub fn print_run_summary(result: &RunResult) {
+    log::info("run summary");
+    log::detail(&format!(
+        "experiments:  {}  (accepted {})",
+        result.experiments, result.acceptances
+    ));
+
+    if let Ok(report) = report_from_journal(&result.journal_path) {
+        if let Some(open) = report.opening_baseline_score {
+            let delta = result.best_score - open;
+            if result.acceptances == 0 {
+                log::detail(&format!(
+                    "best score:    {}  (no improvement over opening {})",
+                    result.best_score, open
+                ));
+            } else {
+                log::detail(&format!(
+                    "best score:    {}  (opening {}  Δ {delta:+.6e})",
+                    result.best_score, open
+                ));
+            }
+        } else {
+            log::detail(&format!("best score:    {}", result.best_score));
+        }
+
+        let total_ms = report.total_analysis_ms + report.total_scorer_ms;
+        log::detail(&format!(
+            "time:          analysis {}  + scorer {}  = {}",
+            format_ms(report.total_analysis_ms),
+            format_ms(report.total_scorer_ms),
+            format_ms(total_ms)
+        ));
+        if let Some(ms) = report.time_to_first_acceptance_ms {
+            log::detail(&format!("first accept:  {}", format_ms(ms)));
+        }
+        if !report.strategies.is_empty() {
+            let wins = report
+                .strategies
+                .iter()
+                .map(|s| format!("{}×{}", s.strategy, s.wins))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::detail(&format!("winning strats: {wins}"));
+        }
+    } else {
+        log::detail(&format!("best score:    {}", result.best_score));
+    }
+
+    log::detail(&format!("best.json:     {}", result.best_path.display()));
+    log::detail(&format!("journal:       {}", result.journal_path.display()));
+    if result.acceptances > 0 {
+        log::ok(&format!(
+            "finished with {} acceptance(s)",
+            result.acceptances
+        ));
+    } else {
+        log::warn("finished with no acceptances");
     }
 }
 
