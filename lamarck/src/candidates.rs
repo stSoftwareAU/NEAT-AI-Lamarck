@@ -388,11 +388,16 @@ fn pick_best_incoming<'a>(
 }
 
 /// Write baseline + candidates into a temporary scoring directory.
+///
+/// Recreates `dir` so leftover JSON from a prior larger batch cannot be scored.
 pub fn write_candidate_batch(
     dir: &Path,
     incumbent: &CreatureExport,
     candidates: &[Candidate],
 ) -> Result<Vec<String>, String> {
+    if dir.exists() {
+        fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let baseline = creature_to_json_pretty(incumbent).map_err(|e| e.to_string())?;
     fs::write(dir.join("baseline.json"), baseline).map_err(|e| e.to_string())?;
