@@ -20,3 +20,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   25k records) plus coloured stderr progress for interactive runs.
 - Coloured end-of-run summary (experiments, score delta, analysis/scorer time,
   paths).
+- `--focus-neuron <uuid>` locks experiments to a chosen non-input neuron (e.g.
+  `output-0`); `--quick` also caps focus-stat scans to the sample size.

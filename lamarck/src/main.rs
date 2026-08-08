@@ -60,6 +60,10 @@ struct Cli {
     /// Max records for `--quick` observations sampling.
     #[arg(long, default_value_t = DEFAULT_QUICK_SAMPLE_RECORDS)]
     quick_sample_records: u64,
+
+    /// Lock focus to this neuron UUID (default: random non-input each experiment).
+    #[arg(long)]
+    focus_neuron: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -115,6 +119,7 @@ fn main() -> ExitCode {
             StatsMode::Full
         },
         quick_sample_records: cli.quick_sample_records,
+        focus_neuron: cli.focus_neuron,
     };
 
     let scorer = ExternalScorer { binary: cli.scorer };

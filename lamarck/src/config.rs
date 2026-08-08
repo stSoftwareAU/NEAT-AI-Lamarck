@@ -40,6 +40,8 @@ pub struct LamarckConfig {
     pub stats_mode: StatsMode,
     /// Max records for quick-mode observations (ignored in full mode).
     pub quick_sample_records: u64,
+    /// When set, always focus this neuron UUID instead of random selection.
+    pub focus_neuron: Option<String>,
 }
 
 impl Default for LamarckConfig {
@@ -56,6 +58,7 @@ impl Default for LamarckConfig {
             preserve_losers: false,
             stats_mode: StatsMode::Full,
             quick_sample_records: DEFAULT_QUICK_SAMPLE_RECORDS,
+            focus_neuron: None,
         }
     }
 }

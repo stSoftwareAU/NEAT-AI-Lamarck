@@ -5,7 +5,7 @@ use crate::candidates::{
     CandidateGenContext, CandidateProvenance, generate_candidates, write_candidate_batch,
 };
 use crate::config::LamarckConfig;
-use crate::focus::{FocusSelector, RandomFocusSelector, collect_focus_stats};
+use crate::focus::{FixedFocusSelector, FocusSelector, RandomFocusSelector, collect_focus_stats};
 use crate::log;
 use crate::observations::ensure_statistics;
 use crate::scorer::{DirectoryScorer, ScoreResult, accepts_improvement, select_winner};
@@ -105,8 +105,16 @@ pub fn run_optimisation(
         Some(seed) => StdRng::seed_from_u64(seed),
         None => StdRng::from_os_rng(),
     };
-    let mut focus_selector = RandomFocusSelector;
+    let mut random_focus = RandomFocusSelector;
+    let mut fixed_focus = config
+        .focus_neuron
+        .as_ref()
+        .map(|uuid| FixedFocusSelector { uuid: uuid.clone() });
     let backprop = BackpropConfig::default();
+    let focus_sample_limit = match config.stats_mode {
+        crate::observations::StatsMode::Quick => Some(config.quick_sample_records),
+        crate::observations::StatsMode::Full => None,
+    };
 
     let deadline = Instant::now() + config.timeout;
     let mut experiments = 0u64;
@@ -117,6 +125,9 @@ pub fn run_optimisation(
         config.timeout.as_secs(),
         config.candidates
     ));
+    if let Some(uuid) = &config.focus_neuron {
+        log::detail(&format!("focus locked to {uuid}"));
+    }
 
     while Instant::now() < deadline {
         experiments += 1;
@@ -126,14 +137,28 @@ pub fn run_optimisation(
             remaining.as_secs()
         ));
         let analysis_start = Instant::now();
-        let focus = focus_selector
-            .select(&incumbent, &mut rng)
-            .ok_or_else(|| "no focus neuron available".to_string())?;
+        let focus = if let Some(selector) = fixed_focus.as_mut() {
+            selector.select(&incumbent, &mut rng).ok_or_else(|| {
+                format!(
+                    "focus neuron '{}' not found (or is an input)",
+                    selector.uuid
+                )
+            })?
+        } else {
+            random_focus
+                .select(&incumbent, &mut rng)
+                .ok_or_else(|| "no focus neuron available".to_string())?
+        };
         log::detail(&format!("focus neuron: {focus}"));
         let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
         log::detail("scanning incumbent for focus stats...");
-        let focus_stats =
-            collect_focus_stats(&incumbent, &mut network, &config.training_data, &focus)?;
+        let focus_stats = collect_focus_stats(
+            &incumbent,
+            &mut network,
+            &config.training_data,
+            &focus,
+            focus_sample_limit,
+        )?;
         let gen_ctx = CandidateGenContext {
             incumbent: &incumbent,
             focus_uuid: &focus,
@@ -411,6 +436,7 @@ mod tests {
             preserve_losers: true,
             stats_mode: crate::observations::StatsMode::Quick,
             quick_sample_records: 8,
+            focus_neuron: Some("h1".into()),
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),

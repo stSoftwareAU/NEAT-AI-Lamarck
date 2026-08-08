@@ -30,6 +30,23 @@ impl FocusSelector for RandomFocusSelector {
     }
 }
 
+/// Always select a caller-specified non-input neuron UUID (for tests / smoke runs).
+#[derive(Debug, Clone)]
+pub struct FixedFocusSelector {
+    /// Neuron UUID to focus (must exist and not be an input).
+    pub uuid: String,
+}
+
+impl FocusSelector for FixedFocusSelector {
+    fn select(&mut self, creature: &CreatureExport, _rng: &mut impl Rng) -> Option<String> {
+        creature
+            .neurons
+            .iter()
+            .find(|n| n.uuid == self.uuid && n.neuron_type != "input")
+            .map(|n| n.uuid.clone())
+    }
+}
+
 /// Streaming statistics for one focused neuron.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,11 +87,14 @@ pub fn neuron_index(creature: &CreatureExport, uuid: &str) -> Option<usize> {
 }
 
 /// Collect focused statistics by scanning the incumbent over training data.
+///
+/// When `max_records` is `Some(n)`, stop after `n` records (used with `--quick`).
 pub fn collect_focus_stats(
     creature: &CreatureExport,
     network: &mut CompiledNetwork,
     training_data: &std::path::Path,
     focus_uuid: &str,
+    max_records: Option<u64>,
 ) -> Result<FocusNeuronStats, String> {
     let neuron = creature
         .neurons
@@ -108,6 +128,11 @@ pub fn collect_focus_stats(
 
     let squash = neuron.squash.clone();
     while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
+        if let Some(limit) = max_records
+            && count >= limit
+        {
+            break;
+        }
         let traced = network.activate_and_trace(&record.inputs, creature.output);
         let num_non_inputs = network.num_neurons.saturating_sub(creature.input);
         let post_offset = creature.output;
@@ -209,5 +234,15 @@ mod tests {
             a.select(&creature, &mut rng_a),
             b.select(&creature, &mut rng_b)
         );
+    }
+
+    #[test]
+    fn fixed_focus_selects_requested_uuid() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let mut selector = FixedFocusSelector { uuid: "o1".into() };
+        let mut rng = StdRng::seed_from_u64(1);
+        assert_eq!(selector.select(&creature, &mut rng).as_deref(), Some("o1"));
+        selector.uuid = "missing".into();
+        assert!(selector.select(&creature, &mut rng).is_none());
     }
 }
