@@ -1,11 +1,12 @@
 //! Focus-neuron selection and incumbent-specific streaming statistics.
 
+use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::learning::squash_derivative;
-use crate::observations::ObservationsStatistics;
 use neat_core::{CompiledNetwork, CreatureExport, TrainingDataConfig, TrainingDataIterator};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Strategy for choosing which non-input neuron to investigate.
 pub trait FocusSelector {
@@ -70,7 +71,7 @@ impl FocusSelector for UnsaturatedFocusSelector {
     }
 }
 
-/// Prefer the first output neuron when present (high-error proxy before a scan).
+/// Prefer the first output neuron when present (fallback when no signals yet).
 #[derive(Debug, Default, Clone)]
 pub struct HighErrorFocusSelector;
 
@@ -83,18 +84,39 @@ impl FocusSelector for HighErrorFocusSelector {
     }
 }
 
+/// Pick the neuron with the largest improvement signal (high-error policy).
+pub fn select_highest_signal(signals: &HashMap<String, f64>) -> Option<FocusChoice> {
+    signals
+        .iter()
+        .filter(|(_, s)| **s > FOCUS_SIGNAL_EPS)
+        .max_by(|a, b| {
+            a.1.partial_cmp(b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(b.0))
+        })
+        .map(|(uuid, signal)| FocusChoice {
+            uuid: uuid.clone(),
+            weight: *signal,
+            reason: format!("highest_signal={signal:.6e}"),
+        })
+}
+
 /// Focus-policy name for CLI / config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPolicy {
-    /// Weighted-random by estimated improvement potential (issue #25).
+    /// Weighted-random by improvement signal (issue #25).
+    ///
+    /// Default. Neurons are ranked by residual MAE (outputs) or |backprop blame|
+    /// (hidden). Neurons with ~zero signal are **never** selected — you cannot
+    /// improve on zero error. Opt into uninformed exploration with `random`.
     #[default]
     Weighted,
-    /// Random non-input each experiment.
+    /// Pick the single highest-signal neuron (usually the worst output head).
+    HighError,
+    /// Random non-input each experiment (may pick zero-signal neurons).
     Random,
     /// Prefer outputs (unsaturated / direct heads).
     Unsaturated,
-    /// Prefer first output neuron (error-bearing head).
-    HighError,
 }
 
 impl FocusPolicy {
@@ -142,8 +164,12 @@ pub struct FocusChoice {
     pub reason: String,
 }
 
-/// Minimum weight so every eligible neuron retains a non-zero draw chance.
-pub const FOCUS_EXPLORATION_FLOOR: f64 = 1.0;
+/// Minimum weight among neurons that already cleared the signal gate.
+pub const FOCUS_EXPLORATION_FLOOR: f64 = 0.01;
+
+/// Signals at or below this are treated as zero — never selected by weighted /
+/// high-error policies (you cannot improve on zero error / blame).
+pub const FOCUS_SIGNAL_EPS: f64 = 1e-12;
 
 /// Weighted-random focus by improvement potential (issue #25).
 #[derive(Debug, Default, Clone)]
@@ -180,14 +206,14 @@ impl WeightedFocusSelector {
         }
     }
 
-    /// Draw a focus neuron ∝ weight, with exploration floor.
+    /// Draw a focus neuron ∝ improvement signal (zeros never enter the pool).
     pub fn select_weighted(
         &self,
         creature: &CreatureExport,
-        observations: Option<&ObservationsStatistics>,
+        signals: &HashMap<String, f64>,
         rng: &mut impl Rng,
     ) -> Option<FocusChoice> {
-        let ranked = self.rank_candidates(creature, observations);
+        let ranked = self.rank_candidates(creature, signals);
         if ranked.is_empty() {
             return None;
         }
@@ -214,50 +240,34 @@ impl WeightedFocusSelector {
         })
     }
 
-    /// Compute (uuid, weight, reason) for every eligible non-input neuron.
+    /// Rank non-input neurons that have a non-zero improvement signal.
+    ///
+    /// Neurons with signal ≤ [`FOCUS_SIGNAL_EPS`] are omitted entirely — they
+    /// cannot improve (zero residual / zero blame).
     pub fn rank_candidates(
         &self,
         creature: &CreatureExport,
-        observations: Option<&ObservationsStatistics>,
+        signals: &HashMap<String, f64>,
     ) -> Vec<(String, f64, String)> {
-        let incoming_counts = incoming_counts(creature);
-        let output_index: HashMap<&str, usize> = creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type == "output")
-            .enumerate()
-            .map(|(i, n)| (n.uuid.as_str(), i))
-            .collect();
-
-        let mut ranked = Vec::with_capacity(creature.neurons.len());
+        let mut ranked = Vec::with_capacity(signals.len());
         for n in &creature.neurons {
             if n.neuron_type == "input" {
                 continue;
             }
-            let hist = self.history.get(&n.uuid);
-            let incoming = *incoming_counts.get(&n.uuid).unwrap_or(&0);
-            let mut weight = FOCUS_EXPLORATION_FLOOR;
-            let mut reasons = Vec::new();
+            let Some(&signal) = signals.get(&n.uuid) else {
+                continue;
+            };
+            if !signal.is_finite() || signal <= FOCUS_SIGNAL_EPS {
+                continue;
+            }
 
+            let hist = self.history.get(&n.uuid);
+            let mut weight = FOCUS_EXPLORATION_FLOOR + 50.0 * signal;
+            let mut reasons = vec![format!("signal={signal:.6e}")];
             if n.neuron_type == "output" {
-                weight += 20.0;
                 reasons.push("output".into());
-                if let Some(obs) = observations
-                    && let Some(&out_i) = output_index.get(n.uuid.as_str())
-                    && let Some(stats) = obs.outputs.get(out_i)
-                {
-                    // Harder targets → more room for focus work.
-                    let signal = stats.mean_abs.max(stats.std_dev).max(0.0);
-                    let bump = 10.0 * signal.min(5.0);
-                    weight += bump;
-                    reasons.push(format!("target_scale={signal:.3}"));
-                }
             } else {
-                let deg = (incoming as f64).min(40.0);
-                weight += 0.05 * deg;
-                if incoming > 0 {
-                    reasons.push(format!("in={incoming}"));
-                }
+                reasons.push("hidden_blame".into());
             }
 
             if let Some(h) = hist {
@@ -276,9 +286,6 @@ impl WeightedFocusSelector {
                 }
             }
 
-            if reasons.is_empty() {
-                reasons.push("explore".into());
-            }
             ranked.push((
                 n.uuid.clone(),
                 weight.max(FOCUS_EXPLORATION_FLOOR),
@@ -294,12 +301,90 @@ impl WeightedFocusSelector {
     }
 }
 
-fn incoming_counts(creature: &CreatureExport) -> HashMap<String, usize> {
-    let mut map = HashMap::new();
-    for s in &creature.synapses {
-        *map.entry(s.to_uuid.clone()).or_default() += 1;
+/// Mean absolute residual per output UUID over a training sample.
+pub fn collect_output_mean_abs_errors(
+    creature: &CreatureExport,
+    network: &mut CompiledNetwork,
+    training_data: &Path,
+    max_records: Option<u64>,
+) -> Result<HashMap<String, f64>, String> {
+    let outputs: Vec<(usize, String)> = creature
+        .neurons
+        .iter()
+        .filter(|n| n.neuron_type == "output")
+        .enumerate()
+        .map(|(i, n)| (i, n.uuid.clone()))
+        .collect();
+    if outputs.is_empty() {
+        return Ok(HashMap::new());
     }
-    map
+
+    let config = TrainingDataConfig::new(creature.input, creature.output);
+    let mut iter = TrainingDataIterator::new(training_data, config).map_err(|e| e.to_string())?;
+    let mut abs_sums = vec![0.0f64; outputs.len()];
+    let mut count = 0u64;
+
+    while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
+        if let Some(limit) = max_records
+            && count >= limit
+        {
+            break;
+        }
+        let preds = network.activate(&record.inputs, creature.output);
+        count += 1;
+        for (out_i, _) in &outputs {
+            if *out_i >= record.outputs.len() || *out_i >= preds.len() {
+                continue;
+            }
+            let pred = f64::from(preds[*out_i]);
+            let target = f64::from(record.outputs[*out_i]);
+            abs_sums[*out_i] += (target - pred).abs();
+        }
+    }
+
+    let mut map = HashMap::with_capacity(outputs.len());
+    if count == 0 {
+        return Ok(map);
+    }
+    for (out_i, uuid) in outputs {
+        map.insert(uuid, abs_sums[out_i] / count as f64);
+    }
+    Ok(map)
+}
+
+/// Build per-neuron improvement signals used by weighted / high-error focus.
+///
+/// - Outputs: mean absolute residual (MAE). Zero MAE ⇒ omitted.
+/// - Hidden: `|mean adjusted bias blame|` when `count > 0`. Zero blame ⇒ omitted.
+pub fn build_improvement_signals(
+    creature: &CreatureExport,
+    output_mae: &HashMap<String, f64>,
+    learning: &LearningSignal,
+) -> HashMap<String, f64> {
+    let mut signals = HashMap::new();
+    for (i, n) in creature.neurons.iter().enumerate() {
+        if n.neuron_type == "input" {
+            continue;
+        }
+        if n.neuron_type == "output" {
+            let mae = output_mae.get(&n.uuid).copied().unwrap_or(0.0);
+            if mae > FOCUS_SIGNAL_EPS {
+                signals.insert(n.uuid.clone(), mae);
+            }
+            continue;
+        }
+        let Some(sig) = learning.biases.get(i) else {
+            continue;
+        };
+        if sig.count <= 0.0 {
+            continue;
+        }
+        let mean_abs = (sig.total_adjusted_bias / sig.count).abs();
+        if mean_abs > FOCUS_SIGNAL_EPS {
+            signals.insert(n.uuid.clone(), mean_abs);
+        }
+    }
+    signals
 }
 
 /// Per-incoming-synapse source statistics for the focus neuron.
@@ -324,6 +409,15 @@ pub struct IncomingSourceStats {
     pub std_dev: f64,
     /// Pearson correlation with focus residual when available.
     pub correlation_with_error: Option<f64>,
+    /// Backprop weight-signal accumulation count for this synapse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight_signal_count: Option<f64>,
+    /// Proposed weight change (`propose − current`) from the learning signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_weight_delta: Option<f64>,
+    /// Mean adjusted-value mass per sample from the weight signal (sensitivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_weight_sensitivity: Option<f64>,
 }
 
 /// Streaming statistics for one focused neuron.
@@ -364,6 +458,19 @@ pub struct FocusNeuronStats {
     /// Mean squash derivative over the scan (0 ⇒ saturated / flat).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mean_derivative: Option<f64>,
+    /// Mean backprop bias blame (`total_adjusted_bias / count`) for the focus.
+    /// Present for hidden and output focuses when a learning signal was attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_blame: Option<f64>,
+    /// Backprop bias-signal accumulation count for the focus neuron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blame_count: Option<f64>,
+    /// Absolute value of [`Self::mean_blame`] (convenience for ranking).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_abs_blame: Option<f64>,
+    /// Whether the focus bias signal flagged no-change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blame_no_change: Option<bool>,
     /// Records scanned.
     pub record_count: u64,
 }
@@ -520,6 +627,10 @@ pub fn collect_focus_stats(
         mean_abs_error,
         mean_adjusted_error,
         mean_derivative,
+        mean_blame: None,
+        blame_count: None,
+        mean_abs_blame: None,
+        blame_no_change: None,
         record_count: count,
     })
 }
@@ -589,6 +700,9 @@ pub fn collect_incoming_source_stats(
                 variance,
                 std_dev,
                 correlation_with_error: None,
+                weight_signal_count: None,
+                proposed_weight_delta: None,
+                mean_weight_sensitivity: None,
             }
         })
         .collect();
@@ -685,7 +799,63 @@ pub fn collect_incoming_source_stats(
     Ok(out)
 }
 
-fn is_saturated(squash: Option<&str>, post: f64) -> bool {
+/// Attach backprop bias blame for the focus neuron onto focus stats.
+///
+/// Uses the real [`LearningSignal`] from TS-parity propagate (issue #2/#4).
+/// Never invents a hidden-neuron target — only surfaces accumulated blame.
+pub fn attach_focus_blame(
+    stats: &mut FocusNeuronStats,
+    creature: &CreatureExport,
+    learning: &LearningSignal,
+) {
+    let Some(pos) = creature
+        .neurons
+        .iter()
+        .position(|n| n.uuid == stats.neuron_uuid)
+    else {
+        return;
+    };
+    let Some(signal) = learning.biases.get(pos) else {
+        return;
+    };
+    if signal.count <= 0.0 {
+        stats.mean_blame = Some(0.0);
+        stats.blame_count = Some(0.0);
+        stats.mean_abs_blame = Some(0.0);
+        stats.blame_no_change = Some(signal.no_change);
+        return;
+    }
+    let mean = signal.total_adjusted_bias / signal.count;
+    stats.mean_blame = Some(mean);
+    stats.blame_count = Some(signal.count);
+    stats.mean_abs_blame = Some(mean.abs());
+    stats.blame_no_change = Some(signal.no_change);
+}
+
+/// Attach per-synapse weight-signal summaries onto incoming source stats.
+pub fn attach_learning_to_incoming(
+    incoming: &mut [IncomingSourceStats],
+    learning: &LearningSignal,
+    config: &BackpropConfig,
+    learning_rate: f64,
+) {
+    for src in incoming.iter_mut() {
+        let Some(signal) = learning.weights.get(src.synapse_index) else {
+            continue;
+        };
+        if signal.count <= 0.0 {
+            continue;
+        }
+        let proposed = signal.propose(src.weight, config, learning_rate);
+        let adj_mass = signal.total_positive_adjusted_value + signal.total_negative_adjusted_value;
+        src.weight_signal_count = Some(signal.count);
+        src.proposed_weight_delta = Some(proposed - src.weight);
+        src.mean_weight_sensitivity = Some(adj_mass / signal.count);
+    }
+}
+
+/// Squash-aware saturation heuristic used by focus scans (issue #4).
+pub fn is_saturated(squash: Option<&str>, post: f64) -> bool {
     match squash {
         Some("TANH") | Some("BIPOLAR_SIGMOID") => post.abs() > 0.99,
         Some("LOGISTIC") | Some("SIGMOID") => !(0.01..=0.99).contains(&post),
@@ -698,9 +868,13 @@ fn is_saturated(squash: Option<&str>, post: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neat_core::parse_creature_json;
+    use crate::backprop::BackpropConfig;
+    use crate::learning::accumulate_focus_learning;
+    use neat_core::{compile_creature, parse_creature_json};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use std::io::Write;
+    use tempfile::tempdir;
 
     const TINY: &str = r#"{
       "semanticVersion": "4.0.0",
@@ -716,6 +890,46 @@ mod tests {
         {"fromUUID":"h1","toUUID":"o1","weight":1.0}
       ]
     }"#;
+
+    /// Direct input → output (no hidden).
+    const DIRECT: &str = r#"{
+      "semanticVersion": "4.0.0",
+      "forwardOnly": true,
+      "input": 1,
+      "output": 1,
+      "neurons": [
+        {"type":"output","uuid":"output-0","bias":0.0,"squash":"IDENTITY"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"output-0","weight":1.0}
+      ]
+    }"#;
+
+    /// Deeper chain: input → h1 → h2 → output with saturating TANH on h1.
+    const DEEP: &str = r#"{
+      "semanticVersion": "4.0.0",
+      "forwardOnly": true,
+      "input": 1,
+      "output": 1,
+      "neurons": [
+        {"type":"hidden","uuid":"h1","bias":0.0,"squash":"TANH"},
+        {"type":"hidden","uuid":"h2","bias":0.0,"squash":"IDENTITY"},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"h1","weight":2.0},
+        {"fromUUID":"h1","toUUID":"h2","weight":1.0},
+        {"fromUUID":"h2","toUUID":"o1","weight":1.0}
+      ]
+    }"#;
+
+    fn write_records(dir: &std::path::Path, pairs: &[(f32, f32)]) {
+        let mut f = std::fs::File::create(dir.join("0.bin")).unwrap();
+        for &(inp, out) in pairs {
+            f.write_all(&inp.to_le_bytes()).unwrap();
+            f.write_all(&out.to_le_bytes()).unwrap();
+        }
+    }
 
     #[test]
     fn random_focus_is_deterministic_with_seed() {
@@ -740,43 +954,189 @@ mod tests {
         assert!(selector.select(&creature, &mut rng).is_none());
     }
 
+    fn sample_signals() -> HashMap<String, f64> {
+        HashMap::from([("o1".into(), 0.5), ("h1".into(), 0.1)])
+    }
+
     #[test]
     fn weighted_focus_is_deterministic_with_seed() {
         let creature = parse_creature_json(TINY).unwrap();
         let sel = WeightedFocusSelector::default();
+        let signals = sample_signals();
         let mut rng_a = StdRng::seed_from_u64(11);
         let mut rng_b = StdRng::seed_from_u64(11);
-        let a = sel.select_weighted(&creature, None, &mut rng_a).unwrap();
-        let b = sel.select_weighted(&creature, None, &mut rng_b).unwrap();
+        let a = sel
+            .select_weighted(&creature, &signals, &mut rng_a)
+            .unwrap();
+        let b = sel
+            .select_weighted(&creature, &signals, &mut rng_b)
+            .unwrap();
         assert_eq!(a.uuid, b.uuid);
         assert!((a.weight - b.weight).abs() < 1e-12);
     }
 
     #[test]
-    fn weighted_focus_keeps_exploration_floor() {
+    fn weighted_focus_skips_zero_signal_neurons() {
         let creature = parse_creature_json(TINY).unwrap();
         let sel = WeightedFocusSelector::default();
-        let ranked = sel.rank_candidates(&creature, None);
-        assert!(ranked.iter().all(|(_, w, _)| *w >= FOCUS_EXPLORATION_FLOOR));
-        // Output should outrank a plain hidden with no history.
-        let w_out = ranked.iter().find(|(u, _, _)| u == "o1").unwrap().1;
-        let w_h = ranked.iter().find(|(u, _, _)| u == "h1").unwrap().1;
-        assert!(w_out > w_h);
+        // Only o1 has error; h1 is perfect / unblamed → never ranked.
+        let signals = HashMap::from([("o1".into(), 0.4), ("h1".into(), 0.0)]);
+        let ranked = sel.rank_candidates(&creature, &signals);
+        assert!(
+            ranked
+                .iter()
+                .all(|(u, w, _)| u == "o1" && *w >= FOCUS_EXPLORATION_FLOOR)
+        );
+        assert!(
+            sel.select_weighted(&creature, &signals, &mut StdRng::seed_from_u64(1))
+                .unwrap()
+                .uuid
+                == "o1"
+        );
+        assert!(
+            sel.rank_candidates(&creature, &HashMap::from([("h1".into(), 0.0)]))
+                .is_empty()
+        );
     }
 
     #[test]
     fn weighted_focus_history_boosts_accepts() {
         let creature = parse_creature_json(TINY).unwrap();
+        let signals = sample_signals();
         let mut sel = WeightedFocusSelector::default();
         sel.record_outcome("h1", true, Some(2e-6), false, 1e-6);
-        let ranked = sel.rank_candidates(&creature, None);
+        let ranked = sel.rank_candidates(&creature, &signals);
         let w_h = ranked.iter().find(|(u, _, _)| u == "h1").unwrap().1;
         let base = WeightedFocusSelector::default()
-            .rank_candidates(&creature, None)
+            .rank_candidates(&creature, &signals)
             .iter()
             .find(|(u, _, _)| u == "h1")
             .unwrap()
             .1;
         assert!(w_h > base);
+    }
+
+    #[test]
+    fn highest_signal_picks_worst_output() {
+        let signals = HashMap::from([
+            ("o-good".into(), 1e-15),
+            ("o-bad".into(), 0.8),
+            ("h1".into(), 0.05),
+        ]);
+        let choice = select_highest_signal(&signals).unwrap();
+        assert_eq!(choice.uuid, "o-bad");
+    }
+
+    #[test]
+    fn build_improvement_signals_omits_zero_mae_outputs() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let mae = HashMap::from([("o1".into(), 0.0)]);
+        let learning = LearningSignal::new(creature.neurons.len(), creature.synapses.len());
+        let signals = build_improvement_signals(&creature, &mae, &learning);
+        assert!(!signals.contains_key("o1"));
+        assert!(!signals.contains_key("h1"));
+    }
+
+    #[test]
+    fn direct_to_output_focus_stats_are_stable() {
+        let dir = tempdir().unwrap();
+        // IDENTITY output: pred = input; targets 0.5 / 1.5 → residuals known.
+        write_records(dir.path(), &[(0.5, 1.0), (1.5, 1.0)]);
+        let creature = parse_creature_json(DIRECT).unwrap();
+        let mut network = compile_creature(&creature).unwrap();
+        let mut selector = FixedFocusSelector {
+            uuid: "output-0".into(),
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+        assert_eq!(
+            selector.select(&creature, &mut rng).as_deref(),
+            Some("output-0")
+        );
+
+        let a = collect_focus_stats(&creature, &mut network, dir.path(), "output-0", None).unwrap();
+        let b = collect_focus_stats(&creature, &mut network, dir.path(), "output-0", None).unwrap();
+        assert_eq!(a.record_count, 2);
+        assert_eq!(a.record_count, b.record_count);
+        assert!((a.pre_mean - b.pre_mean).abs() < 1e-12);
+        assert!((a.post_mean - b.post_mean).abs() < 1e-12);
+        assert!((a.mean_error.unwrap() - b.mean_error.unwrap()).abs() < 1e-12);
+        // pred means 1.0; targets 1.0 → mean error 0; MAE from |0.5-1|+|1.5-1|/2 = 0.5
+        assert!((a.mean_error.unwrap()).abs() < 1e-9);
+        assert!((a.mean_abs_error.unwrap() - 0.5).abs() < 1e-9);
+        assert!(a.mean_derivative.unwrap() > 0.99);
+    }
+
+    #[test]
+    fn deeper_hidden_focus_gets_blame_and_incoming_learning() {
+        let dir = tempdir().unwrap();
+        write_records(
+            dir.path(),
+            &[(0.5, 0.0), (1.0, 0.0), (-0.5, 0.0), (2.0, 1.0)],
+        );
+        let creature = parse_creature_json(DEEP).unwrap();
+        let mut network = compile_creature(&creature).unwrap();
+
+        let stats = collect_focus_stats(&creature, &mut network, dir.path(), "h1", None).unwrap();
+        assert_eq!(stats.neuron_uuid, "h1");
+        assert_eq!(stats.record_count, 4);
+        assert!(stats.mean_error.is_none(), "hidden has no target residual");
+        // Large |input| through TANH → some saturation.
+        assert!(
+            stats.saturation_fraction > 0.0,
+            "TANH focus should report squash-aware saturation, got {}",
+            stats.saturation_fraction
+        );
+        assert!(is_saturated(Some("TANH"), 0.995));
+        assert!(!is_saturated(Some("TANH"), 0.5));
+
+        let mut incoming =
+            collect_incoming_source_stats(&creature, &mut network, dir.path(), "h1", None, None)
+                .unwrap();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].from_uuid, "input-0");
+
+        let cfg = BackpropConfig::default();
+        let mut rng = StdRng::seed_from_u64(7);
+        let learning = accumulate_focus_learning(
+            &creature,
+            &mut network,
+            dir.path(),
+            "h1",
+            None,
+            &cfg,
+            &mut rng,
+        )
+        .unwrap();
+        let h1_pos = creature
+            .neurons
+            .iter()
+            .position(|n| n.uuid == "h1")
+            .unwrap();
+        assert!(
+            learning.biases[h1_pos].count > 0.0,
+            "hidden must receive propagated blame count"
+        );
+
+        let mut focus_stats = stats;
+        attach_focus_blame(&mut focus_stats, &creature, &learning);
+        assert!(focus_stats.blame_count.unwrap() > 0.0);
+        assert!(focus_stats.mean_blame.is_some());
+        assert!(focus_stats.mean_abs_blame.is_some());
+
+        attach_learning_to_incoming(&mut incoming, &learning, &cfg, cfg.learning_rate);
+        assert!(
+            incoming[0].weight_signal_count.unwrap_or(0.0) > 0.0
+                || incoming[0].proposed_weight_delta.is_some(),
+            "incoming weight signal should attach for hidden focus"
+        );
+    }
+
+    #[test]
+    fn logistic_saturation_heuristic_is_squash_aware() {
+        assert!(is_saturated(Some("LOGISTIC"), 0.005));
+        assert!(is_saturated(Some("LOGISTIC"), 0.995));
+        assert!(!is_saturated(Some("LOGISTIC"), 0.5));
+        assert!(is_saturated(Some("RELU"), 0.0));
+        assert!(!is_saturated(Some("RELU"), 0.5));
     }
 }

@@ -6,13 +6,15 @@ use crate::candidates::{
 };
 use crate::config::LamarckConfig;
 use crate::focus::{
-    FixedFocusSelector, FocusPolicy, FocusSelector, HighErrorFocusSelector, RandomFocusSelector,
-    UnsaturatedFocusSelector, WeightedFocusSelector, collect_focus_stats,
-    collect_incoming_source_stats,
+    FixedFocusSelector, FocusChoice, FocusPolicy, FocusSelector, HighErrorFocusSelector,
+    RandomFocusSelector, UnsaturatedFocusSelector, WeightedFocusSelector, attach_focus_blame,
+    attach_learning_to_incoming, build_improvement_signals, collect_focus_stats,
+    collect_incoming_source_stats, collect_output_mean_abs_errors, select_highest_signal,
 };
-use crate::learning::accumulate_focus_learning;
 use crate::log;
 use crate::observations::ensure_statistics;
+use crate::parity::{check_phase0_parity, compute_local_mse};
+use crate::propagate_layout::accumulate_creature_learning;
 use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
@@ -145,13 +147,27 @@ pub fn run_optimisation(
                         baseline.score, baseline.error
                     ));
                 }
+                log::ok(&format!(
+                    "Phase-0 scorer baseline score={:.12} error={:.12} complexity={:.12}",
+                    baseline.score, baseline.error, baseline.complexity_penalty
+                ));
+                log::detail("Phase-0: computing Lamarck local MSE for parity check...");
+                let mut phase0_net = compile_creature(&incumbent).map_err(|e| e.to_string())?;
+                let (local_error, local_count) =
+                    compute_local_mse(&incumbent, &mut phase0_net, &config.training_data)?;
+                log::detail(&format!(
+                    "Phase-0 local MSE={local_error:.12} over {local_count} records"
+                ));
+                check_phase0_parity(
+                    local_error,
+                    baseline.error,
+                    baseline.score,
+                    baseline.complexity_penalty,
+                )?;
+                log::ok("Phase-0 Lamarck ↔ scorer parity within documented epsilon");
                 opening_baseline_score = Some(baseline.score);
                 creature_meta.upsert("score", format!("{}", baseline.score));
                 creature_meta.upsert("error", format!("{}", baseline.error));
-                log::ok(&format!(
-                    "Phase-0 baseline score={:.12} error={:.12}",
-                    baseline.score, baseline.error
-                ));
                 if !config.preserve_losers {
                     let _ = fs::remove_dir_all(&phase0_dir);
                 }
@@ -206,6 +222,59 @@ pub fn run_optimisation(
             remaining.as_secs()
         ));
         let analysis_start = Instant::now();
+        let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
+
+        // Learning + output MAE first so weighted/high-error can rank by
+        // improvement chance and skip zero-error / zero-blame neurons.
+        log::detail("accumulating creature learning signal (propagate_topological_loop)...");
+        let learn_start = Instant::now();
+        let mut learn_rng = StdRng::seed_from_u64(
+            config
+                .seed
+                .unwrap_or(0)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(experiments),
+        );
+        let learning = accumulate_creature_learning(
+            &incumbent,
+            &mut network,
+            &config.training_data,
+            &backprop,
+            focus_sample_limit,
+            &mut learn_rng,
+        )?;
+        log::ok(&format!(
+            "learning signal in {}ms (bias_count={:.0}, weight_count={:.0})",
+            learn_start.elapsed().as_millis(),
+            learning.biases.iter().map(|b| b.count).sum::<f64>(),
+            learning.weights.iter().map(|w| w.count).sum::<f64>()
+        ));
+
+        let needs_signals = fixed_focus.is_none()
+            && matches!(
+                config.focus_policy,
+                FocusPolicy::Weighted | FocusPolicy::HighError
+            );
+        let improvement_signals = if needs_signals {
+            log::detail("scanning output residuals for focus ranking...");
+            let mae_start = Instant::now();
+            let output_mae = collect_output_mean_abs_errors(
+                &incumbent,
+                &mut network,
+                &config.training_data,
+                focus_sample_limit,
+            )?;
+            let signals = build_improvement_signals(&incumbent, &output_mae, &learning);
+            log::detail(&format!(
+                "improvement signals: {} eligible neurons in {}ms",
+                signals.len(),
+                mae_start.elapsed().as_millis()
+            ));
+            signals
+        } else {
+            std::collections::HashMap::new()
+        };
+
         let focus = if let Some(selector) = fixed_focus.as_mut() {
             let uuid = selector.select(&incumbent, &mut rng).ok_or_else(|| {
                 format!(
@@ -219,11 +288,41 @@ pub fn run_optimisation(
             match config.focus_policy {
                 FocusPolicy::Weighted => {
                     let choice = weighted_focus
-                        .select_weighted(&incumbent, Some(&observations), &mut rng)
+                        .select_weighted(&incumbent, &improvement_signals, &mut rng)
+                        .or_else(|| {
+                            log::warn(
+                                "no non-zero improvement signal; falling back to first output",
+                            );
+                            high_error_focus
+                                .select(&incumbent, &mut rng)
+                                .map(|uuid| FocusChoice {
+                                    uuid,
+                                    weight: 0.0,
+                                    reason: "fallback_first_output".into(),
+                                })
+                        })
                         .ok_or_else(|| "no focus neuron available".to_string())?;
                     log::detail(&format!(
                         "focus neuron: {} (weight={:.2}, {})",
                         choice.uuid, choice.weight, choice.reason
+                    ));
+                    choice.uuid
+                }
+                FocusPolicy::HighError => {
+                    let choice = select_highest_signal(&improvement_signals).or_else(|| {
+                        log::warn("no non-zero improvement signal; falling back to first output");
+                        high_error_focus
+                            .select(&incumbent, &mut rng)
+                            .map(|uuid| FocusChoice {
+                                uuid,
+                                weight: 0.0,
+                                reason: "fallback_first_output".into(),
+                            })
+                    });
+                    let choice = choice.ok_or_else(|| "no focus neuron available".to_string())?;
+                    log::detail(&format!(
+                        "focus neuron: {} ({})",
+                        choice.uuid, choice.reason
                     ));
                     choice.uuid
                 }
@@ -241,19 +340,11 @@ pub fn run_optimisation(
                     log::detail(&format!("focus neuron: {uuid}"));
                     uuid
                 }
-                FocusPolicy::HighError => {
-                    let uuid = high_error_focus
-                        .select(&incumbent, &mut rng)
-                        .ok_or_else(|| "no focus neuron available".to_string())?;
-                    log::detail(&format!("focus neuron: {uuid}"));
-                    uuid
-                }
             }
         };
-        let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
         log::detail("scanning incumbent for focus stats...");
         let focus_scan_start = Instant::now();
-        let focus_stats = collect_focus_stats(
+        let mut focus_stats = collect_focus_stats(
             &incumbent,
             &mut network,
             &config.training_data,
@@ -287,7 +378,7 @@ pub fn run_optimisation(
             ));
         }
 
-        let incoming = collect_incoming_source_stats(
+        let mut incoming = collect_incoming_source_stats(
             &incumbent,
             &mut network,
             &config.training_data,
@@ -297,31 +388,24 @@ pub fn run_optimisation(
         )?;
         log::detail(&format!("incoming sources: {}", incoming.len()));
 
-        log::detail("accumulating creature learning signal (propagate_topological_loop)...");
-        let learn_start = Instant::now();
-        // Deterministic sparse draw: mix run seed with experiment index.
-        let mut learn_rng = StdRng::seed_from_u64(
-            config
-                .seed
-                .unwrap_or(0)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_add(experiments),
-        );
-        let learning = accumulate_focus_learning(
-            &incumbent,
-            &mut network,
-            &config.training_data,
-            &focus,
-            focus_sample_limit,
-            &backprop,
-            &mut learn_rng,
-        )?;
-        log::ok(&format!(
-            "learning signal in {}ms (bias_count={:.0}, weight_count={:.0})",
-            learn_start.elapsed().as_millis(),
-            learning.biases.iter().map(|b| b.count).sum::<f64>(),
-            learning.weights.iter().map(|w| w.count).sum::<f64>()
-        ));
+        // Surface focus blame + incoming weight signals from real backprop (#4).
+        attach_focus_blame(&mut focus_stats, &incumbent, &learning);
+        let lr = crate::backprop::calculate_learning_rate(&backprop, experiments, None);
+        attach_learning_to_incoming(&mut incoming, &learning, &backprop, lr);
+        if let Some(blame) = focus_stats.mean_blame {
+            log::detail(&format!(
+                "focus blame: mean={blame:.6e}  count={:.0}  no_change={}",
+                focus_stats.blame_count.unwrap_or(0.0),
+                focus_stats.blame_no_change.unwrap_or(false)
+            ));
+        }
+        let linked = incoming
+            .iter()
+            .filter(|s| s.proposed_weight_delta.is_some())
+            .count();
+        if linked > 0 {
+            log::detail(&format!("incoming weight-signals attached: {linked}"));
+        }
 
         let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
         let ranked_sources = refine_sources_by_residual(
@@ -821,12 +905,15 @@ mod tests {
         ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
+            // Matches tiny_setup local MSE: pred=1.1, target=0.5 → error=0.36.
+            const BASE_ERROR: f64 = 0.36;
+            const BASE_SCORE: f64 = 1.0 - BASE_ERROR;
             let mut map = BTreeMap::new();
             map.insert(
                 "baseline".into(),
                 ScoreResult {
-                    score: 0.5,
-                    error: 0.5,
+                    score: BASE_SCORE,
+                    error: BASE_ERROR,
                     complexity_penalty: 0.0,
                 },
             );
@@ -838,9 +925,9 @@ mod tests {
                             continue;
                         }
                         let score = if *calls <= 2 && stem == "candidate-000" {
-                            0.5 + 2e-6
+                            BASE_SCORE + 2e-6
                         } else {
-                            0.5
+                            BASE_SCORE
                         };
                         map.insert(
                             stem.to_string(),

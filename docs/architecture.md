@@ -35,8 +35,10 @@ Lamarck must not duplicate this authority.
 
 1. Start from the supplied incumbent.
 2. Verify baseline score/parity.
-3. Select one focus neuron (default: weighted-random by improvement potential).
-4. Scan/measure the incumbent as needed.
+3. Accumulate learning + output residuals, then select one focus neuron
+   (default: `weighted` by improvement signal; zero-error / zero-blame neurons
+   are excluded).
+4. Scan/measure the chosen focus on the incumbent.
 5. Generate ~100 candidates (default; keep the scorer CPU-saturated) from backpropagation, statistical, structural and random strategies.
 6. **Screen** on a cheap scorer subsample (default 5% of rows); promote only sample Δ `> 1e-6`.
 7. **Full-corpus** score baseline + promoted candidates; accept only if Δ score clears `1e-6`.
@@ -50,6 +52,11 @@ Lamarck must not duplicate this authority.
 - Scorer argv: `rust_scorer <candidates_dir> <training_data_dir>` — no `--gpu` / `--cost`.
   Screen phase (issue #24) may add `--sample-rate` / `--sample-phase` only; acceptance
   still uses a full-corpus promote score.
+- Phase-0 (issue #4): before optimising, Lamarck MSE must agree with scorer `error`
+  (and unpenalized `1−error` with `score+complexityPenalty`) within
+  `PHASE0_*_TOL` in `lamarck/src/parity.rs`; abort on unexplained disagreement.
+- Focus analysis surfaces real backprop blame (`LearningSignal`) for hidden and
+  output focuses; never invents a hidden-neuron target.
 - `observations.statistics` is versioned human-readable JSON (semver).
 - Production scale target: GRQ `network.json` (~2511 inputs, ~1590 hidden, ~21k synapses).
 

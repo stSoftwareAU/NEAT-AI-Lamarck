@@ -131,10 +131,14 @@ These rules are non-negotiable:
 
 Before optimisation starts:
 
-1. Score the supplied creature using NEAT-AI-scorer.
-2. Run Lamarck's own analysis path over the same creature/data.
-3. Where Lamarck calculates quantities that overlap with the scorer, verify parity within an explicit tolerance.
-4. Abort optimisation on unexplained disagreement.
+1. Score the supplied creature using NEAT-AI-scorer (finite `score` / `error` required).
+2. Compute Lamarck's whole-creature mean squared error over the same training directory
+   via the compiled network (same activation path used for focus analysis).
+3. Compare overlapping quantities within documented epsilon (see `lamarck/src/parity.rs`):
+   - **error:** abs `1e-6` or rel `1e-5`
+   - **unpenalized score** `1 - error` vs `scorer.score + complexityPenalty`:
+     abs `1e-5` or rel `1e-4`
+4. Abort optimisation on unexplained disagreement (`--skip-phase0` disables the gate).
 
 This prevents Lamarck from accidentally optimising a subtly different metric.
 
@@ -215,10 +219,11 @@ For the current observation count, a full symmetric correlation matrix is accept
 
 Each optimisation iteration focuses on one non-input neuron.
 
-Default policy (`--focus-policy weighted`, issue #25) draws ∝ estimated improvement
-potential (outputs and target scale, incoming degree, recent accepts / near-misses /
-hard fails) with an exploration floor so rare neurons still get tries. Other policies:
-`random`, `unsaturated`, `high-error`. `--focus-neuron` pins a UUID for debug/smoke.
+Default policy (`--focus-policy weighted`, issue #25) ranks neurons by improvement
+chance: output residual MAE, or hidden `|backprop blame|`. Neurons with ~zero
+signal are never selected (you cannot improve on zero error). `high-error` always
+picks the single worst signal; `random` / `unsaturated` remain available.
+`--focus-neuron` pins a UUID for debug/smoke.
 
 ## Phase 3 — creature-specific analysis
 
