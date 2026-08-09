@@ -11,10 +11,10 @@ use crate::focus::{
     attach_learning_to_incoming, build_improvement_signals, collect_focus_stats,
     collect_incoming_source_stats, collect_output_mean_abs_errors, select_highest_signal,
 };
-use crate::propagate_layout::accumulate_creature_learning;
 use crate::log;
 use crate::observations::ensure_statistics;
 use crate::parity::{check_phase0_parity, compute_local_mse};
+use crate::propagate_layout::accumulate_creature_learning;
 use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
@@ -310,9 +310,7 @@ pub fn run_optimisation(
                 }
                 FocusPolicy::HighError => {
                     let choice = select_highest_signal(&improvement_signals).or_else(|| {
-                        log::warn(
-                            "no non-zero improvement signal; falling back to first output",
-                        );
+                        log::warn("no non-zero improvement signal; falling back to first output");
                         high_error_focus
                             .select(&incumbent, &mut rng)
                             .map(|uuid| FocusChoice {

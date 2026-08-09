@@ -257,7 +257,7 @@ impl WeightedFocusSelector {
             let Some(&signal) = signals.get(&n.uuid) else {
                 continue;
             };
-            if !(signal > FOCUS_SIGNAL_EPS) {
+            if !signal.is_finite() || signal <= FOCUS_SIGNAL_EPS {
                 continue;
             }
 
@@ -982,14 +982,21 @@ mod tests {
         // Only o1 has error; h1 is perfect / unblamed → never ranked.
         let signals = HashMap::from([("o1".into(), 0.4), ("h1".into(), 0.0)]);
         let ranked = sel.rank_candidates(&creature, &signals);
-        assert!(ranked.iter().all(|(u, w, _)| u == "o1" && *w >= FOCUS_EXPLORATION_FLOOR));
-        assert!(sel.select_weighted(&creature, &signals, &mut StdRng::seed_from_u64(1))
-            .unwrap()
-            .uuid
-            == "o1");
-        assert!(sel
-            .rank_candidates(&creature, &HashMap::from([("h1".into(), 0.0)]))
-            .is_empty());
+        assert!(
+            ranked
+                .iter()
+                .all(|(u, w, _)| u == "o1" && *w >= FOCUS_EXPLORATION_FLOOR)
+        );
+        assert!(
+            sel.select_weighted(&creature, &signals, &mut StdRng::seed_from_u64(1))
+                .unwrap()
+                .uuid
+                == "o1"
+        );
+        assert!(
+            sel.rank_candidates(&creature, &HashMap::from([("h1".into(), 0.0)]))
+                .is_empty()
+        );
     }
 
     #[test]
