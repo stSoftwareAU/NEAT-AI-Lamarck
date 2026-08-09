@@ -87,15 +87,19 @@ impl FocusSelector for HighErrorFocusSelector {
 /// Focus-policy name for CLI / config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPolicy {
-    /// Weighted-random by estimated improvement potential (issue #25).
+    /// Prefer first output neuron (error-bearing head).
+    ///
+    /// Default: only outputs have training targets, so residual / mean-error
+    /// candidates need an output focus. Hidden exploration remains available
+    /// via `--focus-policy weighted|random`.
     #[default]
+    HighError,
+    /// Weighted-random by estimated improvement potential (issue #25).
     Weighted,
     /// Random non-input each experiment.
     Random,
     /// Prefer outputs (unsaturated / direct heads).
     Unsaturated,
-    /// Prefer first output neuron (error-bearing head).
-    HighError,
 }
 
 impl FocusPolicy {

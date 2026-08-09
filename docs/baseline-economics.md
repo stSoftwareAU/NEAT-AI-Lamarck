@@ -24,7 +24,7 @@ This is an **interim** medium-run baseline (≈15 minutes, 40 candidates). It is
 | `--quick` / sample | **25000** | full observations (no `--quick`) |
 | `--screen-sample-rate` | 0.05 | 0.05 |
 | `--screen-promote-threshold` | 1e-6 | 1e-6 |
-| `--focus-policy` | weighted (default) | weighted |
+| `--focus-policy` | weighted (then default) | **high-error** (current default) |
 | Phase-0 parity | **on** (passed) | on |
 
 Command shape:
@@ -100,7 +100,7 @@ Appearances vs wins (all candidate strategies observed in this journal):
 - **Promising:** `structural_add` and `stats_bias` produced most of the verified accepts. Keep them.
 - **Still useful:** `random` and `structural_weaken` each cleared the `1e-6` bar once — do **not** handicap random.
 - **No wins this run:** `stats_weight`, `structural_add_neuron` — not dominated with N this small; keep generating.
-- **Missing this run:** `backprop` / `mean_error_bias` never appeared because weighted focus mostly selected **hidden** neurons (no output residual → mean-error path skipped; many focuses reported `blame_count=0` for the focus bias even while the creature-wide learning signal was large). Next experiments should force some output focuses (`--focus-policy high-error` or `--focus-neuron output-0`) to measure backprop economics fairly.
+- **Missing this run:** `backprop` / `mean_error_bias` never appeared because weighted focus mostly selected **hidden** neurons (no output residual → mean-error path skipped; many focuses reported `blame_count=0` for the focus bias even while the creature-wide learning signal was large). Default focus is now `high-error` (output head); re-run with that default to measure backprop / mean-error economics.
 
 **Do not disable any strategy from this interim sample alone.**
 

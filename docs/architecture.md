@@ -35,7 +35,7 @@ Lamarck must not duplicate this authority.
 
 1. Start from the supplied incumbent.
 2. Verify baseline score/parity.
-3. Select one focus neuron (default: weighted-random by improvement potential).
+3. Select one focus neuron (default: `high-error` — an output with a training target).
 4. Scan/measure the incumbent as needed.
 5. Generate ~100 candidates (default; keep the scorer CPU-saturated) from backpropagation, statistical, structural and random strategies.
 6. **Screen** on a cheap scorer subsample (default 5% of rows); promote only sample Δ `> 1e-6`.
