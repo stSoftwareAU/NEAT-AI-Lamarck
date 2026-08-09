@@ -30,5 +30,13 @@ resolves to `../../NEAT-AI-core/neat-core`.
 ./quality.sh < /dev/null
 ```
 
-This mirrors CI: shellcheck, codespell, cargo-deny, fmt `--check`, clippy with
-warnings denied, tests, and rustdoc.
+This mirrors CI: shellcheck, the auto-format workflow validator (Issue #33),
+codespell, cargo-deny, fmt `--check`, clippy with warnings denied, tests, and
+rustdoc.
+
+On each PR the **Auto Format** workflow
+([`.github/workflows/auto-format.yml`](./.github/workflows/auto-format.yml))
+runs `cargo fmt --all` and `cargo update -p neat-core`, then pushes any
+tracked-tree changes back to the PR branch. It does **not** bump
+`neat-core.expected-version` — acknowledge breaking neat-core bumps
+deliberately in the same PR that updates Lamarck for them.
