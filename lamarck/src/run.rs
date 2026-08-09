@@ -7,14 +7,18 @@ use crate::candidates::{
 use crate::config::LamarckConfig;
 use crate::focus::{
     FixedFocusSelector, FocusPolicy, FocusSelector, HighErrorFocusSelector, RandomFocusSelector,
-    UnsaturatedFocusSelector, collect_focus_stats, collect_incoming_source_stats,
+    UnsaturatedFocusSelector, WeightedFocusSelector, collect_focus_stats,
+    collect_incoming_source_stats,
 };
 use crate::learning::accumulate_focus_learning;
 use crate::log;
 use crate::observations::ensure_statistics;
+use crate::scorer::improvement;
 use crate::scorer::{
-    DirectoryScorer, ScoreResult, accepts_improvement, log_scorer_batch_stats, select_winner,
+    DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
+    screen_promote_stems, select_winner, write_promote_batch,
 };
+use crate::structural::{rank_unused_sources, refine_sources_by_residual};
 use neat_core::{
     TrainingDataConfig, compile_creature, creature_to_json_pretty, parse_creature_json,
 };
@@ -44,8 +48,11 @@ pub struct ExperimentRecord {
     pub focus_neuron: String,
     /// Candidate provenances.
     pub candidates: Vec<CandidateProvenance>,
-    /// All authoritative scores by stem.
+    /// Authoritative (full-corpus) scores by stem when a promote/full score ran.
     pub scores: std::collections::BTreeMap<String, f64>,
+    /// Screen-phase (subsample) scores by stem when two-phase scoring is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_scores: Option<std::collections::BTreeMap<String, f64>>,
     /// Winning stem if accepted.
     pub winner: Option<String>,
     /// Absolute score improvement when accepted.
@@ -54,7 +61,7 @@ pub struct ExperimentRecord {
     pub accepted: bool,
     /// Analysis elapsed milliseconds.
     pub analysis_ms: u128,
-    /// Scorer elapsed milliseconds.
+    /// Scorer elapsed milliseconds (screen + promote when both ran).
     pub scorer_ms: u128,
     /// Scorer error message when the batch failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +164,7 @@ pub fn run_optimisation(
     let mut random_focus = RandomFocusSelector;
     let mut unsaturated_focus = UnsaturatedFocusSelector;
     let mut high_error_focus = HighErrorFocusSelector;
+    let mut weighted_focus = WeightedFocusSelector::default();
     let mut fixed_focus = config
         .focus_neuron
         .as_ref()
@@ -194,21 +202,49 @@ pub fn run_optimisation(
         ));
         let analysis_start = Instant::now();
         let focus = if let Some(selector) = fixed_focus.as_mut() {
-            selector.select(&incumbent, &mut rng).ok_or_else(|| {
+            let uuid = selector.select(&incumbent, &mut rng).ok_or_else(|| {
                 format!(
                     "focus neuron '{}' not found (or is an input)",
                     selector.uuid
                 )
-            })?
+            })?;
+            log::detail(&format!("focus neuron: {uuid} (pinned)"));
+            uuid
         } else {
             match config.focus_policy {
-                FocusPolicy::Random => random_focus.select(&incumbent, &mut rng),
-                FocusPolicy::Unsaturated => unsaturated_focus.select(&incumbent, &mut rng),
-                FocusPolicy::HighError => high_error_focus.select(&incumbent, &mut rng),
+                FocusPolicy::Weighted => {
+                    let choice = weighted_focus
+                        .select_weighted(&incumbent, Some(&observations), &mut rng)
+                        .ok_or_else(|| "no focus neuron available".to_string())?;
+                    log::detail(&format!(
+                        "focus neuron: {} (weight={:.2}, {})",
+                        choice.uuid, choice.weight, choice.reason
+                    ));
+                    choice.uuid
+                }
+                FocusPolicy::Random => {
+                    let uuid = random_focus
+                        .select(&incumbent, &mut rng)
+                        .ok_or_else(|| "no focus neuron available".to_string())?;
+                    log::detail(&format!("focus neuron: {uuid}"));
+                    uuid
+                }
+                FocusPolicy::Unsaturated => {
+                    let uuid = unsaturated_focus
+                        .select(&incumbent, &mut rng)
+                        .ok_or_else(|| "no focus neuron available".to_string())?;
+                    log::detail(&format!("focus neuron: {uuid}"));
+                    uuid
+                }
+                FocusPolicy::HighError => {
+                    let uuid = high_error_focus
+                        .select(&incumbent, &mut rng)
+                        .ok_or_else(|| "no focus neuron available".to_string())?;
+                    log::detail(&format!("focus neuron: {uuid}"));
+                    uuid
+                }
             }
-            .ok_or_else(|| "no focus neuron available".to_string())?
         };
-        log::detail(&format!("focus neuron: {focus}"));
         let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
         log::detail("scanning incumbent for focus stats...");
         let focus_scan_start = Instant::now();
@@ -271,14 +307,35 @@ pub fn run_optimisation(
             learning.biases.iter().map(|b| b.count).sum::<f64>()
         ));
 
+        let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
+        let ranked_sources = refine_sources_by_residual(
+            &incumbent,
+            &mut network,
+            &config.training_data,
+            &focus,
+            &prior_sources,
+            focus_sample_limit,
+        )?;
+        if let Some(best) = ranked_sources.first() {
+            log::detail(&format!(
+                "best unused source {} residual|corr|={:.4}",
+                best.from_uuid, best.score
+            ));
+        }
+
+        if config.structural_only {
+            log::detail("structural-only: synapse/neuron growth candidates only");
+        }
         let gen_ctx = CandidateGenContext {
             incumbent: &incumbent,
             focus_uuid: &focus,
             focus_stats: &focus_stats,
             incoming: &incoming,
             observations: &observations,
+            ranked_sources: Some(&ranked_sources),
             learning: Some(&learning),
             backprop: &backprop,
+            structural_only: config.structural_only,
         };
         let gen_start = Instant::now();
         let candidates = generate_candidates(&gen_ctx, config.candidates, &mut rng);
@@ -294,18 +351,92 @@ pub fn run_optimisation(
             .join(format!("candidates-exp-{experiments}"));
         write_candidate_batch(&batch_dir, &incumbent, &candidates)?;
 
-        log::detail(&format!(
-            "scoring baseline + {} candidates via {}",
-            candidates.len(),
-            config.scorer_path.display()
-        ));
+        let screen_rate = config.screen_sample_rate.filter(|r| *r > 0.0 && *r < 1.0);
         let scorer_start = Instant::now();
-        let scores = match scorer.score_directory(&batch_dir, &config.training_data) {
-            Ok(s) => s,
-            Err(e) => {
-                scorer_failures += 1;
-                consecutive_scorer_failures += 1;
-                log::warn(&format!("scorer failed: {e}"));
+        let mut screen_score_map: Option<std::collections::BTreeMap<String, f64>> = None;
+        let mut promote_dir: Option<PathBuf> = None;
+
+        let scores = if let Some(rate) = screen_rate {
+            // --- Screen phase (cheap subsample) ---
+            let sample = ScoreSample {
+                rate,
+                phase: experiments.saturating_sub(1),
+            };
+            log::detail(&format!(
+                "screen: scoring baseline + {} candidates at sample-rate={rate} phase={} via {}",
+                candidates.len(),
+                sample.phase,
+                config.scorer_path.display()
+            ));
+            let screen_scores = match scorer.score_directory_sampled(
+                &batch_dir,
+                &config.training_data,
+                sample,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    scorer_failures += 1;
+                    consecutive_scorer_failures += 1;
+                    log::warn(&format!("screen scorer failed: {e}"));
+                    weighted_focus.record_outcome(
+                        &focus,
+                        false,
+                        None,
+                        true,
+                        config.min_improvement,
+                    );
+                    append_journal(
+                        &journal_path,
+                        &ExperimentRecord {
+                            experiment_number: experiments,
+                            timestamp_unix: unix_now(),
+                            seed: config.seed,
+                            incumbent_id: incumbent_id(&incumbent),
+                            baseline_score: best_score,
+                            focus_neuron: focus,
+                            candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+                            scores: Default::default(),
+                            screen_scores: None,
+                            winner: None,
+                            improvement: None,
+                            accepted: false,
+                            analysis_ms,
+                            scorer_ms: scorer_start.elapsed().as_millis(),
+                            scorer_error: Some(e.to_string()),
+                        },
+                    )?;
+                    if !config.preserve_losers {
+                        let _ = fs::remove_dir_all(&batch_dir);
+                    }
+                    if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
+                        return Err(format!(
+                            "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
+                        ));
+                    }
+                    continue;
+                }
+            };
+            let screen_ms = scorer_start.elapsed().as_millis();
+            log_scorer_batch_stats_labeled(
+                &screen_scores,
+                screen_ms,
+                config.screen_promote_threshold,
+                "screen",
+            );
+            consecutive_scorer_failures = 0;
+            scorer_successes += 1;
+            screen_score_map = Some(
+                screen_scores
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.score))
+                    .collect(),
+            );
+
+            let promote_stems =
+                screen_promote_stems(&screen_scores, config.screen_promote_threshold)
+                    .map_err(|e| e.to_string())?;
+            if promote_stems.is_empty() {
+                log::detail("screen empty: no sample improvers → skipping full-corpus score");
                 append_journal(
                     &journal_path,
                     &ExperimentRecord {
@@ -313,33 +444,153 @@ pub fn run_optimisation(
                         timestamp_unix: unix_now(),
                         seed: config.seed,
                         incumbent_id: incumbent_id(&incumbent),
-                        baseline_score: best_score,
+                        baseline_score: screen_scores
+                            .get("baseline")
+                            .map(|b| b.score)
+                            .unwrap_or(best_score),
                         focus_neuron: focus,
                         candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                         scores: Default::default(),
+                        screen_scores: screen_score_map,
                         winner: None,
                         improvement: None,
                         accepted: false,
                         analysis_ms,
-                        scorer_ms: scorer_start.elapsed().as_millis(),
-                        scorer_error: Some(e.to_string()),
+                        scorer_ms: screen_ms,
+                        scorer_error: None,
                     },
                 )?;
                 if !config.preserve_losers {
                     let _ = fs::remove_dir_all(&batch_dir);
                 }
-                if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
-                    return Err(format!(
-                        "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
-                    ));
-                }
                 continue;
             }
+
+            log::detail(&format!(
+                "promote: {} candidate(s) cleared screen (threshold Δ > {}) → full corpus",
+                promote_stems.len(),
+                config.screen_promote_threshold
+            ));
+            let pdir = config.output_dir.join(format!("promote-exp-{experiments}"));
+            write_promote_batch(&pdir, &batch_dir, &promote_stems)?;
+            promote_dir = Some(pdir.clone());
+
+            let promote_start = Instant::now();
+            match scorer.score_directory(&pdir, &config.training_data) {
+                Ok(s) => {
+                    let promote_ms = promote_start.elapsed().as_millis();
+                    log_scorer_batch_stats_labeled(
+                        &s,
+                        promote_ms,
+                        config.min_improvement,
+                        "promote",
+                    );
+                    scorer_successes += 1;
+                    s
+                }
+                Err(e) => {
+                    scorer_failures += 1;
+                    consecutive_scorer_failures += 1;
+                    log::warn(&format!("promote scorer failed: {e}"));
+                    weighted_focus.record_outcome(
+                        &focus,
+                        false,
+                        None,
+                        true,
+                        config.min_improvement,
+                    );
+                    append_journal(
+                        &journal_path,
+                        &ExperimentRecord {
+                            experiment_number: experiments,
+                            timestamp_unix: unix_now(),
+                            seed: config.seed,
+                            incumbent_id: incumbent_id(&incumbent),
+                            baseline_score: best_score,
+                            focus_neuron: focus,
+                            candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+                            scores: Default::default(),
+                            screen_scores: screen_score_map,
+                            winner: None,
+                            improvement: None,
+                            accepted: false,
+                            analysis_ms,
+                            scorer_ms: scorer_start.elapsed().as_millis(),
+                            scorer_error: Some(e.to_string()),
+                        },
+                    )?;
+                    if !config.preserve_losers {
+                        let _ = fs::remove_dir_all(&batch_dir);
+                        let _ = fs::remove_dir_all(&pdir);
+                    }
+                    if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
+                        return Err(format!(
+                            "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
+                        ));
+                    }
+                    continue;
+                }
+            }
+        } else {
+            // --- Single full-corpus score (legacy path) ---
+            log::detail(&format!(
+                "scoring baseline + {} candidates via {}",
+                candidates.len(),
+                config.scorer_path.display()
+            ));
+            match scorer.score_directory(&batch_dir, &config.training_data) {
+                Ok(s) => {
+                    scorer_successes += 1;
+                    let full_ms = scorer_start.elapsed().as_millis();
+                    log_scorer_batch_stats_labeled(&s, full_ms, config.min_improvement, "scorer");
+                    s
+                }
+                Err(e) => {
+                    scorer_failures += 1;
+                    consecutive_scorer_failures += 1;
+                    log::warn(&format!("scorer failed: {e}"));
+                    weighted_focus.record_outcome(
+                        &focus,
+                        false,
+                        None,
+                        true,
+                        config.min_improvement,
+                    );
+                    append_journal(
+                        &journal_path,
+                        &ExperimentRecord {
+                            experiment_number: experiments,
+                            timestamp_unix: unix_now(),
+                            seed: config.seed,
+                            incumbent_id: incumbent_id(&incumbent),
+                            baseline_score: best_score,
+                            focus_neuron: focus,
+                            candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+                            scores: Default::default(),
+                            screen_scores: None,
+                            winner: None,
+                            improvement: None,
+                            accepted: false,
+                            analysis_ms,
+                            scorer_ms: scorer_start.elapsed().as_millis(),
+                            scorer_error: Some(e.to_string()),
+                        },
+                    )?;
+                    if !config.preserve_losers {
+                        let _ = fs::remove_dir_all(&batch_dir);
+                    }
+                    if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
+                        return Err(format!(
+                            "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
+                        ));
+                    }
+                    continue;
+                }
+            }
         };
+
         consecutive_scorer_failures = 0;
-        scorer_successes += 1;
         let scorer_ms = scorer_start.elapsed().as_millis();
-        log_scorer_batch_stats(&scores, scorer_ms, config.min_improvement);
 
         let baseline = scores
             .get("baseline")
@@ -358,7 +609,11 @@ pub fn run_optimisation(
         if let Some((stem, result, delta)) = winner
             && accepts_improvement(result.score, baseline.score, config.min_improvement)
         {
-            if matches!(config.stats_mode, crate::observations::StatsMode::Quick) {
+            if screen_rate.is_some() {
+                log::detail(
+                    "accepting on full-corpus promote score (screen used a scorer subsample)",
+                );
+            } else if matches!(config.stats_mode, crate::observations::StatsMode::Quick) {
                 log::detail(
                     "accepting on full-corpus scorer (analysis used a quick sample; directions may differ)",
                 );
@@ -367,7 +622,11 @@ pub fn run_optimisation(
                 "accepted {stem}: score={} (+{delta:.3e})",
                 result.score
             ));
-            let winner_path = batch_dir.join(format!("{stem}.json"));
+            // Winner JSON lives in the promote dir when two-phase, else the batch dir.
+            let winner_path = promote_dir
+                .as_ref()
+                .unwrap_or(&batch_dir)
+                .join(format!("{stem}.json"));
             let winner_json = fs::read_to_string(&winner_path).map_err(|e| e.to_string())?;
             incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
             fs::write(&best_path, &winner_json).map_err(|e| e.to_string())?;
@@ -386,6 +645,15 @@ pub fn run_optimisation(
             log::detail("no candidate met the acceptance threshold");
         }
 
+        let best_full_delta = best_candidate_delta(&scores);
+        weighted_focus.record_outcome(
+            &focus,
+            accepted,
+            best_full_delta,
+            false,
+            config.min_improvement,
+        );
+
         let score_map = scores.iter().map(|(k, v)| (k.clone(), v.score)).collect();
         append_journal(
             &journal_path,
@@ -398,6 +666,7 @@ pub fn run_optimisation(
                 focus_neuron: focus,
                 candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                 scores: score_map,
+                screen_scores: screen_score_map,
                 winner: winner_stem,
                 improvement,
                 accepted,
@@ -409,6 +678,9 @@ pub fn run_optimisation(
 
         if !config.preserve_losers {
             let _ = fs::remove_dir_all(&batch_dir);
+            if let Some(pdir) = &promote_dir {
+                let _ = fs::remove_dir_all(pdir);
+            }
         }
     }
 
@@ -428,6 +700,16 @@ pub fn run_optimisation(
         scorer_successes,
         opening_baseline_score,
     })
+}
+
+/// Best full-corpus Δ vs baseline among non-baseline stems (for focus history).
+fn best_candidate_delta(scores: &std::collections::BTreeMap<String, ScoreResult>) -> Option<f64> {
+    let baseline = scores.get("baseline")?;
+    scores
+        .iter()
+        .filter(|(stem, _)| stem.as_str() != "baseline")
+        .map(|(_, r)| improvement(r.score, baseline.score))
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 fn incumbent_id(creature: &neat_core::CreatureExport) -> String {
@@ -491,10 +773,11 @@ mod tests {
     }
 
     impl DirectoryScorer for ScriptedScorer {
-        fn score_directory(
+        fn score_directory_sampled(
             &self,
             candidates_dir: &Path,
             _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
         ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
@@ -537,10 +820,11 @@ mod tests {
     struct FailingScorer;
 
     impl DirectoryScorer for FailingScorer {
-        fn score_directory(
+        fn score_directory_sampled(
             &self,
             _candidates_dir: &Path,
             _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
         ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
             Err(crate::scorer::ScorerError::Process("boom".into()))
         }
@@ -598,6 +882,9 @@ mod tests {
             compute_correlations: false,
             max_consecutive_scorer_failures: 3,
             phase0_parity: true,
+            structural_only: false,
+            screen_sample_rate: None,
+            screen_promote_threshold: 0.0,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -609,6 +896,90 @@ mod tests {
         assert!(result.scorer_successes >= 1);
         let journal = fs::read_to_string(result.journal_path).unwrap();
         assert!(journal.lines().next().unwrap().contains("experimentNumber"));
+    }
+
+    /// Screen subsample finds no improvers → skip full score (issue #24).
+    struct NegativeScreenScorer;
+
+    impl DirectoryScorer for NegativeScreenScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            // Subsample screen: every candidate worse than baseline.
+            // Full corpus must not be reached in this test.
+            assert!(
+                sample.is_subsample(),
+                "empty-screen test should only invoke subsample scoring"
+            );
+            let mut map = BTreeMap::new();
+            map.insert(
+                "baseline".into(),
+                ScoreResult {
+                    score: 0.5,
+                    error: 0.5,
+                    complexity_penalty: 0.0,
+                },
+            );
+            if let Ok(rd) = fs::read_dir(candidates_dir) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if let Some(stem) = name.strip_suffix(".json")
+                        && stem != "baseline"
+                    {
+                        map.insert(
+                            stem.to_string(),
+                            ScoreResult {
+                                score: 0.5 - 1e-4,
+                                error: 0.5 + 1e-4,
+                                complexity_penalty: 0.0,
+                            },
+                        );
+                    }
+                }
+            }
+            Ok(map)
+        }
+    }
+
+    #[test]
+    fn screen_empty_skips_full_corpus_score() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            creature: creature_path,
+            training_data: training,
+            timeout: Duration::from_millis(800),
+            candidates: 4,
+            min_improvement: 1e-6,
+            seed: Some(1),
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir: out.clone(),
+            preserve_losers: true,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            phase0_parity: false,
+            structural_only: false,
+            screen_sample_rate: Some(0.1),
+            screen_promote_threshold: 0.0,
+        };
+        let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
+        assert!(result.experiments >= 1);
+        assert_eq!(result.acceptances, 0);
+        let journal = fs::read_to_string(result.journal_path).unwrap();
+        let first: ExperimentRecord =
+            serde_json::from_str(journal.lines().next().unwrap()).unwrap();
+        assert!(first.screen_scores.is_some());
+        assert!(first.scores.is_empty());
+        assert!(!first.accepted);
+        assert!(!out.join("promote-exp-1").exists());
     }
 
     #[test]
@@ -632,6 +1003,9 @@ mod tests {
             compute_correlations: false,
             max_consecutive_scorer_failures: 2,
             phase0_parity: false,
+            structural_only: false,
+            screen_sample_rate: None,
+            screen_promote_threshold: 0.0,
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));

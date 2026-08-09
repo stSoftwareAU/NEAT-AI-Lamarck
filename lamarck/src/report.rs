@@ -159,6 +159,7 @@ fn strategy_name(strategy: CandidateStrategy) -> String {
         CandidateStrategy::StatsWeight => "stats_weight".into(),
         CandidateStrategy::StatsBias => "stats_bias".into(),
         CandidateStrategy::StructuralAdd => "structural_add".into(),
+        CandidateStrategy::StructuralAddNeuron => "structural_add_neuron".into(),
         CandidateStrategy::StructuralWeaken => "structural_weaken".into(),
         CandidateStrategy::Random => "random".into(),
     }
@@ -284,6 +285,7 @@ mod tests {
                 new_value: Some(0.1),
             }],
             scores: Default::default(),
+            screen_scores: None,
             winner: Some("candidate-000".into()),
             improvement: Some(2e-6),
             accepted: true,

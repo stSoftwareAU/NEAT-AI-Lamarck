@@ -34,11 +34,11 @@ Lamarck must not duplicate this authority.
 
 1. Start from the supplied incumbent.
 2. Verify baseline score/parity.
-3. Select one focus neuron.
+3. Select one focus neuron (default: weighted-random by improvement potential).
 4. Scan/measure the incumbent as needed.
-5. Generate approximately 50 candidates from backpropagation, statistical, structural and random strategies.
-6. Batch score baseline + candidates with NEAT-AI-scorer.
-7. Accept the best candidate only if it clears the meaningful-improvement threshold.
+5. Generate ~100 candidates (default; keep the scorer CPU-saturated) from backpropagation, statistical, structural and random strategies.
+6. **Screen** on a cheap scorer subsample (default 5% of rows); promote only sample Δ `> 1e-6`.
+7. **Full-corpus** score baseline + promoted candidates; accept only if Δ score clears `1e-6`.
 8. Treat creature-specific statistics as stale after an acceptance.
 9. Repeat until the wall-clock budget (45 minutes by default) expires.
 
@@ -47,6 +47,8 @@ Lamarck must not duplicate this authority.
 - Accept only on authoritative scorer JSON **`score`** (larger-is-better).
 - Default meaningful improvement: absolute **`1e-6`**, strict `>`.
 - Scorer argv: `rust_scorer <candidates_dir> <training_data_dir>` — no `--gpu` / `--cost`.
+  Screen phase (issue #24) may add `--sample-rate` / `--sample-phase` only; acceptance
+  still uses a full-corpus promote score.
 - `observations.statistics` is versioned human-readable JSON (semver).
 - Production scale target: GRQ `network.json` (~2511 inputs, ~1590 hidden, ~21k synapses).
 

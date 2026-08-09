@@ -4,6 +4,7 @@ use crate::config::DEFAULT_MIN_IMPROVEMENT;
 use crate::log;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -18,6 +19,30 @@ pub struct ScoreResult {
     /// Optional complexity penalty.
     #[serde(default)]
     pub complexity_penalty: f64,
+}
+
+/// Optional corpus subsample for a scorer directory call (issue #24 screen phase).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoreSample {
+    /// Fraction of training rows to keep, in `(0, 1]`. `1.0` = full corpus.
+    pub rate: f64,
+    /// Stratified sample phase (rotates which stratum is kept).
+    pub phase: u64,
+}
+
+impl ScoreSample {
+    /// Full-corpus scoring (no sample flags passed to the scorer).
+    pub const fn full() -> Self {
+        Self {
+            rate: 1.0,
+            phase: 0,
+        }
+    }
+
+    /// True when this requests a proper subsample.
+    pub fn is_subsample(self) -> bool {
+        self.rate > 0.0 && self.rate < 1.0
+    }
 }
 
 /// Errors from invoking or interpreting the scorer.
@@ -47,15 +72,25 @@ impl std::error::Error for ScorerError {}
 
 /// Trait for scoring a directory of creatures (enables fake scorers in tests).
 pub trait DirectoryScorer {
-    /// Score every `*.json` in `candidates_dir` against `training_data`.
+    /// Score every `*.json` in `candidates_dir` against the full training corpus.
     fn score_directory(
         &self,
         candidates_dir: &Path,
         training_data: &Path,
+    ) -> Result<BTreeMap<String, ScoreResult>, ScorerError> {
+        self.score_directory_sampled(candidates_dir, training_data, ScoreSample::full())
+    }
+
+    /// Score a directory, optionally on a stratified subsample of training rows.
+    fn score_directory_sampled(
+        &self,
+        candidates_dir: &Path,
+        training_data: &Path,
+        sample: ScoreSample,
     ) -> Result<BTreeMap<String, ScoreResult>, ScorerError>;
 }
 
-/// Invoke the real `rust_scorer` binary with only dir + training-data args.
+/// Invoke the real `rust_scorer` binary.
 #[derive(Debug, Clone)]
 pub struct ExternalScorer {
     /// Path to the scorer binary.
@@ -63,15 +98,22 @@ pub struct ExternalScorer {
 }
 
 impl DirectoryScorer for ExternalScorer {
-    fn score_directory(
+    fn score_directory_sampled(
         &self,
         candidates_dir: &Path,
         training_data: &Path,
+        sample: ScoreSample,
     ) -> Result<BTreeMap<String, ScoreResult>, ScorerError> {
-        // Locked contract: do NOT pass --gpu / --cost.
-        // Inherit stderr so any scorer diagnostics stream live while we wait
-        // on the single directory batch call; keep stdout piped for JSON.
-        let output = Command::new(&self.binary)
+        // Full corpus: locked two-arg form (no --gpu / --cost).
+        // Screen subsample: add --sample-rate / --sample-phase only (issue #24).
+        let mut cmd = Command::new(&self.binary);
+        if sample.is_subsample() {
+            cmd.arg("--sample-rate")
+                .arg(format!("{}", sample.rate))
+                .arg("--sample-phase")
+                .arg(sample.phase.to_string());
+        }
+        let output = cmd
             .arg(candidates_dir)
             .arg(training_data)
             .stdout(Stdio::piped())
@@ -95,6 +137,16 @@ pub fn log_scorer_batch_stats(
     scorer_ms: u128,
     min_improvement: f64,
 ) {
+    log_scorer_batch_stats_labeled(scores, scorer_ms, min_improvement, "scorer");
+}
+
+/// Like [`log_scorer_batch_stats`] with a phase label (`screen` / `promote` / …).
+pub fn log_scorer_batch_stats_labeled(
+    scores: &BTreeMap<String, ScoreResult>,
+    scorer_ms: u128,
+    min_improvement: f64,
+    label: &str,
+) {
     let n = scores.len();
     let per = if n > 0 {
         scorer_ms as f64 / n as f64
@@ -102,11 +154,11 @@ pub fn log_scorer_batch_stats(
         0.0
     };
     log::ok(&format!(
-        "scorer batch: {n} creatures in {scorer_ms}ms ({per:.0} ms/creature, one directory call)"
+        "{label} batch: {n} creatures in {scorer_ms}ms ({per:.0} ms/creature, one directory call)"
     ));
 
     let Some(baseline) = scores.get("baseline") else {
-        log::warn("scorer batch missing baseline");
+        log::warn(&format!("{label} batch missing baseline"));
         return;
     };
     log::detail(&format!(
@@ -149,6 +201,46 @@ pub fn log_scorer_batch_stats(
     if deltas.len() > show {
         log::detail(&format!("  … {} more candidates", deltas.len() - show));
     }
+}
+
+/// Stems (excluding baseline) whose sample score beats baseline by more than `threshold`.
+pub fn screen_promote_stems(
+    scores: &BTreeMap<String, ScoreResult>,
+    threshold: f64,
+) -> Result<Vec<String>, ScorerError> {
+    let baseline = scores
+        .get("baseline")
+        .ok_or_else(|| ScorerError::Missing("baseline missing from scorer results".into()))?;
+    let mut stems: Vec<(String, f64)> = scores
+        .iter()
+        .filter(|(stem, _)| stem.as_str() != "baseline")
+        .map(|(stem, r)| (stem.clone(), improvement(r.score, baseline.score)))
+        .filter(|(_, delta)| *delta > threshold)
+        .collect();
+    stems.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(stems.into_iter().map(|(s, _)| s).collect())
+}
+
+/// Copy `baseline.json` + promoted candidate JSON into a fresh promote directory.
+pub fn write_promote_batch(
+    promote_dir: &Path,
+    source_batch: &Path,
+    promote_stems: &[String],
+) -> Result<(), String> {
+    if promote_dir.exists() {
+        fs::remove_dir_all(promote_dir).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(promote_dir).map_err(|e| e.to_string())?;
+    let baseline_src = source_batch.join("baseline.json");
+    fs::copy(&baseline_src, promote_dir.join("baseline.json"))
+        .map_err(|e| format!("copy baseline from {} failed: {e}", baseline_src.display()))?;
+    for stem in promote_stems {
+        let name = format!("{stem}.json");
+        let src = source_batch.join(&name);
+        fs::copy(&src, promote_dir.join(&name))
+            .map_err(|e| format!("copy {stem} from {} failed: {e}", src.display()))?;
+    }
+    Ok(())
 }
 
 /// Parse scorer stdout JSON (stem-keyed map).
@@ -213,10 +305,11 @@ mod tests {
     }
 
     impl DirectoryScorer for FakeScorer {
-        fn score_directory(
+        fn score_directory_sampled(
             &self,
             _candidates_dir: &Path,
             _training_data: &Path,
+            _sample: ScoreSample,
         ) -> Result<BTreeMap<String, ScoreResult>, ScorerError> {
             Ok(self.payload.lock().unwrap().clone())
         }
@@ -292,5 +385,60 @@ mod tests {
             .score_directory(Path::new("."), Path::new("."))
             .unwrap();
         assert!(out.contains_key("baseline"));
+    }
+
+    #[test]
+    fn screen_promote_stems_keeps_only_positive_deltas() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "baseline".into(),
+            ScoreResult {
+                score: 0.5,
+                error: 0.5,
+                complexity_penalty: 0.0,
+            },
+        );
+        map.insert(
+            "candidate-000".into(),
+            ScoreResult {
+                score: 0.5 + 1e-4,
+                error: 0.4,
+                complexity_penalty: 0.0,
+            },
+        );
+        map.insert(
+            "candidate-001".into(),
+            ScoreResult {
+                score: 0.5 - 1e-4,
+                error: 0.6,
+                complexity_penalty: 0.0,
+            },
+        );
+        map.insert(
+            "candidate-002".into(),
+            ScoreResult {
+                score: 0.5 + 2e-4,
+                error: 0.3,
+                complexity_penalty: 0.0,
+            },
+        );
+        let stems = screen_promote_stems(&map, 0.0).unwrap();
+        assert_eq!(stems, vec!["candidate-002", "candidate-000"]);
+        assert!(screen_promote_stems(&map, 1e-3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn write_promote_batch_copies_baseline_and_stems() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("baseline.json"), b"{}").unwrap();
+        fs::write(src.join("candidate-000.json"), b"{\"a\":1}").unwrap();
+        fs::write(src.join("candidate-001.json"), b"{\"b\":2}").unwrap();
+        let promote = dir.path().join("promote");
+        write_promote_batch(&promote, &src, &["candidate-001".into()]).unwrap();
+        assert!(promote.join("baseline.json").is_file());
+        assert!(promote.join("candidate-001.json").is_file());
+        assert!(!promote.join("candidate-000.json").exists());
     }
 }

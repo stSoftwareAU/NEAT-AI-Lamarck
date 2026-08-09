@@ -166,8 +166,9 @@ pub fn accumulate_focus_learning(
             };
             let weight = syn.weight;
             // Propose toward weight + (error*deriv)/activation when usable.
-            let adj = if activation.abs() > 1e-6 {
-                weight + adjusted / activation
+            // Clamp the per-sample delta — tiny activations otherwise explode.
+            let adj = if activation.abs() > 1e-3 {
+                weight + (adjusted / activation).clamp(-0.5, 0.5)
             } else {
                 weight
             };

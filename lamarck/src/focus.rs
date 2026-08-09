@@ -1,9 +1,11 @@
 //! Focus-neuron selection and incumbent-specific streaming statistics.
 
 use crate::learning::squash_derivative;
+use crate::observations::ObservationsStatistics;
 use neat_core::{CompiledNetwork, CreatureExport, TrainingDataConfig, TrainingDataIterator};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Strategy for choosing which non-input neuron to investigate.
 pub trait FocusSelector {
@@ -84,8 +86,10 @@ impl FocusSelector for HighErrorFocusSelector {
 /// Focus-policy name for CLI / config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPolicy {
-    /// Random non-input each experiment.
+    /// Weighted-random by estimated improvement potential (issue #25).
     #[default]
+    Weighted,
+    /// Random non-input each experiment.
     Random,
     /// Prefer outputs (unsaturated / direct heads).
     Unsaturated,
@@ -97,6 +101,7 @@ impl FocusPolicy {
     /// Parse from CLI string.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "weighted" | "improvement" | "improvement-potential" => Some(Self::Weighted),
             "random" => Some(Self::Random),
             "unsaturated" => Some(Self::Unsaturated),
             "high-error" | "high_error" => Some(Self::HighError),
@@ -107,11 +112,194 @@ impl FocusPolicy {
     /// Human label.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Weighted => "weighted",
             Self::Random => "random",
             Self::Unsaturated => "unsaturated",
             Self::HighError => "high-error",
         }
     }
+}
+
+/// Per-neuron bookkeeping for weighted focus (updated each experiment).
+#[derive(Debug, Clone, Default)]
+pub struct FocusNeuronHistory {
+    /// Times an acceptance occurred while this neuron was focus.
+    pub accepts: u32,
+    /// Times best full-corpus Δ was positive but below the accept threshold.
+    pub near_misses: u32,
+    /// Scorer failures or large negative full-corpus Δ while focused here.
+    pub hard_fails: u32,
+}
+
+/// Result of a weighted focus draw (for logging).
+#[derive(Debug, Clone)]
+pub struct FocusChoice {
+    /// Selected neuron UUID.
+    pub uuid: String,
+    /// Relative selection weight.
+    pub weight: f64,
+    /// Short explanation of the dominant signals.
+    pub reason: String,
+}
+
+/// Minimum weight so every eligible neuron retains a non-zero draw chance.
+pub const FOCUS_EXPLORATION_FLOOR: f64 = 1.0;
+
+/// Weighted-random focus by improvement potential (issue #25).
+#[derive(Debug, Default, Clone)]
+pub struct WeightedFocusSelector {
+    /// Running per-UUID history for this optimisation session.
+    pub history: HashMap<String, FocusNeuronHistory>,
+}
+
+impl WeightedFocusSelector {
+    /// Record outcome after an experiment on `focus_uuid`.
+    pub fn record_outcome(
+        &mut self,
+        focus_uuid: &str,
+        accepted: bool,
+        best_full_delta: Option<f64>,
+        scorer_failed: bool,
+        min_improvement: f64,
+    ) {
+        let entry = self.history.entry(focus_uuid.to_string()).or_default();
+        if scorer_failed {
+            entry.hard_fails = entry.hard_fails.saturating_add(1);
+            return;
+        }
+        if accepted {
+            entry.accepts = entry.accepts.saturating_add(1);
+            return;
+        }
+        if let Some(delta) = best_full_delta {
+            if delta > 0.0 && delta <= min_improvement {
+                entry.near_misses = entry.near_misses.saturating_add(1);
+            } else if delta < -1e-4 {
+                entry.hard_fails = entry.hard_fails.saturating_add(1);
+            }
+        }
+    }
+
+    /// Draw a focus neuron ∝ weight, with exploration floor.
+    pub fn select_weighted(
+        &self,
+        creature: &CreatureExport,
+        observations: Option<&ObservationsStatistics>,
+        rng: &mut impl Rng,
+    ) -> Option<FocusChoice> {
+        let ranked = self.rank_candidates(creature, observations);
+        if ranked.is_empty() {
+            return None;
+        }
+        let total: f64 = ranked.iter().map(|(_, w, _)| *w).sum();
+        if total <= 0.0 {
+            return None;
+        }
+        let mut pick = rng.random_range(0.0..total);
+        for (uuid, weight, reason) in &ranked {
+            pick -= weight;
+            if pick <= 0.0 {
+                return Some(FocusChoice {
+                    uuid: uuid.clone(),
+                    weight: *weight,
+                    reason: reason.clone(),
+                });
+            }
+        }
+        let (uuid, weight, reason) = ranked.last()?;
+        Some(FocusChoice {
+            uuid: uuid.clone(),
+            weight: *weight,
+            reason: reason.clone(),
+        })
+    }
+
+    /// Compute (uuid, weight, reason) for every eligible non-input neuron.
+    pub fn rank_candidates(
+        &self,
+        creature: &CreatureExport,
+        observations: Option<&ObservationsStatistics>,
+    ) -> Vec<(String, f64, String)> {
+        let incoming_counts = incoming_counts(creature);
+        let output_index: HashMap<&str, usize> = creature
+            .neurons
+            .iter()
+            .filter(|n| n.neuron_type == "output")
+            .enumerate()
+            .map(|(i, n)| (n.uuid.as_str(), i))
+            .collect();
+
+        let mut ranked = Vec::with_capacity(creature.neurons.len());
+        for n in &creature.neurons {
+            if n.neuron_type == "input" {
+                continue;
+            }
+            let hist = self.history.get(&n.uuid);
+            let incoming = *incoming_counts.get(&n.uuid).unwrap_or(&0);
+            let mut weight = FOCUS_EXPLORATION_FLOOR;
+            let mut reasons = Vec::new();
+
+            if n.neuron_type == "output" {
+                weight += 20.0;
+                reasons.push("output".into());
+                if let Some(obs) = observations
+                    && let Some(&out_i) = output_index.get(n.uuid.as_str())
+                    && let Some(stats) = obs.outputs.get(out_i)
+                {
+                    // Harder targets → more room for focus work.
+                    let signal = stats.mean_abs.max(stats.std_dev).max(0.0);
+                    let bump = 10.0 * signal.min(5.0);
+                    weight += bump;
+                    reasons.push(format!("target_scale={signal:.3}"));
+                }
+            } else {
+                let deg = (incoming as f64).min(40.0);
+                weight += 0.05 * deg;
+                if incoming > 0 {
+                    reasons.push(format!("in={incoming}"));
+                }
+            }
+
+            if let Some(h) = hist {
+                if h.accepts > 0 {
+                    weight += 8.0 * f64::from(h.accepts);
+                    reasons.push(format!("accepts={}", h.accepts));
+                }
+                if h.near_misses > 0 {
+                    weight += 3.0 * f64::from(h.near_misses);
+                    reasons.push(format!("near_miss={}", h.near_misses));
+                }
+                if h.hard_fails > 0 {
+                    let damp = 1.0 / (1.0 + f64::from(h.hard_fails));
+                    weight *= damp;
+                    reasons.push(format!("fails={}", h.hard_fails));
+                }
+            }
+
+            if reasons.is_empty() {
+                reasons.push("explore".into());
+            }
+            ranked.push((
+                n.uuid.clone(),
+                weight.max(FOCUS_EXPLORATION_FLOOR),
+                reasons.join("+"),
+            ));
+        }
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        ranked
+    }
+}
+
+fn incoming_counts(creature: &CreatureExport) -> HashMap<String, usize> {
+    let mut map = HashMap::new();
+    for s in &creature.synapses {
+        *map.entry(s.to_uuid.clone()).or_default() += 1;
+    }
+    map
 }
 
 /// Per-incoming-synapse source statistics for the focus neuron.
@@ -550,5 +738,45 @@ mod tests {
         assert_eq!(selector.select(&creature, &mut rng).as_deref(), Some("o1"));
         selector.uuid = "missing".into();
         assert!(selector.select(&creature, &mut rng).is_none());
+    }
+
+    #[test]
+    fn weighted_focus_is_deterministic_with_seed() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let sel = WeightedFocusSelector::default();
+        let mut rng_a = StdRng::seed_from_u64(11);
+        let mut rng_b = StdRng::seed_from_u64(11);
+        let a = sel.select_weighted(&creature, None, &mut rng_a).unwrap();
+        let b = sel.select_weighted(&creature, None, &mut rng_b).unwrap();
+        assert_eq!(a.uuid, b.uuid);
+        assert!((a.weight - b.weight).abs() < 1e-12);
+    }
+
+    #[test]
+    fn weighted_focus_keeps_exploration_floor() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let sel = WeightedFocusSelector::default();
+        let ranked = sel.rank_candidates(&creature, None);
+        assert!(ranked.iter().all(|(_, w, _)| *w >= FOCUS_EXPLORATION_FLOOR));
+        // Output should outrank a plain hidden with no history.
+        let w_out = ranked.iter().find(|(u, _, _)| u == "o1").unwrap().1;
+        let w_h = ranked.iter().find(|(u, _, _)| u == "h1").unwrap().1;
+        assert!(w_out > w_h);
+    }
+
+    #[test]
+    fn weighted_focus_history_boosts_accepts() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let mut sel = WeightedFocusSelector::default();
+        sel.record_outcome("h1", true, Some(2e-6), false, 1e-6);
+        let ranked = sel.rank_candidates(&creature, None);
+        let w_h = ranked.iter().find(|(u, _, _)| u == "h1").unwrap().1;
+        let base = WeightedFocusSelector::default()
+            .rank_candidates(&creature, None)
+            .iter()
+            .find(|(u, _, _)| u == "h1")
+            .unwrap()
+            .1;
+        assert!(w_h > base);
     }
 }

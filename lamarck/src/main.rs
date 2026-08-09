@@ -4,8 +4,9 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_TIMEOUT_SECONDS, ExternalScorer,
-    LamarckConfig, print_run_summary, report_from_journal, run_optimisation,
+    DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
+    DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
+    print_run_summary, report_from_journal, run_optimisation,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -69,8 +70,8 @@ struct Cli {
     #[arg(long)]
     focus_neuron: Option<String>,
 
-    /// Focus selection policy: random | unsaturated | high-error.
-    #[arg(long, default_value = "random")]
+    /// Focus selection policy: weighted | random | unsaturated | high-error.
+    #[arg(long, default_value = "weighted")]
     focus_policy: String,
 
     /// Compute expensive input×input correlations in observations.
@@ -80,6 +81,20 @@ struct Cli {
     /// Skip Phase-0 baseline scorer gate.
     #[arg(long, default_value_t = false)]
     skip_phase0: bool,
+
+    /// Only propose synapse/neuron growth candidates (skip weight/bias strategies).
+    #[arg(long, default_value_t = false)]
+    structural_only: bool,
+
+    /// Screen candidates on a scorer subsample before full-corpus promote scoring
+    /// (issue #24). Values in `(0, 1)` enable screening; `1` (or `>=1`) disables
+    /// and scores the full batch on the full corpus only.
+    #[arg(long, default_value_t = DEFAULT_SCREEN_SAMPLE_RATE)]
+    screen_sample_rate: f64,
+
+    /// Minimum sample-score Δ to promote a candidate to full-corpus scoring.
+    #[arg(long, default_value_t = DEFAULT_SCREEN_PROMOTE_THRESHOLD)]
+    screen_promote_threshold: f64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -121,7 +136,7 @@ fn main() -> ExitCode {
 
     let focus_policy = FocusPolicy::parse(&cli.focus_policy).unwrap_or_else(|| {
         eprintln!(
-            "unknown --focus-policy '{}'; expected random|unsaturated|high-error",
+            "unknown --focus-policy '{}'; expected weighted|random|unsaturated|high-error",
             cli.focus_policy
         );
         std::process::exit(2);
@@ -148,6 +163,13 @@ fn main() -> ExitCode {
         compute_correlations: cli.compute_correlations,
         max_consecutive_scorer_failures: neat_ai_lamarck::DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
         phase0_parity: !cli.skip_phase0,
+        structural_only: cli.structural_only,
+        screen_sample_rate: if cli.screen_sample_rate > 0.0 && cli.screen_sample_rate < 1.0 {
+            Some(cli.screen_sample_rate)
+        } else {
+            None
+        },
+        screen_promote_threshold: cli.screen_promote_threshold,
     };
 
     let scorer = ExternalScorer { binary: cli.scorer };
