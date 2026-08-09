@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Run-level `lamarck` check-in tag (Issue #35).** The creature tag used by GRQ
+  check-in now summarises the whole run (`N accepts / M exps`, last strategy /
+  focus, and `score: <%.6g> improved by <%.3g>` vs opening) instead of only the
+  last accept’s micro-step. Score appears once at 6 significant figures so GRQ
+  can take the tag as the commit subject without appending another score clause.
+  Final `best.json` is restamped with the full experiment count at loop exit.
+
 ### Added
 
 - **PR auto-format syncs `Cargo.lock` to latest neat-core (Issue #33).** New

@@ -2,8 +2,8 @@
 //!
 //! `neat_core::CreatureExport` does not round-trip `tags` / `uuid`, so Lamarck
 //! keeps them in [`CreatureMeta`] and re-attaches on write — preserving the
-//! original pedigree (name, version, …) while stamping Lamarck progress in the
-//! same fun emoji style as GRQ `worker/IntelligentDesign/run.sh`.
+//! original pedigree (name, version, …) while stamping a **run-level** Lamarck
+//! summary for GRQ check-in (`worker/Lamarck/run.sh` reads the tag as-is).
 
 use crate::candidates::CandidateStrategy;
 use neat_core::{CreatureExport, creature_to_json_pretty};
@@ -70,8 +70,9 @@ impl CreatureMeta {
         }
     }
 
-    /// Update score/error and append a fun Lamarck progress tag after an accept.
+    /// Update score/error and stamp a run-level Lamarck summary for check-in.
     pub fn stamp_acceptance(&mut self, progress: &LamarckProgress<'_>) {
+        // Keep full-precision numeric tags for machine consumers.
         self.upsert("score", format!("{}", progress.score));
         self.upsert("error", format!("{}", progress.error));
         let message = lamarck_progress_message(progress);
@@ -81,36 +82,105 @@ impl CreatureMeta {
     }
 }
 
-/// Fields for one accepted Lamarck improvement (used for emoji progress tags).
+/// Fields for the run-level Lamarck check-in summary (cumulative, not last-step).
 #[derive(Debug, Clone, Copy)]
 pub struct LamarckProgress<'a> {
-    /// 1-based acceptance count for this run.
-    pub accept_number: u64,
-    /// Authoritative score after accept.
+    /// Acceptances so far in this run.
+    pub acceptances: u64,
+    /// Authoritative score after the latest accept (or final best).
     pub score: f64,
-    /// Authoritative error after accept.
+    /// Authoritative error after the latest accept (or final best).
     pub error: f64,
-    /// Score delta vs prior baseline.
-    pub delta: f64,
-    /// Focus neuron UUID for this experiment.
+    /// Opening baseline score (Phase-0 / first baseline) for cumulative Δ.
+    pub opening_score: f64,
+    /// Focus neuron UUID for the latest accept.
     pub focus_neuron: &'a str,
-    /// Winning candidate strategy.
+    /// Winning candidate strategy for the latest accept.
     pub strategy: CandidateStrategy,
-    /// Experiment number that produced the accept.
+    /// Experiments attempted so far (full run count when stamped at end).
     pub experiments: u64,
 }
 
-/// Emoji-rich progress blurb (same spirit as GRQ IntelligentDesign `run.sh` logs).
+/// Run-level check-in blurb: accepts / experiments / last strategy / score once.
+///
+/// Score wording matches GRQ `grq_format_score_message` (`%.6g` + `improved by %.3g`
+/// vs opening). GRQ should use this tag as the commit subject without appending
+/// another score clause.
 pub fn lamarck_progress_message(progress: &LamarckProgress<'_>) -> String {
     let (strat_emoji, strat_label) = strategy_emoji(progress.strategy);
+    let score_clause = format_score_improved(progress.score, progress.opening_score);
+    let accept_word = if progress.acceptances == 1 {
+        "accept"
+    } else {
+        "accepts"
+    };
+    let exp_word = if progress.experiments == 1 {
+        "exp"
+    } else {
+        "exps"
+    };
     format!(
-        "🦒 Lamarck accept #{} · Δ{:+.3e} · {strat_emoji} {strat_label} · 🎯 {} · 🧪 exp {} · 🏆 score {:.12}",
-        progress.accept_number,
-        progress.delta,
-        progress.focus_neuron,
-        progress.experiments,
-        progress.score,
+        "🦒 Lamarck · {} {accept_word} / {} {exp_word} · last: {strat_emoji} {strat_label} · 🎯 {} · {score_clause}",
+        progress.acceptances, progress.experiments, progress.focus_neuron,
     )
+}
+
+/// `score: <%.6g> improved by <%.3g>` (cumulative vs opening). Same spirit as
+/// GRQ `worker/shared/score_message.sh`.
+fn format_score_improved(score: f64, opening: f64) -> String {
+    let formatted = format_g(score, 6);
+    let delta = score - opening;
+    if delta < 0.0 {
+        format!("score: {formatted} declined by {}", format_g(-delta, 3))
+    } else {
+        format!("score: {formatted} improved by {}", format_g(delta, 3))
+    }
+}
+
+/// Approximate C/awk `printf("%.*g", prec, v)` for commit-friendly scores.
+fn format_g(v: f64, prec: usize) -> String {
+    if !v.is_finite() {
+        return format!("{v}");
+    }
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let prec = prec.max(1);
+    let abs = v.abs();
+    let exp = abs.log10().floor() as i32;
+    // %g: scientific when exp < -4 or exp >= precision.
+    if exp < -4 || exp >= prec as i32 {
+        let digits = prec.saturating_sub(1);
+        let s = format!("{v:.digits$e}");
+        return trim_g_scientific(&s);
+    }
+    let decimals = (prec as i32 - exp - 1).max(0) as usize;
+    let s = format!("{v:.decimals$}");
+    trim_trailing_zeros_and_dot(&s)
+}
+
+fn trim_g_scientific(s: &str) -> String {
+    // "1.23000e-6" → "1.23e-06" (C/awk printf %g style, two-digit exponent).
+    let Some((mant, exp)) = s.split_once('e') else {
+        return s.to_string();
+    };
+    let mant = trim_trailing_zeros_and_dot(mant);
+    let exp_i: i32 = exp.parse().unwrap_or(0);
+    format!("{mant}e{exp_i:+03}")
+}
+
+fn trim_trailing_zeros_and_dot(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let mut out = s.to_string();
+    while out.ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    out
 }
 
 fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
@@ -179,10 +249,10 @@ mod tests {
         let creature = parse_creature_json(TINY_TAGGED).unwrap();
         let mut meta = CreatureMeta::from_creature_json(TINY_TAGGED);
         meta.stamp_acceptance(&LamarckProgress {
-            accept_number: 1,
+            acceptances: 1,
             score: 0.2,
             error: 0.8,
-            delta: 1e-5,
+            opening_score: 0.1,
             focus_neuron: "o1",
             strategy: CandidateStrategy::Backprop,
             experiments: 3,
@@ -199,6 +269,33 @@ mod tests {
         let msg = lamarck["value"].as_str().unwrap();
         assert!(msg.contains("🦒"));
         assert!(msg.contains("🧠"));
-        assert!(msg.contains("accept #1"));
+        assert!(msg.contains("1 accept / 3 exps"));
+        assert!(msg.contains("score: 0.2 improved by 0.1"));
+        assert!(!msg.contains("🏆"));
+        assert!(!msg.contains("accept #"));
+    }
+
+    #[test]
+    fn run_summary_uses_cumulative_delta_and_six_sigfigs() {
+        let msg = lamarck_progress_message(&LamarckProgress {
+            acceptances: 2,
+            score: 0.3451532296337825,
+            error: 0.5,
+            opening_score: 0.3451500296337825,
+            focus_neuron: "neuron-1343748843",
+            strategy: CandidateStrategy::Random,
+            experiments: 75,
+        });
+        assert_eq!(
+            msg,
+            "🦒 Lamarck · 2 accepts / 75 exps · last: 🎲 random · 🎯 neuron-1343748843 · score: 0.345153 improved by 3.2e-06"
+        );
+    }
+
+    #[test]
+    fn format_g_matches_awk_style_sigfigs() {
+        assert_eq!(format_g(0.345153229634, 6), "0.345153");
+        assert_eq!(format_g(3.2e-6, 3), "3.2e-06");
+        assert_eq!(format_g(0.1, 6), "0.1");
     }
 }
