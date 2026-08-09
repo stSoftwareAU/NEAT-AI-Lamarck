@@ -22,7 +22,7 @@ Issue [#8](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/8) — strateg
 | `--quick` / sample | **25000** | worker-realistic analysis sample; acceptance still full-corpus |
 | `--screen-sample-rate` | 0.05 | production default |
 | `--screen-promote-threshold` | 1e-6 | production default |
-| `--focus-policy` | **weighted** | residual MAE / `|blame|`; zeros excluded |
+| `--focus-policy` | **weighted** | residual MAE / abs(blame); zeros excluded |
 | `--seed` | 1 | |
 | Phase-0 parity | **on** (passed) | |
 
