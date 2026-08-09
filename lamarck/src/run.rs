@@ -20,7 +20,9 @@ use crate::scorer::{
     DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
     screen_promote_stems, select_winner, write_promote_batch,
 };
-use crate::structural::{rank_unused_sources, refine_sources_by_residual};
+use crate::structural::{
+    is_input_source, rank_unused_sources, refine_sources_by_residual_with_observations,
+};
 use crate::tags::{CreatureMeta, LamarckProgress, serialize_creature_with_meta};
 use neat_core::{
     TrainingDataConfig, compile_creature, creature_to_json_pretty, parse_creature_json,
@@ -408,18 +410,28 @@ pub fn run_optimisation(
         }
 
         let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
-        let ranked_sources = refine_sources_by_residual(
+        let ranked_sources = refine_sources_by_residual_with_observations(
             &incumbent,
             &mut network,
             &config.training_data,
             &focus,
             &prior_sources,
             focus_sample_limit,
+            Some(&observations),
         )?;
         if let Some(best) = ranked_sources.first() {
             log::detail(&format!(
                 "best unused source {} residual|corr|={:.4}",
                 best.from_uuid, best.score
+            ));
+        }
+        if let Some(best_hidden) = ranked_sources
+            .iter()
+            .find(|s| !is_input_source(&s.from_uuid))
+        {
+            log::detail(&format!(
+                "best unused hidden {} residual|corr|={:.4}",
+                best_hidden.from_uuid, best_hidden.score
             ));
         }
 
