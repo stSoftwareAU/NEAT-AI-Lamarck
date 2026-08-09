@@ -89,7 +89,10 @@ pub fn insert_index_for_hidden(creature: &CreatureExport, focus_uuid: &str) -> O
     }
 }
 
-fn existing_sources_into<'a>(creature: &'a CreatureExport, focus_uuid: &str) -> std::collections::BTreeSet<&'a str> {
+fn existing_sources_into<'a>(
+    creature: &'a CreatureExport,
+    focus_uuid: &str,
+) -> std::collections::BTreeSet<&'a str> {
     creature
         .synapses
         .iter()
@@ -202,7 +205,10 @@ pub fn suggested_weight_scaled(
     focus_stats: &FocusNeuronStats,
     scale: f64,
 ) -> f64 {
-    if let Some(ols) = source.ols_weight.filter(|w| w.is_finite() && w.abs() > 1e-12) {
+    if let Some(ols) = source
+        .ols_weight
+        .filter(|w| w.is_finite() && w.abs() > 1e-12)
+    {
         return (ols * scale).clamp(-MAX_NEW_WEIGHT, MAX_NEW_WEIGHT);
     }
     let mag = (source.weight_scale * scale / OLS_WEIGHT_FRACTION).clamp(1e-5, MAX_NEW_WEIGHT);
@@ -350,7 +356,22 @@ pub fn random_uuid_v4(rng: &mut impl Rng) -> String {
     b[8] = (b[8] & 0x3f) | 0x80;
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 
@@ -369,20 +390,41 @@ pub fn add_synapse(
     });
 }
 
+/// Parameters for inserting a hidden neuron on `from -> new -> focus`.
+pub struct NeuronBridgeSpec<'a> {
+    /// Upstream source UUID (input or earlier neuron).
+    pub from_uuid: &'a str,
+    /// Downstream focus neuron UUID.
+    pub focus_uuid: &'a str,
+    /// UUID for the new hidden neuron.
+    pub new_uuid: String,
+    /// Squash function name for the new neuron.
+    pub squash: &'a str,
+    /// Bias for the new neuron.
+    pub bias: f64,
+    /// Weight on `from -> new`.
+    pub w_in: f64,
+    /// Weight on `new -> focus`.
+    pub w_out: f64,
+}
+
 /// Insert a hidden neuron on a path `from -> new -> focus`.
 ///
 /// Returns the new neuron UUID. Fails closed when insertion would break
 /// forward-only ordering or the focus cannot host a hidden predecessor.
 pub fn add_neuron_bridge(
     creature: &mut CreatureExport,
-    from_uuid: &str,
-    focus_uuid: &str,
-    new_uuid: String,
-    squash: &str,
-    bias: f64,
-    w_in: f64,
-    w_out: f64,
+    spec: NeuronBridgeSpec<'_>,
 ) -> Result<String, String> {
+    let NeuronBridgeSpec {
+        from_uuid,
+        focus_uuid,
+        new_uuid,
+        squash,
+        bias,
+        w_in,
+        w_out,
+    } = spec;
     if !is_forward_edge(creature, from_uuid, focus_uuid) {
         return Err(format!(
             "bridge {from_uuid} -> {focus_uuid} is not forward-legal before insert"
@@ -450,13 +492,15 @@ pub fn split_incoming_synapse(
     creature.synapses.remove(syn_idx);
     add_neuron_bridge(
         creature,
-        &incoming.from_uuid,
-        focus_uuid,
-        new_uuid,
-        squash,
-        0.0,
-        1.0,
-        old_w,
+        NeuronBridgeSpec {
+            from_uuid: &incoming.from_uuid,
+            focus_uuid,
+            new_uuid,
+            squash,
+            bias: 0.0,
+            w_in: 1.0,
+            w_out: old_w,
+        },
     )
 }
 
@@ -579,18 +623,28 @@ mod tests {
         let uuid = random_uuid_v4(&mut rng);
         add_neuron_bridge(
             &mut creature,
-            "input-1",
-            "o1",
-            uuid.clone(),
-            "TANH",
-            0.0,
-            0.001,
-            0.05,
+            NeuronBridgeSpec {
+                from_uuid: "input-1",
+                focus_uuid: "o1",
+                new_uuid: uuid.clone(),
+                squash: "TANH",
+                bias: 0.0,
+                w_in: 0.001,
+                w_out: 0.05,
+            },
         )
         .unwrap();
         assert!(creature.neurons.iter().any(|n| n.uuid == uuid));
-        let pos_new = creature.neurons.iter().position(|n| n.uuid == uuid).unwrap();
-        let pos_out = creature.neurons.iter().position(|n| n.uuid == "o1").unwrap();
+        let pos_new = creature
+            .neurons
+            .iter()
+            .position(|n| n.uuid == uuid)
+            .unwrap();
+        let pos_out = creature
+            .neurons
+            .iter()
+            .position(|n| n.uuid == "o1")
+            .unwrap();
         assert!(pos_new < pos_out);
         compile_creature(&creature).expect("bridged creature must compile");
     }

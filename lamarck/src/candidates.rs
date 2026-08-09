@@ -4,9 +4,9 @@ use crate::backprop::{BackpropConfig, BiasSignal, LearningSignal};
 use crate::focus::{FocusNeuronStats, IncomingSourceStats};
 use crate::observations::ObservationsStatistics;
 use crate::structural::{
-    NEURON_GROWTH_SQUASHES, OLS_WEIGHT_FRACTION, RankedSource, add_neuron_bridge, add_synapse,
-    bridge_squash, growth_squash_at, pick_smart_source, random_uuid_v4, rank_unused_sources,
-    split_incoming_synapse, suggested_weight, suggested_weight_scaled,
+    NEURON_GROWTH_SQUASHES, NeuronBridgeSpec, OLS_WEIGHT_FRACTION, RankedSource, add_neuron_bridge,
+    add_synapse, bridge_squash, growth_squash_at, pick_smart_source, random_uuid_v4,
+    rank_unused_sources, split_incoming_synapse, suggested_weight, suggested_weight_scaled,
 };
 use neat_core::{CreatureExport, creature_to_json_pretty};
 use rand::Rng;
@@ -158,7 +158,8 @@ pub fn generate_candidates(
 
     let has_error =
         ctx.focus_stats.mean_adjusted_error.is_some() || ctx.focus_stats.mean_error.is_some();
-    if has_error && out.len() < count
+    if has_error
+        && out.len() < count
         && let Some(candidate) = build_candidate(ctx, CandidateStrategy::MeanErrorBias, rng)
     {
         out.push(candidate);
@@ -254,19 +255,24 @@ fn build_structural_add_neuron_combo(
 
     let uuid = add_neuron_bridge(
         &mut creature,
-        &a.from_uuid,
-        focus_uuid,
-        new_uuid.clone(),
-        squash,
-        0.0,
-        w_a,
-        w_out,
+        NeuronBridgeSpec {
+            from_uuid: &a.from_uuid,
+            focus_uuid,
+            new_uuid: new_uuid.clone(),
+            squash,
+            bias: 0.0,
+            w_in: w_a,
+            w_out,
+        },
     )
     .ok()?;
 
     // Optional second residual source into the new neuron.
     let mut second = None;
-    if let Some(b) = ranked.get(1).filter(|b| b.score >= MIN_NEURON_BRIDGE_SCORE * 0.5) {
+    if let Some(b) = ranked
+        .get(1)
+        .filter(|b| b.score >= MIN_NEURON_BRIDGE_SCORE * 0.5)
+    {
         let w_b = suggested_weight_scaled(b, ctx.focus_stats, OLS_WEIGHT_FRACTION * 0.5);
         if crate::structural::is_forward_edge(&creature, &b.from_uuid, &uuid) {
             add_synapse(&mut creature, b.from_uuid.clone(), &uuid, w_b);
@@ -321,8 +327,7 @@ fn build_mean_error_bias(
     if step.abs() < backprop.plank_constant {
         return None;
     }
-    let new_bias =
-        (old_bias + step).clamp(-backprop.limit_bias_scale, backprop.limit_bias_scale);
+    let new_bias = (old_bias + step).clamp(-backprop.limit_bias_scale, backprop.limit_bias_scale);
     creature.neurons[neuron_pos].bias = new_bias;
     Some(Candidate {
         creature,
@@ -371,10 +376,8 @@ fn build_candidate(
                 {
                     let old_w = creature.synapses[src.synapse_index].weight;
                     let proposed = w_signal.propose(old_w, backprop, lr);
-                    let delta = (proposed - old_w).clamp(
-                        -MAX_BACKPROP_WEIGHT_DELTA,
-                        MAX_BACKPROP_WEIGHT_DELTA,
-                    );
+                    let delta = (proposed - old_w)
+                        .clamp(-MAX_BACKPROP_WEIGHT_DELTA, MAX_BACKPROP_WEIGHT_DELTA);
                     let new_w = old_w + delta;
                     if (new_w - old_w).abs() < backprop.plank_constant {
                         // Fall through to bias propose.
@@ -518,9 +521,7 @@ fn build_candidate(
             let score = source.score;
             add_synapse(&mut creature, from.clone(), focus_uuid, weight);
             (
-                format!(
-                    "structural add {from} -> {focus_uuid} w={weight} (score={score:.4})"
-                ),
+                format!("structural add {from} -> {focus_uuid} w={weight} (score={score:.4})"),
                 None,
                 Some(weight),
             )
@@ -537,14 +538,8 @@ fn build_candidate(
             let src = pick_best_incoming(ctx.incoming, rng)?;
             let old_w = src.weight;
             let from = src.from_uuid.clone();
-            let uuid = split_incoming_synapse(
-                &mut creature,
-                src,
-                focus_uuid,
-                new_uuid,
-                squash,
-            )
-            .ok()?;
+            let uuid =
+                split_incoming_synapse(&mut creature, src, focus_uuid, new_uuid, squash).ok()?;
             (
                 format!(
                     "structural split-neuron {from} -> {uuid} -> {focus_uuid} \
@@ -909,8 +904,7 @@ mod tests {
             structural_only: false,
         };
         let mut rng = StdRng::seed_from_u64(9);
-        let cand =
-            build_candidate(&ctx, CandidateStrategy::StructuralAddNeuron, &mut rng).unwrap();
+        let cand = build_candidate(&ctx, CandidateStrategy::StructuralAddNeuron, &mut rng).unwrap();
         assert_eq!(
             cand.provenance.strategy,
             CandidateStrategy::StructuralAddNeuron

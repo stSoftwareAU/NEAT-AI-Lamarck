@@ -279,7 +279,11 @@ impl WeightedFocusSelector {
             if reasons.is_empty() {
                 reasons.push("explore".into());
             }
-            ranked.push((n.uuid.clone(), weight.max(FOCUS_EXPLORATION_FLOOR), reasons.join("+")));
+            ranked.push((
+                n.uuid.clone(),
+                weight.max(FOCUS_EXPLORATION_FLOOR),
+                reasons.join("+"),
+            ));
         }
         ranked.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)

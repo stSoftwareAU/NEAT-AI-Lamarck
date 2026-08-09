@@ -232,12 +232,8 @@ pub fn write_promote_batch(
     }
     fs::create_dir_all(promote_dir).map_err(|e| e.to_string())?;
     let baseline_src = source_batch.join("baseline.json");
-    fs::copy(&baseline_src, promote_dir.join("baseline.json")).map_err(|e| {
-        format!(
-            "copy baseline from {} failed: {e}",
-            baseline_src.display()
-        )
-    })?;
+    fs::copy(&baseline_src, promote_dir.join("baseline.json"))
+        .map_err(|e| format!("copy baseline from {} failed: {e}", baseline_src.display()))?;
     for stem in promote_stems {
         let name = format!("{stem}.json");
         let src = source_batch.join(&name);
@@ -440,12 +436,7 @@ mod tests {
         fs::write(src.join("candidate-000.json"), b"{\"a\":1}").unwrap();
         fs::write(src.join("candidate-001.json"), b"{\"b\":2}").unwrap();
         let promote = dir.path().join("promote");
-        write_promote_batch(
-            &promote,
-            &src,
-            &["candidate-001".into()],
-        )
-        .unwrap();
+        write_promote_batch(&promote, &src, &["candidate-001".into()]).unwrap();
         assert!(promote.join("baseline.json").is_file());
         assert!(promote.join("candidate-001.json").is_file());
         assert!(!promote.join("candidate-000.json").exists());

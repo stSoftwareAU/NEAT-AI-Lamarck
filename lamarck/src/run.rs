@@ -10,15 +10,15 @@ use crate::focus::{
     UnsaturatedFocusSelector, WeightedFocusSelector, collect_focus_stats,
     collect_incoming_source_stats,
 };
-use crate::scorer::improvement;
 use crate::learning::accumulate_focus_learning;
 use crate::log;
 use crate::observations::ensure_statistics;
-use crate::structural::{rank_unused_sources, refine_sources_by_residual};
+use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
     screen_promote_stems, select_winner, write_promote_batch,
 };
+use crate::structural::{rank_unused_sources, refine_sources_by_residual};
 use neat_core::{
     TrainingDataConfig, compile_creature, creature_to_json_pretty, parse_creature_json,
 };
@@ -351,9 +351,7 @@ pub fn run_optimisation(
             .join(format!("candidates-exp-{experiments}"));
         write_candidate_batch(&batch_dir, &incumbent, &candidates)?;
 
-        let screen_rate = config
-            .screen_sample_rate
-            .filter(|r| *r > 0.0 && *r < 1.0);
+        let screen_rate = config.screen_sample_rate.filter(|r| *r > 0.0 && *r < 1.0);
         let scorer_start = Instant::now();
         let mut screen_score_map: Option<std::collections::BTreeMap<String, f64>> = None;
         let mut promote_dir: Option<PathBuf> = None;
@@ -438,9 +436,7 @@ pub fn run_optimisation(
                 screen_promote_stems(&screen_scores, config.screen_promote_threshold)
                     .map_err(|e| e.to_string())?;
             if promote_stems.is_empty() {
-                log::detail(
-                    "screen empty: no sample improvers → skipping full-corpus score",
-                );
+                log::detail("screen empty: no sample improvers → skipping full-corpus score");
                 append_journal(
                     &journal_path,
                     &ExperimentRecord {
@@ -475,9 +471,7 @@ pub fn run_optimisation(
                 promote_stems.len(),
                 config.screen_promote_threshold
             ));
-            let pdir = config
-                .output_dir
-                .join(format!("promote-exp-{experiments}"));
+            let pdir = config.output_dir.join(format!("promote-exp-{experiments}"));
             write_promote_batch(&pdir, &batch_dir, &promote_stems)?;
             promote_dir = Some(pdir.clone());
 
@@ -980,7 +974,8 @@ mod tests {
         assert!(result.experiments >= 1);
         assert_eq!(result.acceptances, 0);
         let journal = fs::read_to_string(result.journal_path).unwrap();
-        let first: ExperimentRecord = serde_json::from_str(journal.lines().next().unwrap()).unwrap();
+        let first: ExperimentRecord =
+            serde_json::from_str(journal.lines().next().unwrap()).unwrap();
         assert!(first.screen_scores.is_some());
         assert!(first.scores.is_empty());
         assert!(!first.accepted);
