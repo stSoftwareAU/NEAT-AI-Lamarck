@@ -215,15 +215,10 @@ For the current observation count, a full symmetric correlation matrix is accept
 
 Each optimisation iteration focuses on one non-input neuron.
 
-Version 1 may choose randomly, but selection must sit behind a strategy abstraction so later policies can prefer neurons based on:
-
-- downstream influence;
-- estimated contribution to loss;
-- activation variance/saturation;
-- previous successful/failed attempts;
-- time since last investigation.
-
-Random selection remains useful and should not be removed merely because smarter strategies are added.
+Default policy (`--focus-policy weighted`, issue #25) draws ∝ estimated improvement
+potential (outputs and target scale, incoming degree, recent accepts / near-misses /
+hard fails) with an exploration floor so rare neurons still get tries. Other policies:
+`random`, `unsaturated`, `high-error`. `--focus-neuron` pins a UUID for debug/smoke.
 
 ## Phase 3 — creature-specific analysis
 
@@ -339,18 +334,24 @@ candidates/
     ...
 ```
 
-Invoke NEAT-AI-scorer's existing directory/batch scoring mode against the normal training-data directory:
+Default production path (issue #24):
 
-```text
-rust_scorer <candidates_dir> <training_data_dir>
-```
+1. **Screen** the full candidate directory with
+   `rust_scorer --sample-rate 0.05 …` (≈0.7–1s/creature on GRQ vs ≈11s full).
+   Default batch size is **100** candidates (saturate a ~10-core GRQ box for
+   improvement/hour).
+2. **Promote** only stems with sample Δ `> 1e-6` (same bar as acceptance) so
+   full-corpus time is not spent on sample noise.
+3. **Full-corpus** score baseline + promoted creatures (two-arg scorer form).
 
 Do **not** pass `--gpu` or `--cost`; scorer defaults decide backend and loss.
+Pass `--screen-sample-rate 1` to disable screening.
 
-The incumbent is included in the same batch to avoid comparison against a stale score and to provide an immediate control.
+The incumbent is included in every scored batch to avoid comparison against a stale score.
 
-Acceptance uses the scorer JSON **`score`** field (**larger-is-better**). Never
-accept on `error` alone. A candidate is accepted only when:
+Acceptance uses the scorer JSON **`score`** field (**larger-is-better**) from the
+**full-corpus** promote (or single) score only. Never accept on `error` alone.
+A candidate is accepted only when:
 
 ```text
 candidate.score - baseline.score > 1e-6
