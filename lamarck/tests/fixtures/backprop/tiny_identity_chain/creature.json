@@ -1,0 +1,32 @@
+{
+  "semanticVersion": "4.0.0",
+  "forwardOnly": true,
+  "input": 1,
+  "output": 1,
+  "neurons": [
+    {
+      "type": "hidden",
+      "uuid": "h1",
+      "bias": 0.0,
+      "squash": "IDENTITY"
+    },
+    {
+      "type": "output",
+      "uuid": "o1",
+      "bias": 0.0,
+      "squash": "IDENTITY"
+    }
+  ],
+  "synapses": [
+    {
+      "fromUUID": "input-0",
+      "toUUID": "h1",
+      "weight": 1.0
+    },
+    {
+      "fromUUID": "h1",
+      "toUUID": "o1",
+      "weight": 1.0
+    }
+  ]
+}

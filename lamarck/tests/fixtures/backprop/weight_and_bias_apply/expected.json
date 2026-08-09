@@ -1,0 +1,30 @@
+{
+  "biasCounts": [
+    1.0,
+    1.0
+  ],
+  "biasTotals": [
+    1.0,
+    1.0
+  ],
+  "weightCounts": [
+    1.0,
+    1.0
+  ],
+  "proposedBiases": [
+    0.005,
+    0.005
+  ],
+  "proposedWeights": [
+    1.005,
+    1.005
+  ],
+  "appliedBiases": [
+    0.005,
+    0.005
+  ],
+  "appliedWeights": [
+    1.005,
+    1.005
+  ]
+}

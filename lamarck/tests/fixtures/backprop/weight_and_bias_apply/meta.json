@@ -1,0 +1,18 @@
+{
+  "name": "weight_and_bias_apply",
+  "seed": 1,
+  "maxRecords": 1,
+  "config": {
+    "sparseRatio": 1.0,
+    "generations": 1.0,
+    "learningRate": 0.01
+  },
+  "records": [
+    {
+      "x": 1.0,
+      "y": [
+        2.0
+      ]
+    }
+  ]
+}

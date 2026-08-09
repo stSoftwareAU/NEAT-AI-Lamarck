@@ -19,6 +19,7 @@ use crate::scorer::{
     screen_promote_stems, select_winner, write_promote_batch,
 };
 use crate::structural::{rank_unused_sources, refine_sources_by_residual};
+use crate::tags::{CreatureMeta, LamarckProgress, serialize_creature_with_meta};
 use neat_core::{
     TrainingDataConfig, compile_creature, creature_to_json_pretty, parse_creature_json,
 };
@@ -101,6 +102,8 @@ pub fn run_optimisation(
 
     let original_text = fs::read_to_string(&config.creature).map_err(|e| e.to_string())?;
     let mut incumbent = parse_creature_json(&original_text).map_err(|e| e.to_string())?;
+    // Tags/uuid are stripped by CreatureExport — keep them for check-in writes.
+    let mut creature_meta = CreatureMeta::from_creature_json(&original_text);
     // Never modify the supplied file — work from in-memory / output copies.
     fs::write(&best_path, &original_text).map_err(|e| e.to_string())?;
 
@@ -143,6 +146,8 @@ pub fn run_optimisation(
                     ));
                 }
                 opening_baseline_score = Some(baseline.score);
+                creature_meta.upsert("score", format!("{}", baseline.score));
+                creature_meta.upsert("error", format!("{}", baseline.error));
                 log::ok(&format!(
                     "Phase-0 baseline score={:.12} error={:.12}",
                     baseline.score, baseline.error
@@ -292,19 +297,30 @@ pub fn run_optimisation(
         )?;
         log::detail(&format!("incoming sources: {}", incoming.len()));
 
-        log::detail("accumulating focus learning signal...");
+        log::detail("accumulating creature learning signal (propagate_topological_loop)...");
         let learn_start = Instant::now();
+        // Deterministic sparse draw: mix run seed with experiment index.
+        let mut learn_rng = StdRng::seed_from_u64(
+            config
+                .seed
+                .unwrap_or(0)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(experiments),
+        );
         let learning = accumulate_focus_learning(
             &incumbent,
             &mut network,
             &config.training_data,
             &focus,
             focus_sample_limit,
+            &backprop,
+            &mut learn_rng,
         )?;
         log::ok(&format!(
-            "learning signal in {}ms (bias_count={:.0})",
+            "learning signal in {}ms (bias_count={:.0}, weight_count={:.0})",
             learn_start.elapsed().as_millis(),
-            learning.biases.iter().map(|b| b.count).sum::<f64>()
+            learning.biases.iter().map(|b| b.count).sum::<f64>(),
+            learning.weights.iter().map(|w| w.count).sum::<f64>()
         ));
 
         let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
@@ -349,7 +365,7 @@ pub fn run_optimisation(
         let batch_dir = config
             .output_dir
             .join(format!("candidates-exp-{experiments}"));
-        write_candidate_batch(&batch_dir, &incumbent, &candidates)?;
+        write_candidate_batch(&batch_dir, &incumbent, &candidates, Some(&creature_meta))?;
 
         let screen_rate = config.screen_sample_rate.filter(|r| *r > 0.0 && *r < 1.0);
         let scorer_start = Instant::now();
@@ -618,8 +634,13 @@ pub fn run_optimisation(
                     "accepting on full-corpus scorer (analysis used a quick sample; directions may differ)",
                 );
             }
+            let strategy = stem
+                .strip_prefix("candidate-")
+                .and_then(|idx| idx.parse::<usize>().ok())
+                .and_then(|i| candidates.get(i).map(|c| c.provenance.strategy))
+                .unwrap_or(crate::candidates::CandidateStrategy::Random);
             log::ok(&format!(
-                "accepted {stem}: score={} (+{delta:.3e})",
+                "🏆 accepted {stem}: score={} (+{delta:.3e})",
                 result.score
             ));
             // Winner JSON lives in the promote dir when two-phase, else the batch dir.
@@ -629,11 +650,30 @@ pub fn run_optimisation(
                 .join(format!("{stem}.json"));
             let winner_json = fs::read_to_string(&winner_path).map_err(|e| e.to_string())?;
             incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
-            fs::write(&best_path, &winner_json).map_err(|e| e.to_string())?;
+            creature_meta.stamp_acceptance(&LamarckProgress {
+                accept_number: acceptances + 1,
+                score: result.score,
+                error: result.error,
+                delta,
+                focus_neuron: &focus,
+                strategy,
+                experiments,
+            });
+            let tagged = serialize_creature_with_meta(&incumbent, &creature_meta)?;
+            log::detail(&format!(
+                "🏷️  {}",
+                creature_meta
+                    .tags
+                    .iter()
+                    .find(|t| t.name == "lamarck")
+                    .map(|t| t.value.as_str())
+                    .unwrap_or("(no lamarck tag)")
+            ));
+            fs::write(&best_path, &tagged).map_err(|e| e.to_string())?;
             fs::create_dir_all(&winners_dir).map_err(|e| e.to_string())?;
             fs::write(
                 winners_dir.join(format!("winner-{experiments:04}.json")),
-                &winner_json,
+                &tagged,
             )
             .map_err(|e| e.to_string())?;
             best_score = result.score;

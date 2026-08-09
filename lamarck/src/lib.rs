@@ -12,20 +12,25 @@ pub mod focus;
 pub mod learning;
 pub mod log;
 pub mod observations;
+pub mod propagate_layout;
 pub mod report;
 pub mod run;
 pub mod scorer;
 pub mod structural;
+pub mod tags;
 
+pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
 pub use config::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES, DEFAULT_MIN_IMPROVEMENT,
     DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
     LamarckConfig,
 };
 pub use focus::{FocusChoice, FocusPolicy, WeightedFocusSelector};
+pub use propagate_layout::{PropagateLayout, accumulate_creature_learning};
 pub use report::{JournalReport, print_run_summary, report_from_journal};
 pub use run::{ExperimentRecord, RunResult, run_optimisation};
 pub use scorer::{
     ExternalScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats,
     screen_promote_stems, write_promote_batch,
 };
+pub use tags::{CreatureMeta, CreatureTag, LamarckProgress, serialize_creature_with_meta};

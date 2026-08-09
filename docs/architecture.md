@@ -9,7 +9,8 @@ NEAT-AI-Lamarck is intentionally a small orchestration/analysis layer around exi
 - build/load `observations.statistics`;
 - select a focus neuron;
 - collect incumbent-specific neuron statistics;
-- expose/port conventional backpropagation learning signals;
+- accumulate conventional backprop learning signals via neat-core
+  `propagate_topological_loop` (analyse-without-apply);
 - generate candidate creatures;
 - invoke authoritative batch scoring;
 - accept only verified improvements;
