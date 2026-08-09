@@ -104,14 +104,16 @@ pub fn select_highest_signal(signals: &HashMap<String, f64>) -> Option<FocusChoi
 /// Focus-policy name for CLI / config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPolicy {
-    /// Weighted-random by improvement signal (issue #25).
+    /// Weighted-random by influence on creature error (issue #25).
     ///
-    /// Default. Neurons are ranked by residual MAE (outputs) or |backprop blame|
-    /// (hidden). Neurons with ~zero signal are **never** selected — you cannot
-    /// improve on zero error. Opt into uninformed exploration with `random`.
+    /// Default. Draw ∝ error-influence mass: output residual L1, or hidden
+    /// `|total adjusted-bias blame|` decayed by synapse distance to the nearest
+    /// output (deep/diluted neurons rarely win the lottery). Outputs are usually
+    /// strongest but not chosen every time. Zero-signal neurons are never
+    /// selected. Prefer this over `high-error`, which sticks on one neuron.
     #[default]
     Weighted,
-    /// Pick the single highest-signal neuron (usually the worst output head).
+    /// Always pick the single highest-influence neuron (debug / A/B only).
     HighError,
     /// Random non-input each experiment (may pick zero-signal neurons).
     Random,
@@ -171,6 +173,13 @@ pub const FOCUS_EXPLORATION_FLOOR: f64 = 0.01;
 /// high-error policies (you cannot improve on zero error / blame).
 pub const FOCUS_SIGNAL_EPS: f64 = 1e-12;
 
+/// Per-hop decay when converting hidden blame mass → error influence.
+///
+/// A neuron `d` synapses upstream of the nearest output keeps roughly
+/// `FOCUS_DEPTH_DECAY^d` of its raw blame mass. Deep, diluted units therefore
+/// lose the lottery to heads closer to the residual.
+pub const FOCUS_DEPTH_DECAY: f64 = 0.5;
+
 /// Weighted-random focus by improvement potential (issue #25).
 #[derive(Debug, Default, Clone)]
 pub struct WeightedFocusSelector {
@@ -201,6 +210,10 @@ impl WeightedFocusSelector {
             if delta > 0.0 && delta <= min_improvement {
                 entry.near_misses = entry.near_misses.saturating_add(1);
             } else if delta < -1e-4 {
+                entry.hard_fails = entry.hard_fails.saturating_add(1);
+            } else if delta <= 0.0 {
+                // Screen-empty / no positive promote Δ — treat as a soft fail so
+                // weighted focus does not stick on the same sterile neuron.
                 entry.hard_fails = entry.hard_fails.saturating_add(1);
             }
         }
@@ -267,7 +280,7 @@ impl WeightedFocusSelector {
             if n.neuron_type == "output" {
                 reasons.push("output".into());
             } else {
-                reasons.push("hidden_blame".into());
+                reasons.push("influence".into());
             }
 
             if let Some(h) = hist {
@@ -301,13 +314,24 @@ impl WeightedFocusSelector {
     }
 }
 
-/// Mean absolute residual per output UUID over a training sample.
+/// Per-output residual summary over a training sample.
+#[derive(Debug, Clone, Default)]
+pub struct OutputErrorInfluence {
+    /// Mean absolute residual (MAE).
+    pub mean_abs_error: f64,
+    /// Total L1 residual mass `sum |target − pred|` (influence on creature error).
+    pub abs_error_mass: f64,
+    /// Records contributing to the sums.
+    pub record_count: u64,
+}
+
+/// Collect per-output MAE and total L1 residual mass over a training sample.
 pub fn collect_output_mean_abs_errors(
     creature: &CreatureExport,
     network: &mut CompiledNetwork,
     training_data: &Path,
     max_records: Option<u64>,
-) -> Result<HashMap<String, f64>, String> {
+) -> Result<HashMap<String, OutputErrorInfluence>, String> {
     let outputs: Vec<(usize, String)> = creature
         .neurons
         .iter()
@@ -347,41 +371,104 @@ pub fn collect_output_mean_abs_errors(
         return Ok(map);
     }
     for (out_i, uuid) in outputs {
-        map.insert(uuid, abs_sums[out_i] / count as f64);
+        let mass = abs_sums[out_i];
+        map.insert(
+            uuid,
+            OutputErrorInfluence {
+                mean_abs_error: mass / count as f64,
+                abs_error_mass: mass,
+                record_count: count,
+            },
+        );
     }
     Ok(map)
 }
 
-/// Build per-neuron improvement signals used by weighted / high-error focus.
+/// Shortest synapse-path length from each non-input neuron to any output.
 ///
-/// - Outputs: mean absolute residual (MAE). Zero MAE ⇒ omitted.
-/// - Hidden: `|mean adjusted bias blame|` when `count > 0`. Zero blame ⇒ omitted.
+/// Outputs are distance `0`. Unreachable neurons are omitted.
+pub fn distance_to_nearest_output(creature: &CreatureExport) -> HashMap<String, usize> {
+    let mut reverse: HashMap<&str, Vec<&str>> = HashMap::new();
+    for s in &creature.synapses {
+        reverse
+            .entry(s.to_uuid.as_str())
+            .or_default()
+            .push(s.from_uuid.as_str());
+    }
+    let mut dist: HashMap<String, usize> = HashMap::new();
+    let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
+    for n in &creature.neurons {
+        if n.neuron_type == "output" {
+            dist.insert(n.uuid.clone(), 0);
+            queue.push_back((n.uuid.clone(), 0));
+        }
+    }
+    while let Some((uuid, d)) = queue.pop_front() {
+        let Some(sources) = reverse.get(uuid.as_str()) else {
+            continue;
+        };
+        for &src in sources {
+            if src.starts_with("input-") {
+                continue;
+            }
+            let next = d + 1;
+            match dist.get(src) {
+                Some(&existing) if existing <= next => {}
+                _ => {
+                    dist.insert(src.to_string(), next);
+                    queue.push_back((src.to_string(), next));
+                }
+            }
+        }
+    }
+    dist
+}
+
+/// Build per-neuron error-influence signals for weighted / high-error focus.
+///
+/// - Outputs: total L1 residual mass (`sum |error|`). Zero ⇒ omitted.
+/// - Hidden: `|total adjusted-bias blame| × FOCUS_DEPTH_DECAY^depth`, where
+///   `depth` is the shortest synapse distance to an output. Mean blame alone
+///   is **not** used — a deep saturated unit with a huge local mean can have
+///   almost no leverage on creature error. `no_change` biases are omitted.
 pub fn build_improvement_signals(
     creature: &CreatureExport,
-    output_mae: &HashMap<String, f64>,
+    output_errors: &HashMap<String, OutputErrorInfluence>,
     learning: &LearningSignal,
 ) -> HashMap<String, f64> {
+    let depth = distance_to_nearest_output(creature);
     let mut signals = HashMap::new();
     for (i, n) in creature.neurons.iter().enumerate() {
         if n.neuron_type == "input" {
             continue;
         }
         if n.neuron_type == "output" {
-            let mae = output_mae.get(&n.uuid).copied().unwrap_or(0.0);
-            if mae > FOCUS_SIGNAL_EPS {
-                signals.insert(n.uuid.clone(), mae);
+            let Some(err) = output_errors.get(&n.uuid) else {
+                continue;
+            };
+            if err.abs_error_mass > FOCUS_SIGNAL_EPS {
+                signals.insert(n.uuid.clone(), err.abs_error_mass);
             }
             continue;
         }
         let Some(sig) = learning.biases.get(i) else {
             continue;
         };
-        if sig.count <= 0.0 {
+        if sig.count <= 0.0 || sig.no_change {
             continue;
         }
-        let mean_abs = (sig.total_adjusted_bias / sig.count).abs();
-        if mean_abs > FOCUS_SIGNAL_EPS {
-            signals.insert(n.uuid.clone(), mean_abs);
+        let blame_mass = sig.total_adjusted_bias.abs();
+        if !blame_mass.is_finite() || blame_mass <= FOCUS_SIGNAL_EPS {
+            continue;
+        }
+        let hops = depth.get(&n.uuid).copied().unwrap_or(usize::MAX);
+        if hops == usize::MAX {
+            continue;
+        }
+        let decay = FOCUS_DEPTH_DECAY.powi(hops as i32);
+        let influence = blame_mass * decay;
+        if influence > FOCUS_SIGNAL_EPS {
+            signals.insert(n.uuid.clone(), influence);
         }
     }
     signals
@@ -1030,11 +1117,78 @@ mod tests {
     #[test]
     fn build_improvement_signals_omits_zero_mae_outputs() {
         let creature = parse_creature_json(TINY).unwrap();
-        let mae = HashMap::from([("o1".into(), 0.0)]);
+        let errs = HashMap::from([(
+            "o1".into(),
+            OutputErrorInfluence {
+                mean_abs_error: 0.0,
+                abs_error_mass: 0.0,
+                record_count: 10,
+            },
+        )]);
         let learning = LearningSignal::new(creature.neurons.len(), creature.synapses.len());
-        let signals = build_improvement_signals(&creature, &mae, &learning);
+        let signals = build_improvement_signals(&creature, &errs, &learning);
         assert!(!signals.contains_key("o1"));
         assert!(!signals.contains_key("h1"));
+    }
+
+    #[test]
+    fn error_influence_prefers_output_mass_over_deep_mean_blame() {
+        // output <- h1 <- h2  (h2 is two hops from the residual)
+        let deep = r#"{
+          "semanticVersion": "4.0.0",
+          "forwardOnly": true,
+          "input": 1,
+          "output": 1,
+          "neurons": [
+            {"type":"hidden","uuid":"h2","bias":0.0,"squash":"IDENTITY"},
+            {"type":"hidden","uuid":"h1","bias":0.0,"squash":"IDENTITY"},
+            {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+          ],
+          "synapses": [
+            {"fromUUID":"input-0","toUUID":"h2","weight":1.0},
+            {"fromUUID":"h2","toUUID":"h1","weight":1.0},
+            {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+          ]
+        }"#;
+        let creature = parse_creature_json(deep).unwrap();
+        let dist = distance_to_nearest_output(&creature);
+        assert_eq!(dist.get("o1"), Some(&0));
+        assert_eq!(dist.get("h1"), Some(&1));
+        assert_eq!(dist.get("h2"), Some(&2));
+
+        let mut learning = LearningSignal::new(creature.neurons.len(), creature.synapses.len());
+        // Huge local mean blame on deep h2, tiny total mass; modest mass on h1.
+        let h2 = creature
+            .neurons
+            .iter()
+            .position(|n| n.uuid == "h2")
+            .unwrap();
+        let h1 = creature
+            .neurons
+            .iter()
+            .position(|n| n.uuid == "h1")
+            .unwrap();
+        learning.biases[h2].count = 10.0;
+        learning.biases[h2].total_adjusted_bias = -160.0; // mean 16, mass 160
+        learning.biases[h1].count = 100.0;
+        learning.biases[h1].total_adjusted_bias = -50.0; // mean 0.5, mass 50
+
+        let errs = HashMap::from([(
+            "o1".into(),
+            OutputErrorInfluence {
+                mean_abs_error: 0.65,
+                abs_error_mass: 16_250.0, // 0.65 × 25000
+                record_count: 25_000,
+            },
+        )]);
+        let signals = build_improvement_signals(&creature, &errs, &learning);
+        let o = *signals.get("o1").unwrap();
+        let s_h1 = *signals.get("h1").unwrap();
+        let s_h2 = *signals.get("h2").unwrap();
+        // Depth decay: h2 mass 160 × 0.25 = 40; h1 mass 50 × 0.5 = 25.
+        assert!((s_h2 - 40.0).abs() < 1e-9, "h2 influence={s_h2}");
+        assert!((s_h1 - 25.0).abs() < 1e-9, "h1 influence={s_h1}");
+        assert!(o > s_h2 && o > s_h1, "output residual mass should dominate");
     }
 
     #[test]

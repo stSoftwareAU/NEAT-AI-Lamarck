@@ -36,8 +36,9 @@ Lamarck must not duplicate this authority.
 1. Start from the supplied incumbent.
 2. Verify baseline score/parity.
 3. Accumulate learning + output residuals, then select one focus neuron
-   (default: `weighted` by improvement signal; zero-error / zero-blame neurons
-   are excluded).
+   (default: `weighted` random by error-influence mass — output residual L1 and
+   depth-decayed hidden blame; zero-signal neurons excluded). Prefer this over
+   `high-error`, which sticks on a single neuron.
 4. Scan/measure the chosen focus on the incumbent.
 5. Generate ~100 candidates (default; keep the scorer CPU-saturated) from backpropagation, statistical, structural and random strategies.
 6. **Screen** on a cheap scorer subsample (default 5% of rows); promote only sample Δ `> 1e-6`.
