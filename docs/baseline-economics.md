@@ -24,7 +24,7 @@ This is an **interim** medium-run baseline (≈15 minutes, 40 candidates). It is
 | `--quick` / sample | **25000** | full observations (no `--quick`) |
 | `--screen-sample-rate` | 0.05 | 0.05 |
 | `--screen-promote-threshold` | 1e-6 | 1e-6 |
-| `--focus-policy` | weighted (then default) | **high-error** (current default) |
+| `--focus-policy` | weighted (then high-error) | **weighted** by residual/blame (zeros excluded) |
 | Phase-0 parity | **on** (passed) | on |
 
 Command shape:

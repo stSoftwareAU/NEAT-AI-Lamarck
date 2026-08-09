@@ -70,8 +70,10 @@ struct Cli {
     #[arg(long)]
     focus_neuron: Option<String>,
 
-    /// Focus selection policy: high-error (default) | weighted | random | unsaturated.
-    #[arg(long, default_value = "high-error")]
+    /// Focus selection policy: weighted (default) | high-error | random | unsaturated.
+    ///
+    /// Weighted / high-error never select neurons with ~zero residual or blame.
+    #[arg(long, default_value = "weighted")]
     focus_policy: String,
 
     /// Compute expensive input×input correlations in observations.
@@ -136,7 +138,7 @@ fn main() -> ExitCode {
 
     let focus_policy = FocusPolicy::parse(&cli.focus_policy).unwrap_or_else(|| {
         eprintln!(
-            "unknown --focus-policy '{}'; expected high-error|weighted|random|unsaturated",
+            "unknown --focus-policy '{}'; expected weighted|high-error|random|unsaturated",
             cli.focus_policy
         );
         std::process::exit(2);

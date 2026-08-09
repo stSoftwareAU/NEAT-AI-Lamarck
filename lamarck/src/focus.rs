@@ -2,11 +2,11 @@
 
 use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::learning::squash_derivative;
-use crate::observations::ObservationsStatistics;
 use neat_core::{CompiledNetwork, CreatureExport, TrainingDataConfig, TrainingDataIterator};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Strategy for choosing which non-input neuron to investigate.
 pub trait FocusSelector {
@@ -71,7 +71,7 @@ impl FocusSelector for UnsaturatedFocusSelector {
     }
 }
 
-/// Prefer the first output neuron when present (high-error proxy before a scan).
+/// Prefer the first output neuron when present (fallback when no signals yet).
 #[derive(Debug, Default, Clone)]
 pub struct HighErrorFocusSelector;
 
@@ -84,19 +84,36 @@ impl FocusSelector for HighErrorFocusSelector {
     }
 }
 
+/// Pick the neuron with the largest improvement signal (high-error policy).
+pub fn select_highest_signal(signals: &HashMap<String, f64>) -> Option<FocusChoice> {
+    signals
+        .iter()
+        .filter(|(_, s)| **s > FOCUS_SIGNAL_EPS)
+        .max_by(|a, b| {
+            a.1.partial_cmp(b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(b.0))
+        })
+        .map(|(uuid, signal)| FocusChoice {
+            uuid: uuid.clone(),
+            weight: *signal,
+            reason: format!("highest_signal={signal:.6e}"),
+        })
+}
+
 /// Focus-policy name for CLI / config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPolicy {
-    /// Prefer first output neuron (error-bearing head).
+    /// Weighted-random by improvement signal (issue #25).
     ///
-    /// Default: only outputs have training targets, so residual / mean-error
-    /// candidates need an output focus. Hidden exploration remains available
-    /// via `--focus-policy weighted|random`.
+    /// Default. Neurons are ranked by residual MAE (outputs) or |backprop blame|
+    /// (hidden). Neurons with ~zero signal are **never** selected — you cannot
+    /// improve on zero error. Opt into uninformed exploration with `random`.
     #[default]
-    HighError,
-    /// Weighted-random by estimated improvement potential (issue #25).
     Weighted,
-    /// Random non-input each experiment.
+    /// Pick the single highest-signal neuron (usually the worst output head).
+    HighError,
+    /// Random non-input each experiment (may pick zero-signal neurons).
     Random,
     /// Prefer outputs (unsaturated / direct heads).
     Unsaturated,
@@ -147,8 +164,12 @@ pub struct FocusChoice {
     pub reason: String,
 }
 
-/// Minimum weight so every eligible neuron retains a non-zero draw chance.
-pub const FOCUS_EXPLORATION_FLOOR: f64 = 1.0;
+/// Minimum weight among neurons that already cleared the signal gate.
+pub const FOCUS_EXPLORATION_FLOOR: f64 = 0.01;
+
+/// Signals at or below this are treated as zero — never selected by weighted /
+/// high-error policies (you cannot improve on zero error / blame).
+pub const FOCUS_SIGNAL_EPS: f64 = 1e-12;
 
 /// Weighted-random focus by improvement potential (issue #25).
 #[derive(Debug, Default, Clone)]
@@ -185,14 +206,14 @@ impl WeightedFocusSelector {
         }
     }
 
-    /// Draw a focus neuron ∝ weight, with exploration floor.
+    /// Draw a focus neuron ∝ improvement signal (zeros never enter the pool).
     pub fn select_weighted(
         &self,
         creature: &CreatureExport,
-        observations: Option<&ObservationsStatistics>,
+        signals: &HashMap<String, f64>,
         rng: &mut impl Rng,
     ) -> Option<FocusChoice> {
-        let ranked = self.rank_candidates(creature, observations);
+        let ranked = self.rank_candidates(creature, signals);
         if ranked.is_empty() {
             return None;
         }
@@ -219,50 +240,34 @@ impl WeightedFocusSelector {
         })
     }
 
-    /// Compute (uuid, weight, reason) for every eligible non-input neuron.
+    /// Rank non-input neurons that have a non-zero improvement signal.
+    ///
+    /// Neurons with signal ≤ [`FOCUS_SIGNAL_EPS`] are omitted entirely — they
+    /// cannot improve (zero residual / zero blame).
     pub fn rank_candidates(
         &self,
         creature: &CreatureExport,
-        observations: Option<&ObservationsStatistics>,
+        signals: &HashMap<String, f64>,
     ) -> Vec<(String, f64, String)> {
-        let incoming_counts = incoming_counts(creature);
-        let output_index: HashMap<&str, usize> = creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type == "output")
-            .enumerate()
-            .map(|(i, n)| (n.uuid.as_str(), i))
-            .collect();
-
-        let mut ranked = Vec::with_capacity(creature.neurons.len());
+        let mut ranked = Vec::with_capacity(signals.len());
         for n in &creature.neurons {
             if n.neuron_type == "input" {
                 continue;
             }
-            let hist = self.history.get(&n.uuid);
-            let incoming = *incoming_counts.get(&n.uuid).unwrap_or(&0);
-            let mut weight = FOCUS_EXPLORATION_FLOOR;
-            let mut reasons = Vec::new();
+            let Some(&signal) = signals.get(&n.uuid) else {
+                continue;
+            };
+            if !(signal > FOCUS_SIGNAL_EPS) {
+                continue;
+            }
 
+            let hist = self.history.get(&n.uuid);
+            let mut weight = FOCUS_EXPLORATION_FLOOR + 50.0 * signal;
+            let mut reasons = vec![format!("signal={signal:.6e}")];
             if n.neuron_type == "output" {
-                weight += 20.0;
                 reasons.push("output".into());
-                if let Some(obs) = observations
-                    && let Some(&out_i) = output_index.get(n.uuid.as_str())
-                    && let Some(stats) = obs.outputs.get(out_i)
-                {
-                    // Harder targets → more room for focus work.
-                    let signal = stats.mean_abs.max(stats.std_dev).max(0.0);
-                    let bump = 10.0 * signal.min(5.0);
-                    weight += bump;
-                    reasons.push(format!("target_scale={signal:.3}"));
-                }
             } else {
-                let deg = (incoming as f64).min(40.0);
-                weight += 0.05 * deg;
-                if incoming > 0 {
-                    reasons.push(format!("in={incoming}"));
-                }
+                reasons.push("hidden_blame".into());
             }
 
             if let Some(h) = hist {
@@ -281,9 +286,6 @@ impl WeightedFocusSelector {
                 }
             }
 
-            if reasons.is_empty() {
-                reasons.push("explore".into());
-            }
             ranked.push((
                 n.uuid.clone(),
                 weight.max(FOCUS_EXPLORATION_FLOOR),
@@ -299,12 +301,90 @@ impl WeightedFocusSelector {
     }
 }
 
-fn incoming_counts(creature: &CreatureExport) -> HashMap<String, usize> {
-    let mut map = HashMap::new();
-    for s in &creature.synapses {
-        *map.entry(s.to_uuid.clone()).or_default() += 1;
+/// Mean absolute residual per output UUID over a training sample.
+pub fn collect_output_mean_abs_errors(
+    creature: &CreatureExport,
+    network: &mut CompiledNetwork,
+    training_data: &Path,
+    max_records: Option<u64>,
+) -> Result<HashMap<String, f64>, String> {
+    let outputs: Vec<(usize, String)> = creature
+        .neurons
+        .iter()
+        .filter(|n| n.neuron_type == "output")
+        .enumerate()
+        .map(|(i, n)| (i, n.uuid.clone()))
+        .collect();
+    if outputs.is_empty() {
+        return Ok(HashMap::new());
     }
-    map
+
+    let config = TrainingDataConfig::new(creature.input, creature.output);
+    let mut iter = TrainingDataIterator::new(training_data, config).map_err(|e| e.to_string())?;
+    let mut abs_sums = vec![0.0f64; outputs.len()];
+    let mut count = 0u64;
+
+    while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
+        if let Some(limit) = max_records
+            && count >= limit
+        {
+            break;
+        }
+        let preds = network.activate(&record.inputs, creature.output);
+        count += 1;
+        for (out_i, _) in &outputs {
+            if *out_i >= record.outputs.len() || *out_i >= preds.len() {
+                continue;
+            }
+            let pred = f64::from(preds[*out_i]);
+            let target = f64::from(record.outputs[*out_i]);
+            abs_sums[*out_i] += (target - pred).abs();
+        }
+    }
+
+    let mut map = HashMap::with_capacity(outputs.len());
+    if count == 0 {
+        return Ok(map);
+    }
+    for (out_i, uuid) in outputs {
+        map.insert(uuid, abs_sums[out_i] / count as f64);
+    }
+    Ok(map)
+}
+
+/// Build per-neuron improvement signals used by weighted / high-error focus.
+///
+/// - Outputs: mean absolute residual (MAE). Zero MAE ⇒ omitted.
+/// - Hidden: `|mean adjusted bias blame|` when `count > 0`. Zero blame ⇒ omitted.
+pub fn build_improvement_signals(
+    creature: &CreatureExport,
+    output_mae: &HashMap<String, f64>,
+    learning: &LearningSignal,
+) -> HashMap<String, f64> {
+    let mut signals = HashMap::new();
+    for (i, n) in creature.neurons.iter().enumerate() {
+        if n.neuron_type == "input" {
+            continue;
+        }
+        if n.neuron_type == "output" {
+            let mae = output_mae.get(&n.uuid).copied().unwrap_or(0.0);
+            if mae > FOCUS_SIGNAL_EPS {
+                signals.insert(n.uuid.clone(), mae);
+            }
+            continue;
+        }
+        let Some(sig) = learning.biases.get(i) else {
+            continue;
+        };
+        if sig.count <= 0.0 {
+            continue;
+        }
+        let mean_abs = (sig.total_adjusted_bias / sig.count).abs();
+        if mean_abs > FOCUS_SIGNAL_EPS {
+            signals.insert(n.uuid.clone(), mean_abs);
+        }
+    }
+    signals
 }
 
 /// Per-incoming-synapse source statistics for the focus neuron.
@@ -874,44 +954,80 @@ mod tests {
         assert!(selector.select(&creature, &mut rng).is_none());
     }
 
+    fn sample_signals() -> HashMap<String, f64> {
+        HashMap::from([("o1".into(), 0.5), ("h1".into(), 0.1)])
+    }
+
     #[test]
     fn weighted_focus_is_deterministic_with_seed() {
         let creature = parse_creature_json(TINY).unwrap();
         let sel = WeightedFocusSelector::default();
+        let signals = sample_signals();
         let mut rng_a = StdRng::seed_from_u64(11);
         let mut rng_b = StdRng::seed_from_u64(11);
-        let a = sel.select_weighted(&creature, None, &mut rng_a).unwrap();
-        let b = sel.select_weighted(&creature, None, &mut rng_b).unwrap();
+        let a = sel
+            .select_weighted(&creature, &signals, &mut rng_a)
+            .unwrap();
+        let b = sel
+            .select_weighted(&creature, &signals, &mut rng_b)
+            .unwrap();
         assert_eq!(a.uuid, b.uuid);
         assert!((a.weight - b.weight).abs() < 1e-12);
     }
 
     #[test]
-    fn weighted_focus_keeps_exploration_floor() {
+    fn weighted_focus_skips_zero_signal_neurons() {
         let creature = parse_creature_json(TINY).unwrap();
         let sel = WeightedFocusSelector::default();
-        let ranked = sel.rank_candidates(&creature, None);
-        assert!(ranked.iter().all(|(_, w, _)| *w >= FOCUS_EXPLORATION_FLOOR));
-        // Output should outrank a plain hidden with no history.
-        let w_out = ranked.iter().find(|(u, _, _)| u == "o1").unwrap().1;
-        let w_h = ranked.iter().find(|(u, _, _)| u == "h1").unwrap().1;
-        assert!(w_out > w_h);
+        // Only o1 has error; h1 is perfect / unblamed → never ranked.
+        let signals = HashMap::from([("o1".into(), 0.4), ("h1".into(), 0.0)]);
+        let ranked = sel.rank_candidates(&creature, &signals);
+        assert!(ranked.iter().all(|(u, w, _)| u == "o1" && *w >= FOCUS_EXPLORATION_FLOOR));
+        assert!(sel.select_weighted(&creature, &signals, &mut StdRng::seed_from_u64(1))
+            .unwrap()
+            .uuid
+            == "o1");
+        assert!(sel
+            .rank_candidates(&creature, &HashMap::from([("h1".into(), 0.0)]))
+            .is_empty());
     }
 
     #[test]
     fn weighted_focus_history_boosts_accepts() {
         let creature = parse_creature_json(TINY).unwrap();
+        let signals = sample_signals();
         let mut sel = WeightedFocusSelector::default();
         sel.record_outcome("h1", true, Some(2e-6), false, 1e-6);
-        let ranked = sel.rank_candidates(&creature, None);
+        let ranked = sel.rank_candidates(&creature, &signals);
         let w_h = ranked.iter().find(|(u, _, _)| u == "h1").unwrap().1;
         let base = WeightedFocusSelector::default()
-            .rank_candidates(&creature, None)
+            .rank_candidates(&creature, &signals)
             .iter()
             .find(|(u, _, _)| u == "h1")
             .unwrap()
             .1;
         assert!(w_h > base);
+    }
+
+    #[test]
+    fn highest_signal_picks_worst_output() {
+        let signals = HashMap::from([
+            ("o-good".into(), 1e-15),
+            ("o-bad".into(), 0.8),
+            ("h1".into(), 0.05),
+        ]);
+        let choice = select_highest_signal(&signals).unwrap();
+        assert_eq!(choice.uuid, "o-bad");
+    }
+
+    #[test]
+    fn build_improvement_signals_omits_zero_mae_outputs() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let mae = HashMap::from([("o1".into(), 0.0)]);
+        let learning = LearningSignal::new(creature.neurons.len(), creature.synapses.len());
+        let signals = build_improvement_signals(&creature, &mae, &learning);
+        assert!(!signals.contains_key("o1"));
+        assert!(!signals.contains_key("h1"));
     }
 
     #[test]

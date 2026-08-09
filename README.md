@@ -219,10 +219,11 @@ For the current observation count, a full symmetric correlation matrix is accept
 
 Each optimisation iteration focuses on one non-input neuron.
 
-Default policy (`--focus-policy high-error`) focuses an **output** neuron so residual /
-mean-error candidates have a real training target. Use `--focus-policy weighted`
-(issue #25) for exploration across hidden neurons (improvement potential × history).
-Other policies: `random`, `unsaturated`. `--focus-neuron` pins a UUID for debug/smoke.
+Default policy (`--focus-policy weighted`, issue #25) ranks neurons by improvement
+chance: output residual MAE, or hidden `|backprop blame|`. Neurons with ~zero
+signal are never selected (you cannot improve on zero error). `high-error` always
+picks the single worst signal; `random` / `unsaturated` remain available.
+`--focus-neuron` pins a UUID for debug/smoke.
 
 ## Phase 3 — creature-specific analysis
 

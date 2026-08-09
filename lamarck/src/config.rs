@@ -100,7 +100,7 @@ impl Default for LamarckConfig {
             stats_mode: StatsMode::Full,
             quick_sample_records: DEFAULT_QUICK_SAMPLE_RECORDS,
             focus_neuron: None,
-            focus_policy: FocusPolicy::HighError,
+            focus_policy: FocusPolicy::Weighted,
             compute_correlations: false,
             max_consecutive_scorer_failures: DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
             phase0_parity: true,
