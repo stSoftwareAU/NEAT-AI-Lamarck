@@ -17,6 +17,7 @@ pub mod report;
 pub mod run;
 pub mod scorer;
 pub mod structural;
+pub mod tags;
 
 pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
 pub use config::{
@@ -32,3 +33,4 @@ pub use scorer::{
     ExternalScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats,
     screen_promote_stems, write_promote_batch,
 };
+pub use tags::{CreatureMeta, CreatureTag, LamarckProgress, serialize_creature_with_meta};

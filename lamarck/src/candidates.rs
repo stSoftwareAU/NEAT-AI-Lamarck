@@ -8,6 +8,7 @@ use crate::structural::{
     add_synapse, bridge_squash, growth_squash_at, pick_smart_source, random_uuid_v4,
     rank_unused_sources, split_incoming_synapse, suggested_weight, suggested_weight_scaled,
 };
+use crate::tags::{CreatureMeta, serialize_creature_with_meta};
 use neat_core::{CreatureExport, creature_to_json_pretty};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -609,16 +610,24 @@ fn pick_best_incoming<'a>(
 /// Write baseline + candidates into a temporary scoring directory.
 ///
 /// Recreates `dir` so leftover JSON from a prior larger batch cannot be scored.
+///
+/// When `meta` is provided, `baseline.json` keeps original `uuid` / `tags`
+/// (candidates stay untagged — acceptance stamps the winner on write).
 pub fn write_candidate_batch(
     dir: &Path,
     incumbent: &CreatureExport,
     candidates: &[Candidate],
+    meta: Option<&CreatureMeta>,
 ) -> Result<Vec<String>, String> {
     if dir.exists() {
         fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     }
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let baseline = creature_to_json_pretty(incumbent).map_err(|e| e.to_string())?;
+    let baseline = if let Some(meta) = meta {
+        serialize_creature_with_meta(incumbent, meta)?
+    } else {
+        creature_to_json_pretty(incumbent).map_err(|e| e.to_string())?
+    };
     fs::write(dir.join("baseline.json"), baseline).map_err(|e| e.to_string())?;
 
     let mut stems = vec!["baseline".to_string()];
