@@ -1,6 +1,6 @@
 # NEAT-AI-Lamarck
 
-> The creature has already evolved. It then experiences the training environment, learns from that experience, and we attempt to encode useful acquired improvements back into the creature.
+> Experimental: teaching evolved NEAT-AI creatures that what they learn in life can be inherited. Adventurous mutations, sceptical scorer — Lamarck would be proud.
 
 NEAT-AI-Lamarck is an experimental Rust optimiser for already-fit [NEAT-AI](https://github.com/stSoftwareAU/NEAT-AI) creatures.
 
@@ -99,7 +99,7 @@ The CLI requires:
 
 - current fittest creature JSON;
 - training-data directory;
-- candidate count, default `50`;
+- candidate count, default `100`;
 - timeout, default `45m`;
 - minimum meaningful improvement, default `1e-6` (absolute score delta, strict `>`);
 - optional deterministic random seed;
@@ -215,6 +215,10 @@ For version 1 also collect, where memory/runtime permits:
 
 For the current observation count, a full symmetric correlation matrix is acceptable. The file format should be versioned so this can change later.
 
+The expensive input×input covariance/correlation matrices are opt-in via
+`--compute-correlations` (default off); observation/target relationships are
+always collected.
+
 ## Phase 2 — select a focus neuron
 
 Each optimisation iteration focuses on one non-input neuron.
@@ -282,7 +286,7 @@ signal, never an invented `expected_hidden - actual_hidden`.
 Default candidate population size:
 
 ```text
-50
+100
 ```
 
 This is configurable.
@@ -400,6 +404,10 @@ Record at least:
 
 This journal is part of the experiment, not merely debug logging.
 
+Summarise strategy economics from a journal with the `report` subcommand
+(`neat_ai_lamarck report experiments.jsonl`, or
+`scripts/report-experiments.sh`).
+
 ## Outputs
 
 At minimum:
@@ -445,29 +453,38 @@ The implementation should eventually let us answer:
 7. As the incumbent improves, how quickly does the hit rate fall?
 8. Given the 45-minute useful-life constraint, how much analysis is economically justified before trying another candidate batch?
 
-## Initial repository layout
+## Repository layout
 
 ```text
 NEAT-AI-Lamarck/
 ├── Cargo.toml
 ├── rust-toolchain.toml
+├── neat-core.expected-version
 ├── quality.sh
 ├── deny.toml
 ├── SECURITY.md
 ├── .github/workflows/   # scorer-aligned quality gates
 ├── scripts/
-├── docs/architecture.md
+├── docs/
+│   ├── architecture.md
+│   └── baseline-economics.md
 └── lamarck/src/
+    ├── lib.rs
+    ├── main.rs              # CLI (optimise + report subcommand)
+    ├── config.rs            # defaults and run options
+    ├── parity.rs            # Phase-0 scorer parity gate
+    ├── observations.rs      # observations.statistics cache
+    ├── focus.rs             # focus-neuron selection policies
     ├── backprop.rs
-    ├── observations.rs
-    ├── focus.rs
     ├── learning.rs
     ├── propagate_layout.rs
     ├── candidates.rs
     ├── structural.rs
     ├── scorer.rs
     ├── run.rs
-    └── report.rs
+    ├── report.rs
+    ├── tags.rs
+    └── log.rs
 ```
 
 ## Development rules
