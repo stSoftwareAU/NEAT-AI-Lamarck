@@ -50,6 +50,11 @@ Lamarck must not duplicate this authority.
 - Scorer argv: `rust_scorer <candidates_dir> <training_data_dir>` — no `--gpu` / `--cost`.
   Screen phase (issue #24) may add `--sample-rate` / `--sample-phase` only; acceptance
   still uses a full-corpus promote score.
+- Phase-0 (issue #4): before optimising, Lamarck MSE must agree with scorer `error`
+  (and unpenalized `1−error` with `score+complexityPenalty`) within
+  `PHASE0_*_TOL` in `lamarck/src/parity.rs`; abort on unexplained disagreement.
+- Focus analysis surfaces real backprop blame (`LearningSignal`) for hidden and
+  output focuses; never invents a hidden-neuron target.
 - `observations.statistics` is versioned human-readable JSON (semver).
 - Production scale target: GRQ `network.json` (~2511 inputs, ~1590 hidden, ~21k synapses).
 

@@ -7,12 +7,13 @@ use crate::candidates::{
 use crate::config::LamarckConfig;
 use crate::focus::{
     FixedFocusSelector, FocusPolicy, FocusSelector, HighErrorFocusSelector, RandomFocusSelector,
-    UnsaturatedFocusSelector, WeightedFocusSelector, collect_focus_stats,
-    collect_incoming_source_stats,
+    UnsaturatedFocusSelector, WeightedFocusSelector, attach_focus_blame,
+    attach_learning_to_incoming, collect_focus_stats, collect_incoming_source_stats,
 };
 use crate::learning::accumulate_focus_learning;
 use crate::log;
 use crate::observations::ensure_statistics;
+use crate::parity::{check_phase0_parity, compute_local_mse};
 use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
@@ -145,13 +146,27 @@ pub fn run_optimisation(
                         baseline.score, baseline.error
                     ));
                 }
+                log::ok(&format!(
+                    "Phase-0 scorer baseline score={:.12} error={:.12} complexity={:.12}",
+                    baseline.score, baseline.error, baseline.complexity_penalty
+                ));
+                log::detail("Phase-0: computing Lamarck local MSE for parity check...");
+                let mut phase0_net = compile_creature(&incumbent).map_err(|e| e.to_string())?;
+                let (local_error, local_count) =
+                    compute_local_mse(&incumbent, &mut phase0_net, &config.training_data)?;
+                log::detail(&format!(
+                    "Phase-0 local MSE={local_error:.12} over {local_count} records"
+                ));
+                check_phase0_parity(
+                    local_error,
+                    baseline.error,
+                    baseline.score,
+                    baseline.complexity_penalty,
+                )?;
+                log::ok("Phase-0 Lamarck ↔ scorer parity within documented epsilon");
                 opening_baseline_score = Some(baseline.score);
                 creature_meta.upsert("score", format!("{}", baseline.score));
                 creature_meta.upsert("error", format!("{}", baseline.error));
-                log::ok(&format!(
-                    "Phase-0 baseline score={:.12} error={:.12}",
-                    baseline.score, baseline.error
-                ));
                 if !config.preserve_losers {
                     let _ = fs::remove_dir_all(&phase0_dir);
                 }
@@ -253,7 +268,7 @@ pub fn run_optimisation(
         let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
         log::detail("scanning incumbent for focus stats...");
         let focus_scan_start = Instant::now();
-        let focus_stats = collect_focus_stats(
+        let mut focus_stats = collect_focus_stats(
             &incumbent,
             &mut network,
             &config.training_data,
@@ -287,7 +302,7 @@ pub fn run_optimisation(
             ));
         }
 
-        let incoming = collect_incoming_source_stats(
+        let mut incoming = collect_incoming_source_stats(
             &incumbent,
             &mut network,
             &config.training_data,
@@ -322,6 +337,25 @@ pub fn run_optimisation(
             learning.biases.iter().map(|b| b.count).sum::<f64>(),
             learning.weights.iter().map(|w| w.count).sum::<f64>()
         ));
+
+        // Surface focus blame + incoming weight signals from real backprop (#4).
+        attach_focus_blame(&mut focus_stats, &incumbent, &learning);
+        let lr = crate::backprop::calculate_learning_rate(&backprop, experiments, None);
+        attach_learning_to_incoming(&mut incoming, &learning, &backprop, lr);
+        if let Some(blame) = focus_stats.mean_blame {
+            log::detail(&format!(
+                "focus blame: mean={blame:.6e}  count={:.0}  no_change={}",
+                focus_stats.blame_count.unwrap_or(0.0),
+                focus_stats.blame_no_change.unwrap_or(false)
+            ));
+        }
+        let linked = incoming
+            .iter()
+            .filter(|s| s.proposed_weight_delta.is_some())
+            .count();
+        if linked > 0 {
+            log::detail(&format!("incoming weight-signals attached: {linked}"));
+        }
 
         let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
         let ranked_sources = refine_sources_by_residual(
@@ -821,12 +855,15 @@ mod tests {
         ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
+            // Matches tiny_setup local MSE: pred=1.1, target=0.5 → error=0.36.
+            const BASE_ERROR: f64 = 0.36;
+            const BASE_SCORE: f64 = 1.0 - BASE_ERROR;
             let mut map = BTreeMap::new();
             map.insert(
                 "baseline".into(),
                 ScoreResult {
-                    score: 0.5,
-                    error: 0.5,
+                    score: BASE_SCORE,
+                    error: BASE_ERROR,
                     complexity_penalty: 0.0,
                 },
             );
@@ -838,9 +875,9 @@ mod tests {
                             continue;
                         }
                         let score = if *calls <= 2 && stem == "candidate-000" {
-                            0.5 + 2e-6
+                            BASE_SCORE + 2e-6
                         } else {
-                            0.5
+                            BASE_SCORE
                         };
                         map.insert(
                             stem.to_string(),

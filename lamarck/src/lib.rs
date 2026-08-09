@@ -12,6 +12,7 @@ pub mod focus;
 pub mod learning;
 pub mod log;
 pub mod observations;
+pub mod parity;
 pub mod propagate_layout;
 pub mod report;
 pub mod run;
@@ -26,6 +27,10 @@ pub use config::{
     LamarckConfig,
 };
 pub use focus::{FocusChoice, FocusPolicy, WeightedFocusSelector};
+pub use parity::{
+    PHASE0_ERROR_ABS_TOL, PHASE0_ERROR_REL_TOL, PHASE0_SCORE_ABS_TOL, PHASE0_SCORE_REL_TOL,
+    check_phase0_parity, compute_local_mse,
+};
 pub use propagate_layout::{PropagateLayout, accumulate_creature_learning};
 pub use report::{JournalReport, print_run_summary, report_from_journal};
 pub use run::{ExperimentRecord, RunResult, run_optimisation};

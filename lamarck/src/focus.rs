@@ -1,5 +1,6 @@
 //! Focus-neuron selection and incumbent-specific streaming statistics.
 
+use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::learning::squash_derivative;
 use crate::observations::ObservationsStatistics;
 use neat_core::{CompiledNetwork, CreatureExport, TrainingDataConfig, TrainingDataIterator};
@@ -324,6 +325,15 @@ pub struct IncomingSourceStats {
     pub std_dev: f64,
     /// Pearson correlation with focus residual when available.
     pub correlation_with_error: Option<f64>,
+    /// Backprop weight-signal accumulation count for this synapse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight_signal_count: Option<f64>,
+    /// Proposed weight change (`propose − current`) from the learning signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_weight_delta: Option<f64>,
+    /// Mean adjusted-value mass per sample from the weight signal (sensitivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_weight_sensitivity: Option<f64>,
 }
 
 /// Streaming statistics for one focused neuron.
@@ -364,6 +374,19 @@ pub struct FocusNeuronStats {
     /// Mean squash derivative over the scan (0 ⇒ saturated / flat).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mean_derivative: Option<f64>,
+    /// Mean backprop bias blame (`total_adjusted_bias / count`) for the focus.
+    /// Present for hidden and output focuses when a learning signal was attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_blame: Option<f64>,
+    /// Backprop bias-signal accumulation count for the focus neuron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blame_count: Option<f64>,
+    /// Absolute value of [`Self::mean_blame`] (convenience for ranking).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_abs_blame: Option<f64>,
+    /// Whether the focus bias signal flagged no-change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blame_no_change: Option<bool>,
     /// Records scanned.
     pub record_count: u64,
 }
@@ -520,6 +543,10 @@ pub fn collect_focus_stats(
         mean_abs_error,
         mean_adjusted_error,
         mean_derivative,
+        mean_blame: None,
+        blame_count: None,
+        mean_abs_blame: None,
+        blame_no_change: None,
         record_count: count,
     })
 }
@@ -589,6 +616,9 @@ pub fn collect_incoming_source_stats(
                 variance,
                 std_dev,
                 correlation_with_error: None,
+                weight_signal_count: None,
+                proposed_weight_delta: None,
+                mean_weight_sensitivity: None,
             }
         })
         .collect();
@@ -685,7 +715,63 @@ pub fn collect_incoming_source_stats(
     Ok(out)
 }
 
-fn is_saturated(squash: Option<&str>, post: f64) -> bool {
+/// Attach backprop bias blame for the focus neuron onto focus stats.
+///
+/// Uses the real [`LearningSignal`] from TS-parity propagate (issue #2/#4).
+/// Never invents a hidden-neuron target — only surfaces accumulated blame.
+pub fn attach_focus_blame(
+    stats: &mut FocusNeuronStats,
+    creature: &CreatureExport,
+    learning: &LearningSignal,
+) {
+    let Some(pos) = creature
+        .neurons
+        .iter()
+        .position(|n| n.uuid == stats.neuron_uuid)
+    else {
+        return;
+    };
+    let Some(signal) = learning.biases.get(pos) else {
+        return;
+    };
+    if signal.count <= 0.0 {
+        stats.mean_blame = Some(0.0);
+        stats.blame_count = Some(0.0);
+        stats.mean_abs_blame = Some(0.0);
+        stats.blame_no_change = Some(signal.no_change);
+        return;
+    }
+    let mean = signal.total_adjusted_bias / signal.count;
+    stats.mean_blame = Some(mean);
+    stats.blame_count = Some(signal.count);
+    stats.mean_abs_blame = Some(mean.abs());
+    stats.blame_no_change = Some(signal.no_change);
+}
+
+/// Attach per-synapse weight-signal summaries onto incoming source stats.
+pub fn attach_learning_to_incoming(
+    incoming: &mut [IncomingSourceStats],
+    learning: &LearningSignal,
+    config: &BackpropConfig,
+    learning_rate: f64,
+) {
+    for src in incoming.iter_mut() {
+        let Some(signal) = learning.weights.get(src.synapse_index) else {
+            continue;
+        };
+        if signal.count <= 0.0 {
+            continue;
+        }
+        let proposed = signal.propose(src.weight, config, learning_rate);
+        let adj_mass = signal.total_positive_adjusted_value + signal.total_negative_adjusted_value;
+        src.weight_signal_count = Some(signal.count);
+        src.proposed_weight_delta = Some(proposed - src.weight);
+        src.mean_weight_sensitivity = Some(adj_mass / signal.count);
+    }
+}
+
+/// Squash-aware saturation heuristic used by focus scans (issue #4).
+pub fn is_saturated(squash: Option<&str>, post: f64) -> bool {
     match squash {
         Some("TANH") | Some("BIPOLAR_SIGMOID") => post.abs() > 0.99,
         Some("LOGISTIC") | Some("SIGMOID") => !(0.01..=0.99).contains(&post),
@@ -698,9 +784,13 @@ fn is_saturated(squash: Option<&str>, post: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neat_core::parse_creature_json;
+    use crate::backprop::BackpropConfig;
+    use crate::learning::accumulate_focus_learning;
+    use neat_core::{compile_creature, parse_creature_json};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use std::io::Write;
+    use tempfile::tempdir;
 
     const TINY: &str = r#"{
       "semanticVersion": "4.0.0",
@@ -716,6 +806,46 @@ mod tests {
         {"fromUUID":"h1","toUUID":"o1","weight":1.0}
       ]
     }"#;
+
+    /// Direct input → output (no hidden).
+    const DIRECT: &str = r#"{
+      "semanticVersion": "4.0.0",
+      "forwardOnly": true,
+      "input": 1,
+      "output": 1,
+      "neurons": [
+        {"type":"output","uuid":"output-0","bias":0.0,"squash":"IDENTITY"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"output-0","weight":1.0}
+      ]
+    }"#;
+
+    /// Deeper chain: input → h1 → h2 → output with saturating TANH on h1.
+    const DEEP: &str = r#"{
+      "semanticVersion": "4.0.0",
+      "forwardOnly": true,
+      "input": 1,
+      "output": 1,
+      "neurons": [
+        {"type":"hidden","uuid":"h1","bias":0.0,"squash":"TANH"},
+        {"type":"hidden","uuid":"h2","bias":0.0,"squash":"IDENTITY"},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"h1","weight":2.0},
+        {"fromUUID":"h1","toUUID":"h2","weight":1.0},
+        {"fromUUID":"h2","toUUID":"o1","weight":1.0}
+      ]
+    }"#;
+
+    fn write_records(dir: &std::path::Path, pairs: &[(f32, f32)]) {
+        let mut f = std::fs::File::create(dir.join("0.bin")).unwrap();
+        for &(inp, out) in pairs {
+            f.write_all(&inp.to_le_bytes()).unwrap();
+            f.write_all(&out.to_le_bytes()).unwrap();
+        }
+    }
 
     #[test]
     fn random_focus_is_deterministic_with_seed() {
@@ -778,5 +908,108 @@ mod tests {
             .unwrap()
             .1;
         assert!(w_h > base);
+    }
+
+    #[test]
+    fn direct_to_output_focus_stats_are_stable() {
+        let dir = tempdir().unwrap();
+        // IDENTITY output: pred = input; targets 0.5 / 1.5 → residuals known.
+        write_records(dir.path(), &[(0.5, 1.0), (1.5, 1.0)]);
+        let creature = parse_creature_json(DIRECT).unwrap();
+        let mut network = compile_creature(&creature).unwrap();
+        let mut selector = FixedFocusSelector {
+            uuid: "output-0".into(),
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+        assert_eq!(
+            selector.select(&creature, &mut rng).as_deref(),
+            Some("output-0")
+        );
+
+        let a = collect_focus_stats(&creature, &mut network, dir.path(), "output-0", None).unwrap();
+        let b = collect_focus_stats(&creature, &mut network, dir.path(), "output-0", None).unwrap();
+        assert_eq!(a.record_count, 2);
+        assert_eq!(a.record_count, b.record_count);
+        assert!((a.pre_mean - b.pre_mean).abs() < 1e-12);
+        assert!((a.post_mean - b.post_mean).abs() < 1e-12);
+        assert!((a.mean_error.unwrap() - b.mean_error.unwrap()).abs() < 1e-12);
+        // pred means 1.0; targets 1.0 → mean error 0; MAE from |0.5-1|+|1.5-1|/2 = 0.5
+        assert!((a.mean_error.unwrap()).abs() < 1e-9);
+        assert!((a.mean_abs_error.unwrap() - 0.5).abs() < 1e-9);
+        assert!(a.mean_derivative.unwrap() > 0.99);
+    }
+
+    #[test]
+    fn deeper_hidden_focus_gets_blame_and_incoming_learning() {
+        let dir = tempdir().unwrap();
+        write_records(
+            dir.path(),
+            &[(0.5, 0.0), (1.0, 0.0), (-0.5, 0.0), (2.0, 1.0)],
+        );
+        let creature = parse_creature_json(DEEP).unwrap();
+        let mut network = compile_creature(&creature).unwrap();
+
+        let stats = collect_focus_stats(&creature, &mut network, dir.path(), "h1", None).unwrap();
+        assert_eq!(stats.neuron_uuid, "h1");
+        assert_eq!(stats.record_count, 4);
+        assert!(stats.mean_error.is_none(), "hidden has no target residual");
+        // Large |input| through TANH → some saturation.
+        assert!(
+            stats.saturation_fraction > 0.0,
+            "TANH focus should report squash-aware saturation, got {}",
+            stats.saturation_fraction
+        );
+        assert!(is_saturated(Some("TANH"), 0.995));
+        assert!(!is_saturated(Some("TANH"), 0.5));
+
+        let mut incoming =
+            collect_incoming_source_stats(&creature, &mut network, dir.path(), "h1", None, None)
+                .unwrap();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].from_uuid, "input-0");
+
+        let cfg = BackpropConfig::default();
+        let mut rng = StdRng::seed_from_u64(7);
+        let learning = accumulate_focus_learning(
+            &creature,
+            &mut network,
+            dir.path(),
+            "h1",
+            None,
+            &cfg,
+            &mut rng,
+        )
+        .unwrap();
+        let h1_pos = creature
+            .neurons
+            .iter()
+            .position(|n| n.uuid == "h1")
+            .unwrap();
+        assert!(
+            learning.biases[h1_pos].count > 0.0,
+            "hidden must receive propagated blame count"
+        );
+
+        let mut focus_stats = stats;
+        attach_focus_blame(&mut focus_stats, &creature, &learning);
+        assert!(focus_stats.blame_count.unwrap() > 0.0);
+        assert!(focus_stats.mean_blame.is_some());
+        assert!(focus_stats.mean_abs_blame.is_some());
+
+        attach_learning_to_incoming(&mut incoming, &learning, &cfg, cfg.learning_rate);
+        assert!(
+            incoming[0].weight_signal_count.unwrap_or(0.0) > 0.0
+                || incoming[0].proposed_weight_delta.is_some(),
+            "incoming weight signal should attach for hidden focus"
+        );
+    }
+
+    #[test]
+    fn logistic_saturation_heuristic_is_squash_aware() {
+        assert!(is_saturated(Some("LOGISTIC"), 0.005));
+        assert!(is_saturated(Some("LOGISTIC"), 0.995));
+        assert!(!is_saturated(Some("LOGISTIC"), 0.5));
+        assert!(is_saturated(Some("RELU"), 0.0));
+        assert!(!is_saturated(Some("RELU"), 0.5));
     }
 }

@@ -131,10 +131,14 @@ These rules are non-negotiable:
 
 Before optimisation starts:
 
-1. Score the supplied creature using NEAT-AI-scorer.
-2. Run Lamarck's own analysis path over the same creature/data.
-3. Where Lamarck calculates quantities that overlap with the scorer, verify parity within an explicit tolerance.
-4. Abort optimisation on unexplained disagreement.
+1. Score the supplied creature using NEAT-AI-scorer (finite `score` / `error` required).
+2. Compute Lamarck's whole-creature mean squared error over the same training directory
+   via the compiled network (same activation path used for focus analysis).
+3. Compare overlapping quantities within documented epsilon (see `lamarck/src/parity.rs`):
+   - **error:** abs `1e-6` or rel `1e-5`
+   - **unpenalized score** `1 - error` vs `scorer.score + complexityPenalty`:
+     abs `1e-5` or rel `1e-4`
+4. Abort optimisation on unexplained disagreement (`--skip-phase0` disables the gate).
 
 This prevents Lamarck from accidentally optimising a subtly different metric.
 

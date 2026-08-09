@@ -595,12 +595,28 @@ fn pick_best_incoming<'a>(
     if incoming.is_empty() {
         return None;
     }
-    // Prefer highest |correlation_with_error|, else random.
+    // Prefer highest |correlation_with_error| when residual corr is meaningful.
     if let Some(best) = incoming.iter().max_by(|a, b| {
         let aa = a.correlation_with_error.unwrap_or(0.0).abs();
         let bb = b.correlation_with_error.unwrap_or(0.0).abs();
         aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
     }) && best.correlation_with_error.unwrap_or(0.0).abs() > 0.05
+    {
+        return Some(best);
+    }
+    // Hidden focus (or weak residual): prefer largest |proposed weight Δ| from
+    // the backprop learning signal (issue #4).
+    if let Some(best) = incoming.iter().max_by(|a, b| {
+        let aa = a.proposed_weight_delta.unwrap_or(0.0).abs();
+        let bb = b.proposed_weight_delta.unwrap_or(0.0).abs();
+        aa.partial_cmp(&bb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let ac = a.weight_signal_count.unwrap_or(0.0);
+                let bc = b.weight_signal_count.unwrap_or(0.0);
+                ac.partial_cmp(&bc).unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }) && best.proposed_weight_delta.unwrap_or(0.0).abs() > 1e-12
     {
         return Some(best);
     }
@@ -711,6 +727,9 @@ mod tests {
             variance: 1.0,
             std_dev: 1.0,
             correlation_with_error: None,
+            weight_signal_count: None,
+            proposed_weight_delta: None,
+            mean_weight_sensitivity: None,
         }];
         let observations = empty_obs();
         let cfg = BackpropConfig::default();
@@ -756,6 +775,9 @@ mod tests {
             variance: 1.0,
             std_dev: 1.0,
             correlation_with_error: Some(0.5),
+            weight_signal_count: None,
+            proposed_weight_delta: None,
+            mean_weight_sensitivity: None,
         }];
         let observations = empty_obs();
         let cfg = BackpropConfig::default();
@@ -949,6 +971,9 @@ mod tests {
             variance: 1.0,
             std_dev: 1.0,
             correlation_with_error: Some(0.4),
+            weight_signal_count: None,
+            proposed_weight_delta: None,
+            mean_weight_sensitivity: None,
         }];
         let observations = obs_two_input(0.2, 0.6);
         let cfg = BackpropConfig::default();
