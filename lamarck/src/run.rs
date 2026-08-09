@@ -205,6 +205,10 @@ pub fn run_optimisation(
     let mut scorer_successes = 0u64;
     let mut consecutive_scorer_failures = 0u32;
     let mut best_score = opening_baseline_score.unwrap_or(f64::NEG_INFINITY);
+    // Last-accept details for the final run-summary stamp (Issue #35).
+    let mut last_accept_focus = String::new();
+    let mut last_accept_strategy = crate::candidates::CandidateStrategy::Random;
+    let mut last_accept_error = f64::NAN;
     log::info(&format!(
         "starting optimisation loop (timeout={}s, candidates={})",
         config.timeout.as_secs(),
@@ -754,11 +758,15 @@ pub fn run_optimisation(
                 .join(format!("{stem}.json"));
             let winner_json = fs::read_to_string(&winner_path).map_err(|e| e.to_string())?;
             incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
+            let opening = opening_baseline_score.unwrap_or(baseline.score);
+            last_accept_focus = focus.clone();
+            last_accept_strategy = strategy;
+            last_accept_error = result.error;
             creature_meta.stamp_acceptance(&LamarckProgress {
-                accept_number: acceptances + 1,
+                acceptances: acceptances + 1,
                 score: result.score,
                 error: result.error,
-                delta,
+                opening_score: opening,
                 focus_neuron: &focus,
                 strategy,
                 experiments,
@@ -832,6 +840,41 @@ pub fn run_optimisation(
         return Err(format!(
             "no successful scorer batches ({scorer_failures} failures); check rust_scorer path/binary"
         ));
+    }
+
+    // Final check-in tag: full run experiment count (may exceed last-accept exp).
+    if acceptances > 0 {
+        let opening = opening_baseline_score.unwrap_or(best_score);
+        let error = if last_accept_error.is_finite() {
+            last_accept_error
+        } else {
+            creature_meta
+                .tags
+                .iter()
+                .find(|t| t.name == "error")
+                .and_then(|t| t.value.parse().ok())
+                .unwrap_or(f64::NAN)
+        };
+        creature_meta.stamp_acceptance(&LamarckProgress {
+            acceptances,
+            score: best_score,
+            error,
+            opening_score: opening,
+            focus_neuron: &last_accept_focus,
+            strategy: last_accept_strategy,
+            experiments,
+        });
+        let tagged = serialize_creature_with_meta(&incumbent, &creature_meta)?;
+        log::detail(&format!(
+            "🏷️  final {}",
+            creature_meta
+                .tags
+                .iter()
+                .find(|t| t.name == "lamarck")
+                .map(|t| t.value.as_str())
+                .unwrap_or("(no lamarck tag)")
+        ));
+        fs::write(&best_path, &tagged).map_err(|e| e.to_string())?;
     }
 
     Ok(RunResult {
@@ -1043,6 +1086,25 @@ mod tests {
         assert!(result.scorer_successes >= 1);
         let journal = fs::read_to_string(result.journal_path).unwrap();
         assert!(journal.lines().next().unwrap().contains("experimentNumber"));
+        if result.acceptances > 0 {
+            let best = fs::read_to_string(&result.best_path).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&best).unwrap();
+            let tags = value["tags"].as_array().expect("tags");
+            let lamarck = tags
+                .iter()
+                .find(|t| t["name"] == "lamarck")
+                .expect("lamarck tag")["value"]
+                .as_str()
+                .unwrap();
+            assert!(
+                lamarck.contains("accept") && lamarck.contains("score:"),
+                "run-summary tag missing accepts/score: {lamarck}"
+            );
+            assert!(
+                !lamarck.contains("accept #") && !lamarck.contains("🏆"),
+                "tag should not use legacy last-accept wording: {lamarck}"
+            );
+        }
     }
 
     /// Screen subsample finds no improvers → skip full score (issue #24).
