@@ -520,6 +520,16 @@ cargo-deny, gitleaks, cargo-audit, dependency-review, Semgrep, markdownlint,
 actionlint, SBOM, shellcheck, and codespell. Branch protection should require
 the aggregator check **CI Required Checks**.
 
+PRs also run an auto-format / housekeeping job
+(`.github/workflows/auto-format.yml`, Issue #33). The job runs
+`cargo fmt --all` and then `cargo update -p neat-core` so `Cargo.lock`
+tracks the checked-out NEAT-AI-core path dependency (workers otherwise
+rewrite the lock on every `cargo build` and `model_fetch` resets it). If the
+working tree changes, the fix is committed and pushed back. The job
+deliberately does **not** bump `neat-core.expected-version` — the
+breaking-bump gate stays a human acknowledgement. The workflow is validated
+by `scripts/check-auto-format-workflow.sh` (invoked from `quality.sh`).
+
 ### neat-core breaking-bump gate
 
 The `neat-core` path dependency is unpinned. CI fails when the sibling
