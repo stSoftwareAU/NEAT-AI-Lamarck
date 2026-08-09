@@ -72,7 +72,9 @@ struct Cli {
 
     /// Focus selection policy: weighted (default) | high-error | random | unsaturated.
     ///
-    /// Weighted / high-error never select neurons with ~zero residual or blame.
+    /// Weighted draws ∝ error-influence mass (output residual L1, depth-decayed
+    /// hidden blame). Prefer this over high-error, which always sticks on one
+    /// neuron. Zero-signal neurons are never selected.
     #[arg(long, default_value = "weighted")]
     focus_policy: String,
 

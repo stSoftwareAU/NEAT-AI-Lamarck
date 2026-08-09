@@ -258,15 +258,15 @@ pub fn run_optimisation(
         let improvement_signals = if needs_signals {
             log::detail("scanning output residuals for focus ranking...");
             let mae_start = Instant::now();
-            let output_mae = collect_output_mean_abs_errors(
+            let output_errors = collect_output_mean_abs_errors(
                 &incumbent,
                 &mut network,
                 &config.training_data,
                 focus_sample_limit,
             )?;
-            let signals = build_improvement_signals(&incumbent, &output_mae, &learning);
+            let signals = build_improvement_signals(&incumbent, &output_errors, &learning);
             log::detail(&format!(
-                "improvement signals: {} eligible neurons in {}ms",
+                "error-influence signals: {} eligible neurons in {}ms",
                 signals.len(),
                 mae_start.elapsed().as_millis()
             ));
@@ -537,6 +537,14 @@ pub fn run_optimisation(
                     .map_err(|e| e.to_string())?;
             if promote_stems.is_empty() {
                 log::detail("screen empty: no sample improvers → skipping full-corpus score");
+                // Sterile focus: dampen so weighted draw explores elsewhere.
+                weighted_focus.record_outcome(
+                    &focus,
+                    false,
+                    Some(0.0),
+                    false,
+                    config.min_improvement,
+                );
                 append_journal(
                     &journal_path,
                     &ExperimentRecord {

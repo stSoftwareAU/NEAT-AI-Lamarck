@@ -219,11 +219,13 @@ For the current observation count, a full symmetric correlation matrix is accept
 
 Each optimisation iteration focuses on one non-input neuron.
 
-Default policy (`--focus-policy weighted`, issue #25) ranks neurons by improvement
-chance: output residual MAE, or hidden `|backprop blame|`. Neurons with ~zero
-signal are never selected (you cannot improve on zero error). `high-error` always
-picks the single worst signal; `random` / `unsaturated` remain available.
-`--focus-neuron` pins a UUID for debug/smoke.
+Default policy (`--focus-policy weighted`, issue #25) draws weighted-random by
+**error influence**: output residual L1 mass, or hidden `|total blame|` decayed by
+distance to the nearest output (deep/diluted neurons rarely win). Outputs are
+usually strongest but not chosen every time. Zero-signal neurons are never
+selected. Avoid `high-error` in production — it sticks on one neuron.
+`random` / `unsaturated` remain available. `--focus-neuron` pins a UUID for
+debug/smoke.
 
 ## Phase 3 — creature-specific analysis
 
