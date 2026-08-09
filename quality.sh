@@ -39,6 +39,9 @@ else
   echo "sibling ../NEAT-AI-core not found — skipping neat-core version gate (CI runs this for real)"
 fi
 
+echo "Validating auto-format PR workflow (Issue #33)..."
+./scripts/check-auto-format-workflow.sh
+
 echo "Running codespell preflight..."
 if ! ./scripts/spell-check.sh; then
   echo "spell-check: FAILED — fix the typos above or update .codespellrc"

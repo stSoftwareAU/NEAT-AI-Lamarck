@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **PR auto-format syncs `Cargo.lock` to latest neat-core (Issue #33).** New
+  auto-format job runs `cargo fmt --all` and `cargo update -p neat-core` on
+  every PR to `Develop`, committing lock drift against the checked-out
+  NEAT-AI-core path dependency so workers stop reprinting
+  `Updating neat-core vX -> vY` after `model_fetch`. Does not auto-bump
+  `neat-core.expected-version`.
 - Repository quality gates aligned with NEAT-AI-scorer (CI, gitleaks, deny,
   codespell, markdownlint, SBOM, and related workflows).
 - Locked experiment contracts for score-based acceptance against GRQ-scale
