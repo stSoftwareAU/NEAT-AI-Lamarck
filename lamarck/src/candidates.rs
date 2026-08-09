@@ -4,9 +4,10 @@ use crate::backprop::{BackpropConfig, BiasSignal, LearningSignal};
 use crate::focus::{FocusNeuronStats, IncomingSourceStats};
 use crate::observations::ObservationsStatistics;
 use crate::structural::{
-    NEURON_GROWTH_SQUASHES, NeuronBridgeSpec, OLS_WEIGHT_FRACTION, RankedSource, add_neuron_bridge,
-    add_synapse, bridge_squash, growth_squash_at, pick_smart_source, random_uuid_v4,
-    rank_unused_sources, split_incoming_synapse, suggested_weight, suggested_weight_scaled,
+    NeuronBridgeSpec, OLS_WEIGHT_FRACTION, RankedSource, add_neuron_bridge, add_synapse,
+    first_previous_hidden_index, growth_squashes_for, pick_smart_source, random_uuid_v4,
+    rank_unused_sources, split_incoming_synapse, suggested_outbound_weight, suggested_weight,
+    suggested_weight_scaled, with_previous_hidden_first,
 };
 use crate::tags::{CreatureMeta, serialize_creature_with_meta};
 use neat_core::{CreatureExport, creature_to_json_pretty};
@@ -103,13 +104,31 @@ pub fn generate_candidates(
     }
 
     let ranked = ranked_for(ctx);
+    let hidden_first = with_previous_hidden_first(&ranked);
 
-    // Synapse add, then one neuron per squash (shape of nonlinearity matters),
+    // Synapse add, then one neuron per squash (order follows residual shape),
     // then additional synapse scales to fill the budget.
     if let Some(cand) = build_structural_add_scaled(ctx, &ranked, 0, OLS_WEIGHT_FRACTION) {
         out.push(cand);
     }
-    for (squash_i, &squash) in NEURON_GROWTH_SQUASHES.iter().enumerate() {
+    // Explicitly try hooking an unused previous hidden into the focus even when
+    // its probe score is still zero (unmeasured prior).
+    if let Some(hid_i) = first_previous_hidden_index(&ranked)
+        && out.len() < count
+    {
+        let already_added = out.iter().any(|c| {
+            c.provenance.strategy == CandidateStrategy::StructuralAdd
+                && c.provenance.mutation.contains(&ranked[hid_i].from_uuid)
+        });
+        if !already_added
+            && let Some(cand) =
+                build_structural_add_scaled_gated(ctx, &ranked, hid_i, OLS_WEIGHT_FRACTION, false)
+        {
+            out.push(cand);
+        }
+    }
+    let growth_squashes = growth_squashes_for(ctx.focus_stats, Some(ctx.observations));
+    for (squash_i, &squash) in growth_squashes.iter().enumerate() {
         if out.len() >= count {
             break;
         }
@@ -119,6 +138,27 @@ pub fn generate_candidates(
         }
         if let Some(cand) = build_structural_add_neuron_combo(ctx, &ranked, rng, squash) {
             out.push(cand);
+        }
+    }
+    // Also grow via a previous hidden when the top residual source is an input.
+    if let Some(ref hid_ranked) = hidden_first
+        && hid_ranked
+            .first()
+            .is_some_and(|s| !crate::structural::is_input_source(&s.from_uuid))
+        && ranked
+            .first()
+            .is_some_and(|s| crate::structural::is_input_source(&s.from_uuid))
+    {
+        for (squash_i, &squash) in growth_squashes.iter().enumerate() {
+            if out.len() >= count {
+                break;
+            }
+            if !ctx.structural_only && squash_i >= 2 {
+                break;
+            }
+            if let Some(cand) = build_structural_add_neuron_combo(ctx, hid_ranked, rng, squash) {
+                out.push(cand);
+            }
         }
     }
     for (idx, scale) in [
@@ -135,12 +175,13 @@ pub fn generate_candidates(
         }
     }
     if ctx.structural_only {
-        // Keep filling with remaining squashes / synapse adds.
+        // Keep filling with remaining residual-ordered squashes / synapse adds.
         let mut squash_i = 0usize;
         let mut syn_i = 0usize;
-        while out.len() < count && squash_i + syn_i < NEURON_GROWTH_SQUASHES.len() * 3 {
+        let n_squash = growth_squashes.len().max(1);
+        while out.len() < count && squash_i + syn_i < n_squash * 3 {
             if squash_i <= syn_i {
-                let squash = growth_squash_at(squash_i);
+                let squash = growth_squashes[squash_i % n_squash];
                 squash_i += 1;
                 if let Some(cand) = build_structural_add_neuron_combo(ctx, &ranked, rng, squash) {
                     out.push(cand);
@@ -199,8 +240,20 @@ fn build_structural_add_scaled(
     source_index: usize,
     scale: f64,
 ) -> Option<Candidate> {
+    build_structural_add_scaled_gated(ctx, ranked, source_index, scale, true)
+}
+
+/// Like [`build_structural_add_scaled`], optionally skipping the residual-score floor
+/// so candidate gen can still force-try an unused previous hidden before probes run.
+fn build_structural_add_scaled_gated(
+    ctx: &CandidateGenContext<'_>,
+    ranked: &[RankedSource],
+    source_index: usize,
+    scale: f64,
+    require_score: bool,
+) -> Option<Candidate> {
     let source = ranked.get(source_index)?;
-    if source.score < 1e-4 {
+    if require_score && source.score < 1e-4 {
         return None;
     }
     let focus_uuid = ctx.focus_uuid;
@@ -251,8 +304,9 @@ fn build_structural_add_neuron_combo(
     let mut creature = ctx.incumbent.clone();
     let new_uuid = random_uuid_v4(rng);
     let w_a = suggested_weight_scaled(a, ctx.focus_stats, OLS_WEIGHT_FRACTION);
-    // Keep outbound modest so squash shape (not weight blow-up) dominates the trial.
-    let w_out = 0.05;
+    // Keep outbound modest; for ABSOLUTE/ReLU/Softplus the sign follows residual
+    // (negative error → negative weight on a non-negative activation).
+    let w_out = suggested_outbound_weight(squash, ctx.focus_stats, 0.05);
 
     let uuid = add_neuron_bridge(
         &mut creature,
@@ -529,12 +583,19 @@ fn build_candidate(
         }
         CandidateStrategy::StructuralAddNeuron => {
             let ranked = ranked_for(ctx);
-            let squash = growth_squash_at(rng.random_range(0..NEURON_GROWTH_SQUASHES.len()));
+            let squashes = growth_squashes_for(ctx.focus_stats, Some(ctx.observations));
+            // Prefer the residual-fronted squash (e.g. ABSOLUTE on negative mean error).
+            let squash = squashes.first().copied().unwrap_or("LeakyReLU");
             if let Some(cand) = build_structural_add_neuron_combo(ctx, &ranked, rng, squash) {
                 return Some(cand);
             }
+            // Prefer reusing a previous hidden when the top residual source is an input.
+            if let Some(hid_ranked) = with_previous_hidden_first(&ranked)
+                && let Some(cand) = build_structural_add_neuron_combo(ctx, &hid_ranked, rng, squash)
+            {
+                return Some(cand);
+            }
             // Fall back: split the strongest error-correlated incoming edge.
-            let squash = bridge_squash(&creature, focus_uuid);
             let new_uuid = random_uuid_v4(rng);
             let src = pick_best_incoming(ctx.incoming, rng)?;
             let old_w = src.weight;
@@ -659,6 +720,7 @@ pub fn write_candidate_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structural::{refine_sources_from_probes, synthetic_observation_probes};
     use neat_core::parse_creature_json;
     use rand::{SeedableRng, rngs::StdRng};
 
@@ -942,12 +1004,26 @@ mod tests {
         );
         assert!(cand.provenance.mutation.contains("add-neuron"));
         assert_eq!(cand.creature.neurons.len(), incumbent.neurons.len() + 1);
+        let grown = cand
+            .creature
+            .neurons
+            .iter()
+            .find(|n| n.neuron_type == "hidden" && n.uuid != "h1")
+            .expect("grown hidden");
+        // Negative residual → ABSOLUTE first, with negative w_out into the focus.
+        assert_eq!(grown.squash.as_deref(), Some("ABSOLUTE"));
+        let w_out = cand
+            .creature
+            .synapses
+            .iter()
+            .find(|s| s.from_uuid == grown.uuid && s.to_uuid == "o1")
+            .map(|s| s.weight)
+            .expect("outbound synapse");
         assert!(
-            cand.creature
-                .neurons
-                .iter()
-                .any(|n| n.neuron_type == "hidden" && n.uuid != "h1")
+            w_out < 0.0,
+            "ABSOLUTE correcting negative residual needs negative w_out, got {w_out}"
         );
+        assert!(cand.provenance.mutation.contains("squash=ABSOLUTE"));
         compile_creature(&cand.creature).expect("grown creature must compile");
     }
 
@@ -1018,7 +1094,136 @@ mod tests {
             neuron_squashes.len() >= 3,
             "expected multiple squashes, got {neuron_squashes:?}"
         );
-        assert!(neuron_squashes.contains("TANH"));
-        assert!(neuron_squashes.contains("ReLU") || neuron_squashes.contains("ABSOLUTE"));
+        // Signed residual reorders ABSOLUTE ahead of the Tier‑1 defaults.
+        assert!(neuron_squashes.contains("ABSOLUTE"));
+        assert!(
+            neuron_squashes.contains("GELU")
+                || neuron_squashes.contains("Swish")
+                || neuron_squashes.contains("TANH")
+        );
+    }
+
+    const ORPHAN_HIDDEN: &str = r#"{
+      "semanticVersion": "4.0.0",
+      "forwardOnly": true,
+      "input": 2,
+      "output": 1,
+      "neurons": [
+        {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY"},
+        {"type":"hidden","uuid":"h2","bias":0.0,"squash":"IDENTITY"},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+        {"fromUUID":"input-1","toUUID":"h2","weight":1.0},
+        {"fromUUID":"h2","toUUID":"o1","weight":1.0}
+      ]
+    }"#;
+
+    #[test]
+    fn generate_candidates_hooks_previous_hidden() {
+        use neat_core::compile_creature;
+        let incumbent = parse_creature_json(ORPHAN_HIDDEN).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_error: Some(-0.2),
+            mean_adjusted_error: Some(-0.2),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        };
+        // Strong input corr so top prior is an input; activation probes score h1.
+        let mut observations = obs_two_input(0.2, 0.85);
+        // Give outputs a range so synthetic probes have targets.
+        observations.output_count = 1;
+        observations.outputs.push(crate::observations::ScalarStats {
+            count: 10,
+            mean: 0.0,
+            variance: 0.25,
+            std_dev: 0.5,
+            min: -1.0,
+            max: 1.0,
+            zero_count: 0,
+            non_zero_count: 10,
+            non_finite_count: 0,
+            mean_abs: 0.5,
+            rms: 0.5,
+            quantiles: [0.0; 7],
+        });
+        let mut network = compile_creature(&incumbent).unwrap();
+        let prior = rank_unused_sources(&incumbent, "o1", &observations);
+        let mut probe_rng = StdRng::seed_from_u64(3);
+        let probes = synthetic_observation_probes(&observations, 2, 1, 32, &mut probe_rng);
+        let ranked =
+            refine_sources_from_probes(&incumbent, &mut network, "o1", &prior, &probes).unwrap();
+        let h1 = ranked
+            .iter()
+            .find(|r| r.from_uuid == "h1")
+            .expect("h1 ranked");
+        assert_ne!(
+            h1.score, 0.05,
+            "hidden score must be calculated, not a constant"
+        );
+
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &[],
+            observations: &observations,
+            ranked_sources: Some(&ranked),
+            learning: None,
+            backprop: &cfg,
+            structural_only: true,
+        };
+        let mut rng = StdRng::seed_from_u64(11);
+        let structural = generate_candidates(&ctx, 12, &mut rng);
+        assert!(
+            structural.iter().any(|c| {
+                c.provenance.strategy == CandidateStrategy::StructuralAdd
+                    && c.provenance.mutation.contains("h1")
+            }),
+            "expected a direct structural-add of h1 into the focus; mutations={:?}",
+            structural
+                .iter()
+                .map(|c| c.provenance.mutation.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn generate_candidates_tries_absolute_first_on_negative_residual() {
+        let incumbent = parse_creature_json(TWO_INPUT).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_error: Some(-0.3),
+            mean_adjusted_error: Some(-0.3),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        };
+        let observations = obs_two_input(0.2, 0.8);
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &[],
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: true,
+        };
+        let mut rng = StdRng::seed_from_u64(2);
+        let structural = generate_candidates(&ctx, 8, &mut rng);
+        let first_neuron = structural
+            .iter()
+            .find(|c| c.provenance.strategy == CandidateStrategy::StructuralAddNeuron)
+            .expect("expected a neuron-growth candidate");
+        assert!(
+            first_neuron.provenance.mutation.contains("squash=ABSOLUTE"),
+            "mutation={}",
+            first_neuron.provenance.mutation
+        );
     }
 }
