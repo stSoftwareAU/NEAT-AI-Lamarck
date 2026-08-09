@@ -1,15 +1,17 @@
 //! Analyse-without-apply learning-signal accumulation for a focus neuron.
 //!
-//! This is a pragmatic GRQ-oriented path: forward-trace the incumbent, seed the
-//! focus (and its incoming synapses) from output residual × squash derivative,
-//! and accumulate [`LearningSignal`] entries indexed the same way candidates
-//! already expect (`creature.neurons` / `creature.synapses` positions).
+//! Issue #2: accumulation goes through neat-core
+//! [`propagate_topological_loop`](neat_core::propagate_topological_loop) via
+//! [`crate::propagate_layout`]. The focus UUID only affects which signals
+//! candidates consume; hidden neurons receive real propagated blame.
 
-use crate::backprop::{BiasSignal, LearningSignal, WeightSignal};
-use neat_core::{CompiledNetwork, CreatureExport, TrainingDataConfig, TrainingDataIterator};
+use crate::backprop::{BackpropConfig, LearningSignal};
+use crate::propagate_layout::accumulate_creature_learning;
+use neat_core::{CompiledNetwork, CreatureExport};
+use rand::Rng;
 use std::path::Path;
 
-/// Squash derivative at a post-activation value (heuristic, production-oriented).
+/// Squash derivative at a post-activation value (heuristic, used by focus stats).
 pub fn squash_derivative(squash: Option<&str>, post: f64) -> f64 {
     match squash {
         Some("IDENTITY") => 1.0,
@@ -46,153 +48,32 @@ pub fn squash_derivative(squash: Option<&str>, post: f64) -> f64 {
     }
 }
 
-/// Resolve source activation for a synapse `from` uuid after `activate_and_trace`.
-fn source_activation(
-    creature: &CreatureExport,
-    from_uuid: &str,
-    inputs: &[f32],
-    traced: &[f32],
-) -> Option<f64> {
-    if let Some(idx) = from_uuid
-        .strip_prefix("input-")
-        .and_then(|s| s.parse::<usize>().ok())
-    {
-        return inputs.get(idx).map(|v| f64::from(*v));
-    }
-    let neuron_pos = creature.neurons.iter().position(|n| n.uuid == from_uuid)?;
-    let relative_idx = neuron_pos;
-    let num_non_inputs = creature.neurons.len();
-    let post_offset = creature.output;
-    let idx = post_offset + relative_idx;
-    if idx < traced.len() && relative_idx < num_non_inputs {
-        Some(f64::from(traced[idx]))
-    } else {
-        None
-    }
-}
-
-/// Accumulate a focus-local [`LearningSignal`] over training records.
+/// Accumulate a creature-wide [`LearningSignal`] (analyse-without-apply).
 ///
-/// Biases/weights are indexed by position in `creature.neurons` /
-/// `creature.synapses` (matching [`crate::candidates`]).
+/// `focus_uuid` is retained for API compatibility with the run loop; the
+/// reverse-topo pass trains the full sparse selection (default: all
+/// hidden/output neurons). Candidates still propose only on the focus.
 pub fn accumulate_focus_learning(
     creature: &CreatureExport,
     network: &mut CompiledNetwork,
     training_data: &Path,
     focus_uuid: &str,
     max_records: Option<u64>,
+    config: &BackpropConfig,
+    rng: &mut impl Rng,
 ) -> Result<LearningSignal, String> {
-    let neuron_pos = creature
-        .neurons
-        .iter()
-        .position(|n| n.uuid == focus_uuid)
-        .ok_or_else(|| format!("focus neuron {focus_uuid} not found"))?;
-    let neuron = &creature.neurons[neuron_pos];
-    let old_bias = neuron.bias;
-    let squash = neuron.squash.as_deref();
-    let output_index = if neuron.neuron_type == "output" {
-        creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type == "output")
-            .position(|n| n.uuid == focus_uuid)
-    } else {
-        None
-    };
-
-    let relative_idx = neuron_pos;
-    let compiled_ok = crate::focus::neuron_index(creature, focus_uuid).is_some();
-    if !compiled_ok {
-        return Err(format!("focus neuron {focus_uuid} missing compiled index"));
+    if creature.neurons.iter().all(|n| n.uuid != focus_uuid) {
+        return Err(format!("focus neuron {focus_uuid} not found"));
     }
-
-    let mut learning = LearningSignal::new(creature.neurons.len(), creature.synapses.len());
-    let incoming: Vec<usize> = creature
-        .synapses
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.to_uuid == focus_uuid)
-        .map(|(i, _)| i)
-        .collect();
-
-    let config = TrainingDataConfig::new(creature.input, creature.output);
-    let mut iter = TrainingDataIterator::new(training_data, config).map_err(|e| e.to_string())?;
-    let mut count = 0u64;
-
-    while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
-        if let Some(limit) = max_records
-            && count >= limit
-        {
-            break;
-        }
-        let traced = network.activate_and_trace(&record.inputs, creature.output);
-        let num_non_inputs = network.num_neurons.saturating_sub(creature.input);
-        let post_offset = creature.output;
-        let pre_offset = creature.output + num_non_inputs;
-        if pre_offset + relative_idx >= traced.len() || post_offset + relative_idx >= traced.len() {
-            continue;
-        }
-        let post = f64::from(traced[post_offset + relative_idx]);
-        count += 1;
-
-        // Hidden neurons have no natural target — only accumulate when focus is
-        // an output (or when a residual can be derived from the output head).
-        let Some(out_i) = output_index else {
-            continue;
-        };
-        if out_i >= record.outputs.len() {
-            continue;
-        }
-        let target = f64::from(record.outputs[out_i]);
-        let err = target - post;
-        let deriv = squash_derivative(squash, post);
-        let adjusted = err * deriv;
-
-        {
-            let signal: &mut BiasSignal = &mut learning.biases[neuron_pos];
-            signal.count += 1.0;
-            signal.total_adjusted_bias += old_bias + adjusted;
-            if deriv <= f64::EPSILON {
-                signal.no_change = true;
-            }
-        }
-
-        for &syn_idx in &incoming {
-            let syn = &creature.synapses[syn_idx];
-            let Some(activation) =
-                source_activation(creature, &syn.from_uuid, &record.inputs, &traced)
-            else {
-                continue;
-            };
-            let weight = syn.weight;
-            // Propose toward weight + (error*deriv)/activation when usable.
-            // Clamp the per-sample delta — tiny activations otherwise explode.
-            let adj = if activation.abs() > 1e-3 {
-                weight + (adjusted / activation).clamp(-0.5, 0.5)
-            } else {
-                weight
-            };
-            let signal: &mut WeightSignal = &mut learning.weights[syn_idx];
-            signal.count += 1.0;
-            if activation >= 0.0 {
-                signal.total_positive_activation += activation;
-                signal.count_positive += 1.0;
-                signal.total_positive_adjusted_value += adj;
-            } else {
-                signal.total_negative_activation += activation;
-                signal.count_negative += 1.0;
-                signal.total_negative_adjusted_value += adj;
-            }
-        }
-    }
-
-    Ok(learning)
+    accumulate_creature_learning(creature, network, training_data, config, max_records, rng)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use neat_core::{compile_creature, parse_creature_json};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
     use std::io::Write;
     use tempfile::tempdir;
 
@@ -215,15 +96,23 @@ mod tests {
     fn identity_output_accumulates_nonzero_bias_signal() {
         let dir = tempdir().unwrap();
         let mut f = std::fs::File::create(dir.path().join("0.bin")).unwrap();
-        // input=1, target=1 → with weights 1, bias 0: post≈1, err≈0 for h1→o1 path
-        // Use target=2 so residual is clearly positive.
         for v in [1.0f32, 2.0f32] {
             f.write_all(&v.to_le_bytes()).unwrap();
         }
         let creature = parse_creature_json(TINY).unwrap();
         let mut network = compile_creature(&creature).unwrap();
-        let learning =
-            accumulate_focus_learning(&creature, &mut network, dir.path(), "o1", Some(1)).unwrap();
+        let cfg = BackpropConfig::default();
+        let mut rng = StdRng::seed_from_u64(1);
+        let learning = accumulate_focus_learning(
+            &creature,
+            &mut network,
+            dir.path(),
+            "o1",
+            Some(1),
+            &cfg,
+            &mut rng,
+        )
+        .unwrap();
         assert!(learning.biases[1].count >= 1.0);
         assert!(learning.biases[1].total_adjusted_bias != 0.0);
     }

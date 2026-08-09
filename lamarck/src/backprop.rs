@@ -7,10 +7,13 @@
 //! exposes analyse-without-apply accumulation helpers that finalise bias and
 //! weight proposals via [`neat_core::calculate_bias`] /
 //! [`neat_core::calculate_weight`].
+//!
+//! Lamarck defaults use fixed `generations: 1.0` (not the TS random 1–10 draw)
+//! so optimisation runs stay deterministic under a seeded RNG.
 
 use neat_core::{
-    PropagateOutcome, PropagateOutput, StandardOutcome, SynapseDelta, calculate_bias,
-    calculate_weight,
+    CreatureExport, PropagateOutcome, PropagateOutput, StandardOutcome, SynapseDelta,
+    calculate_bias, calculate_weight,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,11 +74,21 @@ pub struct BackpropConfig {
     pub l1_weight_decay: f64,
     /// L2 weight decay.
     pub l2_weight_decay: f64,
+    /// Fraction of eligible (hidden/output) neurons selected for sparse updates.
+    /// `1.0` = full network (Lamarck default for strongest focus signals).
+    pub sparse_ratio: f64,
+    /// When true, skip TS-style random generation sampling (already fixed here).
+    pub disable_random_samples: bool,
+    /// Divide multi-path gradients by `sqrt(path_count)` (NEAT-AI #1872).
+    pub normalise_gradients: bool,
+    /// Probability of mutating a gene during sparse clustering (TS `trainingMutationRate`).
+    pub training_mutation_rate: f64,
 }
 
 impl Default for BackpropConfig {
     fn default() -> Self {
         Self {
+            // Fixed (not TS random 1–10) for deterministic Lamarck runs.
             generations: 1.0,
             learning_rate: 0.01,
             maximum_bias_adjustment_scale: 10.0,
@@ -92,6 +105,10 @@ impl Default for BackpropConfig {
             l2_bias_decay: 0.0,
             l1_weight_decay: 0.0,
             l2_weight_decay: 0.0,
+            sparse_ratio: 1.0,
+            disable_random_samples: true,
+            normalise_gradients: false,
+            training_mutation_rate: 1.0,
         }
     }
 }
@@ -230,14 +247,15 @@ impl WeightSignal {
 /// Aggregated learning signal for a creature — never applied automatically.
 #[derive(Debug, Clone, Default)]
 pub struct LearningSignal {
-    /// Per-neuron bias signals (indexed by neuron id in the propagate layout).
+    /// Per-neuron bias signals indexed by `CreatureExport.neurons` position
+    /// (non-input neurons only — matches candidate generation).
     pub biases: Vec<BiasSignal>,
-    /// Per-synapse weight signals.
+    /// Per-synapse weight signals indexed by `CreatureExport.synapses` position.
     pub weights: Vec<WeightSignal>,
 }
 
 impl LearningSignal {
-    /// Create empty accumulators sized for a network.
+    /// Create empty accumulators sized for export neurons/synapses.
     pub fn new(neuron_count: usize, synapse_count: usize) -> Self {
         Self {
             biases: vec![BiasSignal::default(); neuron_count],
@@ -245,10 +263,17 @@ impl LearningSignal {
         }
     }
 
-    /// Fold one [`PropagateOutput`] into this signal (analyse-without-apply).
-    pub fn accumulate_propagate_output(&mut self, output: &PropagateOutput) {
-        for (idx, outcome) in output.neurons.iter().enumerate() {
-            if let Some(signal) = self.biases.get_mut(idx)
+    /// Fold one full-layout [`PropagateOutput`] into export-indexed signals.
+    ///
+    /// Propagate neuron indices `0..input_count` are virtual inputs and skipped;
+    /// `input_count + i` maps to `biases[i]`. Synapses share export order.
+    pub fn accumulate_propagate_output(&mut self, output: &PropagateOutput, input_count: usize) {
+        for (prop_idx, outcome) in output.neurons.iter().enumerate() {
+            if prop_idx < input_count {
+                continue;
+            }
+            let export_idx = prop_idx - input_count;
+            if let Some(signal) = self.biases.get_mut(export_idx)
                 && let PropagateOutcome::Standard(standard) = outcome
             {
                 signal.accumulate_standard(standard);
@@ -260,6 +285,44 @@ impl LearningSignal {
             }
         }
     }
+}
+
+/// Apply accumulated learning proposals to a cloned creature (analyse ≠ apply).
+///
+/// Skips neurons/synapses with zero accumulation count and changes smaller than
+/// `plank_constant`. Does not mutate `creature`.
+pub fn apply_learnings(
+    creature: &CreatureExport,
+    signal: &LearningSignal,
+    config: &BackpropConfig,
+    learning_rate: f64,
+) -> CreatureExport {
+    let mut out = creature.clone();
+    for (i, neuron) in out.neurons.iter_mut().enumerate() {
+        let Some(bias_sig) = signal.biases.get(i) else {
+            continue;
+        };
+        if bias_sig.count <= 0.0 {
+            continue;
+        }
+        let proposed = bias_sig.propose(neuron.bias, config, learning_rate);
+        if (proposed - neuron.bias).abs() >= config.plank_constant {
+            neuron.bias = proposed;
+        }
+    }
+    for (i, syn) in out.synapses.iter_mut().enumerate() {
+        let Some(w_sig) = signal.weights.get(i) else {
+            continue;
+        };
+        if w_sig.count <= 0.0 {
+            continue;
+        }
+        let proposed = w_sig.propose(syn.weight, config, learning_rate);
+        if (proposed - syn.weight).abs() >= config.plank_constant {
+            syn.weight = proposed;
+        }
+    }
+    out
 }
 
 /// Compare two floats with ordinary absolute/relative tolerances.
@@ -357,7 +420,7 @@ mod tests {
 
     #[test]
     fn learning_signal_does_not_mutate_creature_on_accumulate() {
-        let mut signal = LearningSignal::new(2, 1);
+        let mut signal = LearningSignal::new(1, 1);
         let output = PropagateOutput {
             neurons: vec![
                 PropagateOutcome::Skipped,
@@ -375,8 +438,32 @@ mod tests {
                 ..SynapseDelta::default()
             }],
         };
-        signal.accumulate_propagate_output(&output);
-        assert!(nearly_equal(signal.biases[1].count, 1.0));
+        // Full layout: [input0, export0] with input_count=1.
+        signal.accumulate_propagate_output(&output, 1);
+        assert!(nearly_equal(signal.biases[0].count, 1.0));
         assert!(nearly_equal(signal.weights[0].count, 1.0));
+    }
+
+    #[test]
+    fn apply_learnings_updates_bias_without_touching_source() {
+        use neat_core::parse_creature_json;
+        let creature = parse_creature_json(
+            r#"{
+              "input":1,"output":1,"forwardOnly":true,
+              "neurons":[{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}],
+              "synapses":[{"fromUUID":"input-0","toUUID":"o1","weight":1.0}]
+            }"#,
+        )
+        .unwrap();
+        let mut signal = LearningSignal::new(1, 1);
+        signal.biases[0] = BiasSignal {
+            count: 10.0,
+            total_adjusted_bias: 5.0,
+            no_change: false,
+        };
+        let cfg = BackpropConfig::default();
+        let applied = apply_learnings(&creature, &signal, &cfg, 0.01);
+        assert!((creature.neurons[0].bias - 0.0).abs() < 1e-15);
+        assert!((applied.neurons[0].bias - creature.neurons[0].bias).abs() > cfg.plank_constant);
     }
 }

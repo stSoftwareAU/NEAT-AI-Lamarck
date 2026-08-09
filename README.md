@@ -247,45 +247,28 @@ Raw observation sources may reuse `observations.statistics` where mathematically
 
 ## Backpropagation
 
-NEAT-AI already contains conventional TypeScript backpropagation. Version 1 of Lamarck will port that behaviour to Rust rather than inventing a new learning algorithm.
+Lamarck ports NEAT-AI backprop behaviour by wiring creatures through neat-core’s
+`propagate_topological_loop` (the TS/WASM reverse-topo contract), then folding
+results into an analyse-without-apply [`LearningSignal`].
 
-The first port should favour **behavioural parity over redesign**:
+- Config / LR / limits / sparse ratio: `lamarck/src/backprop.rs`
+- Creature → `PropagateInput` layout + sparse RNG: `lamarck/src/propagate_layout.rs`
+- Apply (optional): `apply_learnings` clones the creature and writes proposed
+  bias/weight updates (optimisation still accepts only via the scorer)
+- Defaults use fixed `generations: 1.0` and `sparse_ratio: 1.0` for deterministic
+  full-network signals under a seeded RNG
 
-- same learning-rate semantics;
-- same weight/bias limiting behaviour;
-- same squash-specific propagation behaviour;
-- same sparse-selection behaviour where applicable;
-- same update/application semantics;
-- deterministic tests where randomness is involved.
+Parity fixtures live under `lamarck/tests/fixtures/backprop/` (tolerances about
+`1e-9`–`1e-6`). Regenerate goldens:
 
-Parity tests use ordinary floating-point tolerances (about `1e-9`–`1e-6`), not
-bit-identical TypeScript. The port must be accurate enough to propose sensible
-bias/weight deltas.
-
-The existing implementation spans more than the TypeScript `BackPropagation` configuration class; creature/neuron propagation and learning application behaviour must be included in the parity work.
-
-Initially the Rust implementation lives in this repository. Once stable and proven useful, generic backpropagation code may migrate into NEAT-AI-core.
-
-### Separate analysis from application
-
-Where practical, the Rust port should expose the learning signal separately from committing mutations.
-
-Conceptually:
-
-```text
-analyse(record, expected)
-        |
-        v
-PropagationTrace / LearningSignal
-        |
-        +--> conventional backprop candidate
-        |
-        +--> statistical candidate generation
+```bash
+LAMARCK_REGEN_BACKPROP_FIXTURES=1 cargo test -p neat_ai_lamarck --test backprop_parity
 ```
 
-Lamarck needs the signal, not merely the ability to silently update a creature.
+Optional Deno helper (sibling `../NEAT-AI`): `scripts/generate_backprop_parity_fixtures.ts`.
 
-A hidden neuron does not have a natural target value, so Lamarck should not invent `expected_hidden - actual_hidden`. Use the propagated learning/error contribution from the conventional backprop machinery as the initial definition of neuron blame/sensitivity.
+A hidden neuron has no natural target — blame comes from the propagated learning
+signal, never an invented `expected_hidden - actual_hidden`.
 
 ## Phase 4 — candidate generation
 
@@ -471,7 +454,10 @@ NEAT-AI-Lamarck/
     ├── backprop.rs
     ├── observations.rs
     ├── focus.rs
+    ├── learning.rs
+    ├── propagate_layout.rs
     ├── candidates.rs
+    ├── structural.rs
     ├── scorer.rs
     ├── run.rs
     └── report.rs

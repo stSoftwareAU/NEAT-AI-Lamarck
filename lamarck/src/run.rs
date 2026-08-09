@@ -292,19 +292,30 @@ pub fn run_optimisation(
         )?;
         log::detail(&format!("incoming sources: {}", incoming.len()));
 
-        log::detail("accumulating focus learning signal...");
+        log::detail("accumulating creature learning signal (propagate_topological_loop)...");
         let learn_start = Instant::now();
+        // Deterministic sparse draw: mix run seed with experiment index.
+        let mut learn_rng = StdRng::seed_from_u64(
+            config
+                .seed
+                .unwrap_or(0)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(experiments),
+        );
         let learning = accumulate_focus_learning(
             &incumbent,
             &mut network,
             &config.training_data,
             &focus,
             focus_sample_limit,
+            &backprop,
+            &mut learn_rng,
         )?;
         log::ok(&format!(
-            "learning signal in {}ms (bias_count={:.0})",
+            "learning signal in {}ms (bias_count={:.0}, weight_count={:.0})",
             learn_start.elapsed().as_millis(),
-            learning.biases.iter().map(|b| b.count).sum::<f64>()
+            learning.biases.iter().map(|b| b.count).sum::<f64>(),
+            learning.weights.iter().map(|w| w.count).sum::<f64>()
         ));
 
         let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);

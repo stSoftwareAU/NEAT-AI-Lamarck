@@ -1,0 +1,43 @@
+{
+  "semanticVersion": "4.0.0",
+  "forwardOnly": true,
+  "input": 1,
+  "output": 2,
+  "neurons": [
+    {
+      "type": "hidden",
+      "uuid": "h1",
+      "bias": 0.1,
+      "squash": "TANH"
+    },
+    {
+      "type": "output",
+      "uuid": "o0",
+      "bias": 0.0,
+      "squash": "TANH"
+    },
+    {
+      "type": "output",
+      "uuid": "o1",
+      "bias": 0.0,
+      "squash": "LOGISTIC"
+    }
+  ],
+  "synapses": [
+    {
+      "fromUUID": "input-0",
+      "toUUID": "h1",
+      "weight": 0.8
+    },
+    {
+      "fromUUID": "h1",
+      "toUUID": "o0",
+      "weight": 1.2
+    },
+    {
+      "fromUUID": "h1",
+      "toUUID": "o1",
+      "weight": 0.7
+    }
+  ]
+}
