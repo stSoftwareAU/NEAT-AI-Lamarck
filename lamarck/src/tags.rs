@@ -104,7 +104,7 @@ pub struct LamarckProgress<'a> {
 pub fn lamarck_progress_message(progress: &LamarckProgress<'_>) -> String {
     let (strat_emoji, strat_label) = strategy_emoji(progress.strategy);
     format!(
-        "🧬 Lamarck accept #{} · Δ{:+.3e} · {strat_emoji} {strat_label} · 🎯 {} · 🧪 exp {} · 🏆 score {:.12}",
+        "🦒 Lamarck accept #{} · Δ{:+.3e} · {strat_emoji} {strat_label} · 🎯 {} · 🧪 exp {} · 🏆 score {:.12}",
         progress.accept_number,
         progress.delta,
         progress.focus_neuron,
@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(score["value"], "0.2");
         let lamarck = tags.iter().find(|t| t["name"] == "lamarck").unwrap();
         let msg = lamarck["value"].as_str().unwrap();
-        assert!(msg.contains("🧬"));
+        assert!(msg.contains("🦒"));
         assert!(msg.contains("🧠"));
         assert!(msg.contains("accept #1"));
     }
