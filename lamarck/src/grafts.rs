@@ -7,6 +7,7 @@
 //! Neuron UUIDs are the identity: evolved weights/bias/squash still count as
 //! present. Inapplicable grafts are dropped immediately.
 
+use crate::combos::{dampen_stacked_new_synapses, format_dampen_report};
 use crate::log;
 use crate::scorer::{DirectoryScorer, ScoreResult, accepts_improvement, improvement};
 use crate::structural::{insert_index_for_hidden, is_forward_edge, is_input_source};
@@ -167,6 +168,12 @@ pub struct GraftReplayResult {
     pub store: GraftStore,
     /// Number of grafts accepted into the incumbent this phase.
     pub grafts_applied: usize,
+    /// Combination creatures scored (0 when no combo batch ran).
+    pub combos_scored: usize,
+    /// How many scored combos applied stacked-synapse dampening.
+    pub combos_dampened: usize,
+    /// Dampen detail for the accepted combo winner (empty otherwise).
+    pub combo_dampen: crate::combos::StackDampenReport,
     /// Scorer batches that succeeded.
     pub scorer_successes: u64,
     /// Scorer batches that failed.
@@ -607,6 +614,9 @@ pub fn replay_grafts(
             error: baseline_hint.map(|b| b.error),
             store,
             grafts_applied: 0,
+            combos_scored: 0,
+            combos_dampened: 0,
+            combo_dampen: crate::combos::StackDampenReport::default(),
             scorer_successes,
             scorer_failures,
         });
@@ -620,6 +630,9 @@ pub fn replay_grafts(
             error: baseline_hint.map(|b| b.error),
             store,
             grafts_applied: 0,
+            combos_scored: 0,
+            combos_dampened: 0,
+            combo_dampen: crate::combos::StackDampenReport::default(),
             scorer_successes,
             scorer_failures,
         });
@@ -672,6 +685,9 @@ pub fn replay_grafts(
                 error: baseline_hint.map(|b| b.error),
                 store,
                 grafts_applied: 0,
+                combos_scored: 0,
+                combos_dampened: 0,
+                combo_dampen: crate::combos::StackDampenReport::default(),
                 scorer_successes,
                 scorer_failures,
             });
@@ -750,6 +766,9 @@ pub fn replay_grafts(
     // Parallel combination batch: score groups of helpful singles together.
     // Budget is MAX_GRAFT_COMBO_CANDIDATES including the helpful singles already
     // scored; remaining slots are combination creatures in one scorer call.
+    let mut combos_scored = 0usize;
+    let mut combos_dampened = 0usize;
+    let mut winner_dampen = crate::combos::StackDampenReport::default();
     if helpful.len() > 1 && Instant::now() < deadline {
         let combo_slots = MAX_GRAFT_COMBO_CANDIDATES.saturating_sub(helpful.len());
         let index_sets = combination_index_sets(helpful.len(), combo_slots);
@@ -767,26 +786,40 @@ pub fn replay_grafts(
             }
 
             let mut stem_to_ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            let mut stem_to_dampen: BTreeMap<String, crate::combos::StackDampenReport> =
+                BTreeMap::new();
             for (ci, idxs) in index_sets.iter().enumerate() {
                 let grafts: Vec<&Graft> = idxs.iter().map(|&i| &helpful[i].0).collect();
-                let Ok(creature) = apply_grafts(host, &grafts) else {
+                let Ok(mut creature) = apply_grafts(host, &grafts) else {
                     continue;
                 };
                 let stem = format!("combo-{ci:03}-k{}", idxs.len());
+                let dampen = dampen_stacked_new_synapses(host, &mut creature);
+                if let Some(msg) =
+                    format_dampen_report(&format!("grafts: combo dampen {stem}"), &dampen)
+                {
+                    log::detail(&msg);
+                }
+                if !dampen.is_empty() {
+                    combos_dampened += 1;
+                }
                 if let Err(e) =
                     write_creature_json(&combo_dir.join(format!("{stem}.json")), &creature)
                 {
                     return Err(GraftReplayError { store, message: e });
                 }
-                stem_to_ids.insert(stem, grafts.iter().map(|g| g.id.clone()).collect());
+                stem_to_ids.insert(stem.clone(), grafts.iter().map(|g| g.id.clone()).collect());
+                stem_to_dampen.insert(stem, dampen);
             }
 
             if !stem_to_ids.is_empty() {
+                combos_scored = stem_to_ids.len();
                 log::info(&format!(
-                    "grafts: scoring {} combination(s) in parallel (helpful_singles={}, budget={})",
-                    stem_to_ids.len(),
+                    "grafts: scoring {} combination(s) in parallel (helpful_singles={}, budget={}, dampened={})",
+                    combos_scored,
                     helpful.len(),
-                    MAX_GRAFT_COMBO_CANDIDATES
+                    MAX_GRAFT_COMBO_CANDIDATES,
+                    combos_dampened
                 ));
                 match score_batch(scorer, training_data, &combo_dir) {
                     Ok(scores) => {
@@ -798,7 +831,7 @@ pub fn replay_grafts(
                             if accepts_improvement(result.score, baseline.score, min_improvement)
                                 && result.score > best_score
                             {
-                                let Ok(creature) = apply_grafts(
+                                let Ok(mut creature) = apply_grafts(
                                     host,
                                     &ids.iter()
                                         .filter_map(|id| {
@@ -811,14 +844,21 @@ pub fn replay_grafts(
                                 ) else {
                                     continue;
                                 };
+                                let dampen = dampen_stacked_new_synapses(host, &mut creature);
                                 best_creature = creature;
                                 best_score = result.score;
                                 best_error = result.error;
                                 best_ids = ids.clone();
+                                winner_dampen = dampen;
                                 log::ok(&format!(
-                                    "graft combo {stem}: score={:.12} ({} grafts)",
+                                    "graft combo {stem}: score={:.12} ({} grafts{})",
                                     best_score,
-                                    best_ids.len()
+                                    best_ids.len(),
+                                    if winner_dampen.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(", dampen targets={}", winner_dampen.targets.len())
+                                    }
                                 ));
                             }
                         }
@@ -855,6 +895,12 @@ pub fn replay_grafts(
             }
         }
     }
+    if combos_scored > 0 {
+        log::detail(&format!(
+            "grafts: combo stats scored={combos_scored} dampened={combos_dampened} winner_dampen_targets={}",
+            winner_dampen.targets.len()
+        ));
+    }
 
     let _ = fs::remove_dir_all(&singles_dir);
 
@@ -864,6 +910,9 @@ pub fn replay_grafts(
         error: Some(best_error),
         store,
         grafts_applied,
+        combos_scored,
+        combos_dampened,
+        combo_dampen: winner_dampen,
         scorer_successes,
         scorer_failures,
     })
@@ -1254,6 +1303,104 @@ mod tests {
         assert!(result.store.get("edge:input-1->h1").is_some());
         assert!(result.store.get("edge:input-0->o1").is_some());
         assert!(result.score.is_some_and(|s| (s - 0.500005).abs() < 1e-12));
+        assert_eq!(result.combos_scored, 1);
+        assert_eq!(result.combos_dampened, 0); // different targets
+        assert!(result.combo_dampen.is_empty());
+    }
+
+    /// Two helpful edges into the same target — combo must dampen by stack_dampen_scale(2).
+    struct StackedGraftScorer;
+
+    impl DirectoryScorer for StackedGraftScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            let base = 0.5;
+            let mut map = BTreeMap::new();
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(stem) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                let text = fs::read_to_string(entry.path()).unwrap_or_default();
+                let Ok(c) = parse_creature_json(&text) else {
+                    continue;
+                };
+                let new_into_o1 = c
+                    .synapses
+                    .iter()
+                    .filter(|s| s.to_uuid == "o1" && s.from_uuid.starts_with("input-"))
+                    .count();
+                let score = if stem == "baseline" {
+                    base
+                } else if new_into_o1 >= 2 {
+                    base + 5e-6
+                } else if new_into_o1 == 1 {
+                    base + 2e-6
+                } else {
+                    base
+                };
+                map.insert(
+                    stem.to_string(),
+                    ScoreResult {
+                        score,
+                        error: 1.0 - score,
+                        complexity_penalty: 0.0,
+                    },
+                );
+            }
+            Ok(map)
+        }
+    }
+
+    #[test]
+    fn graft_combo_dampens_stacked_same_target_weights() {
+        let dir = tempdir().unwrap();
+        let host = tiny_creature();
+        let mut store = GraftStore::new();
+        store.upsert(graft_from_add_synapse("input-0", "o1", 0.06));
+        let mut b = graft_from_add_synapse("input-1", "o1", 0.08);
+        b.id = "edge:input-1->o1".into();
+        store.upsert(b);
+        let work = dir.path().join("work");
+        let result = replay_grafts(
+            &StackedGraftScorer,
+            GraftReplayRequest {
+                host: &host,
+                store,
+                training_data: dir.path(),
+                work_dir: &work,
+                deadline: Instant::now() + Duration::from_secs(30),
+                min_improvement: 1e-6,
+                baseline_hint: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.grafts_applied, 2);
+        assert_eq!(result.combos_scored, 1);
+        assert_eq!(result.combos_dampened, 1);
+        assert_eq!(result.combo_dampen.targets.len(), 1);
+        assert_eq!(result.combo_dampen.targets[0].k, 2);
+        let scale = crate::combos::stack_dampen_scale(2);
+        let w0 = result
+            .creature
+            .synapses
+            .iter()
+            .find(|s| s.from_uuid == "input-0" && s.to_uuid == "o1")
+            .unwrap()
+            .weight;
+        let w1 = result
+            .creature
+            .synapses
+            .iter()
+            .find(|s| s.from_uuid == "input-1" && s.to_uuid == "o1")
+            .unwrap()
+            .weight;
+        assert!((w0 - 0.06 * scale).abs() < 1e-12);
+        assert!((w1 - 0.08 * scale).abs() < 1e-12);
     }
 
     #[test]

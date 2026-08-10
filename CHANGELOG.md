@@ -17,6 +17,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Smart combo dampening (Issue #63).** After screened singles improve, combo
+  merges (experiments + Phase-G grafts) scale newly stacked synapses into the
+  same target by `k.powf(-STACK_DAMPEN_EXPONENT)` (default `1/√k`). Journal and
+  run-summary fields (`combosScored`, `combosDampened`, `comboDampen`, …) expose
+  enough signal to retune the exponent after production runs. Bump crate to
+  `0.1.1` so remote `runlib`-style installs rebuild.
 - **PR auto-format syncs `Cargo.lock` to latest neat-core (Issue #33).** New
   auto-format job runs `cargo fmt --all` and `cargo update -p neat-core` on
   every PR to `Develop`, committing lock drift against the checked-out

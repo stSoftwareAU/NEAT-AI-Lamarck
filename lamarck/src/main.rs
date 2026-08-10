@@ -15,6 +15,7 @@ use std::time::Duration;
 #[derive(Debug, Parser)]
 #[command(name = "neat_ai_lamarck")]
 #[command(about = "Experimental optimiser for already-fit NEAT-AI creatures")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

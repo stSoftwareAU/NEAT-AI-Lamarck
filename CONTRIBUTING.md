@@ -40,3 +40,16 @@ runs `cargo fmt --all` and `cargo update -p neat-core`, then pushes any
 tracked-tree changes back to the PR branch. It does **not** bump
 `neat-core.expected-version` — acknowledge breaking neat-core bumps
 deliberately in the same PR that updates Lamarck for them.
+
+## Version bumping
+
+**Every binary-affecting change must bump the patch version in
+[`lamarck/Cargo.toml`](./lamarck/Cargo.toml)** (and keep `Cargo.lock` in sync).
+Remote GRQ runners use the same pattern as
+[`runlib.sh`](https://github.com/stSoftwareAU/GRQ-taxation/blob/Develop/scripts/runlib.sh):
+they compare the installed `neat_ai_lamarck` version marker against
+`Cargo.toml` and skip rebuilding when they match. Forgetting to bump leaves
+stale binaries on remote machines.
+
+Docs-only or CI-config-only changes do not need a bump. Record notable changes
+under **[Unreleased]** in [`CHANGELOG.md`](./CHANGELOG.md).
