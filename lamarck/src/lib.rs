@@ -26,8 +26,8 @@ pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
 pub use combos::{
     ComboSelectRequest, ComboSelection, Improver, MAX_COMBO_CANDIDATES, STACK_DAMPEN_EXPONENT,
     StackDampenReport, StackDampenTarget, collect_improvers, combination_index_sets,
-    dampen_stacked_new_synapses, merge_candidate_deltas, select_best_with_combinations,
-    stack_dampen_scale,
+    dampen_stacked_new_synapses, merge_candidate_deltas, new_synapse_contributor_counts,
+    select_best_with_combinations, stack_dampen_scale,
 };
 pub use config::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES, DEFAULT_MIN_IMPROVEMENT,

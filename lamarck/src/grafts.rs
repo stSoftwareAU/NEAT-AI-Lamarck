@@ -7,7 +7,9 @@
 //! Neuron UUIDs are the identity: evolved weights/bias/squash still count as
 //! present. Inapplicable grafts are dropped immediately.
 
-use crate::combos::{dampen_stacked_new_synapses, format_dampen_report};
+use crate::combos::{
+    dampen_stacked_new_synapses, format_dampen_report, new_synapse_contributor_counts,
+};
 use crate::log;
 use crate::scorer::{DirectoryScorer, ScoreResult, accepts_improvement, improvement};
 use crate::structural::{insert_index_for_hidden, is_forward_edge, is_input_source};
@@ -794,7 +796,14 @@ pub fn replay_grafts(
                     continue;
                 };
                 let stem = format!("combo-{ci:03}-k{}", idxs.len());
-                let dampen = dampen_stacked_new_synapses(host, &mut creature);
+                let singles: Result<Vec<_>, _> =
+                    grafts.iter().map(|g| apply_graft(host, g)).collect();
+                let Ok(singles) = singles else {
+                    continue;
+                };
+                let single_refs: Vec<&CreatureExport> = singles.iter().collect();
+                let contributors = new_synapse_contributor_counts(host, &single_refs);
+                let dampen = dampen_stacked_new_synapses(host, &mut creature, &contributors);
                 if let Some(msg) =
                     format_dampen_report(&format!("grafts: combo dampen {stem}"), &dampen)
                 {
@@ -831,20 +840,28 @@ pub fn replay_grafts(
                             if accepts_improvement(result.score, baseline.score, min_improvement)
                                 && result.score > best_score
                             {
-                                let Ok(mut creature) = apply_grafts(
-                                    host,
-                                    &ids.iter()
-                                        .filter_map(|id| {
-                                            helpful
-                                                .iter()
-                                                .find(|(g, _)| g.id == *id)
-                                                .map(|(g, _)| g)
-                                        })
-                                        .collect::<Vec<_>>(),
-                                ) else {
+                                let member_grafts: Vec<&Graft> = ids
+                                    .iter()
+                                    .filter_map(|id| {
+                                        helpful
+                                            .iter()
+                                            .find(|(g, _)| g.id == *id)
+                                            .map(|(g, _)| g)
+                                    })
+                                    .collect();
+                                let Ok(mut creature) = apply_grafts(host, &member_grafts) else {
                                     continue;
                                 };
-                                let dampen = dampen_stacked_new_synapses(host, &mut creature);
+                                let singles: Result<Vec<_>, _> =
+                                    member_grafts.iter().map(|g| apply_graft(host, g)).collect();
+                                let Ok(singles) = singles else {
+                                    continue;
+                                };
+                                let single_refs: Vec<&CreatureExport> = singles.iter().collect();
+                                let contributors =
+                                    new_synapse_contributor_counts(host, &single_refs);
+                                let dampen =
+                                    dampen_stacked_new_synapses(host, &mut creature, &contributors);
                                 best_creature = creature;
                                 best_score = result.score;
                                 best_error = result.error;

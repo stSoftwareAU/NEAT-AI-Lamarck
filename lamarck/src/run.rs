@@ -2,7 +2,7 @@
 
 use crate::backprop::BackpropConfig;
 use crate::candidates::{
-    CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
+    Candidate, CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
     write_candidate_batch,
 };
 use crate::combos::{
@@ -979,14 +979,48 @@ pub fn run_optimisation(
             winner_stem = Some(sel.stem.clone());
 
             // Record structural improvements into the local graft store.
-            if matches!(
-                strategy,
-                CandidateStrategy::StructuralAdd | CandidateStrategy::StructuralAddNeuron
-            ) && let Some((grafts_path, store)) = graft_store.as_mut()
-                && let Some(id) = record_structural_acceptance(store, &previous, &incumbent)
-            {
-                log::detail(&format!("grafts: recorded structural accept {id}"));
-                if let Err(e) = store.save(grafts_path) {
+            // Combo accepts must persist each member's solo-sized delta — never
+            // the dampened merged creature (replay would then double-dampen).
+            if let Some((grafts_path, store)) = graft_store.as_mut() {
+                let mut recorded_any = false;
+                let structural_members: Vec<&Candidate> = if sel.member_indices.len() <= 1 {
+                    sel.member_indices
+                        .first()
+                        .and_then(|i| candidates.get(*i))
+                        .filter(|c| {
+                            matches!(
+                                c.provenance.strategy,
+                                CandidateStrategy::StructuralAdd
+                                    | CandidateStrategy::StructuralAddNeuron
+                            )
+                        })
+                        .into_iter()
+                        .collect()
+                } else {
+                    sel.member_indices
+                        .iter()
+                        .filter_map(|i| candidates.get(*i))
+                        .filter(|c| {
+                            matches!(
+                                c.provenance.strategy,
+                                CandidateStrategy::StructuralAdd
+                                    | CandidateStrategy::StructuralAddNeuron
+                            )
+                        })
+                        .collect()
+                };
+                for member in structural_members {
+                    // Solo weights from the member candidate (not dampened incumbent).
+                    if let Some(id) =
+                        record_structural_acceptance(store, &previous, &member.creature)
+                    {
+                        log::detail(&format!("grafts: recorded structural accept {id}"));
+                        recorded_any = true;
+                    }
+                }
+                if recorded_any
+                    && let Err(e) = store.save(grafts_path)
+                {
                     log::warn(&format!(
                         "grafts: failed to save {}: {e}",
                         grafts_path.display()
