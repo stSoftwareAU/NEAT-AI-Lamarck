@@ -35,16 +35,22 @@ Lamarck must not duplicate this authority.
 
 1. Start from the supplied incumbent.
 2. Verify baseline score/parity.
-3. Accumulate learning + output residuals, then select one focus neuron
+3. Replay stored structural grafts onto the opening fittest when
+   `--grafts-path` is set (phase G, 10% of the budget by default).
+4. Accumulate learning + output residuals, then select one focus neuron
    (default: `weighted` random by error-influence mass — output residual L1 and
    depth-decayed hidden blame; zero-signal neurons excluded). Prefer this over
    `high-error`, which sticks on a single neuron.
-4. Scan/measure the chosen focus on the incumbent.
-5. Generate ~100 candidates (default; keep the scorer CPU-saturated) from backpropagation, statistical, structural and random strategies.
-6. **Screen** on a cheap scorer subsample (default 5% of rows); promote only sample Δ `> 1e-6`.
-7. **Full-corpus** score baseline + promoted candidates; accept only if Δ score clears `1e-6`.
-8. Treat creature-specific statistics as stale after an acceptance.
-9. Repeat until the wall-clock budget (45 minutes by default) expires.
+5. Scan/measure the chosen focus on the incumbent.
+6. Generate ~100 candidates (default; keep the scorer CPU-saturated) from backpropagation, statistical, structural and random strategies.
+7. **Screen** on a cheap scorer subsample (default 5% of rows); promote only sample Δ `> 1e-6`.
+8. **Full-corpus** score baseline + promoted candidates.
+9. **Combine** improving candidates (pairs first) with stacked-synapse
+   dampening and score those on the full corpus too; accept the best result only
+   if Δ score clears `1e-6`.
+10. Treat creature-specific statistics as stale after an acceptance, and record
+    structural accepts into the graft store.
+11. Repeat until the wall-clock budget (45 minutes by default) expires.
 
 ## Locked contracts
 
