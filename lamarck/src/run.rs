@@ -2,7 +2,8 @@
 
 use crate::backprop::BackpropConfig;
 use crate::candidates::{
-    CandidateGenContext, CandidateProvenance, generate_candidates, write_candidate_batch,
+    CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
+    write_candidate_batch,
 };
 use crate::config::LamarckConfig;
 use crate::focus::{
@@ -10,6 +11,10 @@ use crate::focus::{
     RandomFocusSelector, UnsaturatedFocusSelector, WeightedFocusSelector, attach_focus_blame,
     attach_learning_to_incoming, build_improvement_signals, collect_focus_stats,
     collect_incoming_source_stats, collect_output_mean_abs_errors, select_highest_signal,
+};
+use crate::grafts::{
+    GraftReplayRequest, GraftStore, default_graft_replay_budget, record_structural_acceptance,
+    replay_grafts,
 };
 use crate::log;
 use crate::observations::ensure_statistics;
@@ -207,8 +212,105 @@ pub fn run_optimisation(
     let mut best_score = opening_baseline_score.unwrap_or(f64::NEG_INFINITY);
     // Last-accept details for the final run-summary stamp (Issue #35).
     let mut last_accept_focus = String::new();
-    let mut last_accept_strategy = crate::candidates::CandidateStrategy::Random;
+    let mut last_accept_strategy = CandidateStrategy::Random;
     let mut last_accept_error = f64::NAN;
+
+    // Phase-G: replay local structural grafts onto the opening fittest.
+    let mut graft_store = if let Some(path) = &config.grafts_path {
+        match GraftStore::load(path) {
+            Ok(store) => Some((path.clone(), store)),
+            Err(e) => {
+                log::warn(&format!(
+                    "grafts: failed to load {}: {e}; starting empty",
+                    path.display()
+                ));
+                Some((path.clone(), GraftStore::new()))
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some((grafts_path, store)) = graft_store.take() {
+        let budget = config
+            .graft_replay_budget
+            .unwrap_or_else(|| default_graft_replay_budget(config.timeout));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let graft_deadline = Instant::now() + budget.min(remaining);
+        log::info(&format!(
+            "Phase-G: graft replay (budget={}ms, store={})",
+            budget.min(remaining).as_millis(),
+            grafts_path.display()
+        ));
+        let baseline_hint = opening_baseline_score.map(|score| {
+            let error = creature_meta
+                .tags
+                .iter()
+                .find(|t| t.name == "error")
+                .and_then(|t| t.value.parse().ok())
+                .unwrap_or(f64::NAN);
+            ScoreResult {
+                score,
+                error,
+                complexity_penalty: 0.0,
+            }
+        });
+        let work = config.output_dir.join("graft-replay");
+        match replay_grafts(
+            scorer,
+            GraftReplayRequest {
+                host: &incumbent,
+                store: store.clone(),
+                training_data: &config.training_data,
+                work_dir: &work,
+                deadline: graft_deadline,
+                min_improvement: config.min_improvement,
+                baseline_hint: baseline_hint.as_ref(),
+            },
+        ) {
+            Ok(replay) => {
+                scorer_successes += replay.scorer_successes;
+                scorer_failures += replay.scorer_failures;
+                if replay.grafts_applied > 0 {
+                    incumbent = replay.creature;
+                    if let (Some(score), Some(error)) = (replay.score, replay.error) {
+                        best_score = score;
+                        last_accept_error = error;
+                        last_accept_focus = "(graft-replay)".into();
+                        last_accept_strategy = CandidateStrategy::StructuralAdd;
+                        acceptances += 1;
+                        creature_meta.upsert("score", format!("{score}"));
+                        creature_meta.upsert("error", format!("{error}"));
+                        let tagged = serialize_creature_with_meta(&incumbent, &creature_meta)?;
+                        fs::write(&best_path, &tagged).map_err(|e| e.to_string())?;
+                        log::ok(&format!(
+                            "Phase-G: applied {} graft(s); incumbent score={score:.12}",
+                            replay.grafts_applied
+                        ));
+                    }
+                } else if let Some(score) = replay.score
+                    && best_score.is_infinite()
+                {
+                    best_score = score;
+                }
+                if let Err(e) = replay.store.save(&grafts_path) {
+                    log::warn(&format!(
+                        "grafts: failed to save {}: {e}",
+                        grafts_path.display()
+                    ));
+                }
+                graft_store = Some((grafts_path, replay.store));
+            }
+            Err(e) => {
+                log::warn(&format!("Phase-G: graft replay failed: {e}"));
+                graft_store = Some((grafts_path, store));
+            }
+        }
+        if !config.preserve_losers {
+            let _ = fs::remove_dir_all(config.output_dir.join("graft-replay"));
+        }
+    }
+
     log::info(&format!(
         "starting optimisation loop (timeout={}s, candidates={})",
         config.timeout.as_secs(),
@@ -757,6 +859,7 @@ pub fn run_optimisation(
                 .unwrap_or(&batch_dir)
                 .join(format!("{stem}.json"));
             let winner_json = fs::read_to_string(&winner_path).map_err(|e| e.to_string())?;
+            let previous = incumbent.clone();
             incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
             let opening = opening_baseline_score.unwrap_or(baseline.score);
             last_accept_focus = focus.clone();
@@ -793,6 +896,22 @@ pub fn run_optimisation(
             acceptances += 1;
             improvement = Some(delta);
             winner_stem = Some(stem.to_string());
+
+            // Record structural improvements into the local graft store.
+            if matches!(
+                strategy,
+                CandidateStrategy::StructuralAdd | CandidateStrategy::StructuralAddNeuron
+            ) && let Some((grafts_path, store)) = graft_store.as_mut()
+                && let Some(id) = record_structural_acceptance(store, &previous, &incumbent)
+            {
+                log::detail(&format!("grafts: recorded structural accept {id}"));
+                if let Err(e) = store.save(grafts_path) {
+                    log::warn(&format!(
+                        "grafts: failed to save {}: {e}",
+                        grafts_path.display()
+                    ));
+                }
+            }
         } else {
             log::detail("no candidate met the acceptance threshold");
         }
@@ -1075,6 +1194,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: None,
             screen_promote_threshold: 0.0,
+            grafts_path: None,
+            graft_replay_budget: None,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -1178,6 +1299,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: Some(0.1),
             screen_promote_threshold: 0.0,
+            grafts_path: None,
+            graft_replay_budget: None,
         };
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
@@ -1189,6 +1312,129 @@ mod tests {
         assert!(first.scores.is_empty());
         assert!(!first.accepted);
         assert!(!out.join("promote-exp-1").exists());
+    }
+
+    /// Phase-G replays a stored synapse graft onto the opening fittest.
+    struct GraftAwareScorer;
+
+    impl DirectoryScorer for GraftAwareScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            let base = 0.64; // 1 - 0.36 for phase0-ish parity if needed
+            let mut map = BTreeMap::new();
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(stem) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                let text = fs::read_to_string(entry.path()).unwrap_or_default();
+                let has_edge = parse_creature_json(&text)
+                    .map(|c| {
+                        c.synapses
+                            .iter()
+                            .any(|s| s.from_uuid == "input-1" && s.to_uuid == "h1")
+                    })
+                    .unwrap_or(false);
+                let score = if stem == "baseline" {
+                    base
+                } else if has_edge {
+                    base + 2e-6
+                } else {
+                    base
+                };
+                map.insert(
+                    stem.to_string(),
+                    ScoreResult {
+                        score,
+                        error: 1.0 - score,
+                        complexity_penalty: 0.0,
+                    },
+                );
+            }
+            Ok(map)
+        }
+    }
+
+    #[test]
+    fn phase_g_replays_stored_graft_before_loop() {
+        use crate::grafts::{GraftStore, graft_from_add_synapse};
+
+        let dir = tempdir().unwrap();
+        let creature_path = dir.path().join("creature.json");
+        let training = dir.path().join("data");
+        fs::create_dir_all(&training).unwrap();
+        fs::write(
+            training.join("0.bin"),
+            [1.0f32, 0.0f32, 0.5f32]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        fs::write(
+            &creature_path,
+            r#"{
+              "semanticVersion":"4.0.0","forwardOnly":true,"input":2,"output":1,
+              "neurons":[
+                {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY"},
+                {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+              ],
+              "synapses":[
+                {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+                {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let grafts_path = dir.path().join("grafts.json");
+        let mut store = GraftStore::new();
+        store.upsert(graft_from_add_synapse("input-1", "h1", 0.05));
+        store.save(&grafts_path).unwrap();
+
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            creature: creature_path,
+            training_data: training,
+            timeout: Duration::from_millis(500),
+            candidates: 2,
+            min_improvement: 1e-6,
+            seed: Some(1),
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir: out,
+            preserve_losers: true,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            phase0_parity: false,
+            structural_only: false,
+            screen_sample_rate: None,
+            screen_promote_threshold: 0.0,
+            grafts_path: Some(grafts_path.clone()),
+            // Explicit budget so phase-G is not starved by a sub-second run timeout.
+            graft_replay_budget: Some(Duration::from_secs(5)),
+        };
+        let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
+        assert!(result.acceptances >= 1, "phase-G should accept the graft");
+        let best = parse_creature_json(&fs::read_to_string(result.best_path).unwrap()).unwrap();
+        assert!(
+            best.synapses
+                .iter()
+                .any(|s| s.from_uuid == "input-1" && s.to_uuid == "h1"),
+            "best creature should carry replayed graft edge"
+        );
+        let stored = GraftStore::load(&grafts_path).unwrap();
+        assert!(
+            stored.get("edge:input-1->h1").is_some(),
+            "helpful graft remains in store"
+        );
     }
 
     #[test]
@@ -1215,6 +1461,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: None,
             screen_promote_threshold: 0.0,
+            grafts_path: None,
+            graft_replay_budget: None,
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));
