@@ -99,6 +99,18 @@ struct Cli {
     /// Minimum sample-score Δ to promote a candidate to full-corpus scoring.
     #[arg(long, default_value_t = DEFAULT_SCREEN_PROMOTE_THRESHOLD)]
     screen_promote_threshold: f64,
+
+    /// Local JSON store for structural graft memory (phase-G replay).
+    ///
+    /// When set, Lamarck replays missing applicable grafts onto the opening
+    /// fittest before the experiment loop, and records new structural accepts.
+    /// Keep this outside any wiped work directory (e.g. GRQ `.lamarck-sampler`).
+    #[arg(long)]
+    grafts_path: Option<PathBuf>,
+
+    /// Wall-clock seconds for phase-G graft replay (default: 10% of --timeout-seconds).
+    #[arg(long)]
+    graft_replay_budget_seconds: Option<u64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -174,6 +186,8 @@ fn main() -> ExitCode {
             None
         },
         screen_promote_threshold: cli.screen_promote_threshold,
+        grafts_path: cli.grafts_path,
+        graft_replay_budget: cli.graft_replay_budget_seconds.map(Duration::from_secs),
     };
 
     let scorer = ExternalScorer { binary: cli.scorer };
