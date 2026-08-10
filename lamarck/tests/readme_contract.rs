@@ -57,6 +57,15 @@ fn subsection<'a>(readme: &'a str, heading: &str) -> &'a str {
     }
 }
 
+/// Body of the first ```` ```<lang> ```` fenced block in `text`.
+fn fenced_block<'a>(text: &'a str, lang: &str) -> Option<&'a str> {
+    let fence = format!("```{lang}\n");
+    let start = text.find(&fence)? + fence.len();
+    let rest = &text[start..];
+    let end = rest.find("\n```")?;
+    Some(&rest[..end])
+}
+
 fn readme_text() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../README.md");
     std::fs::read_to_string(&path)
@@ -168,6 +177,95 @@ fn core_principle_diagram_shows_screened_out_candidates_are_dropped() {
         core.contains("dropped") || core.contains("discard"),
         "core-principle diagram does not show candidates failing the screen being dropped"
     );
+}
+
+/// The loop is a flow diagram, so it renders as Mermaid rather than ASCII art (#86).
+#[test]
+fn core_principle_diagram_is_a_mermaid_flowchart() {
+    let readme = readme_text();
+    let core = section(&readme, "\n## Core principle");
+    let diagram =
+        fenced_block(core, "mermaid").expect("Core principle has no ```mermaid fenced block");
+    assert!(
+        diagram.trim_start().starts_with("flowchart"),
+        "the core-principle Mermaid block is not a flowchart"
+    );
+    assert!(
+        fenced_block(core, "text").is_none(),
+        "the ASCII core-principle diagram is still present alongside the Mermaid one"
+    );
+}
+
+/// Converting the diagram must not lose a candidate source (#86).
+#[test]
+fn core_principle_diagram_keeps_every_candidate_source() {
+    let readme = readme_text();
+    let core = section(&readme, "\n## Core principle");
+    let diagram = fenced_block(core, "mermaid")
+        .expect("Core principle has no ```mermaid fenced block")
+        .to_lowercase();
+    for source in ["statistical", "backprop", "structural", "random"] {
+        assert!(
+            diagram.contains(source),
+            "the core-principle diagram omits the {source:?} candidate source"
+        );
+    }
+}
+
+/// Both loop outcomes and the repeat edge must survive the conversion (#86).
+#[test]
+fn core_principle_diagram_shows_both_outcomes_and_repeats() {
+    let readme = readme_text();
+    let core = section(&readme, "\n## Core principle");
+    let diagram = fenced_block(core, "mermaid")
+        .expect("Core principle has no ```mermaid fenced block")
+        .to_lowercase();
+    for phrase in ["new incumbent", "keep incumbent", "repeat"] {
+        assert!(
+            diagram.contains(phrase),
+            "the core-principle diagram omits {phrase:?}"
+        );
+    }
+}
+
+/// The diagram is colour-coded, and every colour it defines must be applied and
+/// carry an explicit text colour so it stays legible in both GitHub themes (#86).
+#[test]
+fn core_principle_diagram_colours_and_applies_every_class() {
+    let readme = readme_text();
+    let core = section(&readme, "\n## Core principle");
+    let diagram =
+        fenced_block(core, "mermaid").expect("Core principle has no ```mermaid fenced block");
+
+    let defined: Vec<(&str, &str)> = diagram
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("classDef "))
+        .filter_map(|rest| rest.split_once(char::is_whitespace))
+        .collect();
+    assert!(
+        defined.len() >= 3,
+        "the core-principle diagram defines {} colour classes; group the sources, stages and outcomes",
+        defined.len()
+    );
+
+    let assignments: Vec<&str> = diagram
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("class "))
+        .collect();
+    for (name, style) in defined {
+        for property in ["fill:#", "stroke:#", "color:#"] {
+            assert!(
+                style.contains(property),
+                "classDef {name} omits {property} — it will not read in both light and dark themes"
+            );
+        }
+        assert!(
+            assignments
+                .iter()
+                .any(|assignment| assignment.split_whitespace().next_back() == Some(name)),
+            "classDef {name} is defined but never applied to any node"
+        );
+    }
 }
 
 /// The gap this issue records is closed, so it must no longer be listed as outstanding.
@@ -397,6 +495,19 @@ fn subsection_returns_only_the_requested_subsection() {
 #[should_panic(expected = "no `\n### Missing` subsection")]
 fn subsection_panics_on_a_missing_heading() {
     subsection("### A\n\nalpha\n", "\n### Missing");
+}
+
+#[test]
+fn fenced_block_returns_only_the_requested_language() {
+    let md = "intro\n\n```text\nascii\n```\n\n```mermaid\nflowchart TD\n  A --> B\n```\n";
+    assert_eq!(fenced_block(md, "text"), Some("ascii"));
+    assert_eq!(fenced_block(md, "mermaid"), Some("flowchart TD\n  A --> B"));
+}
+
+#[test]
+fn fenced_block_is_none_for_a_missing_or_unterminated_block() {
+    assert_eq!(fenced_block("no blocks here", "mermaid"), None);
+    assert_eq!(fenced_block("```mermaid\nflowchart TD\n", "mermaid"), None);
 }
 
 #[test]

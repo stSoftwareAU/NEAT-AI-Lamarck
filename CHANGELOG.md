@@ -112,6 +112,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **README core-principle diagram is a Mermaid flowchart (Issue #86).** The
+  mutate → screen → promote loop was a plain ASCII `text` block; it now renders
+  as a colour-coded Mermaid flowchart (candidate sources, scoring stages and
+  outcomes each get their own `classDef`), matching the README's other
+  diagrams. Same steps and branches — nothing was dropped in the conversion.
+
 - **Run-level `lamarck` check-in tag (Issue #35).** The creature tag used by GRQ
   check-in now summarises the whole run (`N accepts / M exps`, last strategy /
   focus, and `score: <%.6g> improved by <%.3g>` vs opening) instead of only the
