@@ -29,45 +29,45 @@ This document describes what the code does today. Known gaps are listed under
 
 ## Core principle
 
-```text
-current fittest creature
-        |
-        v
-analyse one selected neuron
-        |
-        +----------------+----------------+----------------+
-        |                |                |                |
-        v                v                v                v
- statistical         backprop        structural         random
- candidates          candidates      candidates         candidates
-        |                |                |                |
-        +----------------+--------+-------+----------------+
-                                  |
-                                  v
-                         candidate population
-                                  |
-                                  v
-                  screen: NEAT-AI-scorer on a subsample
-                           /                 \
-                 sample improvement       nothing on
-                   above threshold        the sample
-                          |                   |
-                          v                   v
-              promote: NEAT-AI-scorer     dropped without
-              full corpus (+ combos)      a full-corpus score
-                          |
-                          v
-                 improvement >= threshold?
-                   /                 \
-                 yes                 no
-                  |                   |
-                  v                   v
-           new incumbent        keep incumbent
-                  \                   /
-                   +--------+----------+
-                            |
-                            v
-                           repeat
+```mermaid
+flowchart TD
+    FIT(["current fittest creature"]) --> FOCUS["analyse one selected neuron"]
+
+    FOCUS --> STAT["statistical<br/>candidates"]
+    FOCUS --> BACK["backprop<br/>candidates"]
+    FOCUS --> STRUCT["structural<br/>candidates"]
+    FOCUS --> RAND["random<br/>candidates"]
+
+    STAT --> POP[["candidate population"]]
+    BACK --> POP
+    STRUCT --> POP
+    RAND --> POP
+
+    POP --> SCREEN{"screen: NEAT-AI-scorer<br/>on a subsample"}
+    SCREEN -- "nothing on the sample" --> DROP["dropped without<br/>a full-corpus score"]
+    SCREEN -- "sample improvement<br/>above threshold" --> PROMOTE["promote: NEAT-AI-scorer<br/>full corpus (+ combos)"]
+
+    PROMOTE --> GATE{"improvement ≥ threshold?"}
+    GATE -- yes --> WIN(["new incumbent"])
+    GATE -- no --> KEEP(["keep incumbent"])
+
+    WIN --> REPEAT((("repeat")))
+    KEEP --> REPEAT
+    REPEAT --> FIT
+
+    classDef creature fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef source fill:#cffafe,stroke:#0e7490,stroke-width:2px,color:#083344
+    classDef pool fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    classDef stage fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef win fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef reject fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+
+    class FIT,FOCUS creature
+    class STAT,BACK,STRUCT,RAND source
+    class POP,REPEAT pool
+    class SCREEN,PROMOTE,GATE stage
+    class WIN win
+    class DROP,KEEP reject
 ```
 
 Only the standard scorer may declare a winner, and only on the full corpus:
