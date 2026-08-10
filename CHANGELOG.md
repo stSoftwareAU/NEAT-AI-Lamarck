@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Combo dampen / graft follow-ups after #63.** Scale by how many combo members
+  contribute new synapses to a target (not raw new-edge count), so a multi-edge
+  single candidate is not self-dampened when merged with an unrelated improver.
+  Combo accepts record each structural member's solo-sized graft weights, not
+  the dampened merge (`0.1.2`).
+
 ### Changed
 
 - **Run-level `lamarck` check-in tag (Issue #35).** The creature tag used by GRQ

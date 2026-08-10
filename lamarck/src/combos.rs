@@ -4,9 +4,12 @@
 //! incumbent in groups (pairs, then triples, …) and score those creatures in one
 //! scorer directory batch — up to [`MAX_COMBO_CANDIDATES`] including the singles.
 //!
-//! Newly stacked synapses into the same target are dampened by
-//! [`stack_dampen_scale`] so solo-sized weights do not overshoot when combined
-//! (#63). The exponent is [`STACK_DAMPEN_EXPONENT`] — tune after production evidence.
+//! Newly stacked synapses into the same target across **combo members** are
+//! dampened by [`stack_dampen_scale`] so solo-sized weights do not overshoot
+//! when combined (#63). The exponent is [`STACK_DAMPEN_EXPONENT`] — tune after
+//! production evidence. `k` is the number of members that contribute ≥1 new
+//! edge to a target (not the raw new-edge count inside one multi-synapse
+//! candidate).
 
 use crate::candidates::Candidate;
 use crate::log;
@@ -272,7 +275,7 @@ pub fn merge_candidate_deltas(
 pub struct StackDampenTarget {
     /// Destination neuron UUID for the stacked new edges.
     pub to_uuid: String,
-    /// Number of new synapses into [`Self::to_uuid`].
+    /// Number of combo members that contributed ≥1 new synapse into this target.
     pub k: usize,
     /// Multiplier applied to each new weight (`stack_dampen_scale(k)`).
     pub scale: f64,
@@ -297,14 +300,48 @@ impl StackDampenReport {
     }
 }
 
-/// Scale newly added synapses that stack into the same target by [`stack_dampen_scale`].
+/// Count how many `variants` each contribute ≥1 new synapse into each target.
 ///
-/// Only edges absent from `base` are considered. Bias tweaks and weight changes
-/// on existing edges are untouched. When a target receives a single new edge,
-/// that weight is left alone (`k == 1`).
+/// Used so [`dampen_stacked_new_synapses`] scales by combo-member stacking, not
+/// by how many edges a single multi-synapse candidate already carries (e.g. a
+/// two-source neuron bridge).
+pub fn new_synapse_contributor_counts(
+    base: &CreatureExport,
+    variants: &[&CreatureExport],
+) -> BTreeMap<String, usize> {
+    let base_keys: BTreeSet<(String, String)> = base
+        .synapses
+        .iter()
+        .map(|s| (s.from_uuid.clone(), s.to_uuid.clone()))
+        .collect();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for variant in variants {
+        let mut targets = BTreeSet::new();
+        for s in &variant.synapses {
+            let key = (s.from_uuid.clone(), s.to_uuid.clone());
+            if base_keys.contains(&key) {
+                continue;
+            }
+            targets.insert(s.to_uuid.clone());
+        }
+        for to_uuid in targets {
+            *counts.entry(to_uuid).or_default() += 1;
+        }
+    }
+    counts
+}
+
+/// Scale newly added synapses that stack across combo members by [`stack_dampen_scale`].
+///
+/// `contributor_counts` maps `to_uuid →` number of combo members that added at
+/// least one new synapse into that target (see [`new_synapse_contributor_counts`]).
+/// Only edges absent from `base` are scaled. Bias tweaks and existing-edge
+/// weight changes are untouched. Targets with `k <= 1` (or missing from the
+/// map) are left alone.
 pub fn dampen_stacked_new_synapses(
     base: &CreatureExport,
     creature: &mut CreatureExport,
+    contributor_counts: &BTreeMap<String, usize>,
 ) -> StackDampenReport {
     let base_keys: BTreeSet<(String, String)> = base
         .synapses
@@ -324,7 +361,7 @@ pub fn dampen_stacked_new_synapses(
 
     let mut report = StackDampenReport::default();
     for (to_uuid, indices) in by_target {
-        let k = indices.len();
+        let k = contributor_counts.get(&to_uuid).copied().unwrap_or(1);
         let scale = stack_dampen_scale(k);
         if (scale - 1.0).abs() < f64::EPSILON {
             continue;
@@ -463,7 +500,8 @@ pub fn select_best_with_combinations(
             continue;
         };
         let stem = format!("combo-{ci:03}-k{}", idxs.len());
-        let dampen = dampen_stacked_new_synapses(incumbent, &mut merged);
+        let contributors = new_synapse_contributor_counts(incumbent, &variants);
+        let dampen = dampen_stacked_new_synapses(incumbent, &mut merged, &contributors);
         if let Some(msg) = format_dampen_report(&format!("combo dampen {stem}"), &dampen) {
             log::detail(&msg);
         }
@@ -638,20 +676,23 @@ mod tests {
     #[test]
     fn dampen_scales_two_new_edges_into_same_target() {
         let base = tiny();
-        let mut merged = base.clone();
-        merged.synapses.push(SynapseExport {
+        let mut a = base.clone();
+        a.synapses.push(SynapseExport {
             from_uuid: "input-0".into(),
             to_uuid: "o1".into(),
             weight: 0.05,
             synapse_type: None,
         });
-        merged.synapses.push(SynapseExport {
+        let mut b = base.clone();
+        b.synapses.push(SynapseExport {
             from_uuid: "input-1".into(),
             to_uuid: "o1".into(),
             weight: 0.08,
             synapse_type: None,
         });
-        let report = dampen_stacked_new_synapses(&base, &mut merged);
+        let mut merged = merge_candidate_deltas(&base, &[&a, &b]).unwrap();
+        let contributors = new_synapse_contributor_counts(&base, &[&a, &b]);
+        let report = dampen_stacked_new_synapses(&base, &mut merged, &contributors);
         assert_eq!(report.targets.len(), 1);
         assert_eq!(report.targets[0].to_uuid, "o1");
         assert_eq!(report.targets[0].k, 2);
@@ -688,22 +729,75 @@ mod tests {
     }
 
     #[test]
+    fn dampen_leaves_multi_edge_single_member_pack() {
+        // One candidate already carries two new edges into the same target
+        // (e.g. StructuralAddNeuron). Merging with an unrelated bias tweak must
+        // not treat those as two stacked solo residual steps.
+        let base = tiny();
+        let mut bridge = base.clone();
+        bridge.synapses.push(SynapseExport {
+            from_uuid: "input-0".into(),
+            to_uuid: "o1".into(),
+            weight: 0.05,
+            synapse_type: None,
+        });
+        bridge.synapses.push(SynapseExport {
+            from_uuid: "input-1".into(),
+            to_uuid: "o1".into(),
+            weight: 0.08,
+            synapse_type: None,
+        });
+        let mut bias_only = base.clone();
+        bias_only.neurons[0].bias = 0.1;
+        let mut merged = merge_candidate_deltas(&base, &[&bridge, &bias_only]).unwrap();
+        let contributors = new_synapse_contributor_counts(&base, &[&bridge, &bias_only]);
+        assert_eq!(contributors.get("o1").copied(), Some(1));
+        let report = dampen_stacked_new_synapses(&base, &mut merged, &contributors);
+        assert!(report.is_empty());
+        assert!(
+            (merged
+                .synapses
+                .iter()
+                .find(|s| s.from_uuid == "input-0" && s.to_uuid == "o1")
+                .unwrap()
+                .weight
+                - 0.05)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (merged
+                .synapses
+                .iter()
+                .find(|s| s.from_uuid == "input-1" && s.to_uuid == "o1")
+                .unwrap()
+                .weight
+                - 0.08)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
     fn dampen_leaves_new_edges_into_different_targets() {
         let base = tiny();
-        let mut merged = base.clone();
-        merged.synapses.push(SynapseExport {
+        let mut a = base.clone();
+        a.synapses.push(SynapseExport {
             from_uuid: "input-1".into(),
             to_uuid: "h1".into(),
             weight: 0.05,
             synapse_type: None,
         });
-        merged.synapses.push(SynapseExport {
+        let mut b = base.clone();
+        b.synapses.push(SynapseExport {
             from_uuid: "input-0".into(),
             to_uuid: "o1".into(),
             weight: 0.02,
             synapse_type: None,
         });
-        let report = dampen_stacked_new_synapses(&base, &mut merged);
+        let mut merged = merge_candidate_deltas(&base, &[&a, &b]).unwrap();
+        let contributors = new_synapse_contributor_counts(&base, &[&a, &b]);
+        let report = dampen_stacked_new_synapses(&base, &mut merged, &contributors);
         assert!(report.is_empty());
         assert!(
             (merged
@@ -740,7 +834,9 @@ mod tests {
             weight: 0.05,
             synapse_type: None,
         });
-        let report = dampen_stacked_new_synapses(&base, &mut merged);
+        let mut counts = BTreeMap::new();
+        counts.insert("h1".into(), 1usize);
+        let report = dampen_stacked_new_synapses(&base, &mut merged, &counts);
         assert!(report.is_empty());
         assert!(
             (merged
@@ -758,17 +854,18 @@ mod tests {
     #[test]
     fn dampen_ignores_existing_edge_weight_change_when_counting_k() {
         let base = tiny();
-        let mut merged = base.clone();
-        // Change existing input-0->h1 weight.
-        merged.synapses[0].weight = 0.5;
-        // One new edge into h1.
-        merged.synapses.push(SynapseExport {
+        let mut weight_change = base.clone();
+        weight_change.synapses[0].weight = 0.5;
+        let mut add = base.clone();
+        add.synapses.push(SynapseExport {
             from_uuid: "input-1".into(),
             to_uuid: "h1".into(),
             weight: 0.05,
             synapse_type: None,
         });
-        let report = dampen_stacked_new_synapses(&base, &mut merged);
+        let mut merged = merge_candidate_deltas(&base, &[&weight_change, &add]).unwrap();
+        let contributors = new_synapse_contributor_counts(&base, &[&weight_change, &add]);
+        let report = dampen_stacked_new_synapses(&base, &mut merged, &contributors);
         assert!(report.is_empty());
         assert!((merged.synapses[0].weight - 0.5).abs() < 1e-12);
         assert!(
