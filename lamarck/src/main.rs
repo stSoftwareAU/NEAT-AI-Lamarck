@@ -117,6 +117,11 @@ struct Cli {
     /// Wall-clock seconds for phase-G graft replay (default: 10% of --timeout-seconds).
     #[arg(long)]
     graft_replay_budget_seconds: Option<u64>,
+
+    /// Backprop learning rate used when proposing `backprop` candidates
+    /// (default: 0.01, the NEAT-AI port value). Must be > 0.
+    #[arg(long)]
+    backprop_learning_rate: Option<f64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -195,7 +200,14 @@ fn main() -> ExitCode {
         screen_promote_threshold: cli.screen_promote_threshold,
         grafts_path: cli.grafts_path,
         graft_replay_budget: cli.graft_replay_budget_seconds.map(Duration::from_secs),
+        backprop_learning_rate: cli.backprop_learning_rate,
     };
+
+    // Fail before spawning the scorer rather than deep inside the run.
+    if let Err(e) = config.backprop_config() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
 
     let scorer = ExternalScorer { binary: cli.scorer };
 
