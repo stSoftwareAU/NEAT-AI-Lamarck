@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **CI auto-increments `lamarck/Cargo.toml` patch on src PRs.** Matches the
+  GRQ-taxation / `runlib.sh` contract so remote hosts rebuild when the crate
+  version changes without relying on a manual bump every time.
 - **Smart combo dampening (Issue #63).** After screened singles improve, combo
   merges (experiments + Phase-G grafts) scale newly stacked synapses into the
   same target by `k.powf(-STACK_DAMPEN_EXPONENT)` (default `1/√k`). Journal and

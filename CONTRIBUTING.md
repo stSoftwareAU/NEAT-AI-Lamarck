@@ -51,5 +51,12 @@ they compare the installed `neat_ai_lamarck` version marker against
 `Cargo.toml` and skip rebuilding when they match. Forgetting to bump leaves
 stale binaries on remote machines.
 
+CI also runs a **Version Increment** workflow
+([`.github/workflows/version-increment.yml`](./.github/workflows/version-increment.yml))
+that auto-increments the patch on a pull request when `lamarck/src/` has
+changed — but only if the PR branch has not already bumped it (same approach
+as GRQ-taxation). Bumping locally when your change touches `lamarck/src/` keeps
+the version correct and avoids an extra bot commit.
+
 Docs-only or CI-config-only changes do not need a bump. Record notable changes
 under **[Unreleased]** in [`CHANGELOG.md`](./CHANGELOG.md).
