@@ -74,6 +74,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`report` anchored the opening baseline on a 5% screen sample (Issue #84).**
+  An experiment whose candidate batch screened empty journals the subsample
+  baseline, not a full-corpus score. With `--skip-phase0` that sampled number
+  became `openingBaselineScore`, so `totalScoreImprovement` subtracted two
+  different quantities and could report a negative total for a run that only
+  ever accepted improvements (the `batch-020` arm reported `-4.473e-04` against
+  two accepts of `+1.322e-6` and `+1.724e-6`). `openingBaselineScore` is now the
+  `scores.baseline` of the first experiment that actually promoted — the score
+  Phase-0 measures when it runs, since the incumbent cannot change before the
+  first acceptance — and it, `totalScoreImprovement` and
+  `relativeScoreImprovement` are `null` until such a full-corpus score exists.
+
 - **README read as a project plan rather than the built system (Issue #40).**
   Rewritten in the present tense against the code: status section, full CLI flag
   tables (including the previously undocumented `--preserve-losers`,
