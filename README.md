@@ -47,22 +47,32 @@ analyse one selected neuron
                          candidate population
                                   |
                                   v
-                     NEAT-AI-scorer batch scoring
-                                  |
-                         improvement >= threshold?
+                  screen: NEAT-AI-scorer on a subsample
                            /                 \
-                         yes                 no
+                 sample improvement       nothing on
+                   above threshold        the sample
                           |                   |
                           v                   v
-                   new incumbent        keep incumbent
-                          \                   /
-                           +--------+----------+
-                                    |
-                                    v
-                                   repeat
+              promote: NEAT-AI-scorer     dropped without
+              full corpus (+ combos)      a full-corpus score
+                          |
+                          v
+                 improvement >= threshold?
+                   /                 \
+                 yes                 no
+                  |                   |
+                  v                   v
+           new incumbent        keep incumbent
+                  \                   /
+                   +--------+----------+
+                            |
+                            v
+                           repeat
 ```
 
-Only the standard scorer may declare a winner.
+Only the standard scorer may declare a winner, and only on the full corpus:
+screening filters cheaply, it never accepts. `--screen-sample-rate 1` collapses
+the two phases back into a single full-corpus batch.
 
 ## Why "Lamarck"?
 
@@ -497,7 +507,6 @@ to answer the rest are tracked in
 
 | Issue | Gap |
 |-------|-----|
-| [#39](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/39) | The core-principle diagram predates two-phase screening. |
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
 | [#70](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/70) | The journal omits the focus neuron's squash, incoming count, statistics and blame. |
 | [#71](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/71) | A run without `--seed` cannot be replayed, and the run configuration is not journalled. |
