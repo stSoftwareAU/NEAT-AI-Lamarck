@@ -10,10 +10,11 @@ use crate::combos::{
 };
 use crate::config::LamarckConfig;
 use crate::focus::{
-    FixedFocusSelector, FocusChoice, FocusPolicy, FocusSelector, HighErrorFocusSelector,
-    RandomFocusSelector, UnsaturatedFocusSelector, WeightedFocusSelector, attach_focus_blame,
-    attach_learning_to_incoming, build_improvement_signals, collect_focus_stats,
-    collect_incoming_source_stats, collect_output_mean_abs_errors, select_highest_signal,
+    FixedFocusSelector, FocusChoice, FocusNeuronStats, FocusPolicy, FocusSelector,
+    HighErrorFocusSelector, RandomFocusSelector, UnsaturatedFocusSelector, WeightedFocusSelector,
+    attach_focus_blame, attach_learning_to_incoming, build_improvement_signals,
+    collect_focus_stats, collect_incoming_source_stats, collect_output_mean_abs_errors,
+    select_highest_signal,
 };
 use crate::grafts::{
     GraftReplayRequest, GraftStore, default_graft_replay_budget, record_structural_acceptance,
@@ -59,6 +60,12 @@ pub struct ExperimentRecord {
     pub baseline_score: f64,
     /// Focus neuron UUID.
     pub focus_neuron: String,
+    /// Focus-neuron structure, activation statistics and backprop blame (#70).
+    ///
+    /// Omitted only when the focus scan did not run for this experiment (and on
+    /// journals written before the field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_stats: Option<FocusNeuronStats>,
     /// Candidate provenances.
     pub candidates: Vec<CandidateProvenance>,
     /// Authoritative (full-corpus) scores by stem when a promote/full score ran.
@@ -816,6 +823,7 @@ pub fn run_optimisation(
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
                             focus_neuron: focus,
+                            focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                             scores: Default::default(),
                             screen_scores: None,
@@ -883,6 +891,7 @@ pub fn run_optimisation(
                             .map(|b| b.score)
                             .unwrap_or(best_score),
                         focus_neuron: focus,
+                        focus_stats: Some(focus_stats.clone()),
                         candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                         scores: Default::default(),
                         screen_scores: screen_score_map,
@@ -946,6 +955,7 @@ pub fn run_optimisation(
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
                             focus_neuron: focus,
+                            focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                             scores: Default::default(),
                             screen_scores: screen_score_map,
@@ -1007,6 +1017,7 @@ pub fn run_optimisation(
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
                             focus_neuron: focus,
+                            focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                             scores: Default::default(),
                             screen_scores: None,
@@ -1231,6 +1242,7 @@ pub fn run_optimisation(
                 incumbent_id: incumbent_id(&incumbent),
                 baseline_score: baseline.score,
                 focus_neuron: focus,
+                focus_stats: Some(focus_stats.clone()),
                 candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                 scores: score_map,
                 screen_scores: screen_score_map,
@@ -1822,6 +1834,48 @@ mod tests {
                 "every record carries the effective seed"
             );
         }
+    }
+
+    /// Issue #70: every experiment journals the focus scan that drove it.
+    #[test]
+    fn experiment_records_the_focus_structure_statistics_and_blame() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let config = reproducibility_config(creature_path, training, dir.path().join("out"));
+        let scorer = ScriptedScorer {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let result = run_optimisation(&config, &scorer).unwrap();
+
+        let experiments: Vec<ExperimentRecord> = journal_lines(&result.journal_path)
+            .into_iter()
+            .filter_map(|l| match l {
+                JournalLine::Experiment(record) => Some(*record),
+                JournalLine::Header(_) => None,
+            })
+            .collect();
+        assert!(!experiments.is_empty(), "run wrote at least one experiment");
+        for record in &experiments {
+            let stats = record
+                .focus_stats
+                .as_ref()
+                .expect("every experiment carries the focus scan");
+            // Structure: the scanned neuron is the journalled focus.
+            assert_eq!(stats.neuron_uuid, record.focus_neuron);
+            assert_eq!(stats.neuron_uuid, "o1");
+            assert_eq!(stats.squash.as_deref(), Some("IDENTITY"));
+            assert_eq!(stats.incoming_count, 1, "o1 has one incoming synapse");
+            // Statistics: the scan actually ran over training records.
+            assert!(stats.record_count > 0, "focus scan saw records");
+            assert!(stats.mean_abs_error.is_some(), "output focus has an error");
+            assert!((0.0..=1.0).contains(&stats.saturation_fraction));
+            // Blame: backprop attached a bias signal for the focus.
+            assert!(stats.mean_blame.is_some(), "focus blame is journalled");
+        }
+
+        // The field must survive the journal encoding, under its camelCase name.
+        let encoded = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(encoded.contains("\"focusStats\""));
     }
 
     /// Issue #71: the run header carries the knobs needed to replay the run.

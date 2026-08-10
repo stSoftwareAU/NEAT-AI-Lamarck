@@ -462,6 +462,7 @@ Every following line is one experiment:
 | `incumbentId` | Incumbent shape identity (`in…-out…-n…-s…`). |
 | `baselineScore` | Authoritative baseline for this experiment. |
 | `focusNeuron` | Selected neuron UUID. |
+| `focusStats` | The focus scan that drove the experiment (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`. |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
 | `winner`, `improvement`, `accepted` | Outcome of the experiment. |
@@ -479,6 +480,15 @@ neat_ai_lamarck report experiments.jsonl
 It emits per-strategy appearances/wins/acceptance rate, focus history,
 improvement series, candidates per scorer-minute and per screen-minute,
 analysis-time fraction, projected batches per 45 minutes, and combo totals.
+
+`focusStats` is aggregated into a `focusStats` report object with three buckets —
+`all`, `accepted` and `rejected` — each carrying `experiments`,
+`meanIncomingCount`, `meanSaturationFraction`, `meanNearZeroFraction`,
+`meanPostVariance`, `meanAbsBlame` (magnitudes, so signs cannot cancel out; null
+when no experiment in the bucket recorded blame) and `squashCounts`. Comparing
+`accepted` against `rejected` is how a finished run answers experimental
+questions 4 and 6 below. The object is `null` for a journal with no focus
+statistics.
 
 ## Safety invariants
 
@@ -549,7 +559,6 @@ to answer the rest are tracked in
 | Issue | Gap |
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
-| [#70](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/70) | The journal omits the focus neuron's squash, incoming count, statistics and blame. |
 | [#72](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/72) | No maximum-experiment-count stopping rule and no graceful cancellation. |
 | [#74](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/74) | `report` does not attribute combo or graft wins to a strategy. |
 | [#75](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/75) | The follow-up economics experiments recommended by the #8 baseline are unrun. |

@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The focus neuron's structure, statistics and blame are journalled (Issue
+  #70).** Every experiment record now carries an optional `focusStats` object —
+  the focus scan the loop already computed: squash and incoming-connection
+  count, pre/post activation statistics (mean, variance, min/max, near-zero and
+  saturation fractions, records scanned), output residuals and the backprop
+  blame attached to the focus. `report` aggregates it into `all` / `accepted` /
+  `rejected` buckets (mean incoming count, saturation and near-zero fractions,
+  post-activation variance, mean |blame| and per-squash counts), and the run
+  summary prints the same split, so experimental questions 4 (are
+  saturated/dead neurons good targets?) and 6 (does propagated blame predict a
+  successful direction?) survive the process exiting. Journals written before
+  the field omit it and report `focusStats: null`.
+
 - **Distribution shape in `observations.statistics`, with a consumer (Issue
   #73).** Every input and target column now carries population `skewness` and
   `excessKurtosis`, computed in the same streaming pass (the Welford accumulator

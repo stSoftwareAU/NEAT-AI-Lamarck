@@ -39,6 +39,88 @@ pub struct FocusHistory {
     pub cumulative_improvement: f64,
 }
 
+/// Aggregated focus-neuron analysis over a bucket of experiments (issue #70).
+///
+/// Averages are over the experiments in the bucket that carried `focusStats`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusStatsAggregate {
+    /// Experiments in this bucket carrying focus statistics.
+    pub experiments: u64,
+    /// Mean incoming-connection count of the focus neuron.
+    pub mean_incoming_count: f64,
+    /// Mean saturated-activation fraction.
+    pub mean_saturation_fraction: f64,
+    /// Mean near-zero ("dead") activation fraction.
+    pub mean_near_zero_fraction: f64,
+    /// Mean post-activation variance.
+    pub mean_post_variance: f64,
+    /// Mean absolute backprop blame over the experiments that recorded one.
+    pub mean_abs_blame: Option<f64>,
+    /// Experiment count per focus squash name.
+    pub squash_counts: BTreeMap<String, u64>,
+}
+
+/// Focus-neuron aggregates split by experiment outcome (issue #70).
+///
+/// Comparing `accepted` against `rejected` is what answers the journal's
+/// experimental questions 4 (are saturated/dead neurons good targets?) and 6
+/// (does propagated blame predict a successful direction?).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusStatsSummary {
+    /// Every experiment carrying focus statistics.
+    pub all: FocusStatsAggregate,
+    /// Experiments that accepted a candidate.
+    pub accepted: FocusStatsAggregate,
+    /// Experiments that accepted nothing.
+    pub rejected: FocusStatsAggregate,
+}
+
+/// Streaming accumulator behind one [`FocusStatsAggregate`].
+#[derive(Debug, Default)]
+struct FocusStatsAccumulator {
+    experiments: u64,
+    incoming_count: f64,
+    saturation_fraction: f64,
+    near_zero_fraction: f64,
+    post_variance: f64,
+    abs_blame: f64,
+    blame_records: u64,
+    squash_counts: BTreeMap<String, u64>,
+}
+
+impl FocusStatsAccumulator {
+    fn push(&mut self, stats: &crate::focus::FocusNeuronStats) {
+        self.experiments += 1;
+        self.incoming_count += stats.incoming_count as f64;
+        self.saturation_fraction += stats.saturation_fraction;
+        self.near_zero_fraction += stats.near_zero_fraction;
+        self.post_variance += stats.post_variance;
+        if let Some(blame) = stats.mean_abs_blame.or(stats.mean_blame.map(f64::abs)) {
+            self.abs_blame += blame;
+            self.blame_records += 1;
+        }
+        let squash = stats.squash.clone().unwrap_or_else(|| "unknown".into());
+        *self.squash_counts.entry(squash).or_default() += 1;
+    }
+
+    fn finish(self) -> FocusStatsAggregate {
+        let n = self.experiments as f64;
+        let mean = |total: f64| if self.experiments > 0 { total / n } else { 0.0 };
+        FocusStatsAggregate {
+            experiments: self.experiments,
+            mean_incoming_count: mean(self.incoming_count),
+            mean_saturation_fraction: mean(self.saturation_fraction),
+            mean_near_zero_fraction: mean(self.near_zero_fraction),
+            mean_post_variance: mean(self.post_variance),
+            mean_abs_blame: (self.blame_records > 0)
+                .then(|| self.abs_blame / self.blame_records as f64),
+            squash_counts: self.squash_counts,
+        }
+    }
+}
+
 /// One point on the improvement-vs-fitness series.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +179,10 @@ pub struct JournalReport {
     pub focus_counts: BTreeMap<String, u64>,
     /// Focus hit/failure history.
     pub focus_history: Vec<FocusHistory>,
+    /// Focus structure / statistics / blame aggregates, split by outcome.
+    ///
+    /// `None` when no experiment in the journal recorded `focusStats`.
+    pub focus_stats: Option<FocusStatsSummary>,
     /// Improvement-vs-fitness series (one point per experiment).
     pub improvement_series: Vec<ImprovementPoint>,
     /// Per-strategy win / appearance / acceptance-rate rows.
@@ -139,6 +225,9 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut combos_dampened_total = 0u64;
     let mut combo_acceptances = 0u64;
     let mut combo_acceptances_with_dampen = 0u64;
+    let mut focus_all = FocusStatsAccumulator::default();
+    let mut focus_accepted = FocusStatsAccumulator::default();
+    let mut focus_rejected = FocusStatsAccumulator::default();
 
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -157,6 +246,15 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         first_ts = Some(first_ts.map_or(record.timestamp_unix, |t| t.min(record.timestamp_unix)));
         last_ts = Some(last_ts.map_or(record.timestamp_unix, |t| t.max(record.timestamp_unix)));
         *focus_counts.entry(record.focus_neuron.clone()).or_default() += 1;
+
+        if let Some(stats) = &record.focus_stats {
+            focus_all.push(stats);
+            if record.accepted {
+                focus_accepted.push(stats);
+            } else {
+                focus_rejected.push(stats);
+            }
+        }
 
         for prov in &record.candidates {
             let key = strategy_name(prov.strategy);
@@ -258,6 +356,12 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         })
         .collect();
 
+    let focus_stats = (focus_all.experiments > 0).then(|| FocusStatsSummary {
+        all: focus_all.finish(),
+        accepted: focus_accepted.finish(),
+        rejected: focus_rejected.finish(),
+    });
+
     let total_score_improvement = match (first_baseline, last_best) {
         (Some(first), Some(last)) => Some(last - first),
         _ => None,
@@ -326,6 +430,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         projected_batches_per_45_min,
         focus_counts,
         focus_history,
+        focus_stats,
         improvement_series,
         strategies,
         combos_scored_total,
@@ -358,6 +463,28 @@ fn format_ms(ms: u128) -> String {
     } else {
         format!("{ms}ms")
     }
+}
+
+/// One-line rendering of a focus aggregate for the human run summary.
+fn format_focus(aggregate: &FocusStatsAggregate) -> String {
+    let squashes = aggregate
+        .squash_counts
+        .iter()
+        .map(|(squash, n)| format!("{squash}×{n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let blame = match aggregate.mean_abs_blame {
+        Some(blame) => format!("{blame:.3e}"),
+        None => "n/a".to_string(),
+    };
+    format!(
+        "{} exp  incoming {:.1}  sat {:.3}  dead {:.3}  postVar {:.3e}  |blame| {blame}  [{squashes}]",
+        aggregate.experiments,
+        aggregate.mean_incoming_count,
+        aggregate.mean_saturation_fraction,
+        aggregate.mean_near_zero_fraction,
+        aggregate.mean_post_variance,
+    )
 }
 
 /// Print a coloured human summary of a completed optimisation run to stderr.
@@ -434,6 +561,13 @@ pub fn print_run_summary(result: &RunResult) {
                 .join(", ");
             log::detail(&format!("focus history: {focuses}"));
         }
+        if let Some(focus) = &report.focus_stats {
+            log::detail(&format!("focus stats:   {}", format_focus(&focus.all)));
+            if focus.accepted.experiments > 0 {
+                log::detail(&format!("  accepted:    {}", format_focus(&focus.accepted)));
+                log::detail(&format!("  rejected:    {}", format_focus(&focus.rejected)));
+            }
+        }
         if !report.strategies.is_empty() {
             let wins = report
                 .strategies
@@ -493,6 +627,125 @@ mod tests {
         }
     }
 
+    /// Minimal focus statistics for the aggregate tests (issue #70).
+    fn focus_stats(
+        squash: &str,
+        incoming: usize,
+        saturation: f64,
+        blame: Option<f64>,
+    ) -> crate::focus::FocusNeuronStats {
+        crate::focus::FocusNeuronStats {
+            neuron_uuid: "h1".into(),
+            squash: Some(squash.into()),
+            incoming_count: incoming,
+            post_variance: 0.25,
+            near_zero_fraction: 0.5 - saturation / 2.0,
+            saturation_fraction: saturation,
+            mean_blame: blame,
+            mean_abs_blame: blame.map(f64::abs),
+            record_count: 10,
+            ..Default::default()
+        }
+    }
+
+    fn experiment(number: u64, accepted: bool) -> ExperimentRecord {
+        ExperimentRecord {
+            experiment_number: number,
+            timestamp_unix: 1000 + number,
+            seed: Some(1),
+            incumbent_id: "x".into(),
+            baseline_score: 0.4,
+            focus_neuron: "h1".into(),
+            focus_stats: None,
+            candidates: vec![prov(CandidateStrategy::Random)],
+            scores: BTreeMap::new(),
+            screen_scores: None,
+            winner: accepted.then(|| "candidate-000".to_string()),
+            improvement: accepted.then_some(1e-6),
+            accepted,
+            analysis_ms: 1,
+            scorer_ms: 2,
+            scorer_error: None,
+            combo_members: None,
+            combos_scored: None,
+            combos_dampened: None,
+            combo_dampen: None,
+        }
+    }
+
+    fn journal_of(records: &[ExperimentRecord]) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        for record in records {
+            writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
+        }
+        file
+    }
+
+    /// Issue #70: focus structure/statistics/blame aggregate, split by outcome.
+    #[test]
+    fn report_aggregates_focus_stats_by_outcome() {
+        let mut accepted = experiment(1, true);
+        accepted.focus_stats = Some(focus_stats("TANH", 4, 0.8, Some(-2e-3)));
+        let mut rejected = experiment(2, false);
+        rejected.focus_stats = Some(focus_stats("IDENTITY", 2, 0.2, Some(1e-4)));
+        let file = journal_of(&[accepted, rejected]);
+
+        let summary = report_from_journal(file.path())
+            .unwrap()
+            .focus_stats
+            .expect("journal carries focus statistics");
+
+        assert_eq!(summary.all.experiments, 2);
+        assert!((summary.all.mean_incoming_count - 3.0).abs() < 1e-12);
+        assert!((summary.all.mean_saturation_fraction - 0.5).abs() < 1e-12);
+        assert!((summary.all.mean_near_zero_fraction - 0.25).abs() < 1e-12);
+        assert!((summary.all.mean_post_variance - 0.25).abs() < 1e-12);
+        assert_eq!(summary.all.squash_counts.get("TANH"), Some(&1));
+        assert_eq!(summary.all.squash_counts.get("IDENTITY"), Some(&1));
+
+        assert_eq!(summary.accepted.experiments, 1);
+        assert!((summary.accepted.mean_saturation_fraction - 0.8).abs() < 1e-12);
+        assert!((summary.accepted.mean_incoming_count - 4.0).abs() < 1e-12);
+        // Blame is aggregated as a magnitude so signs cannot cancel out.
+        assert!((summary.accepted.mean_abs_blame.unwrap() - 2e-3).abs() < 1e-12);
+
+        assert_eq!(summary.rejected.experiments, 1);
+        assert!((summary.rejected.mean_saturation_fraction - 0.2).abs() < 1e-12);
+        assert!((summary.rejected.mean_abs_blame.unwrap() - 1e-4).abs() < 1e-12);
+    }
+
+    /// A focus without a learning signal must not fabricate a blame average.
+    #[test]
+    fn report_reports_no_blame_when_none_was_recorded() {
+        let mut record = experiment(1, false);
+        record.focus_stats = Some(focus_stats("LOGISTIC", 1, 0.0, None));
+        let file = journal_of(&[record]);
+
+        let summary = report_from_journal(file.path())
+            .unwrap()
+            .focus_stats
+            .unwrap();
+        assert_eq!(summary.all.experiments, 1);
+        assert_eq!(summary.all.mean_abs_blame, None);
+        assert_eq!(summary.accepted, FocusStatsAggregate::default());
+    }
+
+    /// Journals written before issue #70 have no focus statistics to summarise.
+    #[test]
+    fn report_omits_focus_stats_for_a_legacy_journal() {
+        let mut file = NamedTempFile::new().unwrap();
+        let legacy = serde_json::to_value(experiment(1, false)).unwrap();
+        assert!(
+            legacy.get("focusStats").is_none(),
+            "an absent focus scan must not be serialised"
+        );
+        writeln!(file, "{legacy}").unwrap();
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.experiments, 1);
+        assert_eq!(report.focus_stats, None);
+    }
+
     /// Issue #71: the run-header line is metadata, not an experiment.
     #[test]
     fn report_skips_the_run_header_line() {
@@ -512,6 +765,7 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.4,
             focus_neuron: "h1".into(),
+            focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
             scores: BTreeMap::new(),
             screen_scores: None,
@@ -542,6 +796,7 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.4,
             focus_neuron: "h1".into(),
+            focus_stats: None,
             candidates: vec![
                 prov(CandidateStrategy::Random),
                 prov(CandidateStrategy::Backprop),
@@ -577,6 +832,7 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.400002,
             focus_neuron: "h1".into(),
+            focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
             scores: {
                 let mut m = BTreeMap::new();

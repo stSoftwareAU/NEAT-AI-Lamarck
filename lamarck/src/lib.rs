@@ -44,7 +44,9 @@ pub use parity::{
     check_phase0_parity, compute_local_mse,
 };
 pub use propagate_layout::{PropagateLayout, accumulate_creature_learning};
-pub use report::{JournalReport, print_run_summary, report_from_journal};
+pub use report::{
+    FocusStatsAggregate, FocusStatsSummary, JournalReport, print_run_summary, report_from_journal,
+};
 pub use run::{
     ExperimentRecord, JournalLine, RunConfigRecord, RunHeaderKind, RunHeaderRecord, RunResult,
     SeedSource, run_optimisation,

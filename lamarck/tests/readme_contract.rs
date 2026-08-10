@@ -232,6 +232,55 @@ fn outstanding_work_no_longer_lists_the_observation_moments() {
     );
 }
 
+/// The journal records the focus scan, so its fields must be documented (#70).
+#[test]
+fn experiment_journal_documents_the_focus_stats_record() {
+    let readme = readme_text();
+    let journal = section(&readme, "\n## Experiment journal");
+    for field in [
+        "focusStats",
+        "squash",
+        "incomingCount",
+        "saturationFraction",
+        "meanBlame",
+    ] {
+        assert!(
+            journal.contains(field),
+            "Experiment journal does not document {field:?}, which each record now carries"
+        );
+    }
+}
+
+/// `report` summarises the focus scan, so its aggregates must be documented (#70).
+#[test]
+fn report_documents_the_focus_stats_aggregates() {
+    let readme = readme_text();
+    let journal = section(&readme, "\n## Experiment journal");
+    for field in [
+        "meanSaturationFraction",
+        "meanAbsBlame",
+        "squashCounts",
+        "accepted",
+        "rejected",
+    ] {
+        assert!(
+            journal.contains(field),
+            "the `report` description omits the {field:?} focus aggregate"
+        );
+    }
+}
+
+/// The gap this issue records is closed, so it must no longer be listed as outstanding.
+#[test]
+fn outstanding_work_no_longer_lists_the_focus_journal_gap() {
+    let readme = readme_text();
+    let outstanding = section(&readme, "\n## Outstanding work");
+    assert!(
+        !outstanding.contains("/issues/70"),
+        "Outstanding work still lists issue #70 after the focus scan was journalled"
+    );
+}
+
 #[test]
 fn section_returns_only_the_requested_section() {
     let readme = "# T\n\n## A\n\nalpha\n\n## B\n\nbeta\n";
