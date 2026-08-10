@@ -843,10 +843,7 @@ pub fn replay_grafts(
                                 let member_grafts: Vec<&Graft> = ids
                                     .iter()
                                     .filter_map(|id| {
-                                        helpful
-                                            .iter()
-                                            .find(|(g, _)| g.id == *id)
-                                            .map(|(g, _)| g)
+                                        helpful.iter().find(|(g, _)| g.id == *id).map(|(g, _)| g)
                                     })
                                     .collect();
                                 let Ok(mut creature) = apply_grafts(host, &member_grafts) else {

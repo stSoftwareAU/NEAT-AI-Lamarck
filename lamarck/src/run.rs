@@ -1018,9 +1018,7 @@ pub fn run_optimisation(
                         recorded_any = true;
                     }
                 }
-                if recorded_any
-                    && let Err(e) = store.save(grafts_path)
-                {
+                if recorded_any && let Err(e) = store.save(grafts_path) {
                     log::warn(&format!(
                         "grafts: failed to save {}: {e}",
                         grafts_path.display()
