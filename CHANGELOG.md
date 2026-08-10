@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Distribution shape in `observations.statistics`, with a consumer (Issue
+  #73).** Every input and target column now carries population `skewness` and
+  `excessKurtosis`, computed in the same streaming pass (the Welford accumulator
+  gained third/fourth central moments); a constant column reports `0` rather
+  than `NaN`. The new `stats_skew_bias` candidate strategy consumes them: for an
+  output focus whose target has `|skewness| ≥ 0.25`, it steps the bias a quarter
+  of the way from the target's mean towards its median — the hypothesis that a
+  squared-error fit centres on the wrong statistic under a skewed target —
+  damped by the target's excess kurtosis and skipped when the neuron is
+  saturated. `ALGORITHM_VERSION` is `1.1.0`, so a pre-existing cache is rejected
+  as stale and regenerated. Covariances are **not** stored: they are exactly
+  `r · σ_a · σ_b` from fields already written, and the new
+  `ObservationsStatistics::input_covariance` /
+  `input_target_covariance` accessors derive them on demand instead of
+  duplicating them on disk.
+
 - **Effective seed and run configuration are journalled (Issue #71).** When
   `--seed` is omitted Lamarck now draws an explicit `u64` seed, logs it
   (`replay this run with --seed …`) and uses it for both the main and

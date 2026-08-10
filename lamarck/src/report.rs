@@ -341,6 +341,7 @@ fn strategy_name(strategy: CandidateStrategy) -> String {
         CandidateStrategy::MeanErrorBias => "mean_error_bias".into(),
         CandidateStrategy::StatsWeight => "stats_weight".into(),
         CandidateStrategy::StatsBias => "stats_bias".into(),
+        CandidateStrategy::StatsSkewBias => "stats_skew_bias".into(),
         CandidateStrategy::StructuralAdd => "structural_add".into(),
         CandidateStrategy::StructuralAddNeuron => "structural_add_neuron".into(),
         CandidateStrategy::StructuralWeaken => "structural_weaken".into(),
