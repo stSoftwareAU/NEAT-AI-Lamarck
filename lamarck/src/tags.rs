@@ -75,10 +75,10 @@ impl CreatureMeta {
         // Keep full-precision numeric tags for machine consumers.
         self.upsert("score", format!("{}", progress.score));
         self.upsert("error", format!("{}", progress.error));
-        let message = lamarck_progress_message(progress);
-        self.upsert("lamarck", message.clone());
-        // GRQ check-in scripts often read `intelligentDesign` for the commit blurb.
-        self.upsert("intelligentDesign", message);
+        // Only the `lamarck` tag is ours. `intelligentDesign` belongs to the
+        // Intelligent Design program — stamping it here overwrote another
+        // program's provenance (GRQ #3952), so never touch it.
+        self.upsert("lamarck", lamarck_progress_message(progress));
     }
 }
 
@@ -273,6 +273,63 @@ mod tests {
         assert!(msg.contains("score: 0.2 improved by 0.1"));
         assert!(!msg.contains("🏆"));
         assert!(!msg.contains("accept #"));
+    }
+
+    const TINY_ID_TAGGED: &str = r#"{
+      "uuid": "creature-2",
+      "input": 1,
+      "output": 1,
+      "forwardOnly": true,
+      "neurons": [{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}],
+      "synapses": [{"fromUUID":"input-0","toUUID":"o1","weight":1.0}],
+      "tags": [
+        {"name":"score","value":"0.1"},
+        {"name":"intelligentDesign","value":"💍  Tacit Knowledge, score: 0.1 improved by 1e-6"}
+      ]
+    }"#;
+
+    fn progress() -> LamarckProgress<'static> {
+        LamarckProgress {
+            acceptances: 1,
+            score: 0.2,
+            error: 0.8,
+            opening_score: 0.1,
+            focus_neuron: "o1",
+            strategy: CandidateStrategy::Backprop,
+            experiments: 3,
+        }
+    }
+
+    /// GRQ #3952: `intelligentDesign` belongs to another program — Lamarck must
+    /// never overwrite an existing value with its own run summary.
+    #[test]
+    fn stamp_acceptance_preserves_existing_intelligent_design_tag() {
+        let mut meta = CreatureMeta::from_creature_json(TINY_ID_TAGGED);
+        meta.stamp_acceptance(&progress());
+        let id = meta
+            .tags
+            .iter()
+            .find(|t| t.name == "intelligentDesign")
+            .expect("intelligentDesign tag must survive");
+        assert_eq!(id.value, "💍  Tacit Knowledge, score: 0.1 improved by 1e-6");
+        let lamarck = meta
+            .tags
+            .iter()
+            .find(|t| t.name == "lamarck")
+            .expect("lamarck tag must be stamped");
+        assert!(lamarck.value.contains("🦒"));
+    }
+
+    /// GRQ #3952: and never invents the tag on a creature that has none.
+    #[test]
+    fn stamp_acceptance_does_not_add_intelligent_design_tag() {
+        let mut meta = CreatureMeta::from_creature_json(TINY_TAGGED);
+        meta.stamp_acceptance(&progress());
+        assert!(
+            !meta.tags.iter().any(|t| t.name == "intelligentDesign"),
+            "Lamarck must not create an intelligentDesign tag"
+        );
+        assert!(meta.tags.iter().any(|t| t.name == "lamarck"));
     }
 
     #[test]
