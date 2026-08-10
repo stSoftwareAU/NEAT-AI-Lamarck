@@ -5,6 +5,7 @@ use crate::candidates::{
     CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
     write_candidate_batch,
 };
+use crate::combos::{ComboSelectRequest, select_best_with_combinations};
 use crate::config::LamarckConfig;
 use crate::focus::{
     FixedFocusSelector, FocusChoice, FocusPolicy, FocusSelector, HighErrorFocusSelector,
@@ -23,7 +24,7 @@ use crate::propagate_layout::accumulate_creature_learning;
 use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
-    screen_promote_stems, select_winner, write_promote_batch,
+    screen_promote_stems, write_promote_batch,
 };
 use crate::structural::{
     is_input_source, rank_unused_sources, refine_sources_by_residual_with_observations,
@@ -834,12 +835,45 @@ pub fn run_optimisation(
             opening_baseline_score = Some(baseline.score);
         }
 
-        let winner = select_winner(&scores, config.min_improvement).map_err(|e| e.to_string())?;
+        let source_dir = promote_dir.as_ref().unwrap_or(&batch_dir);
+        let combo_dir = config.output_dir.join(format!("combos-exp-{experiments}"));
+        let selection = match select_best_with_combinations(
+            scorer,
+            ComboSelectRequest {
+                training_data: &config.training_data,
+                incumbent: &incumbent,
+                candidates: &candidates,
+                scores: &scores,
+                min_improvement: config.min_improvement,
+                source_dir,
+                combo_work_dir: &combo_dir,
+            },
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn(&format!(
+                    "combo selection failed: {e}; using best improving single if any"
+                ));
+                crate::combos::collect_improvers(&scores, config.min_improvement)
+                    .ok()
+                    .and_then(|improvers| {
+                        let best = improvers.into_iter().next()?;
+                        Some(crate::combos::ComboSelection {
+                            creature_path: source_dir.join(format!("{}.json", best.stem)),
+                            stem: best.stem,
+                            result: best.result,
+                            delta: best.delta,
+                            member_indices: vec![best.index],
+                        })
+                    })
+            }
+        };
+
         let mut accepted = false;
         let mut improvement = None;
         let mut winner_stem = None;
-        if let Some((stem, result, delta)) = winner
-            && accepts_improvement(result.score, baseline.score, config.min_improvement)
+        if let Some(sel) = selection
+            && accepts_improvement(sel.result.score, baseline.score, config.min_improvement)
         {
             if screen_rate.is_some() {
                 log::detail(
@@ -850,31 +884,29 @@ pub fn run_optimisation(
                     "accepting on full-corpus scorer (analysis used a quick sample; directions may differ)",
                 );
             }
-            let strategy = stem
-                .strip_prefix("candidate-")
-                .and_then(|idx| idx.parse::<usize>().ok())
-                .and_then(|i| candidates.get(i).map(|c| c.provenance.strategy))
-                .unwrap_or(crate::candidates::CandidateStrategy::Random);
+            let strategy = sel
+                .member_indices
+                .first()
+                .and_then(|i| candidates.get(*i).map(|c| c.provenance.strategy))
+                .unwrap_or(CandidateStrategy::Random);
+            let delta = sel.delta;
             log::ok(&format!(
-                "🏆 accepted {stem}: score={} (+{delta:.3e})",
-                result.score
+                "🏆 accepted {}: score={} (+{delta:.3e}, {} member(s))",
+                sel.stem,
+                sel.result.score,
+                sel.member_indices.len()
             ));
-            // Winner JSON lives in the promote dir when two-phase, else the batch dir.
-            let winner_path = promote_dir
-                .as_ref()
-                .unwrap_or(&batch_dir)
-                .join(format!("{stem}.json"));
-            let winner_json = fs::read_to_string(&winner_path).map_err(|e| e.to_string())?;
+            let winner_json = fs::read_to_string(&sel.creature_path).map_err(|e| e.to_string())?;
             let previous = incumbent.clone();
             incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
             let opening = opening_baseline_score.unwrap_or(baseline.score);
             last_accept_focus = focus.clone();
             last_accept_strategy = strategy;
-            last_accept_error = result.error;
+            last_accept_error = sel.result.error;
             creature_meta.stamp_acceptance(&LamarckProgress {
                 acceptances: acceptances + 1,
-                score: result.score,
-                error: result.error,
+                score: sel.result.score,
+                error: sel.result.error,
                 opening_score: opening,
                 focus_neuron: &focus,
                 strategy,
@@ -897,11 +929,11 @@ pub fn run_optimisation(
                 &tagged,
             )
             .map_err(|e| e.to_string())?;
-            best_score = result.score;
+            best_score = sel.result.score;
             accepted = true;
             acceptances += 1;
             improvement = Some(delta);
-            winner_stem = Some(stem.to_string());
+            winner_stem = Some(sel.stem.clone());
 
             // Record structural improvements into the local graft store.
             if matches!(
@@ -958,6 +990,7 @@ pub fn run_optimisation(
             if let Some(pdir) = &promote_dir {
                 let _ = fs::remove_dir_all(pdir);
             }
+            let _ = fs::remove_dir_all(&combo_dir);
         }
     }
 

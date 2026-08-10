@@ -7,6 +7,7 @@
 
 pub mod backprop;
 pub mod candidates;
+pub mod combos;
 pub mod config;
 pub mod focus;
 pub mod grafts;
@@ -22,6 +23,10 @@ pub mod structural;
 pub mod tags;
 
 pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
+pub use combos::{
+    ComboSelectRequest, ComboSelection, Improver, MAX_COMBO_CANDIDATES, collect_improvers,
+    combination_index_sets, merge_candidate_deltas, select_best_with_combinations,
+};
 pub use config::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES, DEFAULT_MIN_IMPROVEMENT,
     DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
@@ -30,7 +35,7 @@ pub use config::{
 pub use focus::{FocusChoice, FocusPolicy, WeightedFocusSelector};
 pub use grafts::{
     Graft, GraftKind, GraftReplayError, GraftReplayRequest, GraftStore, MAX_GRAFT_COMBO_CANDIDATES,
-    classify_graft, combination_index_sets, extract_structural_graft, is_present, replay_grafts,
+    classify_graft, extract_structural_graft, is_present, replay_grafts,
 };
 pub use parity::{
     PHASE0_ERROR_ABS_TOL, PHASE0_ERROR_REL_TOL, PHASE0_SCORE_ABS_TOL, PHASE0_SCORE_REL_TOL,
