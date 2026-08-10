@@ -8,8 +8,9 @@
 use crate::backprop::{BackpropConfig, LearningSignal};
 use neat_core::{
     CompiledNetwork, CreatureExport, NEURON_TYPE_CONSTANT, NEURON_TYPE_HIDDEN, NEURON_TYPE_INPUT,
-    NEURON_TYPE_OUTPUT, NeuronInput, PropagateInput, SquashType, SynapseInput, TrainingDataConfig,
-    TrainingDataIterator, apply_get_range, parse_squash_name, propagate_topological_loop,
+    NEURON_TYPE_OUTPUT, NeuronInput, PropagateInput, SquashType, SynapseInput, SynapseType,
+    TrainingDataConfig, TrainingDataIterator, apply_get_range, parse_squash_name,
+    parse_synapse_type, propagate_topological_loop,
 };
 use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -38,12 +39,55 @@ pub struct PropagateLayout {
     pub reverse_topo_order: Vec<u32>,
     /// UUID → propagate neuron index.
     pub uuid_to_prop: HashMap<String, usize>,
+    /// Aggregate (MINIMUM / MAXIMUM / IF) neurons, linearised per record.
+    pub aggregates: Vec<AggregateNeuron>,
+}
+
+/// Aggregate squash whose activation selects a subset of its inward links.
+///
+/// neat-core's reverse-topological loop hands these back as
+/// [`neat_core::PropagateOutcome::Special`] and stops — the TypeScript trainer
+/// runs a per-squash custom `propagate` instead. Lamarck's equivalent is to
+/// present the neuron to the generic loop as an `IDENTITY` sum over exactly the
+/// links that produced this record's activation (issue #83).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateKind {
+    /// Activation is the smallest inward `weight × activation` (+ bias).
+    Minimum,
+    /// Activation is the largest inward `weight × activation` (+ bias).
+    Maximum,
+    /// Activation is the positive or negative branch sum (+ bias), gated by the
+    /// sign of the condition links.
+    If,
+}
+
+/// One aggregate neuron and its inward links, grouped by synapse role.
+#[derive(Debug, Clone)]
+pub struct AggregateNeuron {
+    /// Propagate neuron index.
+    pub prop_index: usize,
+    /// Which aggregate rule selects the carrying links.
+    pub kind: AggregateKind,
+    /// Non-self-loop inward links as `(export synapse index, role)`.
+    pub links: Vec<(u32, SynapseType)>,
+}
+
+/// Map a squash name onto its aggregate rule, if any.
+fn aggregate_kind_for(squash: SquashType) -> Option<AggregateKind> {
+    match squash {
+        SquashType::Minimum => Some(AggregateKind::Minimum),
+        SquashType::Maximum => Some(AggregateKind::Maximum),
+        SquashType::If => Some(AggregateKind::If),
+        _ => None,
+    }
 }
 
 /// Static per-neuron fields (activation filled per record).
 #[derive(Debug, Clone)]
 pub struct NeuronTemplate {
-    /// Squash discriminant.
+    /// Squash discriminant **as presented to the propagate loop**: aggregate
+    /// squashes (MINIMUM / MAXIMUM / IF) are presented as `IDENTITY` because
+    /// their carrying links are selected per record (see [`AggregateNeuron`]).
     pub squash_type: u8,
     /// Neuron category code.
     pub neuron_type: u8,
@@ -102,7 +146,9 @@ impl PropagateLayout {
                 range_high: hi,
             });
         }
-        for n in &creature.neurons {
+        let mut aggregate_kinds: Vec<Option<AggregateKind>> =
+            vec![None; input_count + creature.neurons.len()];
+        for (i, n) in creature.neurons.iter().enumerate() {
             let squash = match n.squash.as_deref() {
                 None => SquashType::Identity,
                 Some(name) => parse_squash_name(name).map_err(|e| e.to_string())?,
@@ -113,8 +159,17 @@ impl PropagateLayout {
                 "constant" => NEURON_TYPE_CONSTANT,
                 _ => NEURON_TYPE_HIDDEN,
             };
+            // Aggregates are linearised onto their carrying links per record,
+            // so the loop sees a plain sum over that selection.
+            let kind = aggregate_kind_for(squash);
+            aggregate_kinds[input_count + i] = kind;
+            let presented = if kind.is_some() {
+                SquashType::Identity as u8
+            } else {
+                squash as u8
+            };
             neuron_templates.push(NeuronTemplate {
-                squash_type: squash as u8,
+                squash_type: presented,
                 neuron_type,
                 bias: n.bias,
                 range_low: lo,
@@ -123,6 +178,7 @@ impl PropagateLayout {
         }
 
         let mut synapse_templates = Vec::with_capacity(creature.synapses.len());
+        let mut synapse_roles = Vec::with_capacity(creature.synapses.len());
         for s in &creature.synapses {
             let from = *uuid_to_prop
                 .get(&s.from_uuid)
@@ -135,6 +191,7 @@ impl PropagateLayout {
                 to: to as u32,
                 weight: s.weight,
             });
+            synapse_roles.push(parse_synapse_type(s.synapse_type.as_deref()));
         }
 
         let mut inward_lists: Vec<Vec<u32>> = vec![Vec::new(); neuron_count];
@@ -157,6 +214,26 @@ impl PropagateLayout {
             .map(|i| i as u32)
             .collect();
 
+        let mut aggregates = Vec::new();
+        for (prop_index, kind) in aggregate_kinds.iter().enumerate() {
+            let Some(kind) = *kind else {
+                continue;
+            };
+            let links: Vec<(u32, SynapseType)> = inward_lists[prop_index]
+                .iter()
+                .filter(|&&syn_idx| {
+                    let syn = &synapse_templates[syn_idx as usize];
+                    syn.from != syn.to
+                })
+                .map(|&syn_idx| (syn_idx, synapse_roles[syn_idx as usize]))
+                .collect();
+            aggregates.push(AggregateNeuron {
+                prop_index,
+                kind,
+                links,
+            });
+        }
+
         Ok(Self {
             neuron_count,
             input_count,
@@ -168,7 +245,89 @@ impl PropagateLayout {
             inward_synapse_indices,
             reverse_topo_order,
             uuid_to_prop,
+            aggregates,
         })
+    }
+
+    /// Rewrite the inward adjacency so every aggregate neuron exposes only the
+    /// links that carried this record's activation (issue #83).
+    ///
+    /// `counts` / `indices` are working copies of [`Self::inward_counts`] /
+    /// [`Self::inward_synapse_indices`]; only aggregate slices are touched, and
+    /// each is rewritten in full from the pristine layout every record, so the
+    /// buffers can be reused across records.
+    ///
+    /// - `MINIMUM` / `MAXIMUM` keep the single winning link (winner-take-all,
+    ///   matching the TypeScript `propagate`).
+    /// - `IF` keeps the taken branch: positive/standard links when the
+    ///   condition links sum above zero, negative links otherwise. Condition
+    ///   links gate the branch and never carry its error.
+    ///
+    /// An aggregate with no eligible link is presented with an empty inward
+    /// list — bias still accumulates, nothing propagates upstream.
+    pub fn linearise_aggregates(
+        &self,
+        activations: &[f32],
+        counts: &mut [u32],
+        indices: &mut [u32],
+    ) {
+        for aggregate in &self.aggregates {
+            let start = self.inward_starts[aggregate.prop_index] as usize;
+            let mut written = 0usize;
+            match aggregate.kind {
+                AggregateKind::Minimum | AggregateKind::Maximum => {
+                    let mut best: Option<(u32, f64)> = None;
+                    for &(syn_idx, _) in &aggregate.links {
+                        let value = self.link_value(syn_idx, activations);
+                        let better = match (best, aggregate.kind) {
+                            (None, _) => true,
+                            (Some((_, b)), AggregateKind::Minimum) => value < b,
+                            (Some((_, b)), _) => value > b,
+                        };
+                        if better {
+                            best = Some((syn_idx, value));
+                        }
+                    }
+                    if let Some((syn_idx, _)) = best {
+                        indices[start] = syn_idx;
+                        written = 1;
+                    }
+                }
+                AggregateKind::If => {
+                    let condition: f64 = aggregate
+                        .links
+                        .iter()
+                        .filter(|(_, role)| matches!(role, SynapseType::Condition))
+                        .map(|&(syn_idx, _)| self.link_value(syn_idx, activations))
+                        .sum();
+                    let take_positive = condition > 0.0;
+                    for &(syn_idx, role) in &aggregate.links {
+                        let carries = match role {
+                            SynapseType::Condition => false,
+                            SynapseType::Negative => !take_positive,
+                            SynapseType::Positive | SynapseType::Standard => take_positive,
+                        };
+                        if carries {
+                            indices[start + written] = syn_idx;
+                            written += 1;
+                        }
+                    }
+                }
+            }
+            counts[aggregate.prop_index] = written as u32;
+        }
+    }
+
+    /// `weight × source activation` for one export synapse.
+    fn link_value(&self, syn_idx: u32, activations: &[f32]) -> f64 {
+        let syn = &self.synapse_templates[syn_idx as usize];
+        let from = f64::from(
+            activations
+                .get(syn.from as usize)
+                .copied()
+                .unwrap_or_default(),
+        );
+        syn.weight * from
     }
 }
 
@@ -245,6 +404,9 @@ pub fn accumulate_creature_learning(
     let layout = PropagateLayout::from_creature(creature)?;
     let sparse = select_sparse(creature, &layout, config, rng);
     let mut learning = LearningSignal::new(creature.neurons.len(), creature.synapses.len());
+    // Working inward adjacency — aggregate slices are rewritten per record.
+    let mut inward_counts = layout.inward_counts.clone();
+    let mut inward_indices = layout.inward_synapse_indices.clone();
 
     let td_cfg = TrainingDataConfig::new(creature.input, creature.output);
     let mut iter = TrainingDataIterator::new(training_data, td_cfg).map_err(|e| e.to_string())?;
@@ -258,6 +420,14 @@ pub fn accumulate_creature_learning(
         }
         let _traced = network.activate_and_trace(&record.inputs, creature.output);
         count += 1;
+
+        if !layout.aggregates.is_empty() {
+            layout.linearise_aggregates(
+                &network.activations,
+                &mut inward_counts,
+                &mut inward_indices,
+            );
+        }
 
         let mut neurons: Vec<NeuronInput> = Vec::with_capacity(layout.neuron_count);
         for (prop_idx, tmpl) in layout.neuron_templates.iter().enumerate() {
@@ -302,8 +472,8 @@ pub fn accumulate_creature_learning(
             neurons: &neurons,
             synapses: &synapses,
             inward_starts: &layout.inward_starts,
-            inward_counts: &layout.inward_counts,
-            inward_synapse_indices: &layout.inward_synapse_indices,
+            inward_counts: &inward_counts,
+            inward_synapse_indices: &inward_indices,
             reverse_topo_order: &layout.reverse_topo_order,
             expected: &expected,
             input_count: layout.input_count as u32,
@@ -344,12 +514,144 @@ mod tests {
       ]
     }"#;
 
+    /// Two hidden branches (`h1` value 1, `h2` value 2) feeding an aggregate
+    /// output. `{SQUASH}` is substituted per test.
+    const AGGREGATE_OUTPUT: &str = r#"{
+      "semanticVersion": "4.0.0",
+      "forwardOnly": true,
+      "input": 1,
+      "output": 1,
+      "neurons": [
+        {"type":"hidden","uuid":"h1","bias":0.0,"squash":"IDENTITY"},
+        {"type":"hidden","uuid":"h2","bias":0.0,"squash":"IDENTITY"},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"{SQUASH}"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+        {"fromUUID":"input-0","toUUID":"h2","weight":2.0},
+        {"fromUUID":"h1","toUUID":"o1","weight":1.0},
+        {"fromUUID":"h2","toUUID":"o1","weight":1.0}
+      ]
+    }"#;
+
+    /// Condition / positive / negative branches feeding an `IF` output.
+    const IF_OUTPUT: &str = r#"{
+      "semanticVersion": "4.0.0",
+      "forwardOnly": true,
+      "input": 1,
+      "output": 1,
+      "neurons": [
+        {"type":"hidden","uuid":"cond","bias":0.0,"squash":"IDENTITY"},
+        {"type":"hidden","uuid":"pos","bias":0.0,"squash":"IDENTITY"},
+        {"type":"hidden","uuid":"neg","bias":0.0,"squash":"IDENTITY"},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"IF"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"cond","weight":1.0},
+        {"fromUUID":"input-0","toUUID":"pos","weight":2.0},
+        {"fromUUID":"input-0","toUUID":"neg","weight":3.0},
+        {"fromUUID":"cond","toUUID":"o1","weight":1.0,"type":"condition"},
+        {"fromUUID":"pos","toUUID":"o1","weight":1.0,"type":"positive"},
+        {"fromUUID":"neg","toUUID":"o1","weight":1.0,"type":"negative"}
+      ]
+    }"#;
+
     fn write_records(dir: &Path, pairs: &[(f32, f32)]) {
         let mut f = std::fs::File::create(dir.join("0.bin")).unwrap();
         for &(x, y) in pairs {
             f.write_all(&x.to_le_bytes()).unwrap();
             f.write_all(&y.to_le_bytes()).unwrap();
         }
+    }
+
+    /// Accumulate one record of learning for `json` against `input → target`.
+    fn learn_one(json: &str, input: f32, target: f32) -> (CreatureExport, LearningSignal) {
+        let dir = tempdir().unwrap();
+        write_records(dir.path(), &[(input, target)]);
+        let creature = parse_creature_json(json).unwrap();
+        let mut network = compile_creature(&creature).unwrap();
+        let cfg = BackpropConfig::default();
+        let mut rng = StdRng::seed_from_u64(7);
+        let learning = accumulate_creature_learning(
+            &creature,
+            &mut network,
+            dir.path(),
+            &cfg,
+            Some(1),
+            &mut rng,
+        )
+        .unwrap();
+        (creature, learning)
+    }
+
+    fn bias_count(creature: &CreatureExport, learning: &LearningSignal, uuid: &str) -> f64 {
+        let idx = creature
+            .neurons
+            .iter()
+            .position(|n| n.uuid == uuid)
+            .expect("neuron");
+        learning.biases[idx].count
+    }
+
+    fn weight_count(creature: &CreatureExport, learning: &LearningSignal, from: &str) -> f64 {
+        let idx = creature
+            .synapses
+            .iter()
+            .position(|s| s.from_uuid == from && s.to_uuid == "o1")
+            .expect("synapse");
+        learning.weights[idx].count
+    }
+
+    #[test]
+    fn minimum_output_propagates_blame_to_the_winning_branch() {
+        // o1 = min(h1=1, h2=2) = 1; target 2 ⇒ error 1 routed through h1.
+        let (creature, learning) =
+            learn_one(&AGGREGATE_OUTPUT.replace("{SQUASH}", "MINIMUM"), 1.0, 2.0);
+        assert!(
+            bias_count(&creature, &learning, "o1") > 0.0,
+            "aggregate output must accumulate a bias signal"
+        );
+        assert!(
+            bias_count(&creature, &learning, "h1") > 0.0,
+            "the winning branch must receive propagated blame"
+        );
+        assert_eq!(
+            bias_count(&creature, &learning, "h2"),
+            0.0,
+            "the losing branch must not receive blame"
+        );
+        assert!(weight_count(&creature, &learning, "h1") > 0.0);
+        assert_eq!(weight_count(&creature, &learning, "h2"), 0.0);
+    }
+
+    #[test]
+    fn maximum_output_propagates_blame_to_the_winning_branch() {
+        // o1 = max(h1=1, h2=2) = 2; target 3 ⇒ error 1 routed through h2.
+        let (creature, learning) =
+            learn_one(&AGGREGATE_OUTPUT.replace("{SQUASH}", "MAXIMUM"), 1.0, 3.0);
+        assert!(bias_count(&creature, &learning, "o1") > 0.0);
+        assert!(
+            bias_count(&creature, &learning, "h2") > 0.0,
+            "the winning branch must receive propagated blame"
+        );
+        assert_eq!(bias_count(&creature, &learning, "h1"), 0.0);
+    }
+
+    #[test]
+    fn if_output_propagates_blame_to_the_taken_branch_only() {
+        // cond = 1 > 0 ⇒ positive branch (pos=2) is taken; target 4 ⇒ error 2.
+        let (creature, learning) = learn_one(IF_OUTPUT, 1.0, 4.0);
+        assert!(bias_count(&creature, &learning, "o1") > 0.0);
+        assert!(
+            bias_count(&creature, &learning, "pos") > 0.0,
+            "the taken branch must receive propagated blame"
+        );
+        assert_eq!(bias_count(&creature, &learning, "neg"), 0.0);
+        assert_eq!(
+            bias_count(&creature, &learning, "cond"),
+            0.0,
+            "condition links gate the branch, they do not carry its error"
+        );
     }
 
     #[test]

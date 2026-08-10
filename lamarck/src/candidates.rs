@@ -1,6 +1,6 @@
 //! Candidate population generation from an incumbent creature.
 
-use crate::backprop::{BackpropConfig, BiasSignal, LearningSignal};
+use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::focus::{FocusNeuronStats, IncomingSourceStats};
 use crate::observations::ObservationsStatistics;
 use crate::structural::{
@@ -540,25 +540,14 @@ fn build_candidate(
                     Some(old_bias),
                     Some(new_bias),
                 )
-            } else if let Some(mean_adj) =
-                focus_stats.mean_adjusted_error.or(focus_stats.mean_error)
-            {
-                let fallback = BiasSignal {
-                    count: 1.0,
-                    total_adjusted_bias: old_bias + mean_adj * MEAN_ERROR_STEP_FRACTION,
-                    no_change: focus_stats.mean_derivative.is_some_and(|d| d <= 1e-6),
-                };
-                let new_bias = fallback.propose(old_bias, backprop, lr);
-                if (new_bias - old_bias).abs() < backprop.plank_constant {
-                    return None;
-                }
-                creature.neurons[neuron_pos].bias = new_bias;
-                (
-                    format!("backprop-fallback bias {old_bias} -> {new_bias}"),
-                    Some(old_bias),
-                    Some(new_bias),
-                )
             } else {
+                // No accumulated blame on the focus — issue #83. The old
+                // residual fallback ran the mean adjusted error through both
+                // the 0.1 step fraction and the learning rate, landing ~200x
+                // below the scale accepted candidates move at, and duplicated
+                // `mean_error_bias` at a strictly worse size. Skip instead so
+                // the batch slot goes to a strategy that can clear
+                // `--min-improvement`.
                 return None;
             }
         }
@@ -795,6 +784,7 @@ pub fn write_candidate_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backprop::BiasSignal;
     use crate::structural::{refine_sources_from_probes, synthetic_observation_probes};
     use neat_core::parse_creature_json;
     use rand::{SeedableRng, rngs::StdRng};
@@ -973,6 +963,89 @@ mod tests {
         };
         let mut rng = StdRng::seed_from_u64(1);
         assert!(build_candidate(&ctx, CandidateStrategy::MeanErrorBias, &mut rng).is_none());
+    }
+
+    #[test]
+    fn backprop_without_a_learning_signal_proposes_nothing() {
+        // Issue #83: a focus with no accumulated blame used to emit a
+        // fallback bias step ~200x below the accepted scale — a strictly
+        // worse duplicate of mean_error_bias. It must now be skipped.
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_error: Some(0.25),
+            mean_abs_error: Some(0.25),
+            mean_adjusted_error: Some(0.25),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        };
+        let observations = empty_obs();
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &[],
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let mut rng = StdRng::seed_from_u64(3);
+        assert!(build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng).is_none());
+
+        // An all-zero signal (blame never reached the focus) is the same case.
+        let learning = LearningSignal::new(incumbent.neurons.len(), incumbent.synapses.len());
+        let ctx = CandidateGenContext {
+            learning: Some(&learning),
+            ..ctx
+        };
+        assert!(build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng).is_none());
+    }
+
+    #[test]
+    fn backprop_proposes_from_an_accumulated_bias_signal() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        };
+        let observations = empty_obs();
+        let cfg = BackpropConfig::default();
+        let mut learning = LearningSignal::new(incumbent.neurons.len(), incumbent.synapses.len());
+        let focus_pos = incumbent
+            .neurons
+            .iter()
+            .position(|n| n.uuid == "o1")
+            .unwrap();
+        learning.biases[focus_pos] = BiasSignal {
+            count: 4.0,
+            total_adjusted_bias: 2.0,
+            no_change: false,
+        };
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &[],
+            observations: &observations,
+            ranked_sources: None,
+            learning: Some(&learning),
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let mut rng = StdRng::seed_from_u64(3);
+        let candidate = build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng)
+            .expect("backprop candidate from real blame");
+        assert_eq!(candidate.provenance.strategy, CandidateStrategy::Backprop);
+        let old = candidate.provenance.old_value.unwrap();
+        let new = candidate.provenance.new_value.unwrap();
+        assert!(
+            new > old,
+            "expected an upward bias step, got {old} -> {new}"
+        );
     }
 
     /// Observations whose single target has the given shape and mean→median gap.
