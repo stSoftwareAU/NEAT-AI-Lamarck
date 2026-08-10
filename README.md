@@ -95,16 +95,33 @@ This constraint should influence implementation choices. A theoretically better 
 
 ## Inputs
 
-The CLI requires:
+**Required positional arguments** (no default — the run cannot start without them):
 
 - current fittest creature JSON;
-- training-data directory;
-- candidate count, default `100`;
-- timeout, default `45m`;
-- minimum meaningful improvement, default `1e-6` (absolute score delta, strict `>`);
-- optional deterministic random seed;
-- optional scorer binary path and output directory;
-- optional mutation-strategy configuration.
+- training-data directory.
+
+**Required, but defaulted** — the run always uses these; the flag only overrides
+the value:
+
+- a working NEAT-AI-scorer binary — `--scorer`, default `rust_scorer` resolved
+  on `PATH`. Scoring is **mandatory**, not optional: safety invariant 3 lets
+  only the scorer declare a candidate fitter, so a run that cannot spawn the
+  binary aborts — at the Phase-0 gate, or after
+  `DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES` (`3`) consecutive scorer failures
+  when `--skip-phase0` is passed. The flag is optional only in the sense that
+  the default path is used when it is omitted.
+- output directory — `--output-dir`, default `.` (holds `best.json` and
+  `experiments.jsonl`);
+- candidate count — `--candidates`, default `100`;
+- timeout — `--timeout-seconds`, default `2700` (45 minutes);
+- minimum meaningful improvement — `--min-improvement`, default `1e-6`
+  (absolute score delta, strict `>`).
+
+**Genuinely optional** (unset changes behaviour):
+
+- deterministic random seed — `--seed`; unset means the run is not reproducible;
+- mutation-strategy configuration — e.g. `--structural-only`, `--focus-policy`,
+  `--focus-neuron`, `--screen-sample-rate`.
 
 ### Production scale target
 
