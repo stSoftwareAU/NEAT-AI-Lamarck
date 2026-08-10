@@ -23,11 +23,8 @@ pub const GRAFT_STORE_VERSION: u32 = 1;
 /// Default fraction of the run timeout reserved for graft replay.
 pub const DEFAULT_GRAFT_REPLAY_BUDGET_FRACTION: f64 = 0.10;
 
-/// Max helpful singles + combination creatures scored for graft selection.
-///
-/// Singles of the helpful pool count toward this cap; remaining slots score
-/// combinations (pairs, then triples, …) in one parallel scorer batch.
-pub const MAX_GRAFT_COMBO_CANDIDATES: usize = 50;
+/// Alias for [`crate::combos::MAX_COMBO_CANDIDATES`] (graft replay budget).
+pub use crate::combos::MAX_COMBO_CANDIDATES as MAX_GRAFT_COMBO_CANDIDATES;
 
 /// Kind of structural graft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -540,51 +537,8 @@ fn score_batch(
         .map_err(|e| e.to_string())
 }
 
-/// Index sets for combinations of size `>= 2` over `0..n`, up to `max_combos`.
-///
-/// Smaller groups first (all pairs, then triples, …) so a tight budget still
-/// explores pairwise interactions before larger sets.
-pub fn combination_index_sets(n: usize, max_combos: usize) -> Vec<Vec<usize>> {
-    let mut out = Vec::new();
-    if n < 2 || max_combos == 0 {
-        return out;
-    }
-    for k in 2..=n {
-        let mut cur = Vec::with_capacity(k);
-        choose_indices(n, k, 0, &mut cur, &mut out, max_combos);
-        if out.len() >= max_combos {
-            break;
-        }
-    }
-    out
-}
-
-fn choose_indices(
-    n: usize,
-    k: usize,
-    start: usize,
-    cur: &mut Vec<usize>,
-    out: &mut Vec<Vec<usize>>,
-    max_combos: usize,
-) {
-    if out.len() >= max_combos {
-        return;
-    }
-    if cur.len() == k {
-        out.push(cur.clone());
-        return;
-    }
-    // Need enough remaining indices to fill `k`.
-    let need = k - cur.len();
-    for i in start..=n - need {
-        cur.push(i);
-        choose_indices(n, k, i + 1, cur, out, max_combos);
-        cur.pop();
-        if out.len() >= max_combos {
-            return;
-        }
-    }
-}
+/// Re-export shared combination enumerator.
+pub use crate::combos::combination_index_sets;
 
 /// Inputs for [`replay_grafts`].
 pub struct GraftReplayRequest<'a> {
