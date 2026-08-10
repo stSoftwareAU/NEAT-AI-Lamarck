@@ -49,6 +49,8 @@ pub struct LamarckConfig {
     pub training_data: PathBuf,
     /// Wall-clock budget.
     pub timeout: Duration,
+    /// Stop after this many experiments. `None` = wall-clock bounded only.
+    pub max_experiments: Option<u64>,
     /// Candidates per focus-neuron experiment.
     pub candidates: usize,
     /// Absolute score delta required for acceptance (`candidate - baseline`).
@@ -94,6 +96,7 @@ impl Default for LamarckConfig {
             creature: PathBuf::from("creature.json"),
             training_data: PathBuf::from("training"),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+            max_experiments: None,
             candidates: DEFAULT_CANDIDATE_COUNT,
             min_improvement: DEFAULT_MIN_IMPROVEMENT,
             seed: None,

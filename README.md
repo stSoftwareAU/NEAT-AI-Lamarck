@@ -175,6 +175,7 @@ Leaving these unset changes behaviour.
 | Flag | Effect when set |
 |------|-----------------|
 | `--seed` | Deterministic RNG seed. When unset a seed is drawn from OS entropy and recorded in the journal `runHeader`, so the run stays replayable. |
+| `--max-experiments` | Stop after this many experiments, whichever of it and `--timeout-seconds` comes first. Unset = wall-clock bounded only. |
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
@@ -191,13 +192,15 @@ flowchart TD
     SEED[Seed: use --seed or draw one; write runHeader to experiments.jsonl] --> P0
     P0[Phase 0: scorer baseline + parity gate] --> OBS[Phase 1: observations.statistics cache]
     OBS --> G[Phase G: replay stored structural grafts]
-    G --> LOOP{wall-clock budget left?}
+    G --> LOOP{budget left, cap not reached, not cancelled?}
     LOOP -- no --> OUT[best.json + experiments.jsonl + winners/]
     LOOP -- yes --> LRN[accumulate creature learning signal]
     LRN --> F[Phase 2: select focus neuron]
     F --> AN[Phase 3: focus + incoming-source statistics]
     AN --> GEN[Phase 4: generate candidates]
-    GEN --> SCR[Phase 5a: screen on scorer subsample]
+    GEN --> CAN{cancelled during analysis?}
+    CAN -- yes --> OUT
+    CAN -- no --> SCR[Phase 5a: screen on scorer subsample]
     SCR --> PRO[Phase 5b: full-corpus score baseline + promoted]
     PRO --> CMB[Phase 5c: score combos of improving candidates]
     CMB --> ACC{score delta > min-improvement?}
@@ -405,13 +408,46 @@ with the creature's `uuid`/`tags` re-attached and a run-summary `lamarck` tag,
 a copy is kept under `winners/`, structural accepts are recorded into the graft
 store, and creature-specific analysis is recomputed next iteration.
 
-### Phase 6 — repeat until the budget expires
+### Phase 6 — repeat until a stopping rule fires
 
-The loop continues selecting neurons and testing candidates until the
-wall-clock timeout expires, or three consecutive scorer batches fail. A failed
-experiment simply moves on to another attempt. A configured maximum experiment
-count and explicit cancellation are **not** implemented — see
-[#72](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/72).
+The loop keeps selecting neurons and testing candidates until the first of four
+stopping rules fires. A failed experiment simply moves on to another attempt.
+
+| Stopping rule | Trigger | Reported as |
+|---------------|---------|-------------|
+| Wall-clock timeout | `--timeout-seconds` elapsed, checked between experiments. | `timeout` |
+| Experiment cap | `--max-experiments N` experiments completed. Unset = wall-clock bounded only. | `max-experiments` |
+| Cancellation | `SIGINT` (Ctrl-C) or `SIGTERM`. | `cancelled` |
+| Scorer failure | Three consecutive scorer batches fail (`--skip-phase0` runs). | Run aborts with an error |
+
+The stopping rule that ended the run is printed in the run summary as
+`stopped on:`.
+
+**Graceful cancellation.** `SIGINT`/`SIGTERM` only set a flag; the loop polls it
+and stops through the normal exit path, so `best.json` is still re-stamped with
+the run-summary `lamarck` tag and the summary is still printed. A signal that
+arrives during analysis abandons the in-flight experiment before its scorer
+batch (no working directory is written for it); one that arrives during scoring
+stops the loop after that experiment has been journalled. Either way no
+`candidates-exp-N/` directory is left behind, and the process exits `0`. A
+**second** signal force-quits immediately with exit code `130`, for a run wedged
+inside a long scorer batch.
+
+```mermaid
+sequenceDiagram
+    participant U as Operator
+    participant S as Signal handler
+    participant L as Optimisation loop
+    U->>S: SIGINT
+    S->>S: set cancel flag (no I/O)
+    L->>S: poll before scoring
+    S-->>L: cancelled
+    L->>L: abandon experiment, clean working dirs
+    L->>L: re-stamp best.json + print run summary
+    L-->>U: exit 0
+    U->>S: second SIGINT
+    S-->>U: force quit (exit 130)
+```
 
 The optimisation path is cumulative:
 
@@ -451,7 +487,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`. |
 
 Every following line is one experiment:
 
@@ -559,7 +595,6 @@ to answer the rest are tracked in
 | Issue | Gap |
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
-| [#72](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/72) | No maximum-experiment-count stopping rule and no graceful cancellation. |
 | [#74](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/74) | `report` does not attribute combo or graft wins to a strategy. |
 | [#75](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/75) | The follow-up economics experiments recommended by the #8 baseline are unrun. |
 

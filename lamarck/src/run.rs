@@ -1,6 +1,7 @@
 //! End-to-end Lamarck optimisation loop and experiment journal.
 
 use crate::backprop::BackpropConfig;
+use crate::cancel::CancelToken;
 use crate::candidates::{
     Candidate, CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
     write_candidate_batch,
@@ -130,6 +131,9 @@ pub struct RunConfigRecord {
     pub scorer_path: PathBuf,
     /// Wall-clock budget in seconds.
     pub timeout_seconds: u64,
+    /// Experiment cap when one was configured (`--max-experiments`).
+    #[serde(default)]
+    pub max_experiments: Option<u64>,
     /// Candidates generated per experiment.
     pub candidates: usize,
     /// Absolute score delta required for acceptance.
@@ -170,6 +174,7 @@ impl RunConfigRecord {
             training_data: config.training_data.clone(),
             scorer_path: config.scorer_path.clone(),
             timeout_seconds: config.timeout.as_secs(),
+            max_experiments: config.max_experiments,
             candidates: config.candidates,
             min_improvement: config.min_improvement,
             screen_sample_rate: config.screen_sample_rate,
@@ -265,6 +270,29 @@ impl JournalLine {
     }
 }
 
+/// Why the optimisation loop stopped (issue #72).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StopReason {
+    /// The wall-clock budget expired.
+    Timeout,
+    /// The configured experiment cap was reached.
+    MaxExperiments,
+    /// `SIGINT`/`SIGTERM` (or a programmatic cancel) asked the run to stop.
+    Cancelled,
+}
+
+impl StopReason {
+    /// Stable lower-case label for logs and journals.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::MaxExperiments => "max-experiments",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// Result of a completed Lamarck run.
 #[derive(Debug)]
 pub struct RunResult {
@@ -286,12 +314,32 @@ pub struct RunResult {
     pub opening_baseline_score: Option<f64>,
     /// Effective RNG seed used by the run (drawn when `--seed` was omitted).
     pub seed: u64,
+    /// Which stopping rule ended the loop.
+    pub stop_reason: StopReason,
 }
 
-/// Run the Lamarck optimisation loop until the wall-clock budget expires.
+/// Run the Lamarck optimisation loop with no external cancellation.
+///
+/// Equivalent to [`run_optimisation_cancellable`] with a token that is never
+/// cancelled: the run stops on the wall-clock budget or the experiment cap.
 pub fn run_optimisation(
     config: &LamarckConfig,
     scorer: &impl DirectoryScorer,
+) -> Result<RunResult, String> {
+    run_optimisation_cancellable(config, scorer, &CancelToken::new())
+}
+
+/// Run the Lamarck optimisation loop until a stopping rule fires (issue #72).
+///
+/// The loop ends on the first of: `cancel` being set (`SIGINT`/`SIGTERM` when
+/// the caller installed the handlers), the configured experiment cap, or the
+/// wall-clock budget. Cancellation abandons the in-flight experiment before its
+/// scorer batch rather than killing the process, so `best.json` is still
+/// re-stamped with the run summary and the run summary is still returned.
+pub fn run_optimisation_cancellable(
+    config: &LamarckConfig,
+    scorer: &impl DirectoryScorer,
+    cancel: &CancelToken,
 ) -> Result<RunResult, String> {
     fs::create_dir_all(&config.output_dir).map_err(|e| e.to_string())?;
     let journal_path = config.output_dir.join("experiments.jsonl");
@@ -526,9 +574,12 @@ pub fn run_optimisation(
     }
 
     log::info(&format!(
-        "starting optimisation loop (timeout={}s, candidates={})",
+        "starting optimisation loop (timeout={}s, candidates={}, max_experiments={})",
         config.timeout.as_secs(),
-        config.candidates
+        config.candidates,
+        config
+            .max_experiments
+            .map_or_else(|| "unlimited".to_string(), |max| max.to_string())
     ));
     if let Some(uuid) = &config.focus_neuron {
         log::detail(&format!("focus locked to {uuid}"));
@@ -536,7 +587,21 @@ pub fn run_optimisation(
         log::detail(&format!("focus policy: {}", config.focus_policy.label()));
     }
 
-    while Instant::now() < deadline {
+    let stop_reason = loop {
+        // Stopping rules, cheapest and most urgent first.
+        if cancel.is_cancelled() {
+            log::warn("cancellation requested — stopping before the next experiment");
+            break StopReason::Cancelled;
+        }
+        if let Some(max) = config.max_experiments
+            && experiments >= max
+        {
+            log::info(&format!("experiment cap reached ({max}) — stopping"));
+            break StopReason::MaxExperiments;
+        }
+        if Instant::now() >= deadline {
+            break StopReason::Timeout;
+        }
         experiments += 1;
         let remaining = deadline.saturating_duration_since(Instant::now());
         log::info(&format!(
@@ -774,6 +839,17 @@ pub fn run_optimisation(
             "generated {} candidates in {generate_ms}ms (analysis total {analysis_ms}ms)",
             candidates.len()
         ));
+
+        // Scoring dominates an experiment, so poll here: a signal arriving
+        // during analysis abandons this experiment before any working
+        // directory is written, instead of waiting out a full scorer batch.
+        if cancel.is_cancelled() {
+            log::warn(&format!(
+                "cancellation requested — abandoning experiment {experiments} before scoring"
+            ));
+            experiments = experiments.saturating_sub(1);
+            break StopReason::Cancelled;
+        }
 
         let batch_dir = config
             .output_dir
@@ -1266,7 +1342,7 @@ pub fn run_optimisation(
             }
             let _ = fs::remove_dir_all(&combo_dir);
         }
-    }
+    };
 
     if experiments > 0 && scorer_successes == 0 {
         return Err(format!(
@@ -1319,6 +1395,7 @@ pub fn run_optimisation(
         scorer_successes,
         opening_baseline_score,
         seed,
+        stop_reason,
     })
 }
 
@@ -1497,6 +1574,7 @@ mod tests {
             creature: creature_path,
             training_data: training,
             timeout: Duration::from_millis(500),
+            max_experiments: None,
             candidates: 4,
             min_improvement: 1e-6,
             seed: Some(1),
@@ -1524,6 +1602,11 @@ mod tests {
         assert!(result.best_path.is_file());
         assert!(result.experiments >= 1);
         assert!(result.scorer_successes >= 1);
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Timeout,
+            "an uncapped, uncancelled run stops on the wall clock"
+        );
         let journal = fs::read_to_string(&result.journal_path).unwrap();
         let mut lines = journal.lines();
         // Line 1 is the run header (issue #71); experiments follow.
@@ -1605,6 +1688,7 @@ mod tests {
             creature: creature_path,
             training_data: training,
             timeout: Duration::from_millis(800),
+            max_experiments: None,
             candidates: 4,
             min_improvement: 1e-6,
             seed: Some(1),
@@ -1728,6 +1812,7 @@ mod tests {
             creature: creature_path,
             training_data: training,
             timeout: Duration::from_millis(500),
+            max_experiments: None,
             candidates: 2,
             min_improvement: 1e-6,
             seed: Some(1),
@@ -1769,6 +1854,7 @@ mod tests {
             creature,
             training_data: training,
             timeout: Duration::from_millis(400),
+            max_experiments: None,
             candidates: 4,
             min_improvement: 1e-6,
             seed: None,
@@ -1974,6 +2060,228 @@ mod tests {
         );
     }
 
+    /// Cancels the run from inside the first scorer batch, as `SIGINT` would.
+    struct CancellingScorer {
+        token: CancelToken,
+    }
+
+    impl DirectoryScorer for CancellingScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            self.token.cancel();
+            const BASE_SCORE: f64 = 0.64;
+            let mut map = BTreeMap::new();
+            map.insert(
+                "baseline".into(),
+                ScoreResult {
+                    score: BASE_SCORE,
+                    error: 1.0 - BASE_SCORE,
+                    complexity_penalty: 0.0,
+                },
+            );
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(stem) = name.strip_suffix(".json")
+                    && stem != "baseline"
+                {
+                    let score = if stem == "candidate-000" {
+                        BASE_SCORE + 2e-6
+                    } else {
+                        BASE_SCORE
+                    };
+                    map.insert(
+                        stem.to_string(),
+                        ScoreResult {
+                            score,
+                            error: 1.0 - score,
+                            complexity_penalty: 0.0,
+                        },
+                    );
+                }
+            }
+            Ok(map)
+        }
+    }
+
+    /// Working directories the loop creates per experiment.
+    fn experiment_work_dirs(output_dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(output_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| {
+                n.starts_with("candidates-exp-")
+                    || n.starts_with("promote-exp-")
+                    || n.starts_with("combos-exp-")
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Issue #72: `--max-experiments` stops the loop inside the time budget.
+    #[test]
+    fn max_experiments_caps_the_loop() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out");
+        let mut config = reproducibility_config(creature_path, training, out.clone());
+        // Generous budget: only the cap can end this run.
+        config.timeout = Duration::from_secs(300);
+        config.seed = Some(1);
+        config.max_experiments = Some(2);
+
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.experiments, 2, "the cap bounds the experiment count");
+        assert_eq!(result.stop_reason, StopReason::MaxExperiments);
+        let lines = journal_lines(&result.journal_path);
+        let experiments: Vec<&ExperimentRecord> = lines
+            .iter()
+            .filter_map(|l| match l {
+                JournalLine::Experiment(record) => Some(record.as_ref()),
+                JournalLine::Header(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            experiments.len(),
+            2,
+            "every capped experiment is journalled"
+        );
+        let JournalLine::Header(header) = &lines[0] else {
+            panic!("first journal line must be the run header");
+        };
+        assert_eq!(
+            header.config.max_experiments,
+            Some(2),
+            "the cap is part of the replay contract"
+        );
+        assert!(result.best_path.is_file());
+    }
+
+    /// Issue #72: a cap of zero is a legitimate no-op, not an underflow.
+    #[test]
+    fn a_zero_experiment_cap_runs_nothing() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out");
+        let mut config = reproducibility_config(creature_path, training, out.clone());
+        config.timeout = Duration::from_secs(300);
+        config.max_experiments = Some(0);
+
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.experiments, 0);
+        assert_eq!(result.acceptances, 0);
+        assert_eq!(result.stop_reason, StopReason::MaxExperiments);
+        assert!(experiment_work_dirs(&out).is_empty());
+    }
+
+    /// Issue #72: cancellation ends the run through the normal exit path — the
+    /// journal, the `best.json` run-summary stamp and the cleanup all survive.
+    #[test]
+    fn cancellation_stops_the_loop_and_still_stamps_best() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out");
+        let mut config = reproducibility_config(creature_path, training, out.clone());
+        // Generous budget: only the cancellation can end this run promptly.
+        config.timeout = Duration::from_secs(300);
+        config.seed = Some(1);
+
+        let cancel = CancelToken::new();
+        let result = run_optimisation_cancellable(
+            &config,
+            &CancellingScorer {
+                token: cancel.clone(),
+            },
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
+        assert_eq!(
+            result.experiments, 1,
+            "the in-flight experiment finishes, and no further one starts"
+        );
+        assert_eq!(
+            journal_lines(&result.journal_path)
+                .into_iter()
+                .filter(|l| matches!(l, JournalLine::Experiment(_)))
+                .count(),
+            1,
+            "the finished experiment is journalled before exiting"
+        );
+        assert!(result.acceptances >= 1, "the winner was accepted");
+        let best: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result.best_path).unwrap()).unwrap();
+        let lamarck = best["tags"]
+            .as_array()
+            .expect("tags")
+            .iter()
+            .find(|t| t["name"] == "lamarck")
+            .expect("lamarck tag")["value"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            lamarck.contains("accept") && lamarck.contains("score:"),
+            "cancelled run must still re-stamp best.json: {lamarck}"
+        );
+        assert!(
+            experiment_work_dirs(&out).is_empty(),
+            "cancellation must not leave working directories behind: {:?}",
+            experiment_work_dirs(&out)
+        );
+    }
+
+    /// Issue #72: a token already set stops the run before any experiment.
+    #[test]
+    fn cancellation_before_the_first_experiment_runs_none() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out");
+        let mut config = reproducibility_config(creature_path.clone(), training, out.clone());
+        config.timeout = Duration::from_secs(300);
+
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let result = run_optimisation_cancellable(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(result.experiments, 0);
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
+        assert!(experiment_work_dirs(&out).is_empty());
+        // best.json is still the verbatim copy of the supplied creature.
+        assert_eq!(
+            fs::read_to_string(&result.best_path).unwrap(),
+            fs::read_to_string(&creature_path).unwrap()
+        );
+    }
+
     #[test]
     fn consecutive_scorer_failures_abort() {
         let dir = tempdir().unwrap();
@@ -1982,6 +2290,7 @@ mod tests {
             creature: creature_path,
             training_data: training,
             timeout: Duration::from_secs(30),
+            max_experiments: None,
             candidates: 2,
             min_improvement: 1e-6,
             seed: Some(1),

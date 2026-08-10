@@ -281,6 +281,49 @@ fn outstanding_work_no_longer_lists_the_focus_journal_gap() {
     );
 }
 
+/// All four stopping rules exist now, so Phase 6 must list them (#72).
+#[test]
+fn phase_six_documents_every_stopping_rule() {
+    let readme = readme_text();
+    let phase_six = subsection(&readme, "\n### Phase 6").to_lowercase();
+    for phrase in [
+        "--timeout-seconds",
+        "--max-experiments",
+        "sigint",
+        "sigterm",
+        "consecutive",
+    ] {
+        assert!(
+            phase_six.contains(phrase),
+            "Phase 6 omits the {phrase:?} stopping rule"
+        );
+    }
+}
+
+/// Cancellation is only useful if the run still finishes cleanly (#72).
+#[test]
+fn phase_six_documents_the_graceful_cancellation_contract() {
+    let readme = readme_text();
+    let phase_six = subsection(&readme, "\n### Phase 6").to_lowercase();
+    for phrase in ["best.json", "run summary", "130"] {
+        assert!(
+            phase_six.contains(phrase),
+            "Phase 6 does not document {phrase:?} in the cancellation contract"
+        );
+    }
+}
+
+/// The gap this issue records is closed, so it must no longer be listed as outstanding.
+#[test]
+fn outstanding_work_no_longer_lists_the_stopping_rules_gap() {
+    let readme = readme_text();
+    let outstanding = section(&readme, "\n## Outstanding work");
+    assert!(
+        !outstanding.contains("/issues/72"),
+        "Outstanding work still lists issue #72 after the stopping rules were added"
+    );
+}
+
 #[test]
 fn section_returns_only_the_requested_section() {
     let readme = "# T\n\n## A\n\nalpha\n\n## B\n\nbeta\n";

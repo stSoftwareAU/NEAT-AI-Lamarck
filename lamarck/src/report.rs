@@ -498,6 +498,7 @@ pub fn print_run_summary(result: &RunResult) {
         "seed:          {}  (replay with --seed {})",
         result.seed, result.seed
     ));
+    log::detail(&format!("stopped on:    {}", result.stop_reason.label()));
 
     if let Ok(report) = report_from_journal(&result.journal_path) {
         let open = result

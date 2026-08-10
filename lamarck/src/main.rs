@@ -4,9 +4,10 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
-    DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
-    print_run_summary, report_from_journal, run_optimisation,
+    CancelToken, DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT,
+    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
+    ExternalScorer, LamarckConfig, print_run_summary, report_from_journal,
+    run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -31,6 +32,10 @@ struct Cli {
     /// Wall-clock budget in seconds.
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
     timeout_seconds: u64,
+
+    /// Stop after this many experiments (in addition to the wall-clock budget).
+    #[arg(long)]
+    max_experiments: Option<u64>,
 
     /// Candidate creatures generated per experiment.
     #[arg(long, default_value_t = DEFAULT_CANDIDATE_COUNT)]
@@ -163,6 +168,7 @@ fn main() -> ExitCode {
         creature,
         training_data,
         timeout: Duration::from_secs(cli.timeout_seconds),
+        max_experiments: cli.max_experiments,
         candidates: cli.candidates,
         min_improvement: cli.min_improvement,
         seed: cli.seed,
@@ -193,7 +199,18 @@ fn main() -> ExitCode {
 
     let scorer = ExternalScorer { binary: cli.scorer };
 
-    match run_optimisation(&config, &scorer) {
+    // SIGINT/SIGTERM must stop the run gracefully (issue #72): the loop polls
+    // the token, so the final best.json stamp and run summary still happen. A
+    // handler that cannot be installed is fatal — cancellation would otherwise
+    // look wired up while silently killing the run mid-experiment.
+    let cancel = CancelToken::new();
+    #[cfg(unix)]
+    if let Err(e) = neat_ai_lamarck::cancel::install_cancel_signals(&cancel) {
+        eprintln!("failed to install cancellation signal handlers: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    match run_optimisation_cancellable(&config, &scorer, &cancel) {
         Ok(result) => {
             print_run_summary(&result);
             if result.experiments > 0 && result.scorer_successes == 0 {

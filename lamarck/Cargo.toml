@@ -27,5 +27,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.9"
 
+# Graceful SIGINT/SIGTERM cancellation (issue #72). Unix-only crate; the
+# handler is installed behind `cfg(unix)`.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.4", default-features = false }
+
 [dev-dependencies]
 tempfile = "3"

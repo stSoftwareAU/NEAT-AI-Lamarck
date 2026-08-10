@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`--max-experiments` and graceful cancellation (Issue #72).** The loop now
+  stops on the first of four rules instead of two: the wall-clock timeout, the
+  new `--max-experiments N` cap (recorded in the journal `runHeader` as
+  `maxExperiments`), `SIGINT`/`SIGTERM`, or three consecutive scorer failures.
+  The signal handler only sets an `AtomicBool`; the loop polls it before the
+  next experiment and again before the expensive scoring phase, so a signal
+  during analysis abandons the in-flight experiment without leaving a
+  `candidates-exp-N/` directory behind, and either way `best.json` is still
+  re-stamped with the run-summary tag before the process exits `0`. A second
+  signal force-quits with exit code `130`. `RunResult` carries the
+  `stopReason`, which the run summary prints as `stopped on:`.
+
 - **The focus neuron's structure, statistics and blame are journalled (Issue
   #70).** Every experiment record now carries an optional `focusStats` object —
   the focus scan the loop already computed: squash and incoming-connection
