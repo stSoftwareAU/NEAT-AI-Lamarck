@@ -192,11 +192,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             }
             if record.combo_members.is_some_and(|m| m > 1) {
                 combo_acceptances += 1;
-                if record
-                    .combo_dampen
-                    .as_ref()
-                    .is_some_and(|d| !d.is_empty())
-                {
+                if record.combo_dampen.as_ref().is_some_and(|d| !d.is_empty()) {
                     combo_acceptances_with_dampen += 1;
                 }
             }

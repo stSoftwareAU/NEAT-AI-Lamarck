@@ -1029,10 +1029,8 @@ mod tests {
         assert_eq!(best.dampen.targets.len(), 1);
         assert_eq!(best.dampen.targets[0].k, 2);
 
-        let written = parse_creature_json(
-            &fs::read_to_string(&best.creature_path).unwrap(),
-        )
-        .unwrap();
+        let written =
+            parse_creature_json(&fs::read_to_string(&best.creature_path).unwrap()).unwrap();
         let scale = stack_dampen_scale(2);
         let w0 = written
             .synapses

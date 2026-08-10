@@ -857,10 +857,7 @@ pub fn replay_grafts(
                                     if winner_dampen.is_empty() {
                                         String::new()
                                     } else {
-                                        format!(
-                                            ", dampen targets={}",
-                                            winner_dampen.targets.len()
-                                        )
+                                        format!(", dampen targets={}", winner_dampen.targets.len())
                                     }
                                 ));
                             }
