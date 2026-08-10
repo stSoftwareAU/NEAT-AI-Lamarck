@@ -281,6 +281,53 @@ fn outstanding_work_no_longer_lists_the_focus_journal_gap() {
     );
 }
 
+/// Combo and graft wins are attributable now, so the journal must document how (#74).
+#[test]
+fn experiment_journal_documents_combo_members_and_graft_replay() {
+    let readme = readme_text();
+    let journal = section(&readme, "\n## Experiment journal");
+    for field in [
+        "comboMemberIndices",
+        "graftReplay",
+        "graftsApplied",
+        "replayError",
+    ] {
+        assert!(
+            journal.contains(field),
+            "Experiment journal does not document {field:?}, which the journal now carries"
+        );
+    }
+}
+
+/// `report` buckets combo and graft wins, so the attribution rule must be stated (#74).
+#[test]
+fn report_documents_combo_and_graft_win_attribution() {
+    let readme = readme_text();
+    let journal = section(&readme, "\n## Experiment journal");
+    for field in [
+        "comboWins",
+        "comboAcceptancesUnattributed",
+        "cumulativeImprovement",
+        "every** member strategy",
+    ] {
+        assert!(
+            journal.contains(field),
+            "the `report` description omits {field:?} from the win attribution rule"
+        );
+    }
+}
+
+/// The gap this issue records is closed, so it must no longer be listed as outstanding.
+#[test]
+fn outstanding_work_no_longer_lists_the_win_attribution_gap() {
+    let readme = readme_text();
+    let outstanding = section(&readme, "\n## Outstanding work");
+    assert!(
+        !outstanding.contains("/issues/74"),
+        "Outstanding work still lists issue #74 after combo and graft wins were attributed"
+    );
+}
+
 /// All four stopping rules exist now, so Phase 6 must list them (#72).
 #[test]
 fn phase_six_documents_every_stopping_rule() {

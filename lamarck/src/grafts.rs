@@ -164,6 +164,8 @@ pub struct GraftReplayResult {
     pub creature: CreatureExport,
     /// Authoritative score of the returned creature (when scored).
     pub score: Option<f64>,
+    /// Authoritative score of the host before replay (when scored).
+    pub baseline_score: Option<f64>,
     /// Authoritative error of the returned creature (when scored).
     pub error: Option<f64>,
     /// Updated store (already pruned / recorded).
@@ -613,6 +615,7 @@ pub fn replay_grafts(
         return Ok(GraftReplayResult {
             creature: host.clone(),
             score: baseline_hint.map(|b| b.score),
+            baseline_score: baseline_hint.map(|b| b.score),
             error: baseline_hint.map(|b| b.error),
             store,
             grafts_applied: 0,
@@ -629,6 +632,7 @@ pub fn replay_grafts(
         return Ok(GraftReplayResult {
             creature: host.clone(),
             score: baseline_hint.map(|b| b.score),
+            baseline_score: baseline_hint.map(|b| b.score),
             error: baseline_hint.map(|b| b.error),
             store,
             grafts_applied: 0,
@@ -684,6 +688,7 @@ pub fn replay_grafts(
             return Ok(GraftReplayResult {
                 creature: host.clone(),
                 score: baseline_hint.map(|b| b.score),
+                baseline_score: baseline_hint.map(|b| b.score),
                 error: baseline_hint.map(|b| b.error),
                 store,
                 grafts_applied: 0,
@@ -921,6 +926,7 @@ pub fn replay_grafts(
     Ok(GraftReplayResult {
         creature: best_creature,
         score: Some(best_score),
+        baseline_score: Some(baseline.score),
         error: Some(best_error),
         store,
         grafts_applied,

@@ -489,6 +489,19 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `version` | Lamarck version that wrote the journal. |
 | `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`. |
 
+When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
+before the first experiment (issue #74). A replay can improve the incumbent with
+no candidate stem at all, so it needs its own line or `report` cannot see it:
+
+| Field | Meaning |
+|-------|---------|
+| `record` | Always `graftReplay`. |
+| `timestampUnix`, `elapsedMs` | When the phase finished and how long it took. |
+| `graftsApplied`, `accepted` | Grafts merged into the incumbent, and whether the incumbent improved. |
+| `baselineScore`, `score`, `improvement` | Score before, score after, and the accepted Δ. |
+| `scorerSuccesses`, `scorerFailures` | Scorer batches run during the phase. |
+| `replayError` | Present when the phase aborted instead of completing. |
+
 Every following line is one experiment:
 
 | Field | Meaning |
@@ -505,6 +518,7 @@ Every following line is one experiment:
 | `analysisMs`, `scorerMs` | Where the time went. |
 | `scorerError` | Present when the batch failed. |
 | `comboMembers`, `combosScored`, `combosDampened`, `comboDampen` | Combination-scoring detail. |
+| `comboMemberIndices` | Indices into `candidates[]` of the accepted winner's members — one entry for a single, several for a merged `combo-NNN-kM`. Present only on an acceptance, and absent from journals written before issue #74. |
 
 Summarise strategy economics from a journal with the `report` subcommand:
 
@@ -516,6 +530,17 @@ neat_ai_lamarck report experiments.jsonl
 It emits per-strategy appearances/wins/acceptance rate, focus history,
 improvement series, candidates per scorer-minute and per screen-minute,
 analysis-time fraction, projected batches per 45 minutes, and combo totals.
+
+Wins are attributed from `comboMemberIndices`, so a merged combo win counts once
+for **every** member strategy and is also carried in that row's `comboWins`
+(issue #74). The `wins` column therefore sums to more than `acceptances` whenever
+combos win. A combo win in a journal written before `comboMemberIndices` existed
+names no members, so it cannot be attributed at all — those are counted in
+`comboAcceptancesUnattributed` rather than silently dropped.
+
+Phase-G replay gets its own `graftReplay` bucket — `replays`, `accepts`,
+`graftsApplied`, `cumulativeImprovement`, `scorerFailures` and `replayErrors` —
+which is `null` for a journal with no replay line.
 
 `focusStats` is aggregated into a `focusStats` report object with three buckets —
 `all`, `accepted` and `rejected` — each carrying `experiments`,
@@ -595,7 +620,6 @@ to answer the rest are tracked in
 | Issue | Gap |
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
-| [#74](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/74) | `report` does not attribute combo or graft wins to a strategy. |
 | [#75](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/75) | The follow-up economics experiments recommended by the #8 baseline are unrun. |
 
 ## Repository layout
