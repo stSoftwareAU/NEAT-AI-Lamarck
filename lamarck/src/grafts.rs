@@ -2,7 +2,8 @@
 //!
 //! Structural acceptances (`add_synapse` / `add_neuron_bridge`) are stored as
 //! portable UUID-keyed recipes. At the start of each run, missing applicable
-//! grafts are replayed onto the current fittest (singles, then greedy combos).
+//! grafts are replayed onto the current fittest: score each singly, then score
+//! combinations of the helpful ones in one parallel batch (up to 50 creatures).
 //! Neuron UUIDs are the identity: evolved weights/bias/squash still count as
 //! present. Inapplicable grafts are dropped immediately.
 
@@ -22,8 +23,11 @@ pub const GRAFT_STORE_VERSION: u32 = 1;
 /// Default fraction of the run timeout reserved for graft replay.
 pub const DEFAULT_GRAFT_REPLAY_BUDGET_FRACTION: f64 = 0.10;
 
-/// Max helpful singles for which we also score the full set as a combo check.
-const FULL_SET_COMBO_MAX: usize = 4;
+/// Max helpful singles + combination creatures scored for graft selection.
+///
+/// Singles of the helpful pool count toward this cap; remaining slots score
+/// combinations (pairs, then triples, …) in one parallel scorer batch.
+pub const MAX_GRAFT_COMBO_CANDIDATES: usize = 50;
 
 /// Kind of structural graft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,6 +540,52 @@ fn score_batch(
         .map_err(|e| e.to_string())
 }
 
+/// Index sets for combinations of size `>= 2` over `0..n`, up to `max_combos`.
+///
+/// Smaller groups first (all pairs, then triples, …) so a tight budget still
+/// explores pairwise interactions before larger sets.
+pub fn combination_index_sets(n: usize, max_combos: usize) -> Vec<Vec<usize>> {
+    let mut out = Vec::new();
+    if n < 2 || max_combos == 0 {
+        return out;
+    }
+    for k in 2..=n {
+        let mut cur = Vec::with_capacity(k);
+        choose_indices(n, k, 0, &mut cur, &mut out, max_combos);
+        if out.len() >= max_combos {
+            break;
+        }
+    }
+    out
+}
+
+fn choose_indices(
+    n: usize,
+    k: usize,
+    start: usize,
+    cur: &mut Vec<usize>,
+    out: &mut Vec<Vec<usize>>,
+    max_combos: usize,
+) {
+    if out.len() >= max_combos {
+        return;
+    }
+    if cur.len() == k {
+        out.push(cur.clone());
+        return;
+    }
+    // Need enough remaining indices to fill `k`.
+    let need = k - cur.len();
+    for i in start..=n - need {
+        cur.push(i);
+        choose_indices(n, k, i + 1, cur, out, max_combos);
+        cur.pop();
+        if out.len() >= max_combos {
+            return;
+        }
+    }
+}
+
 /// Inputs for [`replay_grafts`].
 pub struct GraftReplayRequest<'a> {
     /// Opening fittest creature.
@@ -554,7 +604,7 @@ pub struct GraftReplayRequest<'a> {
     pub baseline_hint: Option<&'a ScoreResult>,
 }
 
-/// Phase-G: classify, prune inapplicable, score singles, greedy combo, prune harmful.
+/// Phase-G: classify, score singles, parallel-score helpful combinations, prune.
 pub fn replay_grafts(
     scorer: &impl DirectoryScorer,
     request: GraftReplayRequest<'_>,
@@ -720,7 +770,7 @@ pub fn replay_grafts(
         }
     }
 
-    // Sort helpful by descending delta for greedy assembly.
+    // Sort helpful by descending single Δ; seed best from the top single.
     helpful.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut best_creature = host.clone();
@@ -728,8 +778,6 @@ pub fn replay_grafts(
     let mut best_error = baseline.error;
     let mut best_ids: Vec<String> = Vec::new();
 
-    // Seed from the best scored single immediately so a tight combo budget
-    // cannot discard already-verified singles work.
     if let Some((graft, _)) = helpful.first()
         && let Some((stem, _)) = stem_to_id.iter().find(|(_, id)| *id == &graft.id)
         && let Some(result) = singles_scores.get(stem)
@@ -745,172 +793,93 @@ pub fn replay_grafts(
         ));
     }
 
-    // Greedy combo: add helpful grafts one at a time while improving.
+    // Parallel combination batch: score groups of helpful singles together.
+    // Budget is MAX_GRAFT_COMBO_CANDIDATES including the helpful singles already
+    // scored; remaining slots are combination creatures in one scorer call.
     if helpful.len() > 1 && Instant::now() < deadline {
-        let mut selected: Vec<&Graft> = Vec::new();
-        let mut current = host.clone();
-        let mut current_score = baseline.score;
-        let mut current_error = baseline.error;
-
-        for (graft, _) in &helpful {
-            if Instant::now() >= deadline {
-                break;
-            }
-            let mut trial_set = selected.clone();
-            trial_set.push(graft);
-            let Ok(trial) = apply_grafts(host, &trial_set) else {
-                continue;
-            };
-            let trial_dir = work_dir.join(format!("graft-greedy-{}", selected.len() + 1));
-            let _ = fs::remove_dir_all(&trial_dir);
-            if let Err(e) = fs::create_dir_all(&trial_dir) {
+        let combo_slots = MAX_GRAFT_COMBO_CANDIDATES.saturating_sub(helpful.len());
+        let index_sets = combination_index_sets(helpful.len(), combo_slots);
+        if !index_sets.is_empty() {
+            let combo_dir = work_dir.join("graft-combos");
+            let _ = fs::remove_dir_all(&combo_dir);
+            if let Err(e) = fs::create_dir_all(&combo_dir) {
                 return Err(GraftReplayError {
                     store,
                     message: e.to_string(),
                 });
             }
-            if let Err(e) = write_creature_json(&trial_dir.join("baseline.json"), &current) {
+            if let Err(e) = write_creature_json(&combo_dir.join("baseline.json"), host) {
                 return Err(GraftReplayError { store, message: e });
             }
-            if let Err(e) = write_creature_json(&trial_dir.join("candidate.json"), &trial) {
-                return Err(GraftReplayError { store, message: e });
-            }
-            match score_batch(scorer, training_data, &trial_dir) {
-                Ok(scores) => {
-                    scorer_successes += 1;
-                    let cand = scores.get("candidate");
-                    let base = scores
-                        .get("baseline")
-                        .map(|b| b.score)
-                        .unwrap_or(current_score);
-                    if let Some(cand) = cand
-                        && accepts_improvement(cand.score, base, min_improvement)
-                    {
-                        selected.push(graft);
-                        current = trial;
-                        current_score = cand.score;
-                        current_error = cand.error;
-                        log::ok(&format!(
-                            "graft greedy +{} → score={:.12}",
-                            graft.id, cand.score
-                        ));
-                    }
-                }
-                Err(e) => {
-                    scorer_failures += 1;
-                    log::warn(&format!("graft greedy score failed: {e}"));
-                }
-            }
-            let _ = fs::remove_dir_all(&trial_dir);
-        }
 
-        if accepts_improvement(current_score, baseline.score, min_improvement)
-            && current_score > best_score
-        {
-            best_creature = current;
-            best_score = current_score;
-            best_error = current_error;
-            best_ids = selected.iter().map(|g| g.id.clone()).collect();
-        }
-
-        // Full-set check when few helpful singles.
-        if helpful.len() > 1 && helpful.len() <= FULL_SET_COMBO_MAX && Instant::now() < deadline {
-            let all_refs: Vec<&Graft> = helpful.iter().map(|(g, _)| g).collect();
-            if let Ok(all_creature) = apply_grafts(host, &all_refs) {
-                let all_dir = work_dir.join("graft-fullset-helpful");
-                let _ = fs::remove_dir_all(&all_dir);
-                if let Err(e) = fs::create_dir_all(&all_dir) {
-                    return Err(GraftReplayError {
-                        store,
-                        message: e.to_string(),
-                    });
-                }
-                if let Err(e) = write_creature_json(&all_dir.join("baseline.json"), host) {
-                    return Err(GraftReplayError { store, message: e });
-                }
-                if let Err(e) = write_creature_json(&all_dir.join("candidate.json"), &all_creature)
+            let mut stem_to_ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for (ci, idxs) in index_sets.iter().enumerate() {
+                let grafts: Vec<&Graft> = idxs.iter().map(|&i| &helpful[i].0).collect();
+                let Ok(creature) = apply_grafts(host, &grafts) else {
+                    continue;
+                };
+                let stem = format!("combo-{ci:03}-k{}", idxs.len());
+                if let Err(e) =
+                    write_creature_json(&combo_dir.join(format!("{stem}.json")), &creature)
                 {
                     return Err(GraftReplayError { store, message: e });
                 }
-                match score_batch(scorer, training_data, &all_dir) {
+                stem_to_ids.insert(stem, grafts.iter().map(|g| g.id.clone()).collect());
+            }
+
+            if !stem_to_ids.is_empty() {
+                log::info(&format!(
+                    "grafts: scoring {} combination(s) in parallel (helpful_singles={}, budget={})",
+                    stem_to_ids.len(),
+                    helpful.len(),
+                    MAX_GRAFT_COMBO_CANDIDATES
+                ));
+                match score_batch(scorer, training_data, &combo_dir) {
                     Ok(scores) => {
                         scorer_successes += 1;
-                        if let Some(cand) = scores.get("candidate")
-                            && accepts_improvement(cand.score, baseline.score, min_improvement)
-                            && cand.score > best_score
-                        {
-                            best_creature = all_creature;
-                            best_score = cand.score;
-                            best_error = cand.error;
-                            best_ids = helpful.iter().map(|(g, _)| g.id.clone()).collect();
-                            log::ok(&format!(
-                                "graft helpful full-set wins score={:.12} ({} grafts)",
-                                best_score,
-                                best_ids.len()
-                            ));
+                        for (stem, ids) in &stem_to_ids {
+                            let Some(result) = scores.get(stem) else {
+                                continue;
+                            };
+                            if accepts_improvement(result.score, baseline.score, min_improvement)
+                                && result.score > best_score
+                            {
+                                let Ok(creature) = apply_grafts(
+                                    host,
+                                    &ids.iter()
+                                        .filter_map(|id| {
+                                            helpful
+                                                .iter()
+                                                .find(|(g, _)| g.id == *id)
+                                                .map(|(g, _)| g)
+                                        })
+                                        .collect::<Vec<_>>(),
+                                ) else {
+                                    continue;
+                                };
+                                best_creature = creature;
+                                best_score = result.score;
+                                best_error = result.error;
+                                best_ids = ids.clone();
+                                log::ok(&format!(
+                                    "graft combo {stem}: score={:.12} ({} grafts)",
+                                    best_score,
+                                    best_ids.len()
+                                ));
+                            }
                         }
                     }
                     Err(e) => {
                         scorer_failures += 1;
-                        log::warn(&format!("graft helpful full-set score failed: {e}"));
+                        log::warn(&format!("graft combo batch score failed: {e}"));
                     }
                 }
-                let _ = fs::remove_dir_all(&all_dir);
             }
+            let _ = fs::remove_dir_all(&combo_dir);
         }
     }
 
-    // Synergy: grafts that fail alone may still help together. Before pruning
-    // harmful-alone entries, try the full applicable set when small enough.
-    if !harmful_ids.is_empty()
-        && applicable.len() > 1
-        && applicable.len() <= FULL_SET_COMBO_MAX
-        && Instant::now() < deadline
-    {
-        let all_refs: Vec<&Graft> = applicable.iter().collect();
-        if let Ok(all_creature) = apply_grafts(host, &all_refs) {
-            let all_dir = work_dir.join("graft-fullset-applicable");
-            let _ = fs::remove_dir_all(&all_dir);
-            if let Err(e) = fs::create_dir_all(&all_dir) {
-                return Err(GraftReplayError {
-                    store,
-                    message: e.to_string(),
-                });
-            }
-            if let Err(e) = write_creature_json(&all_dir.join("baseline.json"), host) {
-                return Err(GraftReplayError { store, message: e });
-            }
-            if let Err(e) = write_creature_json(&all_dir.join("candidate.json"), &all_creature) {
-                return Err(GraftReplayError { store, message: e });
-            }
-            match score_batch(scorer, training_data, &all_dir) {
-                Ok(scores) => {
-                    scorer_successes += 1;
-                    if let Some(cand) = scores.get("candidate")
-                        && accepts_improvement(cand.score, baseline.score, min_improvement)
-                        && cand.score > best_score
-                    {
-                        best_creature = all_creature;
-                        best_score = cand.score;
-                        best_error = cand.error;
-                        best_ids = applicable.iter().map(|g| g.id.clone()).collect();
-                        log::ok(&format!(
-                            "graft synergy full-set wins score={:.12} ({} grafts)",
-                            best_score,
-                            best_ids.len()
-                        ));
-                    }
-                }
-                Err(e) => {
-                    scorer_failures += 1;
-                    log::warn(&format!("graft synergy full-set score failed: {e}"));
-                }
-            }
-            let _ = fs::remove_dir_all(&all_dir);
-        }
-    }
-
-    // Prune harmful singles that never appear in the winning combo (after synergy).
+    // Prune harmful singles that never appear in the winning set.
     let winning: BTreeSet<&str> = best_ids.iter().map(|s| s.as_str()).collect();
     for id in &harmful_ids {
         if !winning.contains(id.as_str()) {
@@ -1208,8 +1177,21 @@ mod tests {
     }
 
     #[test]
+    fn combination_index_sets_prefers_pairs_then_triples() {
+        let sets = combination_index_sets(3, 10);
+        assert_eq!(
+            sets,
+            vec![vec![0, 1], vec![0, 2], vec![1, 2], vec![0, 1, 2]]
+        );
+        let capped = combination_index_sets(5, 3);
+        assert_eq!(capped.len(), 3);
+        assert!(capped.iter().all(|s| s.len() == 2), "pairs first under cap");
+        assert_eq!(combination_index_sets(1, 50), Vec::<Vec<usize>>::new());
+    }
+
+    #[test]
     fn greedy_combo_skips_harmful_pair_member() {
-        // Two helpful singles; full set / greedy should keep the better one.
+        // One helpful single is enough to accept; harmful partner is pruned.
         let dir = tempdir().unwrap();
         let host = tiny_creature();
         let mut store = GraftStore::new();
@@ -1240,10 +1222,10 @@ mod tests {
         );
     }
 
-    /// Edges alone are neutral; together they improve — synergy must keep both.
-    struct SynergyScorer;
+    /// Each edge helps alone; both together score higher — combo batch must win.
+    struct ComboBoostScorer;
 
-    impl DirectoryScorer for SynergyScorer {
+    impl DirectoryScorer for ComboBoostScorer {
         fn score_directory_sampled(
             &self,
             candidates_dir: &Path,
@@ -1272,6 +1254,8 @@ mod tests {
                 let score = if stem == "baseline" {
                     base
                 } else if has_a && has_b {
+                    base + 5e-6
+                } else if has_a || has_b {
                     base + 2e-6
                 } else {
                     base
@@ -1290,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn synergy_keeps_grafts_that_only_help_together() {
+    fn parallel_combo_batch_picks_best_group() {
         let dir = tempdir().unwrap();
         let host = tiny_creature();
         let mut store = GraftStore::new();
@@ -1300,7 +1284,7 @@ mod tests {
         store.upsert(b);
         let work = dir.path().join("work");
         let result = replay_grafts(
-            &SynergyScorer,
+            &ComboBoostScorer,
             GraftReplayRequest {
                 host: &host,
                 store,
@@ -1312,14 +1296,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(result.grafts_applied, 2);
+        assert_eq!(result.grafts_applied, 2, "combo of both singles should win");
         assert!(result.store.get("edge:input-1->h1").is_some());
         assert!(result.store.get("edge:input-0->o1").is_some());
-        assert!(
-            result
-                .score
-                .is_some_and(|s| s > 0.5 + DEFAULT_MIN_IMPROVEMENT)
-        );
+        assert!(result.score.is_some_and(|s| (s - 0.500005).abs() < 1e-12));
     }
 
     #[test]
