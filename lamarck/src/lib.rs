@@ -9,6 +9,7 @@ pub mod backprop;
 pub mod candidates;
 pub mod config;
 pub mod focus;
+pub mod grafts;
 pub mod learning;
 pub mod log;
 pub mod observations;
@@ -27,6 +28,10 @@ pub use config::{
     LamarckConfig,
 };
 pub use focus::{FocusChoice, FocusPolicy, WeightedFocusSelector};
+pub use grafts::{
+    Graft, GraftKind, GraftReplayRequest, GraftStore, classify_graft, extract_structural_graft,
+    is_present, replay_grafts,
+};
 pub use parity::{
     PHASE0_ERROR_ABS_TOL, PHASE0_ERROR_REL_TOL, PHASE0_SCORE_ABS_TOL, PHASE0_SCORE_REL_TOL,
     check_phase0_parity, compute_local_mse,

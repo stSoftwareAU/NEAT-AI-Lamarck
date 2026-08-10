@@ -82,6 +82,10 @@ pub struct LamarckConfig {
     pub screen_sample_rate: Option<f64>,
     /// Minimum sample-score Δ to promote a candidate to full-corpus scoring.
     pub screen_promote_threshold: f64,
+    /// Local structural graft store path. `None` disables phase-G replay / recording.
+    pub grafts_path: Option<PathBuf>,
+    /// Wall-clock budget for phase-G graft replay. `None` → 10% of [`Self::timeout`].
+    pub graft_replay_budget: Option<Duration>,
 }
 
 impl Default for LamarckConfig {
@@ -107,6 +111,8 @@ impl Default for LamarckConfig {
             structural_only: false,
             screen_sample_rate: Some(DEFAULT_SCREEN_SAMPLE_RATE),
             screen_promote_threshold: DEFAULT_SCREEN_PROMOTE_THRESHOLD,
+            grafts_path: None,
+            graft_replay_budget: None,
         }
     }
 }
