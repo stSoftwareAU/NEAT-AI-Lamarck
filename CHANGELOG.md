@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Combo and graft wins are attributed to a strategy (Issue #74).** An
+  acceptance now journals `comboMemberIndices` — the candidate indices behind
+  the winner — so `report` can credit a merged `combo-NNN-kM` win to *every*
+  member strategy instead of dropping it. Each `strategies[]` row carries the
+  subset earned in a merge as `comboWins`, and a pre-#74 combo win (which names
+  no members) is counted in `comboAcceptancesUnattributed` rather than silently
+  ignored. Phase-G replay writes its own `graftReplay` journal line — grafts
+  applied, baseline/after score, Δ, elapsed, scorer counters and any
+  `replayError` — which `report` surfaces as a `graftReplay` bucket (`null` for
+  journals without one), so a graft accept with no candidate stem is no longer
+  invisible.
+
 - **`--max-experiments` and graceful cancellation (Issue #72).** The loop now
   stops on the first of four rules instead of two: the wall-clock timeout, the
   new `--max-experiments N` cap (recorded in the journal `runHeader` as

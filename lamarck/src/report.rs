@@ -16,13 +16,41 @@ pub struct StrategyStats {
     /// Strategy name.
     pub strategy: String,
     /// Times this strategy appeared on an accepted winner provenance.
+    ///
+    /// A merged combo win counts once for *every* member strategy (issue #74),
+    /// so the column sums to more than [`JournalReport::acceptances`] whenever
+    /// combos win.
     pub wins: u64,
+    /// Subset of [`Self::wins`] earned as a member of a merged combo winner.
+    pub combo_wins: u64,
     /// Times this strategy appeared among candidates across all experiments.
     pub appearances_total: u64,
     /// Times this strategy appeared among candidates in accepted experiments.
     pub appearances_in_accepted: u64,
     /// `wins / appearances_total` (0 when no appearances).
     pub acceptance_rate: f64,
+}
+
+/// Phase-G graft-replay bucket (issue #74).
+///
+/// Graft replay runs before the experiment loop and accepts without any
+/// candidate stem, so its outcomes are reported separately from experiment
+/// acceptances rather than being dropped.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraftReplayStats {
+    /// Graft-replay phases recorded in the journal.
+    pub replays: u64,
+    /// Replays that improved the incumbent.
+    pub accepts: u64,
+    /// Grafts applied across accepting replays.
+    pub grafts_applied: u64,
+    /// Cumulative accepted score Δ from graft replay.
+    pub cumulative_improvement: f64,
+    /// Scorer batches that failed during replay.
+    pub scorer_failures: u64,
+    /// Replays that aborted with an error instead of completing.
+    pub replay_errors: u64,
 }
 
 /// Per-focus hit / failure history.
@@ -195,6 +223,13 @@ pub struct JournalReport {
     pub combo_acceptances: u64,
     /// Combo acceptances that also recorded a non-empty `comboDampen`.
     pub combo_acceptances_with_dampen: u64,
+    /// Combo acceptances whose members could not be attributed to a strategy.
+    ///
+    /// A journal written before `comboMemberIndices` existed (issue #74) names
+    /// only the merged `combo-NNN-kM` stem, so its members are unknowable.
+    pub combo_acceptances_unattributed: u64,
+    /// Phase-G graft-replay bucket; `None` when the journal has no replay line.
+    pub graft_replay: Option<GraftReplayStats>,
 }
 
 /// Consume `experiments.jsonl` and produce an economics report.
@@ -215,6 +250,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut first_ts: Option<u64> = None;
     let mut last_ts: Option<u64> = None;
     let mut wins: BTreeMap<String, u64> = BTreeMap::new();
+    let mut combo_wins: BTreeMap<String, u64> = BTreeMap::new();
     let mut appearances_total: BTreeMap<String, u64> = BTreeMap::new();
     let mut appearances_in_accepted: BTreeMap<String, u64> = BTreeMap::new();
     let mut focus_counts: BTreeMap<String, u64> = BTreeMap::new();
@@ -225,6 +261,8 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut combos_dampened_total = 0u64;
     let mut combo_acceptances = 0u64;
     let mut combo_acceptances_with_dampen = 0u64;
+    let mut combo_acceptances_unattributed = 0u64;
+    let mut graft_replay: Option<GraftReplayStats> = None;
     let mut focus_all = FocusStatsAccumulator::default();
     let mut focus_accepted = FocusStatsAccumulator::default();
     let mut focus_rejected = FocusStatsAccumulator::default();
@@ -234,9 +272,24 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         if line.trim().is_empty() {
             continue;
         }
-        // The run header (issue #71) is run metadata, not an experiment.
+        // The run header (issue #71) is run metadata, not an experiment; the
+        // graft-replay line (issue #74) is its own bucket.
         let record = match JournalLine::parse(&line)? {
             JournalLine::Header(_) => continue,
+            JournalLine::GraftReplay(replay) => {
+                let bucket = graft_replay.get_or_insert_with(GraftReplayStats::default);
+                bucket.replays += 1;
+                bucket.scorer_failures += replay.scorer_failures;
+                if replay.replay_error.is_some() {
+                    bucket.replay_errors += 1;
+                }
+                if replay.accepted {
+                    bucket.accepts += 1;
+                    bucket.grafts_applied += replay.grafts_applied as u64;
+                    bucket.cumulative_improvement += replay.improvement.unwrap_or(0.0);
+                }
+                continue;
+            }
             JournalLine::Experiment(record) => *record,
         };
         experiments += 1;
@@ -310,14 +363,26 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
                 let key = strategy_name(prov.strategy);
                 *appearances_in_accepted.entry(key).or_default() += 1;
             }
-            if let Some(winner) = &record.winner
-                && let Some(idx) = winner
-                    .strip_prefix("candidate-")
-                    .and_then(|s| s.parse::<usize>().ok())
-                && let Some(prov) = record.candidates.get(idx)
-            {
+            // Attribute the win to every member of the winner: a merged combo
+            // (`combo-NNN-kM`) has no single owning strategy (issue #74).
+            let members = winner_member_indices(&record);
+            let is_combo = members.len() > 1;
+            let mut attributed = 0u64;
+            for idx in members {
+                let Some(prov) = record.candidates.get(idx) else {
+                    continue;
+                };
                 let key = strategy_name(prov.strategy);
-                *wins.entry(key).or_default() += 1;
+                *wins.entry(key.clone()).or_default() += 1;
+                if is_combo {
+                    *combo_wins.entry(key).or_default() += 1;
+                }
+                attributed += 1;
+            }
+            // A pre-#74 journal names only the merged stem, so its member
+            // strategies are unknowable — count the gap rather than hide it.
+            if attributed == 0 && record.winner.is_some() {
+                combo_acceptances_unattributed += 1;
             }
         }
     }
@@ -330,6 +395,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             StrategyStats {
                 strategy: strategy.clone(),
                 wins: w,
+                combo_wins: *combo_wins.get(strategy).unwrap_or(&0),
                 appearances_total: total,
                 appearances_in_accepted: in_acc,
                 acceptance_rate: if total > 0 {
@@ -437,7 +503,30 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         combos_dampened_total,
         combo_acceptances,
         combo_acceptances_with_dampen,
+        combo_acceptances_unattributed,
+        graft_replay,
     })
+}
+
+/// Candidate indices behind an accepted winner (issue #74).
+///
+/// `comboMemberIndices` is authoritative when present — it is the only thing
+/// that names the members of a merged `combo-NNN-kM` winner. Journals written
+/// before that field fall back to parsing a `candidate-NNN` stem, which is all
+/// a single-candidate win ever needed.
+fn winner_member_indices(record: &crate::run::ExperimentRecord) -> Vec<usize> {
+    if let Some(indices) = &record.combo_member_indices
+        && !indices.is_empty()
+    {
+        return indices.clone();
+    }
+    record
+        .winner
+        .as_deref()
+        .and_then(|stem| stem.strip_prefix("candidate-"))
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|idx| vec![idx])
+        .unwrap_or_default()
 }
 
 fn strategy_name(strategy: CandidateStrategy) -> String {
@@ -548,6 +637,17 @@ pub fn print_run_summary(result: &RunResult) {
                 crate::combos::STACK_DAMPEN_EXPONENT
             ));
         }
+        if let Some(grafts) = &report.graft_replay {
+            log::detail(&format!(
+                "graft replay:  {} phase(s)  accepts {}  grafts {}  Δ {:+.3e}  (scorer_fail {}  errors {})",
+                grafts.replays,
+                grafts.accepts,
+                grafts.grafts_applied,
+                grafts.cumulative_improvement,
+                grafts.scorer_failures,
+                grafts.replay_errors
+            ));
+        }
         if !report.focus_history.is_empty() {
             let focuses = report
                 .focus_history
@@ -575,8 +675,13 @@ pub fn print_run_summary(result: &RunResult) {
                 .iter()
                 .filter(|s| s.wins > 0 || s.appearances_total > 0)
                 .map(|s| {
+                    let combo = if s.combo_wins > 0 {
+                        format!(" [{} in combo]", s.combo_wins)
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "{}×{}/{} ({:.0}%)",
+                        "{}×{}{combo}/{} ({:.0}%)",
                         s.strategy,
                         s.wins,
                         s.appearances_total,
@@ -668,6 +773,7 @@ mod tests {
             scorer_ms: 2,
             scorer_error: None,
             combo_members: None,
+            combo_member_indices: accepted.then(|| vec![0]),
             combos_scored: None,
             combos_dampened: None,
             combo_dampen: None,
@@ -777,6 +883,7 @@ mod tests {
             scorer_ms: 2,
             scorer_error: None,
             combo_members: None,
+            combo_member_indices: None,
             combos_scored: None,
             combos_dampened: None,
             combo_dampen: None,
@@ -785,6 +892,174 @@ mod tests {
         writeln!(file, "{}", serde_json::to_string(&experiment).unwrap()).unwrap();
         let report = report_from_journal(file.path()).unwrap();
         assert_eq!(report.experiments, 1, "header must not count as experiment");
+    }
+
+    /// Issue #74: a merged combo win belongs to every member strategy.
+    #[test]
+    fn report_attributes_a_combo_win_to_every_member_strategy() {
+        let mut record = experiment(1, true);
+        record.candidates = vec![
+            prov(CandidateStrategy::Random),
+            prov(CandidateStrategy::Backprop),
+            prov(CandidateStrategy::StatsBias),
+        ];
+        record.winner = Some("combo-000-k2".into());
+        record.combo_members = Some(2);
+        record.combo_member_indices = Some(vec![0, 1]);
+        record.combos_scored = Some(3);
+        let file = journal_of(&[record]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        let row = |name: &str| {
+            report
+                .strategies
+                .iter()
+                .find(|s| s.strategy == name)
+                .unwrap_or_else(|| panic!("{name} row"))
+                .clone()
+        };
+        assert_eq!(report.combo_acceptances, 1);
+        assert_eq!(report.combo_acceptances_unattributed, 0);
+        assert_eq!(row("random").wins, 1, "member strategy wins with the combo");
+        assert_eq!(row("random").combo_wins, 1);
+        assert_eq!(row("backprop").wins, 1);
+        assert_eq!(row("backprop").combo_wins, 1);
+        assert_eq!(
+            row("stats_bias").wins,
+            0,
+            "a non-member must not inherit the win"
+        );
+        assert!((row("random").acceptance_rate - 1.0).abs() < 1e-12);
+    }
+
+    /// A single-candidate win is attributed to exactly one strategy, once.
+    #[test]
+    fn report_attributes_a_single_win_to_one_strategy() {
+        let mut record = experiment(1, true);
+        record.candidates = vec![
+            prov(CandidateStrategy::Random),
+            prov(CandidateStrategy::Backprop),
+        ];
+        record.winner = Some("candidate-001".into());
+        record.combo_member_indices = Some(vec![1]);
+        let file = journal_of(&[record]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        let backprop = report
+            .strategies
+            .iter()
+            .find(|s| s.strategy == "backprop")
+            .unwrap();
+        assert_eq!(backprop.wins, 1);
+        assert_eq!(backprop.combo_wins, 0, "a single is not a combo win");
+        assert_eq!(
+            report
+                .strategies
+                .iter()
+                .find(|s| s.strategy == "random")
+                .unwrap()
+                .wins,
+            0
+        );
+    }
+
+    /// A pre-#74 combo win names no members, so the gap is reported, not hidden.
+    #[test]
+    fn report_counts_an_unattributable_legacy_combo_win() {
+        let mut record = experiment(1, true);
+        record.candidates = vec![
+            prov(CandidateStrategy::Random),
+            prov(CandidateStrategy::Backprop),
+        ];
+        record.winner = Some("combo-000-k2".into());
+        record.combo_members = Some(2);
+        record.combo_member_indices = None;
+        let file = journal_of(&[record]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.acceptances, 1);
+        assert_eq!(report.combo_acceptances, 1);
+        assert_eq!(report.combo_acceptances_unattributed, 1);
+        assert!(
+            report.strategies.iter().all(|s| s.wins == 0),
+            "unknown members must not be guessed at"
+        );
+    }
+
+    /// Issue #74: Phase-G accepts get their own bucket instead of being dropped.
+    #[test]
+    fn report_buckets_graft_replay_accepts() {
+        use crate::run::{GraftReplayKind, GraftReplayRecord};
+
+        let replay = GraftReplayRecord {
+            record: GraftReplayKind::GraftReplay,
+            timestamp_unix: 999,
+            grafts_applied: 2,
+            accepted: true,
+            baseline_score: Some(0.40),
+            score: Some(0.4000030),
+            improvement: Some(3e-6),
+            elapsed_ms: 120,
+            scorer_successes: 2,
+            scorer_failures: 1,
+            replay_error: None,
+        };
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{}", serde_json::to_string(&replay).unwrap()).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&experiment(1, false)).unwrap()
+        )
+        .unwrap();
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.experiments, 1, "a replay line is not an experiment");
+        let grafts = report.graft_replay.expect("graft replay bucket");
+        assert_eq!(grafts.replays, 1);
+        assert_eq!(grafts.accepts, 1);
+        assert_eq!(grafts.grafts_applied, 2);
+        assert!((grafts.cumulative_improvement - 3e-6).abs() < 1e-15);
+        assert_eq!(grafts.scorer_failures, 1);
+        assert_eq!(grafts.replay_errors, 0);
+    }
+
+    /// A failed replay is surfaced in the bucket rather than passing as clean.
+    #[test]
+    fn report_surfaces_a_failed_graft_replay() {
+        use crate::run::{GraftReplayKind, GraftReplayRecord};
+
+        let replay = GraftReplayRecord {
+            record: GraftReplayKind::GraftReplay,
+            timestamp_unix: 999,
+            grafts_applied: 0,
+            accepted: false,
+            baseline_score: Some(0.4),
+            score: None,
+            improvement: None,
+            elapsed_ms: 5,
+            scorer_successes: 0,
+            scorer_failures: 0,
+            replay_error: Some("graft singles: baseline missing".into()),
+        };
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{}", serde_json::to_string(&replay).unwrap()).unwrap();
+
+        let grafts = report_from_journal(file.path())
+            .unwrap()
+            .graft_replay
+            .expect("graft replay bucket");
+        assert_eq!(grafts.replays, 1);
+        assert_eq!(grafts.accepts, 0);
+        assert_eq!(grafts.replay_errors, 1);
+        assert_eq!(grafts.cumulative_improvement, 0.0);
+    }
+
+    /// A journal with no Phase-G line reports no bucket at all.
+    #[test]
+    fn report_omits_the_graft_bucket_without_a_replay_line() {
+        let file = journal_of(&[experiment(1, false)]);
+        assert_eq!(report_from_journal(file.path()).unwrap().graft_replay, None);
     }
 
     #[test]
@@ -822,6 +1097,7 @@ mod tests {
             scorer_ms: 20,
             scorer_error: None,
             combo_members: None,
+            combo_member_indices: None,
             combos_scored: None,
             combos_dampened: None,
             combo_dampen: None,
@@ -849,6 +1125,7 @@ mod tests {
             scorer_ms: 15,
             scorer_error: None,
             combo_members: None,
+            combo_member_indices: None,
             combos_scored: None,
             combos_dampened: None,
             combo_dampen: None,

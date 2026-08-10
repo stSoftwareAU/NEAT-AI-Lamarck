@@ -90,6 +90,14 @@ pub struct ExperimentRecord {
     /// Member count of the selected combo (`None` / omitted for pure singles).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combo_members: Option<usize>,
+    /// Indices into `candidates` of the accepted winner's members (issue #74).
+    ///
+    /// Recorded for every acceptance — a single is a one-member list — so the
+    /// report can attribute a merged `combo-NNN-kM` win to each member's
+    /// strategy. Omitted when nothing was accepted, and absent from journals
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo_member_indices: Option<Vec<usize>>,
     /// Combination creatures scored during selection (for dampen tuning).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combos_scored: Option<usize>,
@@ -107,6 +115,47 @@ pub struct ExperimentRecord {
 pub enum RunHeaderKind {
     /// This line is a run header, not an experiment.
     RunHeader,
+}
+
+/// Marks a journal line as a Phase-G graft-replay outcome (issue #74).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GraftReplayKind {
+    /// This line is a graft-replay outcome, not an experiment.
+    GraftReplay,
+}
+
+/// One journal line recording the Phase-G graft-replay outcome (issue #74).
+///
+/// Phase-G runs before the experiment loop and can improve the incumbent
+/// without any candidate stem, so its accepts have no experiment record to live
+/// on. Journalling them keeps `report` from silently dropping the improvement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraftReplayRecord {
+    /// Discriminates this line from an [`ExperimentRecord`].
+    pub record: GraftReplayKind,
+    /// Unix timestamp when the phase finished.
+    pub timestamp_unix: u64,
+    /// Grafts accepted into the incumbent (0 when the replay changed nothing).
+    pub grafts_applied: usize,
+    /// Whether the replay improved the incumbent.
+    pub accepted: bool,
+    /// Incumbent score before the replay, when it was scored.
+    pub baseline_score: Option<f64>,
+    /// Incumbent score after the replay, when it was scored.
+    pub score: Option<f64>,
+    /// Absolute score improvement when accepted.
+    pub improvement: Option<f64>,
+    /// Wall-clock milliseconds spent in the phase.
+    pub elapsed_ms: u128,
+    /// Scorer batches that succeeded during the phase.
+    pub scorer_successes: u64,
+    /// Scorer batches that failed during the phase.
+    pub scorer_failures: u64,
+    /// Failure message when the phase aborted instead of completing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_error: Option<String>,
 }
 
 /// Where the effective RNG seed came from.
@@ -238,12 +287,14 @@ impl RunHeaderRecord {
     }
 }
 
-/// One line of `experiments.jsonl`: the run header or an experiment record.
+/// One line of `experiments.jsonl`: run header, graft replay or experiment.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum JournalLine {
     /// Run header written once at the start of a run.
     Header(Box<RunHeaderRecord>),
+    /// Phase-G graft-replay outcome written once before the loop (issue #74).
+    GraftReplay(Box<GraftReplayRecord>),
     /// One experiment outcome.
     Experiment(Box<ExperimentRecord>),
 }
@@ -251,21 +302,29 @@ pub enum JournalLine {
 impl JournalLine {
     /// Parse one journal line, dispatching on the `record` discriminator.
     ///
-    /// A line that is neither a valid header nor a valid experiment is an
+    /// A line that is none of a valid header, graft replay or experiment is an
     /// error — a malformed journal must never be read as an empty run.
     pub fn parse(line: &str) -> Result<Self, String> {
         #[derive(Deserialize)]
         struct Probe {
             #[serde(default)]
-            record: Option<RunHeaderKind>,
+            record: Option<String>,
         }
         let probe: Probe = serde_json::from_str(line).map_err(|e| e.to_string())?;
-        if probe.record.is_some() {
-            let header = serde_json::from_str(line).map_err(|e| e.to_string())?;
-            Ok(Self::Header(Box::new(header)))
-        } else {
-            let record = serde_json::from_str(line).map_err(|e| e.to_string())?;
-            Ok(Self::Experiment(Box::new(record)))
+        match probe.record.as_deref() {
+            Some("runHeader") => {
+                let header = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                Ok(Self::Header(Box::new(header)))
+            }
+            Some("graftReplay") => {
+                let replay = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                Ok(Self::GraftReplay(Box::new(replay)))
+            }
+            Some(other) => Err(format!("unknown journal record kind: {other}")),
+            None => {
+                let record = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                Ok(Self::Experiment(Box::new(record)))
+            }
         }
     }
 }
@@ -512,6 +571,7 @@ pub fn run_optimisation_cancellable(
             }
         });
         let work = config.output_dir.join("graft-replay");
+        let graft_start = Instant::now();
         match replay_grafts(
             scorer,
             GraftReplayRequest {
@@ -527,6 +587,7 @@ pub fn run_optimisation_cancellable(
             Ok(replay) => {
                 scorer_successes += replay.scorer_successes;
                 scorer_failures += replay.scorer_failures;
+                let mut graft_accepted = false;
                 if replay.grafts_applied > 0 {
                     incumbent = replay.creature;
                     if let (Some(score), Some(error)) = (replay.score, replay.error) {
@@ -535,6 +596,7 @@ pub fn run_optimisation_cancellable(
                         last_accept_focus = "(graft-replay)".into();
                         last_accept_strategy = CandidateStrategy::StructuralAdd;
                         acceptances += 1;
+                        graft_accepted = true;
                         creature_meta.upsert("score", format!("{score}"));
                         creature_meta.upsert("error", format!("{error}"));
                         let tagged = serialize_creature_with_meta(&incumbent, &creature_meta)?;
@@ -549,6 +611,28 @@ pub fn run_optimisation_cancellable(
                 {
                     best_score = score;
                 }
+                // Phase-G accepts have no candidate stem, so they need their own
+                // journal line or the report drops them entirely (issue #74).
+                let improvement = match (graft_accepted, replay.score, replay.baseline_score) {
+                    (true, Some(score), Some(base)) => Some(score - base),
+                    _ => None,
+                };
+                append_journal_line(
+                    &journal_path,
+                    &GraftReplayRecord {
+                        record: GraftReplayKind::GraftReplay,
+                        timestamp_unix: unix_now(),
+                        grafts_applied: replay.grafts_applied,
+                        accepted: graft_accepted,
+                        baseline_score: replay.baseline_score,
+                        score: replay.score,
+                        improvement,
+                        elapsed_ms: graft_start.elapsed().as_millis(),
+                        scorer_successes: replay.scorer_successes,
+                        scorer_failures: replay.scorer_failures,
+                        replay_error: None,
+                    },
+                )?;
                 if let Err(e) = replay.store.save(&grafts_path) {
                     log::warn(&format!(
                         "grafts: failed to save {}: {e}",
@@ -559,6 +643,22 @@ pub fn run_optimisation_cancellable(
             }
             Err(e) => {
                 log::warn(&format!("Phase-G: graft replay failed: {e}"));
+                append_journal_line(
+                    &journal_path,
+                    &GraftReplayRecord {
+                        record: GraftReplayKind::GraftReplay,
+                        timestamp_unix: unix_now(),
+                        grafts_applied: 0,
+                        accepted: false,
+                        baseline_score: opening_baseline_score,
+                        score: None,
+                        improvement: None,
+                        elapsed_ms: graft_start.elapsed().as_millis(),
+                        scorer_successes: 0,
+                        scorer_failures: 0,
+                        replay_error: Some(e.message.clone()),
+                    },
+                )?;
                 if let Err(save_e) = e.store.save(&grafts_path) {
                     log::warn(&format!(
                         "grafts: failed to save {}: {save_e}",
@@ -910,6 +1010,7 @@ pub fn run_optimisation_cancellable(
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
+                            combo_member_indices: None,
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
@@ -978,6 +1079,7 @@ pub fn run_optimisation_cancellable(
                         scorer_ms: screen_ms,
                         scorer_error: None,
                         combo_members: None,
+                        combo_member_indices: None,
                         combos_scored: None,
                         combos_dampened: None,
                         combo_dampen: None,
@@ -1042,6 +1144,7 @@ pub fn run_optimisation_cancellable(
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
+                            combo_member_indices: None,
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
@@ -1104,6 +1207,7 @@ pub fn run_optimisation_cancellable(
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
+                            combo_member_indices: None,
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
@@ -1185,6 +1289,7 @@ pub fn run_optimisation_cancellable(
         let mut accepted = false;
         let mut improvement = None;
         let mut winner_stem = None;
+        let mut winner_member_indices = None;
         if let Some(sel) = selection
             && accepts_improvement(sel.result.score, baseline.score, config.min_improvement)
         {
@@ -1247,6 +1352,7 @@ pub fn run_optimisation_cancellable(
             acceptances += 1;
             improvement = Some(delta);
             winner_stem = Some(sel.stem.clone());
+            winner_member_indices = Some(sel.member_indices.clone());
 
             // Record structural improvements into the local graft store.
             // Combo accepts must persist each member's solo-sized delta — never
@@ -1329,6 +1435,7 @@ pub fn run_optimisation_cancellable(
                 scorer_ms,
                 scorer_error: None,
                 combo_members,
+                combo_member_indices: winner_member_indices,
                 combos_scored,
                 combos_dampened,
                 combo_dampen,
@@ -1716,7 +1823,7 @@ mod tests {
             .into_iter()
             .find_map(|l| match l {
                 JournalLine::Experiment(record) => Some(*record),
-                JournalLine::Header(_) => None,
+                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
             })
             .expect("at least one experiment");
         assert!(first.screen_scores.is_some());
@@ -1770,13 +1877,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn phase_g_replays_stored_graft_before_loop() {
+    /// Run with a graft store holding one helpful synapse graft for phase G.
+    fn graft_replay_run(dir: &Path) -> (RunResult, PathBuf) {
         use crate::grafts::{GraftStore, graft_from_add_synapse};
 
-        let dir = tempdir().unwrap();
-        let creature_path = dir.path().join("creature.json");
-        let training = dir.path().join("data");
+        let creature_path = dir.join("creature.json");
+        let training = dir.join("data");
         fs::create_dir_all(&training).unwrap();
         fs::write(
             training.join("0.bin"),
@@ -1802,12 +1908,12 @@ mod tests {
         )
         .unwrap();
 
-        let grafts_path = dir.path().join("grafts.json");
+        let grafts_path = dir.join("grafts.json");
         let mut store = GraftStore::new();
         store.upsert(graft_from_add_synapse("input-1", "h1", 0.05));
         store.save(&grafts_path).unwrap();
 
-        let out = dir.path().join("out");
+        let out = dir.join("out");
         let config = LamarckConfig {
             creature: creature_path,
             training_data: training,
@@ -1834,6 +1940,15 @@ mod tests {
             graft_replay_budget: Some(Duration::from_secs(5)),
         };
         let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
+        (result, grafts_path)
+    }
+
+    #[test]
+    fn phase_g_replays_stored_graft_before_loop() {
+        use crate::grafts::GraftStore;
+
+        let dir = tempdir().unwrap();
+        let (result, grafts_path) = graft_replay_run(dir.path());
         assert!(result.acceptances >= 1, "phase-G should accept the graft");
         let best = parse_creature_json(&fs::read_to_string(result.best_path).unwrap()).unwrap();
         assert!(
@@ -1846,6 +1961,91 @@ mod tests {
         assert!(
             stored.get("edge:input-1->h1").is_some(),
             "helpful graft remains in store"
+        );
+    }
+
+    /// Issue #74: a phase-G accept is journalled so `report` can bucket it.
+    #[test]
+    fn phase_g_accept_is_journalled_as_a_graft_replay_record() {
+        let dir = tempdir().unwrap();
+        let (result, _) = graft_replay_run(dir.path());
+
+        let replay = journal_lines(&result.journal_path)
+            .into_iter()
+            .find_map(|l| match l {
+                JournalLine::GraftReplay(record) => Some(*record),
+                _ => None,
+            })
+            .expect("phase-G writes a graftReplay journal line");
+        assert!(replay.accepted, "the helpful graft was accepted");
+        assert!(replay.grafts_applied >= 1);
+        assert!(
+            replay.improvement.is_some_and(|d| d > 0.0),
+            "an accepted replay records its score Δ"
+        );
+        assert!(replay.baseline_score.is_some() && replay.score.is_some());
+
+        // The report must bucket it rather than drop it (issue #74).
+        let grafts = crate::report::report_from_journal(&result.journal_path)
+            .unwrap()
+            .graft_replay
+            .expect("report carries the graft-replay bucket");
+        assert_eq!(grafts.accepts, 1);
+        assert!(grafts.cumulative_improvement > 0.0);
+
+        // The record must survive the journal encoding under its camelCase name.
+        let encoded = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(encoded.contains("\"record\":\"graftReplay\""));
+        assert!(encoded.contains("\"graftsApplied\""));
+    }
+
+    /// Issue #74: an accepted winner journals the candidate indices behind it.
+    #[test]
+    fn an_accepted_winner_journals_its_member_indices() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let config = LamarckConfig {
+            creature: creature_path,
+            training_data: training,
+            timeout: Duration::from_millis(500),
+            max_experiments: Some(1),
+            candidates: 4,
+            min_improvement: 1e-6,
+            seed: Some(1),
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir: dir.path().join("out"),
+            preserve_losers: false,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            phase0_parity: false,
+            structural_only: false,
+            screen_sample_rate: None,
+            screen_promote_threshold: 0.0,
+            grafts_path: None,
+            graft_replay_budget: None,
+        };
+        let scorer = ScriptedScorer {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let result = run_optimisation(&config, &scorer).unwrap();
+        let record = journal_lines(&result.journal_path)
+            .into_iter()
+            .find_map(|l| match l {
+                JournalLine::Experiment(record) if record.accepted => Some(*record),
+                _ => None,
+            })
+            .expect("at least one accepted experiment");
+        let indices = record
+            .combo_member_indices
+            .expect("an accepted winner records its member indices");
+        assert!(!indices.is_empty(), "a winner has at least one member");
+        assert!(
+            indices.iter().all(|i| *i < record.candidates.len()),
+            "member indices address the journalled candidates"
         );
     }
 
@@ -1909,7 +2109,7 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 JournalLine::Experiment(record) => Some(record.as_ref()),
-                JournalLine::Header(_) => None,
+                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -1937,7 +2137,7 @@ mod tests {
             .into_iter()
             .filter_map(|l| match l {
                 JournalLine::Experiment(record) => Some(*record),
-                JournalLine::Header(_) => None,
+                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -2046,7 +2246,7 @@ mod tests {
                 .into_iter()
                 .find_map(|l| match l {
                     JournalLine::Experiment(record) => Some(*record),
-                    JournalLine::Header(_) => None,
+                    JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
                 })
                 .expect("at least one experiment")
         };
@@ -2151,7 +2351,7 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 JournalLine::Experiment(record) => Some(record.as_ref()),
-                JournalLine::Header(_) => None,
+                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
             })
             .collect();
         assert_eq!(

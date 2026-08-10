@@ -132,7 +132,12 @@ An earlier ~15-minute / 40-candidate interim (28 exps, 7 accepts; `structural_ad
 
 `neat_ai_lamarck report` includes:
 
-- `strategies[].appearancesTotal` / `wins` / `acceptanceRate`
+- `strategies[].appearancesTotal` / `wins` / `comboWins` / `acceptanceRate` — a
+  merged combo win counts for every member strategy (issue #74)
+- `comboAcceptancesUnattributed` — combo wins in a pre-#74 journal (this
+  baseline included) that name no members and so cannot be attributed
+- `graftReplay` — Phase-G bucket: `replays`, `accepts`, `graftsApplied`,
+  `cumulativeImprovement`, `scorerFailures`, `replayErrors`
 - `focusHistory[]` (experiments, accepts, cumulative Δ)
 - `improvementSeries[]`
 - `candidatesPerScorerMinute`, `candidatesPerScreenMinute`, optional `candidatesPerWallMinute`
