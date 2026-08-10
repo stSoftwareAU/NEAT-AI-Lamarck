@@ -260,7 +260,7 @@ pub fn run_optimisation(
             scorer,
             GraftReplayRequest {
                 host: &incumbent,
-                store: store.clone(),
+                store,
                 training_data: &config.training_data,
                 work_dir: &work,
                 deadline: graft_deadline,
@@ -303,7 +303,13 @@ pub fn run_optimisation(
             }
             Err(e) => {
                 log::warn(&format!("Phase-G: graft replay failed: {e}"));
-                graft_store = Some((grafts_path, store));
+                if let Err(save_e) = e.store.save(&grafts_path) {
+                    log::warn(&format!(
+                        "grafts: failed to save {}: {save_e}",
+                        grafts_path.display()
+                    ));
+                }
+                graft_store = Some((grafts_path, e.store));
             }
         }
         if !config.preserve_losers {
