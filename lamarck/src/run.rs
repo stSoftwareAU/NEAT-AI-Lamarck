@@ -5,7 +5,9 @@ use crate::candidates::{
     CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
     write_candidate_batch,
 };
-use crate::combos::{ComboSelectRequest, select_best_with_combinations};
+use crate::combos::{
+    ComboSelectRequest, ComboSelection, StackDampenReport, select_best_with_combinations,
+};
 use crate::config::LamarckConfig;
 use crate::focus::{
     FixedFocusSelector, FocusChoice, FocusPolicy, FocusSelector, HighErrorFocusSelector,
@@ -77,6 +79,18 @@ pub struct ExperimentRecord {
     /// Scorer error message when the batch failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scorer_error: Option<String>,
+    /// Member count of the selected combo (`None` / omitted for pure singles).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo_members: Option<usize>,
+    /// Combination creatures scored during selection (for dampen tuning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combos_scored: Option<usize>,
+    /// How many scored combos applied stacked-synapse dampening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combos_dampened: Option<usize>,
+    /// Per-target dampen detail for the accepted winner (when any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo_dampen: Option<StackDampenReport>,
 }
 
 /// Result of a completed Lamarck run.
@@ -628,6 +642,10 @@ pub fn run_optimisation(
                             analysis_ms,
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
+                            combo_members: None,
+                            combos_scored: None,
+                            combos_dampened: None,
+                            combo_dampen: None,
                         },
                     )?;
                     if !config.preserve_losers {
@@ -691,6 +709,10 @@ pub fn run_optimisation(
                         analysis_ms,
                         scorer_ms: screen_ms,
                         scorer_error: None,
+                        combo_members: None,
+                        combos_scored: None,
+                        combos_dampened: None,
+                        combo_dampen: None,
                     },
                 )?;
                 if !config.preserve_losers {
@@ -750,6 +772,10 @@ pub fn run_optimisation(
                             analysis_ms,
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
+                            combo_members: None,
+                            combos_scored: None,
+                            combos_dampened: None,
+                            combo_dampen: None,
                         },
                     )?;
                     if !config.preserve_losers {
@@ -807,6 +833,10 @@ pub fn run_optimisation(
                             analysis_ms,
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
+                            combo_members: None,
+                            combos_scored: None,
+                            combos_dampened: None,
+                            combo_dampen: None,
                         },
                     )?;
                     if !config.preserve_losers {
@@ -858,15 +888,28 @@ pub fn run_optimisation(
                     .ok()
                     .and_then(|improvers| {
                         let best = improvers.into_iter().next()?;
-                        Some(crate::combos::ComboSelection {
+                        Some(ComboSelection {
                             creature_path: source_dir.join(format!("{}.json", best.stem)),
                             stem: best.stem,
                             result: best.result,
                             delta: best.delta,
                             member_indices: vec![best.index],
+                            dampen: StackDampenReport::default(),
+                            combos_scored: 0,
+                            combos_dampened: 0,
                         })
                     })
             }
+        };
+
+        let (combo_members, combos_scored, combos_dampened, combo_dampen) = match &selection {
+            Some(sel) if sel.combos_scored > 0 || sel.member_indices.len() > 1 => (
+                (sel.member_indices.len() > 1).then_some(sel.member_indices.len()),
+                Some(sel.combos_scored),
+                Some(sel.combos_dampened),
+                (!sel.dampen.is_empty()).then(|| sel.dampen.clone()),
+            ),
+            _ => (None, None, None, None),
         };
 
         let mut accepted = false;
@@ -982,6 +1025,10 @@ pub fn run_optimisation(
                 analysis_ms,
                 scorer_ms,
                 scorer_error: None,
+                combo_members,
+                combos_scored,
+                combos_dampened,
+                combo_dampen,
             },
         )?;
 

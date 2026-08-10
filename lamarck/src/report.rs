@@ -101,6 +101,14 @@ pub struct JournalReport {
     pub improvement_series: Vec<ImprovementPoint>,
     /// Per-strategy win / appearance / acceptance-rate rows.
     pub strategies: Vec<StrategyStats>,
+    /// Sum of `combosScored` across experiments (combo batch size for #63 tuning).
+    pub combos_scored_total: u64,
+    /// Sum of `combosDampened` across experiments.
+    pub combos_dampened_total: u64,
+    /// Acceptances whose winner was a multi-member combo.
+    pub combo_acceptances: u64,
+    /// Combo acceptances that also recorded a non-empty `comboDampen`.
+    pub combo_acceptances_with_dampen: u64,
 }
 
 /// Consume `experiments.jsonl` and produce an economics report.
@@ -127,6 +135,10 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut focus_accepts: BTreeMap<String, u64> = BTreeMap::new();
     let mut focus_delta: BTreeMap<String, f64> = BTreeMap::new();
     let mut improvement_series = Vec::new();
+    let mut combos_scored_total = 0u64;
+    let mut combos_dampened_total = 0u64;
+    let mut combo_acceptances = 0u64;
+    let mut combo_acceptances_with_dampen = 0u64;
 
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -166,10 +178,27 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             accepted: record.accepted,
         });
 
+        if let Some(n) = record.combos_scored {
+            combos_scored_total += n as u64;
+        }
+        if let Some(n) = record.combos_dampened {
+            combos_dampened_total += n as u64;
+        }
+
         if record.accepted {
             acceptances += 1;
             if time_to_first.is_none() {
                 time_to_first = Some(elapsed);
+            }
+            if record.combo_members.is_some_and(|m| m > 1) {
+                combo_acceptances += 1;
+                if record
+                    .combo_dampen
+                    .as_ref()
+                    .is_some_and(|d| !d.is_empty())
+                {
+                    combo_acceptances_with_dampen += 1;
+                }
             }
             if let Some(delta) = record.improvement {
                 let base = last_best.unwrap_or(record.baseline_score);
@@ -299,6 +328,10 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         focus_history,
         improvement_series,
         strategies,
+        combos_scored_total,
+        combos_dampened_total,
+        combo_acceptances,
+        combo_acceptances_with_dampen,
     })
 }
 
@@ -371,6 +404,16 @@ pub fn print_run_summary(result: &RunResult) {
         ));
         if let Some(ms) = report.time_to_first_acceptance_ms {
             log::detail(&format!("first accept:  {}", format_ms(ms)));
+        }
+        if report.combos_scored_total > 0 || report.combo_acceptances > 0 {
+            log::detail(&format!(
+                "combos:        scored {}  dampened {}  accepts {}  (with dampen {})  exponent={}",
+                report.combos_scored_total,
+                report.combos_dampened_total,
+                report.combo_acceptances,
+                report.combo_acceptances_with_dampen,
+                crate::combos::STACK_DAMPEN_EXPONENT
+            ));
         }
         if !report.focus_history.is_empty() {
             let focuses = report
@@ -477,6 +520,10 @@ mod tests {
             analysis_ms: 10,
             scorer_ms: 20,
             scorer_error: None,
+            combo_members: None,
+            combos_scored: None,
+            combos_dampened: None,
+            combo_dampen: None,
         };
         let rejected = ExperimentRecord {
             experiment_number: 2,
@@ -499,6 +546,10 @@ mod tests {
             analysis_ms: 5,
             scorer_ms: 15,
             scorer_error: None,
+            combo_members: None,
+            combos_scored: None,
+            combos_dampened: None,
+            combo_dampen: None,
         };
         writeln!(file, "{}", serde_json::to_string(&accepted).unwrap()).unwrap();
         writeln!(file, "{}", serde_json::to_string(&rejected).unwrap()).unwrap();
