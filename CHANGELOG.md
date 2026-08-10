@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **README input list called the scorer optional (Issue #37).** The scorer
+  binary is mandatory — only the `--scorer` path override has a default
+  (`rust_scorer` on `PATH`). The **Inputs** section now separates required
+  positionals, required-but-defaulted settings (scorer, output directory,
+  candidates, timeout, minimum improvement) and genuinely optional ones (seed,
+  mutation-strategy flags), with each flag name and default matching `--help`.
+
 - **Combo dampen / graft follow-ups after #63.** Scale by how many combo members
   contribute new synapses to a target (not raw new-edge count), so a multi-edge
   single candidate is not self-dampened when merged with an unrelated improver.
