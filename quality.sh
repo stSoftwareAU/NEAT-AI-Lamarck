@@ -42,6 +42,9 @@ fi
 echo "Validating auto-format PR workflow (Issue #33)..."
 ./scripts/check-auto-format-workflow.sh
 
+echo "Validating version-increment PR workflow (runlib / GRQ-taxation)..."
+./scripts/check-version-increment-workflow.sh
+
 echo "Running codespell preflight..."
 if ! ./scripts/spell-check.sh; then
   echo "spell-check: FAILED — fix the typos above or update .codespellrc"

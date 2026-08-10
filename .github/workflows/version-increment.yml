@@ -1,0 +1,98 @@
+# Auto-increment lamarck/Cargo.toml patch when lamarck/src/ changes on a PR
+# (GRQ-taxation version-increment / runlib.sh contract).
+#
+# Remotes rebuild neat_ai_lamarck when the crate version changes. This job
+# bumps the patch on PRs that touch source if the branch has not already
+# bumped. Re-running after a bump is a no-op (idempotent).
+#
+# Push auth matches auto-format.yml (App token → ACTIONS_PUSH → GITHUB_TOKEN).
+name: Version Increment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - Develop
+    paths:
+      - "lamarck/src/**"
+      - "lamarck/Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/bump-lamarck-version.sh"
+      - ".github/workflows/version-increment.yml"
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: version-increment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version-increment:
+    name: Auto-increment Versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      PUSH_APP_CONFIGURED: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID != '' && secrets.ACTIONS_PUSH_APP_PRIVATE_KEY != '' }}
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch base branch
+        run: |
+          set -euo pipefail
+          git fetch origin Develop:Develop || git fetch origin Develop || true
+
+      - name: Bump lamarck patch version when src changed
+        id: bump
+        run: |
+          set -euo pipefail
+          if ./scripts/bump-lamarck-version.sh --base-ref origin/Develop; then
+            echo "changed=true" >>"$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -eq 1 ]]; then
+              echo "changed=false" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            exit "$status"
+          fi
+
+      - name: Mint repo-scoped push token
+        id: push-token
+        if: steps.bump.outputs.changed == 'true' && env.PUSH_APP_CONFIGURED == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ACTIONS_PUSH_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Commit and push version bump
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GH_PAT: ${{ steps.push-token.outputs.token || secrets.ACTIONS_PUSH || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          GIT=/usr/bin/git
+          BASE64=/usr/bin/base64
+          "$GIT" -c core.hooksPath=/dev/null config user.name "github-actions[bot]"
+          "$GIT" -c core.hooksPath=/dev/null config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          "$GIT" -c core.hooksPath=/dev/null add lamarck/Cargo.toml Cargo.lock
+          "$GIT" -c core.hooksPath=/dev/null commit -m "chore: auto-increment versions for changed projects"
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_PAT" | "$BASE64" -w0)"
+          if git ls-remote --exit-code --heads origin "$PR_HEAD_REF" >/dev/null 2>&1; then
+            "$GIT" -c core.hooksPath=/dev/null \
+              -c http.https://github.com/.extraheader="$AUTH_HEADER" \
+              push origin "HEAD:$PR_HEAD_REF"
+          else
+            echo "::notice::Head branch '$PR_HEAD_REF' no longer exists; skipping push."
+          fi
