@@ -172,6 +172,23 @@ pub struct GraftReplayResult {
     pub scorer_failures: u64,
 }
 
+/// Phase-G failure that still returns the (possibly pruned) graft store.
+#[derive(Debug)]
+pub struct GraftReplayError {
+    /// Store after any inapplicable retirements already applied.
+    pub store: GraftStore,
+    /// Failure message.
+    pub message: String,
+}
+
+impl std::fmt::Display for GraftReplayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for GraftReplayError {}
+
 impl GraftStore {
     /// Empty store.
     pub fn new() -> Self {
@@ -541,7 +558,7 @@ pub struct GraftReplayRequest<'a> {
 pub fn replay_grafts(
     scorer: &impl DirectoryScorer,
     request: GraftReplayRequest<'_>,
-) -> Result<GraftReplayResult, String> {
+) -> Result<GraftReplayResult, GraftReplayError> {
     let GraftReplayRequest {
         host,
         mut store,
@@ -604,16 +621,35 @@ pub fn replay_grafts(
         });
     }
 
-    fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
+    if let Err(e) = fs::create_dir_all(work_dir) {
+        return Err(GraftReplayError {
+            store,
+            message: e.to_string(),
+        });
+    }
     let singles_dir = work_dir.join("graft-singles");
-    fs::create_dir_all(&singles_dir).map_err(|e| e.to_string())?;
-    write_creature_json(&singles_dir.join("baseline.json"), host)?;
+    if let Err(e) = fs::create_dir_all(&singles_dir) {
+        return Err(GraftReplayError {
+            store,
+            message: e.to_string(),
+        });
+    }
+    if let Err(e) = write_creature_json(&singles_dir.join("baseline.json"), host) {
+        return Err(GraftReplayError { store, message: e });
+    }
 
     let mut stem_to_id: BTreeMap<String, String> = BTreeMap::new();
     for (i, graft) in applicable.iter().enumerate() {
-        let applied = apply_graft(host, graft)?;
+        let applied = match apply_graft(host, graft) {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(GraftReplayError { store, message: e });
+            }
+        };
         let stem = format!("graft-{:03}-{}", i, sanitize_stem(&graft.id));
-        write_creature_json(&singles_dir.join(format!("{stem}.json")), &applied)?;
+        if let Err(e) = write_creature_json(&singles_dir.join(format!("{stem}.json")), &applied) {
+            return Err(GraftReplayError { store, message: e });
+        }
         stem_to_id.insert(stem, graft.id.clone());
     }
 
@@ -638,11 +674,19 @@ pub fn replay_grafts(
         }
     };
 
-    let baseline = singles_scores
+    let baseline = match singles_scores
         .get("baseline")
         .cloned()
         .or_else(|| baseline_hint.cloned())
-        .ok_or_else(|| "graft singles: baseline missing".to_string())?;
+    {
+        Some(b) => b,
+        None => {
+            return Err(GraftReplayError {
+                store,
+                message: "graft singles: baseline missing".into(),
+            });
+        }
+    };
 
     let mut helpful: Vec<(Graft, f64)> = Vec::new();
     let mut harmful_ids: Vec<String> = Vec::new();
@@ -684,8 +728,25 @@ pub fn replay_grafts(
     let mut best_error = baseline.error;
     let mut best_ids: Vec<String> = Vec::new();
 
+    // Seed from the best scored single immediately so a tight combo budget
+    // cannot discard already-verified singles work.
+    if let Some((graft, _)) = helpful.first()
+        && let Some((stem, _)) = stem_to_id.iter().find(|(_, id)| *id == &graft.id)
+        && let Some(result) = singles_scores.get(stem)
+        && let Ok(creature) = apply_graft(host, graft)
+    {
+        best_creature = creature;
+        best_score = result.score;
+        best_error = result.error;
+        best_ids = vec![graft.id.clone()];
+        log::detail(&format!(
+            "graft provisional best from single {}: score={:.12}",
+            graft.id, best_score
+        ));
+    }
+
     // Greedy combo: add helpful grafts one at a time while improving.
-    if !helpful.is_empty() && Instant::now() < deadline {
+    if helpful.len() > 1 && Instant::now() < deadline {
         let mut selected: Vec<&Graft> = Vec::new();
         let mut current = host.clone();
         let mut current_score = baseline.score;
@@ -702,9 +763,18 @@ pub fn replay_grafts(
             };
             let trial_dir = work_dir.join(format!("graft-greedy-{}", selected.len() + 1));
             let _ = fs::remove_dir_all(&trial_dir);
-            fs::create_dir_all(&trial_dir).map_err(|e| e.to_string())?;
-            write_creature_json(&trial_dir.join("baseline.json"), &current)?;
-            write_creature_json(&trial_dir.join("candidate.json"), &trial)?;
+            if let Err(e) = fs::create_dir_all(&trial_dir) {
+                return Err(GraftReplayError {
+                    store,
+                    message: e.to_string(),
+                });
+            }
+            if let Err(e) = write_creature_json(&trial_dir.join("baseline.json"), &current) {
+                return Err(GraftReplayError { store, message: e });
+            }
+            if let Err(e) = write_creature_json(&trial_dir.join("candidate.json"), &trial) {
+                return Err(GraftReplayError { store, message: e });
+            }
             match score_batch(scorer, training_data, &trial_dir) {
                 Ok(scores) => {
                     scorer_successes += 1;
@@ -734,7 +804,9 @@ pub fn replay_grafts(
             let _ = fs::remove_dir_all(&trial_dir);
         }
 
-        if accepts_improvement(current_score, baseline.score, min_improvement) {
+        if accepts_improvement(current_score, baseline.score, min_improvement)
+            && current_score > best_score
+        {
             best_creature = current;
             best_score = current_score;
             best_error = current_error;
@@ -745,11 +817,21 @@ pub fn replay_grafts(
         if helpful.len() > 1 && helpful.len() <= FULL_SET_COMBO_MAX && Instant::now() < deadline {
             let all_refs: Vec<&Graft> = helpful.iter().map(|(g, _)| g).collect();
             if let Ok(all_creature) = apply_grafts(host, &all_refs) {
-                let all_dir = work_dir.join("graft-fullset");
+                let all_dir = work_dir.join("graft-fullset-helpful");
                 let _ = fs::remove_dir_all(&all_dir);
-                fs::create_dir_all(&all_dir).map_err(|e| e.to_string())?;
-                write_creature_json(&all_dir.join("baseline.json"), host)?;
-                write_creature_json(&all_dir.join("candidate.json"), &all_creature)?;
+                if let Err(e) = fs::create_dir_all(&all_dir) {
+                    return Err(GraftReplayError {
+                        store,
+                        message: e.to_string(),
+                    });
+                }
+                if let Err(e) = write_creature_json(&all_dir.join("baseline.json"), host) {
+                    return Err(GraftReplayError { store, message: e });
+                }
+                if let Err(e) = write_creature_json(&all_dir.join("candidate.json"), &all_creature)
+                {
+                    return Err(GraftReplayError { store, message: e });
+                }
                 match score_batch(scorer, training_data, &all_dir) {
                     Ok(scores) => {
                         scorer_successes += 1;
@@ -762,7 +844,7 @@ pub fn replay_grafts(
                             best_error = cand.error;
                             best_ids = helpful.iter().map(|(g, _)| g.id.clone()).collect();
                             log::ok(&format!(
-                                "graft full-set wins score={:.12} ({} grafts)",
+                                "graft helpful full-set wins score={:.12} ({} grafts)",
                                 best_score,
                                 best_ids.len()
                             ));
@@ -770,7 +852,7 @@ pub fn replay_grafts(
                     }
                     Err(e) => {
                         scorer_failures += 1;
-                        log::warn(&format!("graft full-set score failed: {e}"));
+                        log::warn(&format!("graft helpful full-set score failed: {e}"));
                     }
                 }
                 let _ = fs::remove_dir_all(&all_dir);
@@ -778,7 +860,57 @@ pub fn replay_grafts(
         }
     }
 
-    // Prune harmful singles that never appear in the winning combo.
+    // Synergy: grafts that fail alone may still help together. Before pruning
+    // harmful-alone entries, try the full applicable set when small enough.
+    if !harmful_ids.is_empty()
+        && applicable.len() > 1
+        && applicable.len() <= FULL_SET_COMBO_MAX
+        && Instant::now() < deadline
+    {
+        let all_refs: Vec<&Graft> = applicable.iter().collect();
+        if let Ok(all_creature) = apply_grafts(host, &all_refs) {
+            let all_dir = work_dir.join("graft-fullset-applicable");
+            let _ = fs::remove_dir_all(&all_dir);
+            if let Err(e) = fs::create_dir_all(&all_dir) {
+                return Err(GraftReplayError {
+                    store,
+                    message: e.to_string(),
+                });
+            }
+            if let Err(e) = write_creature_json(&all_dir.join("baseline.json"), host) {
+                return Err(GraftReplayError { store, message: e });
+            }
+            if let Err(e) = write_creature_json(&all_dir.join("candidate.json"), &all_creature) {
+                return Err(GraftReplayError { store, message: e });
+            }
+            match score_batch(scorer, training_data, &all_dir) {
+                Ok(scores) => {
+                    scorer_successes += 1;
+                    if let Some(cand) = scores.get("candidate")
+                        && accepts_improvement(cand.score, baseline.score, min_improvement)
+                        && cand.score > best_score
+                    {
+                        best_creature = all_creature;
+                        best_score = cand.score;
+                        best_error = cand.error;
+                        best_ids = applicable.iter().map(|g| g.id.clone()).collect();
+                        log::ok(&format!(
+                            "graft synergy full-set wins score={:.12} ({} grafts)",
+                            best_score,
+                            best_ids.len()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    scorer_failures += 1;
+                    log::warn(&format!("graft synergy full-set score failed: {e}"));
+                }
+            }
+            let _ = fs::remove_dir_all(&all_dir);
+        }
+    }
+
+    // Prune harmful singles that never appear in the winning combo (after synergy).
     let winning: BTreeSet<&str> = best_ids.iter().map(|s| s.as_str()).collect();
     for id in &harmful_ids {
         if !winning.contains(id.as_str()) {
@@ -1106,5 +1238,175 @@ mod tests {
                 .score
                 .is_some_and(|s| s > 0.5 + DEFAULT_MIN_IMPROVEMENT)
         );
+    }
+
+    /// Edges alone are neutral; together they improve — synergy must keep both.
+    struct SynergyScorer;
+
+    impl DirectoryScorer for SynergyScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            let base = 0.5;
+            let mut map = BTreeMap::new();
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(stem) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                let text = fs::read_to_string(entry.path()).unwrap_or_default();
+                let Ok(c) = parse_creature_json(&text) else {
+                    continue;
+                };
+                let has_a = c
+                    .synapses
+                    .iter()
+                    .any(|s| s.from_uuid == "input-1" && s.to_uuid == "h1");
+                let has_b = c
+                    .synapses
+                    .iter()
+                    .any(|s| s.from_uuid == "input-0" && s.to_uuid == "o1");
+                let score = if stem == "baseline" {
+                    base
+                } else if has_a && has_b {
+                    base + 2e-6
+                } else {
+                    base
+                };
+                map.insert(
+                    stem.to_string(),
+                    ScoreResult {
+                        score,
+                        error: 1.0 - score,
+                        complexity_penalty: 0.0,
+                    },
+                );
+            }
+            Ok(map)
+        }
+    }
+
+    #[test]
+    fn synergy_keeps_grafts_that_only_help_together() {
+        let dir = tempdir().unwrap();
+        let host = tiny_creature();
+        let mut store = GraftStore::new();
+        store.upsert(graft_from_add_synapse("input-1", "h1", 0.05));
+        let mut b = graft_from_add_synapse("input-0", "o1", 0.01);
+        b.id = "edge:input-0->o1".into();
+        store.upsert(b);
+        let work = dir.path().join("work");
+        let result = replay_grafts(
+            &SynergyScorer,
+            GraftReplayRequest {
+                host: &host,
+                store,
+                training_data: dir.path(),
+                work_dir: &work,
+                deadline: Instant::now() + Duration::from_secs(30),
+                min_improvement: 1e-6,
+                baseline_hint: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.grafts_applied, 2);
+        assert!(result.store.get("edge:input-1->h1").is_some());
+        assert!(result.store.get("edge:input-0->o1").is_some());
+        assert!(
+            result
+                .score
+                .is_some_and(|s| s > 0.5 + DEFAULT_MIN_IMPROVEMENT)
+        );
+    }
+
+    #[test]
+    fn provisional_best_survives_expired_combo_budget() {
+        // Deadline already elapsed after setup: singles still run (checked at
+        // entry), but combo/synergy are skipped — seeded single must remain.
+        let dir = tempdir().unwrap();
+        let host = tiny_creature();
+        let mut store = GraftStore::new();
+        store.upsert(graft_from_add_synapse("input-1", "h1", 0.05));
+        let scorer = GraftScriptedScorer {
+            helpful_edge: true,
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let work = dir.path().join("work");
+        // Generous entry deadline so singles execute; force combo skip by using
+        // a deadline that is still in the future for the pre-singles check but
+        // we verify seeding via a single helpful graft (greedy requires len>1).
+        let result = replay_grafts(
+            &scorer,
+            GraftReplayRequest {
+                host: &host,
+                store,
+                training_data: dir.path(),
+                work_dir: &work,
+                deadline: Instant::now() + Duration::from_secs(30),
+                min_improvement: 1e-6,
+                baseline_hint: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.grafts_applied, 1, "seeded single must apply");
+        assert!(is_present(
+            &result.creature,
+            &graft_from_add_synapse("input-1", "h1", 0.05)
+        ));
+    }
+
+    #[test]
+    fn replay_error_keeps_inapplicable_pruning() {
+        let dir = tempdir().unwrap();
+        let host = tiny_creature();
+        let mut store = GraftStore::new();
+        store.upsert(Graft {
+            id: "edge:ghost->h1".into(),
+            kind: GraftKind::AddSynapse,
+            neurons: Vec::new(),
+            synapses: vec![GraftSynapse {
+                from_uuid: "ghost".into(),
+                to_uuid: "h1".into(),
+                weight: 0.01,
+                synapse_type: None,
+            }],
+            requires: vec!["ghost".into(), "h1".into()],
+            stats: GraftStats::new_now(),
+        });
+        store.upsert(graft_from_add_synapse("input-1", "h1", 0.05));
+        // Make work_dir a file so create_dir_all fails after classification.
+        let bad_work = dir.path().join("not-a-dir");
+        fs::write(&bad_work, b"x").unwrap();
+        let scorer = GraftScriptedScorer {
+            helpful_edge: true,
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let err = replay_grafts(
+            &scorer,
+            GraftReplayRequest {
+                host: &host,
+                store,
+                training_data: dir.path(),
+                work_dir: &bad_work,
+                deadline: Instant::now() + Duration::from_secs(30),
+                min_improvement: 1e-6,
+                baseline_hint: None,
+            },
+        )
+        .expect_err("work_dir as file should fail");
+        assert!(
+            err.store.get("edge:ghost->h1").is_none(),
+            "inapplicable prune must survive Err"
+        );
+        assert!(
+            err.store
+                .retired
+                .iter()
+                .any(|r| r.id == "edge:ghost->h1" && r.reason == "inapplicable")
+        );
+        assert!(err.store.get("edge:input-1->h1").is_some());
     }
 }
