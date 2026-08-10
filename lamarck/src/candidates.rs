@@ -28,6 +28,8 @@ pub enum CandidateStrategy {
     StatsWeight,
     /// Statistics-guided bias change.
     StatsBias,
+    /// Output bias stepped towards a skewed target's median.
+    StatsSkewBias,
     /// Add a correlation-ranked upstream connection into the focus.
     StructuralAdd,
     /// Grow a hidden neuron on a path into the focus.
@@ -69,6 +71,13 @@ const MEAN_ERROR_STEP_FRACTION: f64 = 0.1;
 const MAX_BACKPROP_WEIGHT_DELTA: f64 = 0.01;
 /// Minimum |residual corr| before growing a neuron bridge.
 const MIN_NEURON_BRIDGE_SCORE: f64 = 0.02;
+/// Minimum |target skewness| before a median-ward bias step is worth proposing.
+const MIN_TARGET_SKEW: f64 = 0.25;
+/// Fraction of the target's mean→median gap applied as a bias step.
+const SKEW_BIAS_STEP_FRACTION: f64 = 0.25;
+/// Excess kurtosis at which the skew-bias step is halved (heavy tails make the
+/// sampled median gap noisy, so trust it less).
+const SKEW_BIAS_KURTOSIS_REFERENCE: f64 = 3.0;
 
 /// Inputs shared by candidate generation for one focus-neuron experiment.
 pub struct CandidateGenContext<'a> {
@@ -213,6 +222,7 @@ pub fn generate_candidates(
         CandidateStrategy::StructuralAdd,
         CandidateStrategy::StructuralAddNeuron,
         CandidateStrategy::StatsBias,
+        CandidateStrategy::StatsSkewBias,
         CandidateStrategy::StructuralWeaken,
         CandidateStrategy::Random,
     ];
@@ -398,6 +408,70 @@ fn build_mean_error_bias(
     })
 }
 
+/// Step an output neuron's bias towards its target's median when that target is
+/// skewed (Issue #73).
+///
+/// A squared-error fit centres a prediction on the target **mean**; under a
+/// skewed target the mean sits away from the typical value, so a step towards
+/// the median is a distinct hypothesis worth scoring. The observation cache's
+/// skewness gates the proposal and its excess kurtosis damps it — heavy tails
+/// make the sampled median gap unreliable. Hidden focuses (no target), symmetric
+/// targets and saturated neurons produce nothing.
+fn build_stats_skew_bias(ctx: &CandidateGenContext<'_>) -> Option<Candidate> {
+    let focus_uuid = ctx.focus_uuid;
+    let out_idx = crate::structural::focus_output_index(ctx.incumbent, focus_uuid)?;
+    let target = ctx.observations.outputs.get(out_idx)?;
+    if target.count == 0 || !target.skewness.is_finite() {
+        return None;
+    }
+    let skewness = target.skewness;
+    if skewness.abs() < MIN_TARGET_SKEW {
+        return None;
+    }
+    // Median of the seven stored quantiles (1/5/25/50/75/95/99%).
+    let median = target.quantiles[3];
+    if !median.is_finite() || !target.mean.is_finite() {
+        return None;
+    }
+    let mean_deriv = ctx.focus_stats.mean_derivative.unwrap_or(1.0);
+    if mean_deriv <= 1e-6 {
+        return None;
+    }
+    let excess_kurtosis = if target.excess_kurtosis.is_finite() {
+        target.excess_kurtosis.max(0.0)
+    } else {
+        0.0
+    };
+    let damping = 1.0 / (1.0 + excess_kurtosis / SKEW_BIAS_KURTOSIS_REFERENCE);
+    let step = (median - target.mean) * SKEW_BIAS_STEP_FRACTION * damping * mean_deriv;
+    if !step.is_finite() || step.abs() < ctx.backprop.plank_constant {
+        return None;
+    }
+    let mut creature = ctx.incumbent.clone();
+    let neuron_pos = creature.neurons.iter().position(|n| n.uuid == focus_uuid)?;
+    let old_bias = creature.neurons[neuron_pos].bias;
+    let new_bias = (old_bias + step).clamp(
+        -ctx.backprop.limit_bias_scale,
+        ctx.backprop.limit_bias_scale,
+    );
+    creature.neurons[neuron_pos].bias = new_bias;
+    Some(Candidate {
+        creature,
+        provenance: CandidateProvenance {
+            strategy: CandidateStrategy::StatsSkewBias,
+            focus_neuron: focus_uuid.to_string(),
+            mutation: format!(
+                "skew bias Δ {step} towards target-{out_idx} median {median} \
+                 (mean={}, skew={skewness:.4}, excessKurtosis={:.4}, damp={damping:.4}, \
+                 deriv={mean_deriv:.4})",
+                target.mean, target.excess_kurtosis
+            ),
+            old_value: Some(old_bias),
+            new_value: Some(new_bias),
+        },
+    })
+}
+
 fn build_candidate(
     ctx: &CandidateGenContext<'_>,
     strategy: CandidateStrategy,
@@ -417,6 +491,7 @@ fn build_candidate(
         CandidateStrategy::MeanErrorBias => {
             return build_mean_error_bias(ctx, rng, MEAN_ERROR_STEP_FRACTION);
         }
+        CandidateStrategy::StatsSkewBias => return build_stats_skew_bias(ctx),
         CandidateStrategy::Backprop => {
             let lr = backprop.learning_rate;
             if let Some(signal) = learning.and_then(|l| l.biases.get(neuron_pos))
@@ -762,6 +837,8 @@ mod tests {
                 non_finite_count: 0,
                 mean_abs: 0.0,
                 rms: 0.0,
+                skewness: 0.0,
+                excess_kurtosis: 0.0,
                 quantiles: [0.0; 7],
             }],
             outputs: vec![],
@@ -898,6 +975,189 @@ mod tests {
         assert!(build_candidate(&ctx, CandidateStrategy::MeanErrorBias, &mut rng).is_none());
     }
 
+    /// Observations whose single target has the given shape and mean→median gap.
+    fn obs_with_target(
+        mean: f64,
+        median: f64,
+        skewness: f64,
+        excess_kurtosis: f64,
+    ) -> ObservationsStatistics {
+        let mut obs = empty_obs();
+        obs.outputs.push(crate::observations::ScalarStats {
+            count: 100,
+            mean,
+            variance: 1.0,
+            std_dev: 1.0,
+            min: -1.0,
+            max: 5.0,
+            zero_count: 0,
+            non_zero_count: 100,
+            non_finite_count: 0,
+            mean_abs: mean.abs(),
+            rms: 1.0,
+            skewness,
+            excess_kurtosis,
+            quantiles: [median; 7],
+        });
+        obs
+    }
+
+    fn skew_bias_ctx<'a>(
+        incumbent: &'a CreatureExport,
+        focus: &'a FocusNeuronStats,
+        observations: &'a ObservationsStatistics,
+        backprop: &'a BackpropConfig,
+        focus_uuid: &'a str,
+    ) -> CandidateGenContext<'a> {
+        CandidateGenContext {
+            incumbent,
+            focus_uuid,
+            focus_stats: focus,
+            incoming: &[],
+            observations,
+            ranked_sources: None,
+            learning: None,
+            backprop,
+            structural_only: false,
+        }
+    }
+
+    fn output_focus() -> FocusNeuronStats {
+        FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        }
+    }
+
+    #[test]
+    fn skew_bias_steps_the_output_towards_the_target_median() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = output_focus();
+        // Right-skewed target: median 0.5 sits below mean 1.0.
+        let observations = obs_with_target(1.0, 0.5, 1.2, 0.0);
+        let cfg = BackpropConfig::default();
+        let ctx = skew_bias_ctx(&incumbent, &focus, &observations, &cfg, "o1");
+        let mut rng = StdRng::seed_from_u64(7);
+        let candidate = build_candidate(&ctx, CandidateStrategy::StatsSkewBias, &mut rng)
+            .expect("skew-bias candidate");
+        let old = candidate.provenance.old_value.unwrap();
+        let new = candidate.provenance.new_value.unwrap();
+        // gap (−0.5) × fraction (0.25) × derivative (1.0), undamped.
+        assert!(
+            (new - old + 0.125).abs() < 1e-12,
+            "expected a −0.125 bias step, got {}",
+            new - old
+        );
+        assert_eq!(
+            candidate.provenance.strategy,
+            CandidateStrategy::StatsSkewBias
+        );
+    }
+
+    #[test]
+    fn skew_bias_follows_a_left_skewed_target_upwards() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = output_focus();
+        // Left-skewed target: median 1.5 sits above mean 1.0.
+        let observations = obs_with_target(1.0, 1.5, -1.2, 0.0);
+        let cfg = BackpropConfig::default();
+        let ctx = skew_bias_ctx(&incumbent, &focus, &observations, &cfg, "o1");
+        let mut rng = StdRng::seed_from_u64(7);
+        let candidate = build_candidate(&ctx, CandidateStrategy::StatsSkewBias, &mut rng)
+            .expect("skew-bias candidate");
+        let old = candidate.provenance.old_value.unwrap();
+        let new = candidate.provenance.new_value.unwrap();
+        assert!(new > old, "expected an upward step, got {old} -> {new}");
+    }
+
+    #[test]
+    fn heavy_tails_damp_the_skew_bias_step() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = output_focus();
+        let cfg = BackpropConfig::default();
+        let mut rng = StdRng::seed_from_u64(7);
+
+        let light = obs_with_target(1.0, 0.5, 1.2, 0.0);
+        let ctx = skew_bias_ctx(&incumbent, &focus, &light, &cfg, "o1");
+        let light_step = build_candidate(&ctx, CandidateStrategy::StatsSkewBias, &mut rng)
+            .expect("light-tailed candidate");
+
+        // Excess kurtosis of 3 (the reference) halves the step.
+        let heavy = obs_with_target(1.0, 0.5, 1.2, 3.0);
+        let ctx = skew_bias_ctx(&incumbent, &focus, &heavy, &cfg, "o1");
+        let heavy_step = build_candidate(&ctx, CandidateStrategy::StatsSkewBias, &mut rng)
+            .expect("heavy-tailed candidate");
+
+        let delta =
+            |c: &Candidate| c.provenance.new_value.unwrap() - c.provenance.old_value.unwrap();
+        assert!(
+            (delta(&heavy_step) - delta(&light_step) / 2.0).abs() < 1e-12,
+            "heavy tails should halve the step: {} vs {}",
+            delta(&heavy_step),
+            delta(&light_step)
+        );
+    }
+
+    #[test]
+    fn a_symmetric_target_produces_no_skew_bias_candidate() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = output_focus();
+        let observations = obs_with_target(1.0, 0.5, 0.05, 0.0);
+        let cfg = BackpropConfig::default();
+        let ctx = skew_bias_ctx(&incumbent, &focus, &observations, &cfg, "o1");
+        let mut rng = StdRng::seed_from_u64(7);
+        assert!(build_candidate(&ctx, CandidateStrategy::StatsSkewBias, &mut rng).is_none());
+    }
+
+    #[test]
+    fn a_hidden_focus_produces_no_skew_bias_candidate() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "h1".into(),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        };
+        let observations = obs_with_target(1.0, 0.5, 1.2, 0.0);
+        let cfg = BackpropConfig::default();
+        let ctx = skew_bias_ctx(&incumbent, &focus, &observations, &cfg, "h1");
+        let mut rng = StdRng::seed_from_u64(7);
+        assert!(build_candidate(&ctx, CandidateStrategy::StatsSkewBias, &mut rng).is_none());
+    }
+
+    #[test]
+    fn a_saturated_focus_produces_no_skew_bias_candidate() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_derivative: Some(0.0),
+            saturation_fraction: 1.0,
+            ..FocusNeuronStats::default()
+        };
+        let observations = obs_with_target(1.0, 0.5, 1.2, 0.0);
+        let cfg = BackpropConfig::default();
+        let ctx = skew_bias_ctx(&incumbent, &focus, &observations, &cfg, "o1");
+        let mut rng = StdRng::seed_from_u64(7);
+        assert!(build_candidate(&ctx, CandidateStrategy::StatsSkewBias, &mut rng).is_none());
+    }
+
+    #[test]
+    fn skew_bias_is_offered_in_a_generated_population() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = output_focus();
+        let observations = obs_with_target(1.0, 0.5, 1.2, 0.0);
+        let cfg = BackpropConfig::default();
+        let ctx = skew_bias_ctx(&incumbent, &focus, &observations, &cfg, "o1");
+        let mut rng = StdRng::seed_from_u64(11);
+        let population = generate_candidates(&ctx, 12, &mut rng);
+        assert!(
+            population
+                .iter()
+                .any(|c| c.provenance.strategy == CandidateStrategy::StatsSkewBias),
+            "generated population never offered a skew-aware bias candidate"
+        );
+    }
+
     const TWO_INPUT: &str = r#"{
       "semanticVersion": "4.0.0",
       "forwardOnly": true,
@@ -928,6 +1188,8 @@ mod tests {
             non_finite_count: 0,
             mean_abs: 0.0,
             rms: 0.0,
+            skewness: 0.0,
+            excess_kurtosis: 0.0,
             quantiles: [0.0; 7],
         });
         obs.input_target_correlations = vec![c0, c1];
@@ -1147,6 +1409,8 @@ mod tests {
             non_finite_count: 0,
             mean_abs: 0.5,
             rms: 0.5,
+            skewness: 0.0,
+            excess_kurtosis: 0.0,
             quantiles: [0.0; 7],
         });
         let mut network = compile_creature(&incumbent).unwrap();

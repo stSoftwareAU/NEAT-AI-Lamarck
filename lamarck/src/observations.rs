@@ -15,7 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const FORMAT_VERSION: &str = "1.0.0";
 
 /// Current statistics algorithm semver.
-pub const ALGORITHM_VERSION: &str = "1.0.0";
+///
+/// `1.1.0` added per-column skewness and excess kurtosis (Issue #73).
+pub const ALGORITHM_VERSION: &str = "1.1.0";
 
 /// Filename for a full-corpus statistics cache.
 pub const STATISTICS_FILENAME: &str = "observations.statistics";
@@ -63,6 +65,15 @@ pub struct ScalarStats {
     pub mean_abs: f64,
     /// Root-mean-square.
     pub rms: f64,
+    /// Population skewness `m3 / m2^1.5` (0 when the column is constant).
+    ///
+    /// Defaulted so a pre-`1.1.0` cache parses and is then rejected by the
+    /// algorithm-version gate with a precise reason rather than a parse error.
+    #[serde(default)]
+    pub skewness: f64,
+    /// Population *excess* kurtosis `m4 / m2² − 3` (0 for a Gaussian column).
+    #[serde(default)]
+    pub excess_kurtosis: f64,
     /// Approximate quantiles: 1%, 5%, 25%, 50%, 75%, 95%, 99%.
     pub quantiles: [f64; 7],
 }
@@ -99,6 +110,45 @@ pub struct ObservationsStatistics {
     pub input_correlations: Vec<f64>,
     /// Input/target Pearson correlations (inputs × outputs).
     pub input_target_correlations: Vec<f64>,
+}
+
+impl ObservationsStatistics {
+    /// Covariance between inputs `i` and `j`, derived as `r · σ_i · σ_j`.
+    ///
+    /// Covariances are deliberately **not** written to disk (Issue #73): a
+    /// stored covariance carries no information the Pearson correlation and the
+    /// per-column `std_dev` do not already hold, and a duplicated field is one
+    /// more thing to keep consistent. Returns `None` when the input×input
+    /// matrix was not computed (`--compute-correlations` off) or an index is
+    /// out of range. Symmetric in `i` and `j`; the diagonal is the variance.
+    pub fn input_covariance(&self, i: usize, j: usize) -> Option<f64> {
+        let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
+        let flat = upper_triangular_index(lo, hi, self.input_count)?;
+        let corr = *self.input_correlations.get(flat)?;
+        Some(corr * self.inputs.get(lo)?.std_dev * self.inputs.get(hi)?.std_dev)
+    }
+
+    /// Covariance between input `i` and target `j`, derived as `r · σ_i · σ_j`.
+    ///
+    /// See [`Self::input_covariance`] for why this is derived rather than
+    /// stored. Returns `None` when either index is out of range.
+    pub fn input_target_covariance(&self, i: usize, j: usize) -> Option<f64> {
+        if j >= self.output_count {
+            return None;
+        }
+        let corr = *self
+            .input_target_correlations
+            .get(i * self.output_count + j)?;
+        Some(corr * self.inputs.get(i)?.std_dev * self.outputs.get(j)?.std_dev)
+    }
+}
+
+/// Flat offset of `(i, j)` (with `i <= j`) in a row-major upper triangle of `n`.
+fn upper_triangular_index(i: usize, j: usize, n: usize) -> Option<usize> {
+    if j >= n {
+        return None;
+    }
+    Some(i * n - i * i.saturating_sub(1) / 2 + (j - i))
 }
 
 impl StatsMode {
@@ -157,12 +207,14 @@ impl From<serde_json::Error> for ObservationsError {
     }
 }
 
-/// Online mean/variance accumulator (Welford).
+/// Online central-moment accumulator (Welford, extended to third/fourth order).
 #[derive(Debug, Clone)]
 struct OnlineMoment {
     count: u64,
     mean: f64,
     m2: f64,
+    m3: f64,
+    m4: f64,
     min: f64,
     max: f64,
     zero_count: u64,
@@ -179,6 +231,8 @@ impl OnlineMoment {
             count: 0,
             mean: 0.0,
             m2: 0.0,
+            m3: 0.0,
+            m4: 0.0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             zero_count: 0,
@@ -196,11 +250,21 @@ impl OnlineMoment {
             self.non_finite_count += 1;
             return;
         }
+        let n1 = self.count as f64;
         self.count += 1;
+        let n = self.count as f64;
+        // Pébay's online update for the second/third/fourth central moments.
+        // `term1` equals Welford's `delta * (v - new_mean)`, so `m2` is
+        // unchanged from the previous two-moment form.
         let delta = v - self.mean;
-        self.mean += delta / self.count as f64;
-        let delta2 = v - self.mean;
-        self.m2 += delta * delta2;
+        let delta_n = delta / n;
+        let delta_n2 = delta_n * delta_n;
+        let term1 = delta * delta_n * n1;
+        self.mean += delta_n;
+        self.m4 += term1 * delta_n2 * (n * n - 3.0 * n + 3.0) + 6.0 * delta_n2 * self.m2
+            - 4.0 * delta_n * self.m3;
+        self.m3 += term1 * delta_n * (n - 2.0) - 3.0 * delta_n * self.m2;
+        self.m2 += term1;
         self.min = self.min.min(v);
         self.max = self.max.max(v);
         if v == 0.0 {
@@ -226,6 +290,16 @@ impl OnlineMoment {
             0.0
         };
         let std_dev = variance.sqrt();
+        // Shape is undefined for a constant (or empty) column — report 0, not NaN.
+        let (skewness, excess_kurtosis) = if self.count > 0 && variance > 0.0 {
+            let n = self.count as f64;
+            let m2 = self.m2 / n;
+            let m3 = self.m3 / n;
+            let m4 = self.m4 / n;
+            (m3 / m2.powf(1.5), m4 / (m2 * m2) - 3.0)
+        } else {
+            (0.0, 0.0)
+        };
         let mean_abs = if self.count > 0 {
             self.abs_sum / self.count as f64
         } else {
@@ -257,6 +331,8 @@ impl OnlineMoment {
             non_finite_count: self.non_finite_count,
             mean_abs,
             rms,
+            skewness,
+            excess_kurtosis,
             quantiles: [
                 q(0.01),
                 q(0.05),
@@ -790,5 +866,134 @@ mod tests {
 
     fn nearly_mean(stats: &ScalarStats, expected: f64) -> bool {
         (stats.mean - expected).abs() < 1e-9
+    }
+
+    /// One input and one target per record: input `[0,0,0,4]` (right-skewed),
+    /// target `[-1,0,0,1]` (symmetric). Population moments are exact by hand.
+    fn write_skewed_corpus(dir: &Path) {
+        write_bin(
+            dir,
+            "0.bin",
+            &[
+                0.0, -1.0, //
+                0.0, 0.0, //
+                0.0, 0.0, //
+                4.0, 1.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn skewness_and_kurtosis_are_collected() {
+        let dir = tempdir().unwrap();
+        write_skewed_corpus(dir.path());
+        let config = TrainingDataConfig::new(1, 1);
+        let stats = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
+
+        // input [0,0,0,4]: m2 = 3, m3 = 6, m4 = 21 ⇒ g1 = 2/√3, g2 = 21/9 − 3.
+        let input = &stats.inputs[0];
+        assert!(
+            (input.skewness - 2.0 / 3.0_f64.sqrt()).abs() < 1e-9,
+            "input skewness {} != 2/√3",
+            input.skewness
+        );
+        assert!(
+            (input.excess_kurtosis - (21.0 / 9.0 - 3.0)).abs() < 1e-9,
+            "input excess kurtosis {} != -2/3",
+            input.excess_kurtosis
+        );
+
+        // target [-1,0,0,1]: symmetric ⇒ g1 = 0; m2 = 0.5, m4 = 0.5 ⇒ g2 = −1.
+        let target = &stats.outputs[0];
+        assert!(
+            target.skewness.abs() < 1e-9,
+            "target skew {}",
+            target.skewness
+        );
+        assert!(
+            (target.excess_kurtosis + 1.0).abs() < 1e-9,
+            "target excess kurtosis {}",
+            target.excess_kurtosis
+        );
+    }
+
+    #[test]
+    fn constant_and_empty_columns_report_zero_moments() {
+        let dir = tempdir().unwrap();
+        // Two records, input constant at 2.0 — zero variance ⇒ undefined shape.
+        write_bin(dir.path(), "0.bin", &[2.0, 1.0, 2.0, 3.0]);
+        let config = TrainingDataConfig::new(1, 1);
+        let stats = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
+        assert_eq!(stats.inputs[0].skewness, 0.0);
+        assert_eq!(stats.inputs[0].excess_kurtosis, 0.0);
+    }
+
+    #[test]
+    fn input_target_covariance_is_derived_from_correlation_and_spread() {
+        let dir = tempdir().unwrap();
+        write_skewed_corpus(dir.path());
+        let config = TrainingDataConfig::new(1, 1);
+        let stats = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
+        // cov([0,0,0,4], [-1,0,0,1]) = ((-1)(-1) + 0 + 0 + (3)(1)) / 4 = 1.
+        let cov = stats.input_target_covariance(0, 0).expect("covariance");
+        assert!((cov - 1.0).abs() < 1e-9, "covariance {cov} != 1");
+        assert!(stats.input_target_covariance(1, 0).is_none());
+        assert!(stats.input_target_covariance(0, 1).is_none());
+    }
+
+    #[test]
+    fn input_covariance_needs_the_input_matrix() {
+        let dir = tempdir().unwrap();
+        write_bin(
+            dir.path(),
+            "0.bin",
+            &[1.0, 2.0, 0.5, 3.0, 4.0, 1.0, 5.0, 6.0, 1.5],
+        );
+        let config = TrainingDataConfig::new(2, 1);
+
+        let lean = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
+        assert!(lean.input_covariance(0, 1).is_none());
+
+        fs::remove_file(statistics_path(dir.path(), StatsMode::Full)).unwrap();
+        let full = ensure_statistics(dir.path(), &config, StatsMode::Full, None, true).unwrap();
+        // inputs [1,3,5] and [2,4,6]: cov = (4 + 0 + 4) / 3 = 8/3; var = 8/3.
+        let cov = full.input_covariance(0, 1).expect("covariance");
+        assert!((cov - 8.0 / 3.0).abs() < 1e-9, "covariance {cov} != 8/3");
+        // Symmetric in its arguments, and the diagonal is the variance.
+        assert_eq!(full.input_covariance(1, 0), full.input_covariance(0, 1));
+        let diag = full.input_covariance(0, 0).expect("diagonal covariance");
+        assert!((diag - full.inputs[0].variance).abs() < 1e-9);
+        assert!(full.input_covariance(0, 2).is_none());
+    }
+
+    #[test]
+    fn a_cache_without_moments_is_stale_rather_than_corrupt() {
+        let dir = tempdir().unwrap();
+        write_skewed_corpus(dir.path());
+        let config = TrainingDataConfig::new(1, 1);
+        let stats = ensure_statistics(dir.path(), &config, StatsMode::Full, None, false).unwrap();
+
+        // Emulate a pre-#73 cache: drop the moment fields and the version bump.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&stats).unwrap()).unwrap();
+        value["algorithmVersion"] = serde_json::Value::String("1.0.0".into());
+        for column in ["inputs", "outputs"] {
+            for entry in value[column].as_array_mut().unwrap() {
+                entry.as_object_mut().unwrap().remove("skewness");
+                entry.as_object_mut().unwrap().remove("excessKurtosis");
+            }
+        }
+        let path = statistics_path(dir.path(), StatsMode::Full);
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        // Parses (missing moments default) but is rejected loudly by version.
+        let old = load_statistics(&path).expect("old cache still parses");
+        assert_eq!(old.inputs[0].skewness, 0.0);
+        let err = validate_statistics(&old, dir.path(), &config, StatsMode::Full, None)
+            .expect_err("pre-#73 cache must be rejected");
+        assert!(
+            matches!(&err, ObservationsError::Stale(reason) if reason.contains("algorithm_version")),
+            "expected a stale algorithm_version error, got {err}"
+        );
     }
 }

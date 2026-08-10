@@ -17,7 +17,7 @@ adventurous, but acceptance is not.
 
 The optimiser described below is **built and running** against production
 GRQ-scale creatures. The whole spine exists — Phase-0 parity gate, observations
-cache, focus selection, backprop learning signals, eight candidate strategies,
+cache, focus selection, backprop learning signals, nine candidate strategies,
 two-phase screen/promote scoring, candidate combos, structural graft memory,
 the experiment journal and the `report` subcommand.
 
@@ -240,13 +240,30 @@ never silently reused.
 
 For every raw input observation, and every target, it records: count; mean;
 variance and standard deviation; minimum and maximum; zero, non-zero and
-non-finite counts; mean absolute value; RMS; and approximate 1/5/25/50/75/95/99%
-quantiles from a capped reservoir sample.
+non-finite counts; mean absolute value; RMS; population skewness and *excess*
+kurtosis; and approximate 1/5/25/50/75/95/99% quantiles from a capped reservoir
+sample.
+
+Skewness (`m3 / m2^1.5`) and excess kurtosis (`m4 / m2² − 3`, so `0` for a
+Gaussian column) come free from the same streaming pass — the Welford
+accumulator carries the third and fourth central moments. Both report `0` for a
+constant or empty column, where distribution shape is undefined. They are
+consumed by the `stats_skew_bias` candidate strategy below; the cache
+`algorithmVersion` is `1.1.0` since they were added, so a pre-`1.1.0` cache is
+rejected as stale and regenerated.
 
 Relationships: observation/target Pearson correlations are always collected. The
 expensive input×input correlation matrix is opt-in via `--compute-correlations`
 (default off, after [#22](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/22)
 removed fields nothing consumed).
+
+**Covariances are derived, never stored.** A covariance is exactly
+`r · σ_a · σ_b` from fields the cache already writes, so storing it would
+duplicate data with nothing extra to say — the same trap #22 cleared. Callers
+that want one use `ObservationsStatistics::input_covariance` (input×input,
+`None` unless `--compute-correlations` ran) or `input_target_covariance`
+(input×target), which apply that identity to the stored correlation and standard
+deviations.
 
 ### Phase G — structural graft memory
 
@@ -325,6 +342,7 @@ below; `--structural-only` restricts it to growth candidates.
 | `mean_error_bias` | Output-focus `bias += mean((target - post) * derivative)`, damped to a tenth and skipped when the neuron is saturated. |
 | `stats_weight` | Weight nudge on the best incoming source, direction from its correlation with the error, magnitude scaled by the source's standard deviation. |
 | `stats_bias` | Bias step scaled by the measured pre-activation spread, pushed away from saturation. |
+| `stats_skew_bias` | Output-focus bias stepped a quarter of the way from the target's mean towards its median when `\|skewness\| ≥ 0.25`, damped by the target's excess kurtosis and skipped when the neuron is saturated. |
 | `structural_add` | New upstream synapse from a residual-ranked unused source, weight from a fraction of the residual OLS coefficient. |
 | `structural_add_neuron` | New hidden neuron bridging top residual sources into the focus, squash chosen from the residual sign and observation scale; falls back to splitting the strongest incoming synapse. |
 | `structural_weaken` | Halves the weight of the smallest-magnitude incoming synapse. |
@@ -533,7 +551,6 @@ to answer the rest are tracked in
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
 | [#70](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/70) | The journal omits the focus neuron's squash, incoming count, statistics and blame. |
 | [#72](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/72) | No maximum-experiment-count stopping rule and no graceful cancellation. |
-| [#73](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/73) | `observations.statistics` has no skewness/kurtosis or covariances. |
 | [#74](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/74) | `report` does not attribute combo or graft wins to a strategy. |
 | [#75](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/75) | The follow-up economics experiments recommended by the #8 baseline are unrun. |
 

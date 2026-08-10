@@ -44,6 +44,19 @@ fn section<'a>(readme: &'a str, heading: &str) -> &'a str {
     }
 }
 
+/// Text of the README subsection introduced by `heading`, up to the next `### `.
+fn subsection<'a>(readme: &'a str, heading: &str) -> &'a str {
+    let start = readme
+        .find(heading)
+        .unwrap_or_else(|| panic!("README.md has no `{heading}` subsection"))
+        + heading.len();
+    let rest = &readme[start..];
+    match rest.find("\n### ") {
+        Some(end) => &rest[..end],
+        None => rest,
+    }
+}
+
 fn readme_text() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../README.md");
     std::fs::read_to_string(&path)
@@ -168,6 +181,57 @@ fn outstanding_work_no_longer_lists_the_core_principle_diagram() {
     );
 }
 
+/// Phase 1 writes distribution shape, so the README must say so (#73).
+#[test]
+fn phase_one_documents_the_distribution_moments() {
+    let readme = readme_text();
+    let phase_one = subsection(&readme, "\n### Phase 1").to_lowercase();
+    for phrase in ["skewness", "kurtosis"] {
+        assert!(
+            phase_one.contains(phrase),
+            "Phase 1 does not document {phrase:?}, which the cache now records"
+        );
+    }
+}
+
+/// Covariance is derived from the stored correlation, not written to disk (#73).
+#[test]
+fn phase_one_documents_covariance_as_derived() {
+    let readme = readme_text();
+    let phase_one = subsection(&readme, "\n### Phase 1");
+    assert!(
+        phase_one.contains("input_target_covariance") && phase_one.contains("input_covariance"),
+        "Phase 1 does not name the derived covariance accessors"
+    );
+    let lowered = phase_one.to_lowercase();
+    assert!(
+        lowered.contains("derived"),
+        "Phase 1 does not say covariances are derived rather than stored"
+    );
+}
+
+/// The moments have a consumer, so its journal tag must be documented (#73).
+#[test]
+fn candidate_table_documents_the_skew_bias_strategy() {
+    let readme = readme_text();
+    let phase_four = subsection(&readme, "\n### Phase 4");
+    assert!(
+        phase_four.contains("stats_skew_bias"),
+        "Phase 4 candidate table omits the `stats_skew_bias` strategy"
+    );
+}
+
+/// The gap this issue records is closed, so it must no longer be listed as outstanding.
+#[test]
+fn outstanding_work_no_longer_lists_the_observation_moments() {
+    let readme = readme_text();
+    let outstanding = section(&readme, "\n## Outstanding work");
+    assert!(
+        !outstanding.contains("/issues/73"),
+        "Outstanding work still lists issue #73 after the moments were added"
+    );
+}
+
 #[test]
 fn section_returns_only_the_requested_section() {
     let readme = "# T\n\n## A\n\nalpha\n\n## B\n\nbeta\n";
@@ -180,6 +244,20 @@ fn section_returns_only_the_requested_section() {
 #[should_panic(expected = "no `\n## Missing` section")]
 fn section_panics_on_a_missing_heading() {
     section("## A\n\nalpha\n", "\n## Missing");
+}
+
+#[test]
+fn subsection_returns_only_the_requested_subsection() {
+    let readme = "## Top\n\n### A\n\nalpha\n\n### B\n\nbeta\n";
+    assert!(subsection(readme, "\n### A").contains("alpha"));
+    assert!(!subsection(readme, "\n### A").contains("beta"));
+    assert!(subsection(readme, "\n### B").contains("beta"));
+}
+
+#[test]
+#[should_panic(expected = "no `\n### Missing` subsection")]
+fn subsection_panics_on_a_missing_heading() {
+    subsection("### A\n\nalpha\n", "\n### Missing");
 }
 
 #[test]

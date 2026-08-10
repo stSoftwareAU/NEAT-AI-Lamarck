@@ -189,6 +189,7 @@ fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
         CandidateStrategy::MeanErrorBias => ("📏", "mean_error_bias"),
         CandidateStrategy::StatsWeight => ("📊", "stats_weight"),
         CandidateStrategy::StatsBias => ("📐", "stats_bias"),
+        CandidateStrategy::StatsSkewBias => ("📉", "stats_skew_bias"),
         CandidateStrategy::StructuralAdd => ("🌱", "structural_add"),
         CandidateStrategy::StructuralAddNeuron => ("🧩", "structural_add_neuron"),
         CandidateStrategy::StructuralWeaken => ("✂️", "structural_weaken"),

@@ -968,6 +968,8 @@ mod tests {
                     non_finite_count: 0,
                     mean_abs: 0.5,
                     rms: 1.0,
+                    skewness: 0.0,
+                    excess_kurtosis: 0.0,
                     quantiles: [0.0; 7],
                 },
                 crate::observations::ScalarStats {
@@ -982,6 +984,8 @@ mod tests {
                     non_finite_count: 0,
                     mean_abs: 0.5,
                     rms: 1.0,
+                    skewness: 0.0,
+                    excess_kurtosis: 0.0,
                     quantiles: [0.0; 7],
                 },
             ],
@@ -1112,6 +1116,8 @@ mod tests {
             non_finite_count: 0,
             mean_abs: max.abs().max(min.abs()),
             rms: max.abs().max(min.abs()),
+            skewness: 0.0,
+            excess_kurtosis: 0.0,
             quantiles: [0.0; 7],
         }
     }
