@@ -174,7 +174,7 @@ Leaving these unset changes behaviour.
 
 | Flag | Effect when set |
 |------|-----------------|
-| `--seed` | Deterministic RNG seed. Unset means the run cannot be replayed (see [#71](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/71)). |
+| `--seed` | Deterministic RNG seed. When unset a seed is drawn from OS entropy and recorded in the journal `runHeader`, so the run stays replayable. |
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
@@ -188,6 +188,7 @@ Leaving these unset changes behaviour.
 
 ```mermaid
 flowchart TD
+    SEED[Seed: use --seed or draw one; write runHeader to experiments.jsonl] --> P0
     P0[Phase 0: scorer baseline + parity gate] --> OBS[Phase 1: observations.statistics cache]
     OBS --> G[Phase G: replay stored structural grafts]
     G --> LOOP{wall-clock budget left?}
@@ -419,13 +420,27 @@ never modified: `best.json` starts as a verbatim copy of it.
 
 ## Experiment journal
 
-`experiments.jsonl` is one JSON object per experiment, and is part of the
-experiment rather than debug logging. Each record carries:
+`experiments.jsonl` is one JSON object per line, and is part of the experiment
+rather than debug logging.
+
+The **first line of each run** is a `runHeader` record carrying the
+reproducibility contract (issue #71) — everything needed to replay the run:
+
+| Field | Meaning |
+|-------|---------|
+| `record` | Always `runHeader`; absent on experiment records. |
+| `timestampUnix` | Run start. |
+| `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
+| `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
+| `version` | Lamarck version that wrote the journal. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`. |
+
+Every following line is one experiment:
 
 | Field | Meaning |
 |-------|---------|
 | `experimentNumber`, `timestampUnix` | Sequence and wall-clock position. |
-| `seed` | Run seed, when `--seed` was supplied. |
+| `seed` | Effective run seed (matches the header). |
 | `incumbentId` | Incumbent shape identity (`in…-out…-n…-s…`). |
 | `baselineScore` | Authoritative baseline for this experiment. |
 | `focusNeuron` | Selected neuron UUID. |
@@ -462,17 +477,25 @@ These rules are non-negotiable:
 
 ## Reproducibility
 
-All Lamarck-controlled randomness comes from the `--seed` value: the main RNG is
-seeded from it, and the per-experiment backprop RNG is derived from it
-deterministically. Given an identical starting creature, training data,
-`observations.statistics`, configuration, software version and seed, candidate
-generation repeats.
+All Lamarck-controlled randomness comes from one **effective seed**: the main
+RNG is seeded from it, and the per-experiment backprop RNG is derived from it
+deterministically. When `--seed` is omitted the effective seed is drawn from OS
+entropy, logged (`seed … (drawn from OS entropy; replay this run with --seed …)`)
+and recorded, so every run is replayable.
 
-Two caveats apply today. Without `--seed` the RNG is drawn from OS entropy and
-the drawn value is not recorded, so the run cannot be replayed; and because the
-experiment count is wall-clock bounded, a differently timed rerun may not
-produce the same number of experiments. Both are tracked in
-[#71](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/71).
+The effective seed and the run configuration are written as the first line of
+`experiments.jsonl` — the `runHeader` record described in
+[Experiment journal](#experiment-journal) — and the effective seed is repeated on
+every experiment record. To replay a run, take `seed` from its header and pass it
+as `--seed` with the same creature, training data and configuration.
+
+The contract: given an identical starting creature, training data,
+`observations.statistics`, configuration, software version and effective seed,
+the RNG stream — and therefore candidate generation — repeats. One caveat
+remains: the experiment count is wall-clock bounded and the screen phase is
+derived from the experiment index, so a differently timed replay may run a
+different number of experiments and reach a different point in that identical
+stream.
 
 ## What we have learnt so far
 
@@ -509,7 +532,6 @@ to answer the rest are tracked in
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
 | [#70](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/70) | The journal omits the focus neuron's squash, incoming count, statistics and blame. |
-| [#71](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/71) | A run without `--seed` cannot be replayed, and the run configuration is not journalled. |
 | [#72](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/72) | No maximum-experiment-count stopping rule and no graceful cancellation. |
 | [#73](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/73) | `observations.statistics` has no skewness/kurtosis or covariances. |
 | [#74](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/74) | `report` does not attribute combo or graft wins to a strategy. |

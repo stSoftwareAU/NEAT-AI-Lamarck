@@ -93,6 +93,171 @@ pub struct ExperimentRecord {
     pub combo_dampen: Option<StackDampenReport>,
 }
 
+/// Marks a journal line as the one-off run header (issue #71).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunHeaderKind {
+    /// This line is a run header, not an experiment.
+    RunHeader,
+}
+
+/// Where the effective RNG seed came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SeedSource {
+    /// The seed was supplied by the caller (`--seed`).
+    Supplied,
+    /// The seed was drawn from OS entropy and recorded for replay.
+    Drawn,
+}
+
+/// Run knobs recorded in the journal header so a run can be replayed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunConfigRecord {
+    /// Supplied incumbent creature path.
+    pub creature: PathBuf,
+    /// Training-data directory.
+    pub training_data: PathBuf,
+    /// Scorer binary path.
+    pub scorer_path: PathBuf,
+    /// Wall-clock budget in seconds.
+    pub timeout_seconds: u64,
+    /// Candidates generated per experiment.
+    pub candidates: usize,
+    /// Absolute score delta required for acceptance.
+    pub min_improvement: f64,
+    /// Screen subsample rate (`None` = full-corpus scoring only).
+    pub screen_sample_rate: Option<f64>,
+    /// Minimum sample-score delta to promote to full-corpus scoring.
+    pub screen_promote_threshold: f64,
+    /// Pinned focus neuron UUID when set.
+    pub focus_neuron: Option<String>,
+    /// Focus selection policy label.
+    pub focus_policy: String,
+    /// Observations mode label (`full` / `quick`).
+    pub stats_mode: String,
+    /// Record cap for quick-mode analysis sampling.
+    pub quick_sample_records: u64,
+    /// Whether input×input correlations were computed.
+    pub compute_correlations: bool,
+    /// Whether only structural growth candidates were generated.
+    pub structural_only: bool,
+    /// Whether the Phase-0 parity gate ran.
+    pub phase0_parity: bool,
+    /// Whether rejected candidate directories were kept.
+    pub preserve_losers: bool,
+    /// Consecutive scorer failures tolerated before aborting.
+    pub max_consecutive_scorer_failures: u32,
+    /// Structural graft store path when phase-G was enabled.
+    pub grafts_path: Option<PathBuf>,
+    /// Explicit phase-G replay budget in seconds when set.
+    pub graft_replay_budget_seconds: Option<u64>,
+}
+
+impl RunConfigRecord {
+    /// Capture the reproducible knobs of a [`LamarckConfig`].
+    pub fn from_config(config: &LamarckConfig) -> Self {
+        Self {
+            creature: config.creature.clone(),
+            training_data: config.training_data.clone(),
+            scorer_path: config.scorer_path.clone(),
+            timeout_seconds: config.timeout.as_secs(),
+            candidates: config.candidates,
+            min_improvement: config.min_improvement,
+            screen_sample_rate: config.screen_sample_rate,
+            screen_promote_threshold: config.screen_promote_threshold,
+            focus_neuron: config.focus_neuron.clone(),
+            focus_policy: config.focus_policy.label().to_string(),
+            stats_mode: config.stats_mode.label().to_string(),
+            quick_sample_records: config.quick_sample_records,
+            compute_correlations: config.compute_correlations,
+            structural_only: config.structural_only,
+            phase0_parity: config.phase0_parity,
+            preserve_losers: config.preserve_losers,
+            max_consecutive_scorer_failures: config.max_consecutive_scorer_failures,
+            grafts_path: config.grafts_path.clone(),
+            graft_replay_budget_seconds: config.graft_replay_budget.map(|d| d.as_secs()),
+        }
+    }
+}
+
+/// One-off header line written to `experiments.jsonl` at the start of a run.
+///
+/// The header pins the reproducibility contract: the effective seed (drawn from
+/// OS entropy when `--seed` was omitted) plus the run configuration. Replaying
+/// with the recorded seed reproduces the RNG stream; because the experiment
+/// count is wall-clock bounded and the screen phase is derived from the
+/// experiment index, a differently timed replay may still run a different number
+/// of experiments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunHeaderRecord {
+    /// Discriminates this line from an [`ExperimentRecord`].
+    pub record: RunHeaderKind,
+    /// Unix timestamp at run start.
+    pub timestamp_unix: u64,
+    /// Effective RNG seed for the run.
+    pub seed: u64,
+    /// Whether the seed was supplied or drawn.
+    pub seed_source: SeedSource,
+    /// Lamarck version that wrote the journal.
+    pub version: String,
+    /// Run configuration knobs.
+    pub config: RunConfigRecord,
+}
+
+impl RunHeaderRecord {
+    /// Build a header for the effective seed and captured configuration.
+    pub fn new(
+        seed: u64,
+        seed_source: SeedSource,
+        config: RunConfigRecord,
+        timestamp_unix: u64,
+    ) -> Self {
+        Self {
+            record: RunHeaderKind::RunHeader,
+            timestamp_unix,
+            seed,
+            seed_source,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            config,
+        }
+    }
+}
+
+/// One line of `experiments.jsonl`: the run header or an experiment record.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum JournalLine {
+    /// Run header written once at the start of a run.
+    Header(Box<RunHeaderRecord>),
+    /// One experiment outcome.
+    Experiment(Box<ExperimentRecord>),
+}
+
+impl JournalLine {
+    /// Parse one journal line, dispatching on the `record` discriminator.
+    ///
+    /// A line that is neither a valid header nor a valid experiment is an
+    /// error — a malformed journal must never be read as an empty run.
+    pub fn parse(line: &str) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct Probe {
+            #[serde(default)]
+            record: Option<RunHeaderKind>,
+        }
+        let probe: Probe = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        if probe.record.is_some() {
+            let header = serde_json::from_str(line).map_err(|e| e.to_string())?;
+            Ok(Self::Header(Box::new(header)))
+        } else {
+            let record = serde_json::from_str(line).map_err(|e| e.to_string())?;
+            Ok(Self::Experiment(Box::new(record)))
+        }
+    }
+}
+
 /// Result of a completed Lamarck run.
 #[derive(Debug)]
 pub struct RunResult {
@@ -112,6 +277,8 @@ pub struct RunResult {
     pub scorer_successes: u64,
     /// Opening Phase-0 baseline score when recorded.
     pub opening_baseline_score: Option<f64>,
+    /// Effective RNG seed used by the run (drawn when `--seed` was omitted).
+    pub seed: u64,
 }
 
 /// Run the Lamarck optimisation loop until the wall-clock budget expires.
@@ -123,6 +290,28 @@ pub fn run_optimisation(
     let journal_path = config.output_dir.join("experiments.jsonl");
     let best_path = config.output_dir.join("best.json");
     let winners_dir = config.output_dir.join("winners");
+
+    // Draw an explicit seed when none was supplied so the run is replayable
+    // (issue #71) — an unrecorded OS-entropy seed cannot be replayed.
+    let (seed, seed_source) = match config.seed {
+        Some(seed) => (seed, SeedSource::Supplied),
+        None => (rand::random::<u64>(), SeedSource::Drawn),
+    };
+    match seed_source {
+        SeedSource::Supplied => log::info(&format!("seed {seed} (supplied)")),
+        SeedSource::Drawn => log::info(&format!(
+            "seed {seed} (drawn from OS entropy; replay this run with --seed {seed})"
+        )),
+    }
+    append_journal_line(
+        &journal_path,
+        &RunHeaderRecord::new(
+            seed,
+            seed_source,
+            RunConfigRecord::from_config(config),
+            unix_now(),
+        ),
+    )?;
 
     let original_text = fs::read_to_string(&config.creature).map_err(|e| e.to_string())?;
     let mut incumbent = parse_creature_json(&original_text).map_err(|e| e.to_string())?;
@@ -200,10 +389,7 @@ pub fn run_optimisation(
         }
     }
 
-    let mut rng = match config.seed {
-        Some(seed) => StdRng::seed_from_u64(seed),
-        None => StdRng::from_os_rng(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed);
     let mut random_focus = RandomFocusSelector;
     let mut unsaturated_focus = UnsaturatedFocusSelector;
     let mut high_error_focus = HighErrorFocusSelector;
@@ -358,10 +544,7 @@ pub fn run_optimisation(
         log::detail("accumulating creature learning signal (propagate_topological_loop)...");
         let learn_start = Instant::now();
         let mut learn_rng = StdRng::seed_from_u64(
-            config
-                .seed
-                .unwrap_or(0)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
                 .wrapping_add(experiments),
         );
         let learning = accumulate_creature_learning(
@@ -629,7 +812,7 @@ pub fn run_optimisation(
                         &ExperimentRecord {
                             experiment_number: experiments,
                             timestamp_unix: unix_now(),
-                            seed: config.seed,
+                            seed: Some(seed),
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
                             focus_neuron: focus,
@@ -693,7 +876,7 @@ pub fn run_optimisation(
                     &ExperimentRecord {
                         experiment_number: experiments,
                         timestamp_unix: unix_now(),
-                        seed: config.seed,
+                        seed: Some(seed),
                         incumbent_id: incumbent_id(&incumbent),
                         baseline_score: screen_scores
                             .get("baseline")
@@ -759,7 +942,7 @@ pub fn run_optimisation(
                         &ExperimentRecord {
                             experiment_number: experiments,
                             timestamp_unix: unix_now(),
-                            seed: config.seed,
+                            seed: Some(seed),
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
                             focus_neuron: focus,
@@ -820,7 +1003,7 @@ pub fn run_optimisation(
                         &ExperimentRecord {
                             experiment_number: experiments,
                             timestamp_unix: unix_now(),
-                            seed: config.seed,
+                            seed: Some(seed),
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
                             focus_neuron: focus,
@@ -1044,7 +1227,7 @@ pub fn run_optimisation(
             &ExperimentRecord {
                 experiment_number: experiments,
                 timestamp_unix: unix_now(),
-                seed: config.seed,
+                seed: Some(seed),
                 incumbent_id: incumbent_id(&incumbent),
                 baseline_score: baseline.score,
                 focus_neuron: focus,
@@ -1123,6 +1306,7 @@ pub fn run_optimisation(
         scorer_failures,
         scorer_successes,
         opening_baseline_score,
+        seed,
     })
 }
 
@@ -1154,13 +1338,18 @@ fn unix_now() -> u64 {
 }
 
 fn append_journal(path: &Path, record: &ExperimentRecord) -> Result<(), String> {
+    append_journal_line(path, record)
+}
+
+/// Append one serialisable journal line (header or experiment) to the journal.
+fn append_journal_line(path: &Path, line: &impl Serialize) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    let line = serde_json::to_string(record).map_err(|e| e.to_string())?;
-    writeln!(file, "{line}").map_err(|e| e.to_string())?;
+    let encoded = serde_json::to_string(line).map_err(|e| e.to_string())?;
+    writeln!(file, "{encoded}").map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1323,8 +1512,11 @@ mod tests {
         assert!(result.best_path.is_file());
         assert!(result.experiments >= 1);
         assert!(result.scorer_successes >= 1);
-        let journal = fs::read_to_string(result.journal_path).unwrap();
-        assert!(journal.lines().next().unwrap().contains("experimentNumber"));
+        let journal = fs::read_to_string(&result.journal_path).unwrap();
+        let mut lines = journal.lines();
+        // Line 1 is the run header (issue #71); experiments follow.
+        assert!(lines.next().unwrap().contains("\"record\":\"runHeader\""));
+        assert!(lines.next().unwrap().contains("experimentNumber"));
         if result.acceptances > 0 {
             let best = fs::read_to_string(&result.best_path).unwrap();
             let value: serde_json::Value = serde_json::from_str(&best).unwrap();
@@ -1423,9 +1615,14 @@ mod tests {
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
         assert_eq!(result.acceptances, 0);
-        let journal = fs::read_to_string(result.journal_path).unwrap();
-        let first: ExperimentRecord =
-            serde_json::from_str(journal.lines().next().unwrap()).unwrap();
+        // Skip the run header (issue #71) — the first experiment follows it.
+        let first = journal_lines(&result.journal_path)
+            .into_iter()
+            .find_map(|l| match l {
+                JournalLine::Experiment(record) => Some(*record),
+                JournalLine::Header(_) => None,
+            })
+            .expect("at least one experiment");
         assert!(first.screen_scores.is_some());
         assert!(first.scores.is_empty());
         assert!(!first.accepted);
@@ -1552,6 +1749,174 @@ mod tests {
         assert!(
             stored.get("edge:input-1->h1").is_some(),
             "helpful graft remains in store"
+        );
+    }
+
+    fn reproducibility_config(creature: PathBuf, training: PathBuf, out: PathBuf) -> LamarckConfig {
+        LamarckConfig {
+            creature,
+            training_data: training,
+            timeout: Duration::from_millis(400),
+            candidates: 4,
+            min_improvement: 1e-6,
+            seed: None,
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir: out,
+            preserve_losers: false,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            phase0_parity: false,
+            structural_only: false,
+            screen_sample_rate: None,
+            screen_promote_threshold: 0.0,
+            grafts_path: None,
+            graft_replay_budget: None,
+        }
+    }
+
+    fn journal_lines(path: &Path) -> Vec<JournalLine> {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| JournalLine::parse(l).expect("journal line parses"))
+            .collect()
+    }
+
+    /// Issue #71: an unseeded run must draw, log and record an effective seed.
+    #[test]
+    fn unseeded_run_records_effective_seed() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let config = reproducibility_config(creature_path, training, dir.path().join("out"));
+        let scorer = ScriptedScorer {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let result = run_optimisation(&config, &scorer).unwrap();
+
+        let lines = journal_lines(&result.journal_path);
+        let JournalLine::Header(header) = &lines[0] else {
+            panic!("first journal line must be the run header");
+        };
+        assert_eq!(
+            header.seed, result.seed,
+            "header seed is the effective seed"
+        );
+        assert_eq!(header.seed_source, SeedSource::Drawn);
+        let experiments: Vec<&ExperimentRecord> = lines
+            .iter()
+            .filter_map(|l| match l {
+                JournalLine::Experiment(record) => Some(record.as_ref()),
+                JournalLine::Header(_) => None,
+            })
+            .collect();
+        assert!(!experiments.is_empty(), "run wrote at least one experiment");
+        for record in experiments {
+            assert_eq!(
+                record.seed,
+                Some(result.seed),
+                "every record carries the effective seed"
+            );
+        }
+    }
+
+    /// Issue #71: the run header carries the knobs needed to replay the run.
+    #[test]
+    fn run_header_records_run_configuration() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut config = reproducibility_config(
+            creature_path.clone(),
+            training.clone(),
+            dir.path().join("out"),
+        );
+        config.seed = Some(7);
+        config.structural_only = true;
+        config.screen_sample_rate = Some(0.25);
+        config.screen_promote_threshold = 1e-7;
+        let scorer = ScriptedScorer {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let result = run_optimisation(&config, &scorer).unwrap();
+
+        let lines = journal_lines(&result.journal_path);
+        let JournalLine::Header(header) = &lines[0] else {
+            panic!("first journal line must be the run header");
+        };
+        assert_eq!(header.seed, 7);
+        assert_eq!(header.seed_source, SeedSource::Supplied);
+        assert_eq!(header.version, env!("CARGO_PKG_VERSION"));
+        let cfg = &header.config;
+        assert_eq!(cfg.creature, creature_path);
+        assert_eq!(cfg.training_data, training);
+        assert_eq!(cfg.timeout_seconds, config.timeout.as_secs());
+        assert_eq!(cfg.candidates, 4);
+        assert_eq!(cfg.min_improvement, 1e-6);
+        assert_eq!(cfg.screen_sample_rate, Some(0.25));
+        assert_eq!(cfg.screen_promote_threshold, 1e-7);
+        assert_eq!(cfg.focus_neuron.as_deref(), Some("o1"));
+        assert_eq!(cfg.focus_policy, "random");
+        assert_eq!(cfg.stats_mode, "quick");
+        assert_eq!(cfg.quick_sample_records, 8);
+        assert!(cfg.structural_only);
+        assert!(!cfg.phase0_parity);
+        assert_eq!(cfg.grafts_path, None);
+        assert_eq!(cfg.max_consecutive_scorer_failures, 3);
+
+        // The header must survive a round-trip through the journal encoding.
+        let encoded = serde_json::to_string(header.as_ref()).unwrap();
+        assert!(encoded.contains("\"record\":\"runHeader\""));
+    }
+
+    /// Issue #71: replaying the recorded seed reproduces the candidate stream.
+    #[test]
+    fn recorded_seed_replays_the_candidate_stream() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let first_config = reproducibility_config(
+            creature_path.clone(),
+            training.clone(),
+            dir.path().join("out-1"),
+        );
+        let first = run_optimisation(
+            &first_config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+
+        let mut replay_config =
+            reproducibility_config(creature_path, training, dir.path().join("out-2"));
+        replay_config.seed = Some(first.seed);
+        let replay = run_optimisation(
+            &replay_config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+
+        let first_experiment = |result: &RunResult| -> ExperimentRecord {
+            journal_lines(&result.journal_path)
+                .into_iter()
+                .find_map(|l| match l {
+                    JournalLine::Experiment(record) => Some(*record),
+                    JournalLine::Header(_) => None,
+                })
+                .expect("at least one experiment")
+        };
+        let a = first_experiment(&first);
+        let b = first_experiment(&replay);
+        assert_eq!(a.focus_neuron, b.focus_neuron);
+        assert_eq!(
+            serde_json::to_string(&a.candidates).unwrap(),
+            serde_json::to_string(&b.candidates).unwrap(),
+            "same seed must regenerate the same candidate stream"
         );
     }
 
