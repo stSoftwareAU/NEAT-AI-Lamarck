@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **README read as a project plan rather than the built system (Issue #40).**
+  Rewritten in the present tense against the code: status section, full CLI flag
+  tables (including the previously undocumented `--preserve-losers`,
+  `--screen-promote-threshold`, `--grafts-path` and
+  `--graft-replay-budget-seconds`), Phase-G graft memory, the eight candidate
+  strategies with their journal tags, combo scoring, the journal fields actually
+  written, and the real outputs. Gaps between the old spec and the code are now
+  an **Outstanding work** table pointing at Issues #39, #69, #70-#75. New
+  `lamarck/tests/readme_contract.rs` fails the build if README and `--help`
+  drift apart again.
+
 - **README input list called the scorer optional (Issue #37).** The scorer
   binary is mandatory — only the `--scorer` path override has a default
   (`rust_scorer` on `PATH`). The **Inputs** section now separates required
