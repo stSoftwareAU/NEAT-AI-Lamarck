@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod backprop;
+pub mod cancel;
 pub mod candidates;
 pub mod combos;
 pub mod config;
@@ -23,6 +24,7 @@ pub mod structural;
 pub mod tags;
 
 pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
+pub use cancel::CancelToken;
 pub use combos::{
     ComboSelectRequest, ComboSelection, Improver, MAX_COMBO_CANDIDATES, STACK_DAMPEN_EXPONENT,
     StackDampenReport, StackDampenTarget, collect_improvers, combination_index_sets,
@@ -49,7 +51,7 @@ pub use report::{
 };
 pub use run::{
     ExperimentRecord, JournalLine, RunConfigRecord, RunHeaderKind, RunHeaderRecord, RunResult,
-    SeedSource, run_optimisation,
+    SeedSource, StopReason, run_optimisation, run_optimisation_cancellable,
 };
 pub use scorer::{
     ExternalScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats,
