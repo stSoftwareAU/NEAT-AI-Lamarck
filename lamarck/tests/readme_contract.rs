@@ -31,6 +31,19 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--workspace",
 ];
 
+/// Text of the README section introduced by `heading`, up to the next `## `.
+fn section<'a>(readme: &'a str, heading: &str) -> &'a str {
+    let start = readme
+        .find(heading)
+        .unwrap_or_else(|| panic!("README.md has no `{heading}` section"))
+        + heading.len();
+    let rest = &readme[start..];
+    match rest.find("\n## ") {
+        Some(end) => &rest[..end],
+        None => rest,
+    }
+}
+
 fn readme_text() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../README.md");
     std::fs::read_to_string(&path)
@@ -110,6 +123,63 @@ fn readme_documents_the_report_subcommand() {
         readme.contains("neat_ai_lamarck report"),
         "README.md does not document the `report` subcommand"
     );
+}
+
+/// The core-principle diagram must show the two-phase screen/promote scoring the
+/// optimiser actually runs, not the single scoring step it started with (#39).
+#[test]
+fn core_principle_diagram_shows_two_phase_screening() {
+    let readme = readme_text();
+    let core = section(&readme, "\n## Core principle").to_lowercase();
+    for phrase in ["screen", "subsample", "full corpus"] {
+        assert!(
+            core.contains(phrase),
+            "core-principle diagram omits {phrase:?} — the screening phase is undocumented"
+        );
+    }
+    let screen = core.find("screen").expect("screen phrase located above");
+    let full = core.find("full corpus").expect("full corpus located above");
+    assert!(
+        screen < full,
+        "core-principle diagram must screen on a subsample before full-corpus scoring"
+    );
+}
+
+/// Screening exists to skip full-corpus scoring for candidates the sample rejects,
+/// so the diagram has to show that branch rather than scoring everything.
+#[test]
+fn core_principle_diagram_shows_screened_out_candidates_are_dropped() {
+    let readme = readme_text();
+    let core = section(&readme, "\n## Core principle").to_lowercase();
+    assert!(
+        core.contains("dropped") || core.contains("discard"),
+        "core-principle diagram does not show candidates failing the screen being dropped"
+    );
+}
+
+/// The gap this issue records is closed, so it must no longer be listed as outstanding.
+#[test]
+fn outstanding_work_no_longer_lists_the_core_principle_diagram() {
+    let readme = readme_text();
+    let outstanding = section(&readme, "\n## Outstanding work");
+    assert!(
+        !outstanding.contains("/issues/39"),
+        "Outstanding work still lists issue #39 after the diagram was updated"
+    );
+}
+
+#[test]
+fn section_returns_only_the_requested_section() {
+    let readme = "# T\n\n## A\n\nalpha\n\n## B\n\nbeta\n";
+    assert!(section(readme, "\n## A").contains("alpha"));
+    assert!(!section(readme, "\n## A").contains("beta"));
+    assert!(section(readme, "\n## B").contains("beta"));
+}
+
+#[test]
+#[should_panic(expected = "no `\n## Missing` section")]
+fn section_panics_on_a_missing_heading() {
+    section("## A\n\nalpha\n", "\n## Missing");
 }
 
 #[test]
