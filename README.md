@@ -322,6 +322,31 @@ the result into an analyse-without-apply `LearningSignal`.
 A hidden neuron has no natural target — blame comes from the propagated learning
 signal, never an invented `expected_hidden - actual_hidden`.
 
+#### Aggregate neurons (MINIMUM / MAXIMUM / IF)
+
+neat-core's reverse-topological loop hands aggregate squashes back as
+`PropagateOutcome::Special` and stops there — the TypeScript trainer runs a
+per-squash custom `propagate` instead. Lamarck's equivalent is to linearise the
+aggregate for each record: the neuron is presented to the loop as an `IDENTITY`
+sum over exactly the links that produced that record's activation (issue #83).
+
+```mermaid
+flowchart LR
+    subgraph record["per training record"]
+        A["aggregate neuron<br/>MINIMUM / MAXIMUM / IF"] --> B{"select carrying links"}
+        B -->|MIN / MAX| C["single winning link"]
+        B -->|IF| D["taken branch links<br/>(condition gates, never carries)"]
+        C --> E["present as IDENTITY sum<br/>over the selection"]
+        D --> E
+        E --> F["neat-core standard path:<br/>bias + weight deltas, error upstream"]
+    end
+```
+
+Without this, an aggregate output ends the reverse-topo walk before anything is
+accumulated: on the production GRQ creature (`MINIMUM` output) the whole
+learning signal was empty — 0 of 1600 neurons and 0 of 21 889 synapses carried
+any blame.
+
 Parity fixtures live under `lamarck/tests/fixtures/backprop/` (tolerances about
 `1e-9`–`1e-6`). Regenerate goldens:
 
@@ -341,7 +366,7 @@ below; `--structural-only` restricts it to growth candidates.
 
 | Journal tag | What it proposes |
 |-------------|------------------|
-| `backprop` | Bias, or the strongest incoming weight, stepped by the accumulated learning signal (absolute weight delta capped at `0.01`). |
+| `backprop` | Bias, or the strongest incoming weight, stepped by the accumulated learning signal (absolute weight delta capped at `0.01`). Skipped entirely when no blame reached the focus — the batch slot goes to a strategy that can clear `--min-improvement` (issue #83). |
 | `mean_error_bias` | Output-focus `bias += mean((target - post) * derivative)`, damped to a tenth and skipped when the neuron is saturated. |
 | `stats_weight` | Weight nudge on the best incoming source, direction from its correlation with the error, magnitude scaled by the source's standard deviation. |
 | `stats_bias` | Bias step scaled by the measured pre-activation spread, pushed away from saturation. |
