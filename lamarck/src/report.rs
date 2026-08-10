@@ -2,7 +2,7 @@
 
 use crate::candidates::CandidateStrategy;
 use crate::log;
-use crate::run::{ExperimentRecord, RunResult};
+use crate::run::{JournalLine, RunResult};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -145,7 +145,11 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         if line.trim().is_empty() {
             continue;
         }
-        let record: ExperimentRecord = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        // The run header (issue #71) is run metadata, not an experiment.
+        let record = match JournalLine::parse(&line)? {
+            JournalLine::Header(_) => continue,
+            JournalLine::Experiment(record) => *record,
+        };
         experiments += 1;
         total_analysis_ms += record.analysis_ms;
         total_scorer_ms += record.scorer_ms;
@@ -362,6 +366,10 @@ pub fn print_run_summary(result: &RunResult) {
         "experiments:  {}  (accepted {}  scorer_ok {}  scorer_fail {})",
         result.experiments, result.acceptances, result.scorer_successes, result.scorer_failures
     ));
+    log::detail(&format!(
+        "seed:          {}  (replay with --seed {})",
+        result.seed, result.seed
+    ));
 
     if let Ok(report) = report_from_journal(&result.journal_path) {
         let open = result
@@ -469,6 +477,7 @@ pub fn print_run_summary(result: &RunResult) {
 mod tests {
     use super::*;
     use crate::candidates::CandidateProvenance;
+    use crate::run::ExperimentRecord;
     use std::collections::BTreeMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -481,6 +490,45 @@ mod tests {
             old_value: Some(0.0),
             new_value: Some(0.1),
         }
+    }
+
+    /// Issue #71: the run-header line is metadata, not an experiment.
+    #[test]
+    fn report_skips_the_run_header_line() {
+        use crate::run::{RunConfigRecord, RunHeaderRecord, SeedSource};
+
+        let mut file = NamedTempFile::new().unwrap();
+        let header = RunHeaderRecord::new(
+            42,
+            SeedSource::Drawn,
+            RunConfigRecord::from_config(&crate::config::LamarckConfig::default()),
+            1000,
+        );
+        let experiment = ExperimentRecord {
+            experiment_number: 1,
+            timestamp_unix: 1000,
+            seed: Some(42),
+            incumbent_id: "x".into(),
+            baseline_score: 0.4,
+            focus_neuron: "h1".into(),
+            candidates: vec![prov(CandidateStrategy::Random)],
+            scores: BTreeMap::new(),
+            screen_scores: None,
+            winner: None,
+            improvement: None,
+            accepted: false,
+            analysis_ms: 1,
+            scorer_ms: 2,
+            scorer_error: None,
+            combo_members: None,
+            combos_scored: None,
+            combos_dampened: None,
+            combo_dampen: None,
+        };
+        writeln!(file, "{}", serde_json::to_string(&header).unwrap()).unwrap();
+        writeln!(file, "{}", serde_json::to_string(&experiment).unwrap()).unwrap();
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.experiments, 1, "header must not count as experiment");
     }
 
     #[test]

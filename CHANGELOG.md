@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Effective seed and run configuration are journalled (Issue #71).** When
+  `--seed` is omitted Lamarck now draws an explicit `u64` seed, logs it
+  (`replay this run with --seed …`) and uses it for both the main and
+  per-experiment backprop RNGs, so an unseeded run is replayable. Every run
+  writes a one-off `runHeader` line to `experiments.jsonl` carrying the effective
+  seed, its source (`supplied` / `drawn`), the Lamarck version and the run knobs
+  (candidate count, minimum improvement, screen rate/threshold, focus policy and
+  pinned neuron, stats mode and quick sample size, `structuralOnly`, grafts path,
+  creature and training-data paths). Experiment records now carry the effective
+  seed instead of `null`. `report` skips the header line.
+
 ### Fixed
 
 - **README read as a project plan rather than the built system (Issue #40).**
