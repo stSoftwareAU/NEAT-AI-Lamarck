@@ -173,7 +173,14 @@ pub struct JournalReport {
     pub acceptances: u64,
     /// Scorer batch failures recorded in the journal.
     pub scorer_failures: u64,
-    /// First experiment baseline score (opening incumbent).
+    /// Opening incumbent score, anchored on a **full-corpus** baseline (#84).
+    ///
+    /// This is the `scores.baseline` of the first experiment that actually
+    /// promoted to full-corpus scoring — the same number Phase-0 measured when
+    /// it ran, because the incumbent cannot change before the first acceptance.
+    /// It is `None` until such an experiment exists: an experiment whose
+    /// candidate batch screened empty only ever recorded a subsample baseline,
+    /// which is not comparable with an authoritative score.
     pub opening_baseline_score: Option<f64>,
     /// Time to first acceptance (sum of analysis+scorer ms until first accept).
     pub time_to_first_acceptance_ms: Option<u128>,
@@ -195,7 +202,8 @@ pub struct JournalReport {
     pub candidates_per_wall_minute: Option<f64>,
     /// Analysis share of (analysis+scorer) time.
     pub analysis_time_fraction: f64,
-    /// Absolute score improvement from first baseline to last accepted.
+    /// Absolute improvement from [`Self::opening_baseline_score`] to the last
+    /// accepted score; `None` until both anchors are full-corpus scores (#84).
     pub total_score_improvement: Option<f64>,
     /// Relative improvement `total / opening` when opening > 0.
     pub relative_score_improvement: Option<f64>,
@@ -322,8 +330,16 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
                 screen_candidates_scored += screen.len().saturating_sub(1) as u64;
             }
         }
-        if first_baseline.is_none() {
-            first_baseline = Some(record.baseline_score);
+        // Anchor the opening baseline on a full-corpus score only (issue #84).
+        // An experiment whose batch screened empty records the subsample
+        // baseline, which swings by ~5e-3 between experiments — thousands of
+        // times the accept threshold — so anchoring on it makes
+        // `totalScoreImprovement` subtract two different quantities and can
+        // report a negative total for a run that only ever improved.
+        if first_baseline.is_none()
+            && let Some(full_corpus_baseline) = record.scores.get("baseline")
+        {
+            first_baseline = Some(*full_corpus_baseline);
         }
 
         improvement_series.push(ImprovementPoint {
@@ -1060,6 +1076,96 @@ mod tests {
     fn report_omits_the_graft_bucket_without_a_replay_line() {
         let file = journal_of(&[experiment(1, false)]);
         assert_eq!(report_from_journal(file.path()).unwrap().graft_replay, None);
+    }
+
+    /// A screen-empty experiment: subsample baseline only, no full-corpus score.
+    fn screened_empty(number: u64, screen_baseline: f64) -> ExperimentRecord {
+        let mut record = experiment(number, false);
+        record.scores = BTreeMap::new();
+        record.screen_scores = Some({
+            let mut m = BTreeMap::new();
+            m.insert("baseline".into(), screen_baseline);
+            m.insert("candidate-000".into(), screen_baseline - 1e-3);
+            m
+        });
+        record
+    }
+
+    /// An experiment that promoted to full-corpus scoring.
+    fn promoted(number: u64, baseline: f64, improvement: Option<f64>) -> ExperimentRecord {
+        let mut record = experiment(number, improvement.is_some());
+        record.baseline_score = baseline;
+        record.improvement = improvement;
+        record.scores = {
+            let mut m = BTreeMap::new();
+            m.insert("baseline".into(), baseline);
+            m.insert(
+                "candidate-000".into(),
+                baseline + improvement.unwrap_or(-1e-6),
+            );
+            m
+        };
+        record
+    }
+
+    /// Issue #84: the opening anchor must never be a 5% screen-sample baseline.
+    ///
+    /// With `--skip-phase0` the first experiments can all screen empty, and each
+    /// records the subsample baseline. Anchoring there subtracts two different
+    /// quantities and reports a negative total for a run that only improved.
+    #[test]
+    fn report_anchors_the_opening_baseline_on_a_full_corpus_score() {
+        let file = journal_of(&[
+            screened_empty(1, 0.3475),
+            promoted(2, 0.3470, None),
+            promoted(3, 0.3470, Some(1.322e-6)),
+            promoted(4, 0.3470 + 1.322e-6, Some(1.724e-6)),
+        ]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        let opening = report.opening_baseline_score.expect("full-corpus anchor");
+        assert!(
+            (opening - 0.3470).abs() < 1e-12,
+            "anchored on {opening}, expected the first promoted full-corpus baseline"
+        );
+        let total = report.total_score_improvement.expect("total improvement");
+        assert!(
+            (total - 3.046e-6).abs() < 1e-12,
+            "total {total} must be the accepted gain, not a sampling artefact"
+        );
+        assert!(
+            total > 0.0,
+            "two accepted improvements cannot total negative"
+        );
+        assert!(report.relative_score_improvement.unwrap() > 0.0);
+    }
+
+    /// No full-corpus score anywhere: report `null` rather than a sampled score.
+    #[test]
+    fn report_leaves_the_opening_baseline_null_without_a_full_corpus_score() {
+        let file = journal_of(&[screened_empty(1, 0.3475), screened_empty(2, 0.3480)]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.experiments, 2);
+        assert_eq!(
+            report.opening_baseline_score, None,
+            "a screen-sample baseline is not an opening baseline"
+        );
+        assert_eq!(report.total_score_improvement, None);
+        assert_eq!(report.relative_score_improvement, None);
+    }
+
+    /// A scorer failure records the incumbent score but no full-corpus batch.
+    #[test]
+    fn report_skips_a_scorer_failure_when_anchoring_the_opening_baseline() {
+        let mut failed = experiment(1, false);
+        failed.scorer_error = Some("scorer exited 1".into());
+        let file = journal_of(&[failed, promoted(2, 0.3470, Some(2e-6))]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.scorer_failures, 1);
+        assert!((report.opening_baseline_score.unwrap() - 0.3470).abs() < 1e-12);
+        assert!((report.total_score_improvement.unwrap() - 2e-6).abs() < 1e-12);
     }
 
     #[test]

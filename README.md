@@ -556,6 +556,16 @@ It emits per-strategy appearances/wins/acceptance rate, focus history,
 improvement series, candidates per scorer-minute and per screen-minute,
 analysis-time fraction, projected batches per 45 minutes, and combo totals.
 
+`openingBaselineScore` is anchored on a **full-corpus** score only (issue #84):
+the `scores.baseline` of the first experiment that actually promoted, which is
+the score Phase-0 measured when it ran, because the incumbent cannot change
+before the first acceptance. An experiment whose batch screened empty recorded
+only a subsample baseline — that baseline swings by ~5e-3 between experiments,
+thousands of times the accept threshold, so it is never used as the anchor. Both
+`openingBaselineScore` and `totalScoreImprovement` (and with them
+`relativeScoreImprovement`) are `null` until a full-corpus baseline exists,
+rather than reporting a difference between two different quantities.
+
 Wins are attributed from `comboMemberIndices`, so a merged combo win counts once
 for **every** member strategy and is also carried in that row's `comboWins`
 (issue #74). The `wins` column therefore sums to more than `acceptances` whenever
