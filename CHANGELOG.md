@@ -81,6 +81,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     With the cache off nothing runs: no extra RNG draw, no new journal field,
     and the #71 replay contract for existing runs is untouched.
 
+- **The failed-candidate cache now measures its own cost and stands down when it
+  stops paying (Issue #92).** #69 made it a hard constraint that the cache must
+  not cost more than it saves; that is now enforced in the code rather than left
+  to a benchmark report. The new `lamarck/src/failed_cache/economics.rs` prices
+  every experiment:
+  - *Accounting.* Savings are estimated as `cacheSkipped ×` the **measured**
+    per-candidate cost of the phase the batch entered this run (the screen where
+    screening is on, the full-corpus batch where it is not), plus recorded
+    full-corpus time — but only for a skipped candidate that had actually been
+    promoted before, since promote-phase savings otherwise accrue only to
+    candidates that would have cleared the threshold. Both halves under-claim by
+    construction, which is the safe direction: it makes the guardrail quicker to
+    fire, never slower. Spend is every millisecond the cache costs — lookup,
+    backfill, age sweeps, the startup rebuild and the snapshot write — with
+    nothing excluded as warm-up.
+  - *Stand-down.* When cumulative spend exceeds estimated savings by a margin
+    (default `1.5×`) **and** the most recent window of experiments (default
+    `20`) is losing money too, the cache is disabled for the rest of the run: a
+    warning is logged, the reason is journalled as `cacheStoodDown`, and the run
+    continues with no cache fields at all — exactly the pre-cache behaviour. The
+    second condition is what makes it "sustained": a cache that paid a heavy
+    rebuild up front but has started earning is left alone. A stood-down cache
+    writes no snapshot.
+  - *Byte ceiling.* `--failed-cache-max-bytes` (default ~25 MiB, matching the
+    default entry cap) bounds the resident footprint by evicting oldest-first
+    rather than growing, and logs when it bites — a silently truncated cache
+    reads as a working cache.
+  - *Reporting.* Each experiment journals `cacheSavedMs` and `cacheSpentMs`, and
+    the run ends with one parseable summary line carrying entries, hit rate, ms
+    saved, ms spent, net, peak memory bytes and disk bytes.
+
 - **The three exclusive-box economics arms are wired up (Issue #96).**
   `scripts/run-followup-economics.sh` gains an `output-neuron` arm (pins
   `--focus-neuron output-0`, the slice `--focus-policy high-error` cannot reach
