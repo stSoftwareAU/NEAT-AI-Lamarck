@@ -489,6 +489,55 @@ mod tests {
         assert_eq!(candidate_index_from_stem("baseline"), None);
     }
 
+    /// Issue #92: a replayed rejection may only claim promote-phase savings
+    /// when the record shows it actually reached the promote phase. A run with
+    /// screening off has no promote phase for it to have reached, so its
+    /// `scores` must not be replayed as promoted.
+    #[test]
+    fn only_a_two_phase_record_replays_a_promoted_entry() {
+        let dir = tempdir().unwrap();
+
+        // Two-phase: candidate-000 was screened *and* fully scored (promoted),
+        // candidate-001 died at the screen.
+        let mut two_phase = experiment(1, 1_000, &["knob-a", "knob-b"]);
+        two_phase.scores = [("baseline".to_string(), 0.5), ("candidate-000".into(), 0.4)]
+            .into_iter()
+            .collect();
+        two_phase.screen_scores = Some(
+            [
+                ("baseline".to_string(), 0.5),
+                ("candidate-000".into(), 0.45),
+                ("candidate-001".into(), 0.4),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let path = write_journal(dir.path(), &[journal_line(&two_phase)]);
+        let mut cache = fresh_cache();
+        rebuild_from_journal(&path, &mut cache, 1_000);
+        assert_eq!(
+            cache.hit(&fingerprint("knob-a", Some(0.0)), 1_000),
+            Some(super::super::store::CacheHit { promoted: true })
+        );
+        assert_eq!(
+            cache.hit(&fingerprint("knob-b", Some(1.0)), 1_000),
+            Some(super::super::store::CacheHit { promoted: false })
+        );
+
+        // Single-phase (screening off): `scores` is the only phase there was.
+        let single_phase = experiment(1, 1_000, &["knob-a"]);
+        assert!(single_phase.screen_scores.is_none());
+        let single_dir = tempdir().unwrap();
+        let path = write_journal(single_dir.path(), &[journal_line(&single_phase)]);
+        let mut cache = fresh_cache();
+        rebuild_from_journal(&path, &mut cache, 1_000);
+        assert_eq!(
+            cache.hit(&fingerprint("knob-a", Some(0.0)), 1_000),
+            Some(super::super::store::CacheHit { promoted: false }),
+            "a run without a screen phase has no promote saving to claim"
+        );
+    }
+
     #[test]
     fn an_absent_journal_rebuilds_nothing() {
         let dir = tempdir().unwrap();
