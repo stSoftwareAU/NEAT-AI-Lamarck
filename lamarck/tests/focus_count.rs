@@ -3,10 +3,12 @@
 //! Three things have to hold before proposing against several focus neurons is
 //! worth anything:
 //!
-//! 1. `--focus-count 1` is byte-for-byte the pre-#109 run. The fixture in
+//! 1. `--focus-count 1` proposes the pre-#109 stream. The fixture in
 //!    `fixtures/focus/k1-candidate-stream.txt` was captured from the commit
 //!    before this change, so any leak of multi-focus plumbing into the default
-//!    — a stray rng draw, a reshaped journal — fails here.
+//!    — a stray rng draw, a reshaped journal — fails here. The comparison is
+//!    exact on structure and six significant figures on values, because the
+//!    analysis reduction is not bit-identical across architectures.
 //! 2. At `K > 1` the creature-wide passes still run **once** per experiment.
 //!    An implementation that loops the whole analysis per focus would be
 //!    *slower*, not faster, and would otherwise look correct.
@@ -17,6 +19,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use neat_ai_lamarck::candidates::CandidateProvenance;
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::StatsMode;
 use neat_ai_lamarck::scorer::{DirectoryScorer, ScoreResult, ScoreSample, ScorerError};
@@ -153,30 +156,108 @@ fn experiments(result: &RunResult) -> Vec<ExperimentRecord> {
         .collect()
 }
 
-/// `focusNeuron|candidates` per experiment — the fixture's format.
+/// Replace every decimal number in `text` with a placeholder.
 ///
-/// Rendered through `serde_json::Value` so the comparison is over the data, not
-/// over struct field order: the fixture was captured by re-parsing a pre-#109
-/// journal, and a field reordering is not a behaviour change.
+/// The mutation text is compared for its *shape* — strategy, target, squash,
+/// grown-neuron UUID and ordering — because the analysis reduction is not
+/// bit-identical across architectures: the same proposal reads
+/// `w=-0.04081369646976907` on aarch64 and `w=-0.04081369645778815` on x86_64.
+/// The proposal's actual value is compared separately, to six significant
+/// figures, which is four orders of magnitude tighter than that drift.
+///
+/// Only runs containing a `.` are redacted, so hexadecimal UUID segments and
+/// integer counts survive verbatim.
+fn redact_decimals(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let negative = chars[i] == '-' && chars.get(i + 1).is_some_and(char::is_ascii_digit);
+        if !negative && !chars[i].is_ascii_digit() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        if negative {
+            i += 1;
+        }
+        while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+            i += 1;
+        }
+        let run: String = chars[start..i].iter().collect();
+        if !run.contains('.') {
+            out.push_str(&run);
+            continue;
+        }
+        // A decimal may carry an exponent; a UUID segment never does.
+        if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
+            let mut j = i + 1;
+            if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
+                j += 1;
+            }
+            if j < chars.len() && chars[j].is_ascii_digit() {
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                i = j;
+            }
+        }
+        out.push_str("<num>");
+    }
+    out
+}
+
+/// Six significant figures — tight enough to catch a changed proposal, loose
+/// enough to survive a different FMA/vectorisation on another architecture.
+fn approx(value: Option<f64>) -> String {
+    value.map_or_else(|| "null".to_string(), |v| format!("{v:.6e}"))
+}
+
+/// One comparable line per experiment: focus, then each candidate's strategy,
+/// focus, mutation shape and proposal values.
+fn normalise(focus: &str, candidates: &[CandidateProvenance]) -> String {
+    let body: Vec<String> = candidates
+        .iter()
+        .map(|p| {
+            format!(
+                "{}|{}|{}|{}|{}",
+                serde_json::to_value(p.strategy).unwrap(),
+                p.focus_neuron,
+                redact_decimals(&p.mutation),
+                approx(p.old_value),
+                approx(p.new_value)
+            )
+        })
+        .collect();
+    format!("\"{focus}\"|{}\n", body.join(" ;; "))
+}
+
 fn candidate_stream(result: &RunResult) -> String {
     experiments(result)
         .iter()
-        .map(|record| {
-            let candidates = serde_json::to_value(&record.candidates).unwrap();
-            format!(
-                "\"{}\"|{}\n",
-                record.focus_neuron,
-                serde_json::to_string(&candidates).unwrap()
-            )
-        })
+        .map(|record| normalise(&record.focus_neuron, &record.candidates))
         .collect()
 }
 
+/// The pre-#109 stream, captured from commit 993f853 and normalised the same
+/// way, so the two sides are compared on identical terms.
 fn golden_stream() -> String {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/focus/k1-candidate-stream.txt");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (focus, candidates) = line
+                .split_once('|')
+                .unwrap_or_else(|| panic!("malformed fixture line: {line}"));
+            let candidates: Vec<CandidateProvenance> = serde_json::from_str(candidates)
+                .unwrap_or_else(|e| panic!("fixture candidates parse: {e}"));
+            normalise(focus.trim_matches('"'), &candidates)
+        })
+        .collect()
 }
 
 /// The default must be indistinguishable from the run before multi-focus
@@ -191,7 +272,43 @@ fn focus_count_one_reproduces_the_pre_change_candidate_stream() {
     );
     cfg.focus_count = 1;
     let result = run_optimisation(&cfg, &FlatScorer).unwrap();
-    assert_eq!(candidate_stream(&result), golden_stream());
+
+    let golden = golden_stream();
+    assert!(
+        golden.lines().count() >= 3,
+        "the fixture must carry the whole pre-change stream"
+    );
+    assert_eq!(candidate_stream(&result), golden);
+}
+
+/// The normaliser must hide float drift without hiding a different proposal.
+#[test]
+fn the_normaliser_redacts_drift_but_not_uuids_or_changed_values() {
+    // Same proposal, different last digits: identical after redaction.
+    assert_eq!(
+        redact_decimals("add input-0 -> o1 w=-0.04081369646976907 (scale=0.050)"),
+        redact_decimals("add input-0 -> o1 w=-0.04081369645778815 (scale=0.050)")
+    );
+    // A different target, squash or grown-neuron UUID still differs.
+    assert_ne!(
+        redact_decimals("add input-0 -> o1 w=-0.04"),
+        redact_decimals("add input-1 -> o1 w=-0.04")
+    );
+    assert_eq!(
+        redact_decimals("split-neuron input-0 -> 016c3466-b81e-4083-a254-36b55143c127 -> h1"),
+        "split-neuron input-0 -> 016c3466-b81e-4083-a254-36b55143c127 -> h1",
+        "hexadecimal UUID segments carry no decimal point and must survive"
+    );
+    assert_eq!(redact_decimals("(count=64)"), "(count=64)");
+    assert_eq!(redact_decimals("mean=1.2e-7 x"), "mean=<num> x");
+
+    // Six significant figures: drift collapses, a real change does not.
+    assert_eq!(
+        approx(Some(0.10061501836753808)),
+        approx(Some(0.10061501759267771))
+    );
+    assert_ne!(approx(Some(0.1006150)), approx(Some(0.1006151)));
+    assert_eq!(approx(None), "null");
 }
 
 /// A single-focus journal keeps its pre-#109 shape: no focus set at all.

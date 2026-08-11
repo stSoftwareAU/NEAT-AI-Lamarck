@@ -20,7 +20,7 @@ already names its focus, so an accepted winner boosts only that focus's history
 in the weighted selector, and every other focus in the set is dampened as
 sterile on its **own** candidates' full-corpus Δ.
 
-`K = 1` is byte-for-byte the pre-change run. The flag ships opt-in at 1, exactly
+`K = 1` proposes exactly the pre-change stream. The flag ships opt-in at 1, exactly
 as `--scale-candidate-quotas` did in #108: the throughput gain is measured
 below, but accepts-per-hour is a production-box question.
 
@@ -86,8 +86,15 @@ Recorded as **Arm 6** in `docs/followup-economics.md`.
 `lamarck/tests/fixtures/focus/k1-candidate-stream.txt` was captured by running
 the loop on the commit **before** this change (993f853) and re-parsing its
 journal. `focus_count_one_reproduces_the_pre_change_candidate_stream` asserts the
-new code reproduces it exactly — same focus choices, same candidates, same order.
-A stray rng draw in the multi-focus plumbing fails there.
+new code reproduces it — same focus choices, same candidates, same order. A
+stray rng draw in the multi-focus plumbing fails there.
+
+The comparison is exact on structure (strategy, focus, target, squash,
+grown-neuron UUID, ordering) and six significant figures on the proposal values:
+the analysis reduction is not bit-identical across architectures, and the same
+proposal reads `w=-0.04081369646976907` on aarch64 and `w=-0.04081369645778815`
+on x86_64. `the_normaliser_redacts_drift_but_not_uuids_or_changed_values` pins
+that the tolerance hides the drift and nothing else.
 
 ## Test Plan
 
