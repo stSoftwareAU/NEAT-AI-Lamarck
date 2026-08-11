@@ -493,6 +493,11 @@ impl ResidualScan {
     }
 
     /// Fold one traced probe (`activate_and_trace` output) plus its inputs and targets.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the probe was not cleared by [`Self::wants_probe`] first —
+    /// that check is what guarantees the target index is in range.
     pub(crate) fn observe(&mut self, inputs: &[f32], outputs: &[f32], traced: &[f32]) {
         match self.mode {
             ResidualMode::Residual {
