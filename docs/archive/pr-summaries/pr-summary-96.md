@@ -33,7 +33,8 @@ What changed:
 
 The measurements are **not** in this PR: no worker box has the production
 creature, the production scorer or 4.5 hours of exclusive time. That work is
-#98, which carries the exact commands and prerequisites.
+issue [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98), which
+carries the exact commands and prerequisites.
 
 ## Evidence
 
