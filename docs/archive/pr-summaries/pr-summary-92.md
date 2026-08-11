@@ -90,6 +90,9 @@ points the issue names:
   against an 8-entry ceiling evict 42, leave the footprint at or under the
   ceiling and produce a reportable bite; a cache inside its ceiling evicts
   nothing but is still measured.
+- `a_warm_cache_above_the_ceiling_is_evicted_at_startup` — a second run over the
+  same output directory, under a tighter ceiling, brings the restored snapshot
+  under the bound before the loop starts rather than after the first insert.
 - `end_of_run_summary_line_carries_every_field` — asserts every field name on the
   summary line of a real run.
 - `cache_off_run_has_no_ledger` — a cache-off run journals no economics fields at
