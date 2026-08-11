@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The #8 baseline's follow-up economics experiments were run (Issue #75).**
+  `docs/followup-economics.md` records 118 further experiments across three
+  arms: an output-focus slice, a backprop step A/B and a batch-size A/B.
+  `--backprop-learning-rate` is a new validated CLI knob (non-positive or
+  non-finite aborts the run rather than silently reverting to `0.01`) and is
+  recorded in the journal `runHeader`. `scripts/run-followup-economics.sh`
+  drives the arms one at a time and `scripts/summarise-followup-economics.sh`
+  turns their reports into the document's tables. **No strategy is disabled**;
+  two findings explain why `backprop` and larger batches never paid: the
+  backprop bias step saturates `maximum_bias_adjustment_scale` at any learning
+  rate, and candidate generation has a fixed per-phase ceiling (~29 on the GRQ
+  creature) so `--candidates` above it buys nothing.
+
 - **Combo and graft wins are attributed to a strategy (Issue #74).** An
   acceptance now journals `comboMemberIndices` — the candidate indices behind
   the winner — so `report` can credit a merged `combo-NNN-kM` win to *every*

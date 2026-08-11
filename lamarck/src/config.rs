@@ -1,5 +1,8 @@
 //! Shared Lamarck configuration defaults and run options.
 
+use crate::backprop::BackpropConfig;
+#[cfg(test)]
+use crate::backprop::BiasSignal;
 use crate::focus::FocusPolicy;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use std::path::PathBuf;
@@ -88,6 +91,31 @@ pub struct LamarckConfig {
     pub grafts_path: Option<PathBuf>,
     /// Wall-clock budget for phase-G graft replay. `None` → 10% of [`Self::timeout`].
     pub graft_replay_budget: Option<Duration>,
+    /// Backprop learning-rate override for candidate proposal (issue #75 A/B).
+    /// `None` keeps the [`BackpropConfig::default`] rate.
+    pub backprop_learning_rate: Option<f64>,
+}
+
+impl LamarckConfig {
+    /// Backprop configuration for this run, with the learning-rate override applied.
+    ///
+    /// An override that is not finite and strictly positive is a configuration
+    /// fault, reported as an error rather than silently reverting to the
+    /// default rate — a run that quietly ignored the flag would invalidate the
+    /// A/B it was set for.
+    pub fn backprop_config(&self) -> Result<BackpropConfig, String> {
+        let mut backprop = BackpropConfig::default();
+        if let Some(rate) = self.backprop_learning_rate {
+            if !rate.is_finite() || rate <= 0.0 {
+                return Err(format!(
+                    "--backprop-learning-rate must be finite and greater than 0 (got {rate})"
+                ));
+            }
+            backprop.learning_rate = rate;
+            backprop.initial_learning_rate = rate;
+        }
+        Ok(backprop)
+    }
 }
 
 impl Default for LamarckConfig {
@@ -116,6 +144,79 @@ impl Default for LamarckConfig {
             screen_promote_threshold: DEFAULT_SCREEN_PROMOTE_THRESHOLD,
             grafts_path: None,
             graft_replay_budget: None,
+            backprop_learning_rate: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backprop_config_keeps_the_port_default_rate_when_unset() {
+        let config = LamarckConfig::default();
+        let backprop = config.backprop_config().expect("default rate is valid");
+        assert_eq!(
+            backprop.learning_rate,
+            BackpropConfig::default().learning_rate
+        );
+    }
+
+    #[test]
+    fn backprop_config_applies_the_override_to_both_rate_fields() {
+        let config = LamarckConfig {
+            backprop_learning_rate: Some(0.001),
+            ..LamarckConfig::default()
+        };
+        let backprop = config.backprop_config().expect("0.001 is valid");
+        assert_eq!(backprop.learning_rate, 0.001);
+        // Decay/adaptive schedules start from `initial_learning_rate`, so an
+        // override that moved only `learning_rate` would silently be undone.
+        assert_eq!(backprop.initial_learning_rate, 0.001);
+    }
+
+    #[test]
+    fn a_larger_rate_proposes_a_proportionally_larger_bias_step() {
+        let signal = BiasSignal {
+            count: 1.0,
+            total_adjusted_bias: 0.5,
+            ..BiasSignal::default()
+        };
+        let small = LamarckConfig {
+            backprop_learning_rate: Some(0.001),
+            ..LamarckConfig::default()
+        }
+        .backprop_config()
+        .unwrap();
+        let large = LamarckConfig {
+            backprop_learning_rate: Some(0.01),
+            ..LamarckConfig::default()
+        }
+        .backprop_config()
+        .unwrap();
+        let small_step = signal.propose(0.0, &small, small.learning_rate) - 0.0;
+        let large_step = signal.propose(0.0, &large, large.learning_rate) - 0.0;
+        assert!(
+            large_step.abs() > small_step.abs() * 5.0,
+            "10x rate should move the bias far further: {small_step} vs {large_step}"
+        );
+    }
+
+    #[test]
+    fn a_non_positive_or_non_finite_rate_is_rejected_loudly() {
+        for bad in [0.0, -0.01, f64::NAN, f64::INFINITY] {
+            let config = LamarckConfig {
+                backprop_learning_rate: Some(bad),
+                ..LamarckConfig::default()
+            };
+            let err = config
+                .backprop_config()
+                .expect_err("invalid rate must not fall back to the default");
+            assert!(
+                err.contains("--backprop-learning-rate"),
+                "error should name the flag: {err}"
+            );
         }
     }
 }

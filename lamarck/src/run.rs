@@ -1,6 +1,5 @@
 //! End-to-end Lamarck optimisation loop and experiment journal.
 
-use crate::backprop::BackpropConfig;
 use crate::cancel::CancelToken;
 use crate::candidates::{
     Candidate, CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
@@ -213,6 +212,9 @@ pub struct RunConfigRecord {
     pub grafts_path: Option<PathBuf>,
     /// Explicit phase-G replay budget in seconds when set.
     pub graft_replay_budget_seconds: Option<u64>,
+    /// Backprop learning rate in force for this run (issue #75 A/B arms).
+    #[serde(default)]
+    pub backprop_learning_rate: Option<f64>,
 }
 
 impl RunConfigRecord {
@@ -239,6 +241,7 @@ impl RunConfigRecord {
             max_consecutive_scorer_failures: config.max_consecutive_scorer_failures,
             grafts_path: config.grafts_path.clone(),
             graft_replay_budget_seconds: config.graft_replay_budget.map(|d| d.as_secs()),
+            backprop_learning_rate: config.backprop_learning_rate,
         }
     }
 }
@@ -400,6 +403,9 @@ pub fn run_optimisation_cancellable(
     scorer: &impl DirectoryScorer,
     cancel: &CancelToken,
 ) -> Result<RunResult, String> {
+    // Validate before the expensive Phase-0 gate: a bad learning rate must stop
+    // the run, never be silently replaced by the default mid-A/B.
+    let backprop = config.backprop_config()?;
     fs::create_dir_all(&config.output_dir).map_err(|e| e.to_string())?;
     let journal_path = config.output_dir.join("experiments.jsonl");
     let best_path = config.output_dir.join("best.json");
@@ -512,7 +518,6 @@ pub fn run_optimisation_cancellable(
         .focus_neuron
         .as_ref()
         .map(|uuid| FixedFocusSelector { uuid: uuid.clone() });
-    let backprop = BackpropConfig::default();
     let focus_sample_limit = match config.stats_mode {
         crate::observations::StatsMode::Quick => Some(config.quick_sample_records),
         crate::observations::StatsMode::Full => None,
@@ -1700,6 +1705,7 @@ mod tests {
             screen_promote_threshold: 0.0,
             grafts_path: None,
             graft_replay_budget: None,
+            backprop_learning_rate: None,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -1814,6 +1820,7 @@ mod tests {
             screen_promote_threshold: 0.0,
             grafts_path: None,
             graft_replay_budget: None,
+            backprop_learning_rate: None,
         };
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
@@ -1938,6 +1945,7 @@ mod tests {
             grafts_path: Some(grafts_path.clone()),
             // Explicit budget so phase-G is not starved by a sub-second run timeout.
             graft_replay_budget: Some(Duration::from_secs(5)),
+            backprop_learning_rate: None,
         };
         let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
         (result, grafts_path)
@@ -2027,6 +2035,7 @@ mod tests {
             screen_promote_threshold: 0.0,
             grafts_path: None,
             graft_replay_budget: None,
+            backprop_learning_rate: None,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -2073,6 +2082,7 @@ mod tests {
             screen_promote_threshold: 0.0,
             grafts_path: None,
             graft_replay_budget: None,
+            backprop_learning_rate: None,
         }
     }
 
@@ -2509,6 +2519,7 @@ mod tests {
             screen_promote_threshold: 0.0,
             grafts_path: None,
             graft_replay_budget: None,
+            backprop_learning_rate: None,
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));

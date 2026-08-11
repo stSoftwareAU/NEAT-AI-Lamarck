@@ -1048,6 +1048,109 @@ mod tests {
         );
     }
 
+    /// Context over [`TINY`] with a bias signal of the given blame mass on `o1`.
+    fn backprop_step_for(total_adjusted_bias: f64, learning_rate: f64) -> f64 {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        };
+        let observations = empty_obs();
+        let cfg = BackpropConfig {
+            learning_rate,
+            initial_learning_rate: learning_rate,
+            ..BackpropConfig::default()
+        };
+        let mut learning = LearningSignal::new(incumbent.neurons.len(), incumbent.synapses.len());
+        let focus_pos = incumbent
+            .neurons
+            .iter()
+            .position(|n| n.uuid == "o1")
+            .unwrap();
+        learning.biases[focus_pos] = BiasSignal {
+            count: 6.0,
+            total_adjusted_bias,
+            no_change: false,
+        };
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &[],
+            observations: &observations,
+            ranked_sources: None,
+            learning: Some(&learning),
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let mut rng = StdRng::seed_from_u64(3);
+        let candidate = build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng)
+            .expect("backprop candidate from real blame");
+        candidate.provenance.new_value.unwrap() - candidate.provenance.old_value.unwrap()
+    }
+
+    /// Issue #75 arm 2: on production blame masses the bias step saturates
+    /// `maximum_bias_adjustment_scale`, so `--backprop-learning-rate` cannot
+    /// move it. The A/B has to vary the cap instead.
+    #[test]
+    fn a_saturating_blame_mass_pins_the_bias_step_to_the_cap_whatever_the_rate() {
+        let cap = BackpropConfig::default().maximum_bias_adjustment_scale;
+        // The GRQ focus carried mean |blame| ≈ 2.3e13 over 6 accumulations.
+        let big = 6.0 * 2.3e13;
+        let fast = backprop_step_for(big, 0.01);
+        let slow = backprop_step_for(big, 0.001);
+        assert_eq!(
+            fast, slow,
+            "a 10x smaller rate still produced the same step: {fast} vs {slow}"
+        );
+        assert!(
+            (fast.abs() - cap).abs() < 1e-9,
+            "expected the step pinned at the ±{cap} cap, got {fast}"
+        );
+        // Small blame is still rate-sensitive, so the knob is not inert per se.
+        let small_fast = backprop_step_for(0.5, 0.01);
+        let small_slow = backprop_step_for(0.5, 0.001);
+        assert!(
+            small_fast.abs() > small_slow.abs(),
+            "small blame should scale with the rate: {small_fast} vs {small_slow}"
+        );
+    }
+
+    /// Issue #75 arm 3: candidate generation has a fixed per-phase ceiling, so
+    /// `--candidates` only binds below it. Raising it buys no extra proposals.
+    #[test]
+    fn raising_the_candidate_budget_above_the_generator_ceiling_adds_nothing() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let focus = FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        };
+        let observations = empty_obs();
+        let cfg = BackpropConfig::default();
+        let ctx = skew_bias_ctx(&incumbent, &focus, &observations, &cfg, "o1");
+
+        let generated = |count: usize| {
+            let mut rng = StdRng::seed_from_u64(5);
+            generate_candidates(&ctx, count, &mut rng).len()
+        };
+        let at_40 = generated(40);
+        assert_eq!(at_40, generated(100), "40 and 100 must fill the same batch");
+        assert_eq!(
+            at_40,
+            generated(150),
+            "100 and 150 must fill the same batch"
+        );
+        assert!(
+            at_40 < 40,
+            "the ceiling should sit below the budget, got {at_40}"
+        );
+        // Below the ceiling the budget does bind.
+        let small = generated(2);
+        assert_eq!(small, 2, "a budget under the ceiling must cap the batch");
+    }
+
     /// Observations whose single target has the given shape and mean→median gap.
     fn obs_with_target(
         mean: f64,
