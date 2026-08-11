@@ -12,11 +12,12 @@
 #   ARM_SECONDS=900 scripts/run-followup-economics.sh batch-size
 #
 # Arms: output-focus | backprop-step | batch-size | multi-seed
-#       output-neuron | backprop-cap
+#       output-neuron | backprop-cap | candidate-quotas
 #
-# `output-neuron` and `backprop-cap` are #96 arms and are **not** in the default
-# set: like `multi-seed` they need the production creature and exclusive use of
-# the scorer, so name them explicitly and run them one at a time.
+# `output-neuron` and `backprop-cap` are #96 arms, `candidate-quotas` is the
+# #108 arm, and none of the three is in the default set: like `multi-seed` they
+# need the production creature and exclusive use of the scorer, so name them
+# explicitly and run them one at a time.
 set -euo pipefail
 
 LAMARCK="${LAMARCK:-./target/release/neat_ai_lamarck}"
@@ -47,6 +48,10 @@ BACKPROP_RATES="${BACKPROP_RATES:-0.01 0.001}"
 BACKPROP_CAPS="${BACKPROP_CAPS:-10 0.01 0.000001}"
 # Per-cap budget: three caps at 400s is the ~20 minutes #96 allows this arm.
 CAP_SECONDS="${CAP_SECONDS:-400}"
+# #108 candidate-quota A/B: the same budget on both sides, so the only variable
+# is whether the generator's quotas scale with `--candidates`.
+QUOTA_CANDIDATES="${QUOTA_CANDIDATES:-100}"
+QUOTA_SECONDS="${QUOTA_SECONDS:-900}"
 # Neuron pinned by the #96 output slice. NEAT-AI names output neurons
 # `output-<index>`; a UUID that does not exist aborts the run rather than
 # quietly falling back to policy selection.
@@ -129,6 +134,22 @@ arm_batch_size() {
   done
 }
 
+arm_candidate_quotas() {
+  # #108 — the paired batch-economics benchmark the raised ceiling needs before
+  # it can become the default. Both runs share the seed, the wall budget and
+  # `--candidates`, so the only difference is whether the generator's per-phase
+  # quotas scale: the control tops out at the fixed ceiling (~29), the scaled
+  # run fills the budget. Compare experiments, screen scores, full-corpus
+  # promotions, promote-scores per scorer-minute and score improvement per hour.
+  run_arm "candidate-quotas-ceiling" \
+    --timeout-seconds "$QUOTA_SECONDS" --candidates "$QUOTA_CANDIDATES" --seed 61 \
+    --focus-policy weighted
+  run_arm "candidate-quotas-scaled" \
+    --timeout-seconds "$QUOTA_SECONDS" --candidates "$QUOTA_CANDIDATES" --seed 61 \
+    --focus-policy weighted \
+    --scale-candidate-quotas
+}
+
 arm_multi_seed() {
   # #75.4 — repeat the production config on fresh seeds before deprioritising
   # any non-random strategy on the strength of the single #8 sample.
@@ -176,7 +197,8 @@ for arm in "${arms[@]}"; do
   multi-seed) arm_multi_seed ;;
   output-neuron) arm_output_neuron ;;
   backprop-cap) arm_backprop_cap ;;
-  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap)" ;;
+  candidate-quotas) arm_candidate_quotas ;;
+  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap | candidate-quotas)" ;;
   esac
 done
 

@@ -1803,6 +1803,39 @@ mod tests {
         assert_eq!(seen.len(), 120);
     }
 
+    /// A production-width creature has hundreds of ranked sources, so the
+    /// budget binds well past the old ~29 ceiling without running dry.
+    #[test]
+    fn a_wide_creature_fills_a_far_larger_budget() {
+        let incumbent = wide_creature(512);
+        let focus = wide_focus();
+        let observations = wide_obs(512);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let batch = scaled_batch(&ctx, 240, 5);
+        assert_eq!(batch.candidates.len(), 240);
+        assert_eq!(batch.limit, BatchLimit::Budget);
+        // The old fixed quotas top out well below it on the same creature.
+        let mut rng = StdRng::seed_from_u64(5);
+        let legacy = generate_candidates(&ctx, 240, &mut rng);
+        assert!(
+            legacy.len() < 40,
+            "the fixed quotas should still cap the legacy batch, got {}",
+            legacy.len()
+        );
+    }
+
     /// The opening phases are untouched, so a batch under the old ceiling is
     /// identical with or without the scaled quotas.
     #[test]

@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The candidate generator's per-phase quotas can scale with the budget (Issue
+  #108).** `--scale-candidate-quotas` keeps generating after the fixed opening
+  quotas are spent, sweeping the ranked-source × weight-scale and
+  ranked-source × squash grids a slice of every strategy family per round, so
+  `--candidates N` binds until the generator is genuinely exhausted instead of
+  topping out at ~29. Duplicate proposals are rejected rather than counted, and
+  each batch reports whether the **budget**, the **fixed quota ceiling** or
+  genuine **exhaustion** bound it — logged per experiment and journalled as
+  `candidatesRequested` / `batchLimit`, with `report` summarising the achieved
+  size in a `candidateBatch` bucket. On a production-shaped creature (2511
+  inputs) the budget now binds at every count measured up to 240, at ~0.08 ms
+  per candidate (`cargo run --release --example candidate_quota_bench`); the
+  fixed quotas stop at 27, of which only 22 are distinct. The flag is
+  **opt-in**: no default changes until the paired `candidate-quotas` arm of
+  `scripts/run-followup-economics.sh` prices a bigger batch in promote-scores
+  per scorer-minute — see `docs/followup-economics.md` Arm 5.
+
 - **The per-experiment analysis scans fold record chunks across cores (Issue
   #107).** Both scans are read-only reductions, so they now run on
   `--analysis-threads` workers (default `4`, `0` aborts the run). Determinism
