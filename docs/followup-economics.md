@@ -259,6 +259,38 @@ The unrun work is one follow-up, not three: it is all "arms that need exclusive
 box time on the production creature", tracked in
 [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96).
 
+### The three outstanding arms are now wired up (#96)
+
+All three are arms of `scripts/run-followup-economics.sh` and none of them is in
+the default arm set: each needs the production creature and **exclusive** use of
+the scorer, so a second Lamarck or GRQ run beside them corrupts every per-minute
+figure they exist to produce. Run them one at a time, on an otherwise idle box:
+
+| Arm | Command | Budget | What it measures |
+|-----|---------|--------|------------------|
+| Multi-seed repeat | `SEEDS="2 3 4 5" scripts/run-followup-economics.sh multi-seed` | 4 × 45 min | Whether the strategy ordering is stable across seeds — the gate on deprioritising any strategy |
+| Output slice | `scripts/run-followup-economics.sh output-neuron` | ~20 min | `mean_error_bias` / `stats_skew_bias`, which have **zero** appearances in 118 experiments because no arm reached an output focus |
+| Backprop cap A/B | `scripts/run-followup-economics.sh backprop-cap` | ~20 min | Whether a bias step sized near the `1e-6` accept bar is worth anything, now that the ±10 default is known to be cap-bound |
+
+Two enablers were added for them:
+
+- The output slice pins the focus (`--focus-neuron output-0`, overridable with
+  `OUTPUT_NEURON`) rather than asking a policy to reach the output. Arm 1 above
+  showed `--focus-policy high-error` cannot get there on this creature; a pinned
+  UUID that does not exist aborts the run rather than falling back to policy
+  selection, so a mis-named neuron costs seconds instead of a whole slot.
+- The cap A/B needed a knob that did not exist. `--backprop-max-bias-adjustment-scale`
+  overrides `BackpropConfig::maximum_bias_adjustment_scale`, mirroring
+  `--backprop-learning-rate`, and is recorded in the journal `runHeader` so an
+  arm is identifiable from its journal alone. The ladder defaults to
+  `10 0.01 0.000001` (`BACKPROP_CAPS`), walking the step down the seven orders
+  of magnitude that separate the default cap from the accept bar. That the cap —
+  unlike the rate — actually resizes a blame-saturated step is pinned by
+  `candidates::tests::lowering_the_bias_cap_resizes_the_saturated_backprop_step`.
+
+Until those arms run, the verdict table above stands as written: nothing is
+disabled, and the two strategies that need an output focus stay unmeasured.
+
 Per [#74](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/74), combo wins
 are attributed to every member strategy in these journals, so unlike the #8
 baseline the tables above have no `comboAcceptancesUnattributed` skew — the

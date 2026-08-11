@@ -122,6 +122,15 @@ struct Cli {
     /// (default: 0.01, the NEAT-AI port value). Must be > 0.
     #[arg(long)]
     backprop_learning_rate: Option<f64>,
+
+    /// Cap on one `backprop` bias step, overriding
+    /// `BackpropConfig::maximum_bias_adjustment_scale` (default: 10). Must be > 0.
+    ///
+    /// On a focus carrying a saturating blame mass the proposal hits this cap
+    /// at every learning rate, so this — not `--backprop-learning-rate` — is
+    /// the knob that resizes the step (issue #96).
+    #[arg(long)]
+    backprop_max_bias_adjustment_scale: Option<f64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -201,6 +210,7 @@ fn main() -> ExitCode {
         grafts_path: cli.grafts_path,
         graft_replay_budget: cli.graft_replay_budget_seconds.map(Duration::from_secs),
         backprop_learning_rate: cli.backprop_learning_rate,
+        backprop_max_bias_adjustment_scale: cli.backprop_max_bias_adjustment_scale,
     };
 
     // Fail before spawning the scorer rather than deep inside the run.

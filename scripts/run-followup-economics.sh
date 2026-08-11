@@ -12,6 +12,11 @@
 #   ARM_SECONDS=900 scripts/run-followup-economics.sh batch-size
 #
 # Arms: output-focus | backprop-step | batch-size | multi-seed
+#       output-neuron | backprop-cap
+#
+# `output-neuron` and `backprop-cap` are #96 arms and are **not** in the default
+# set: like `multi-seed` they need the production creature and exclusive use of
+# the scorer, so name them explicitly and run them one at a time.
 set -euo pipefail
 
 LAMARCK="${LAMARCK:-./target/release/neat_ai_lamarck}"
@@ -36,6 +41,17 @@ SEEDS="${SEEDS:-2 3 4 5}"
 BATCH_SIZES="${BATCH_SIZES:-12 40 100 150}"
 # Learning rates for the backprop step A/B (default arm first).
 BACKPROP_RATES="${BACKPROP_RATES:-0.01 0.001}"
+# Bias-step caps for the #96 backprop cap A/B (default cap first). The 10.0
+# default is ~7 orders of magnitude coarser than the 1e-6 accept bar, so the
+# ladder walks down towards it rather than around it.
+BACKPROP_CAPS="${BACKPROP_CAPS:-10 0.01 0.000001}"
+# Per-cap budget: three caps at 400s is the ~20 minutes #96 allows this arm.
+CAP_SECONDS="${CAP_SECONDS:-400}"
+# Neuron pinned by the #96 output slice. NEAT-AI names output neurons
+# `output-<index>`; a UUID that does not exist aborts the run rather than
+# quietly falling back to policy selection.
+OUTPUT_NEURON="${OUTPUT_NEURON:-output-0}"
+OUTPUT_NEURON_SECONDS="${OUTPUT_NEURON_SECONDS:-1200}"
 
 die() {
   echo "run-followup-economics: $*" >&2
@@ -123,6 +139,30 @@ arm_multi_seed() {
   done
 }
 
+arm_output_neuron() {
+  # #96.2 — the unrun half of #75.1. `--focus-policy high-error` ranks by
+  # error-influence mass and never leaves the hidden layer on this creature, so
+  # the output slice has to pin the neuron. This is the only arm that can
+  # measure `mean_error_bias` / `stats_skew_bias`, which propose from the
+  # output target and therefore need an output focus.
+  run_arm "output-neuron" \
+    --timeout-seconds "$OUTPUT_NEURON_SECONDS" --candidates 100 --seed 41 \
+    --focus-neuron "$OUTPUT_NEURON"
+}
+
+arm_backprop_cap() {
+  # #96.3 — the knob #75.2 identified. The learning-rate A/B returned identical
+  # bias candidates because a saturating blame mass pins the step to
+  # `maximum_bias_adjustment_scale` at every rate, so this arm varies the cap
+  # instead. Same seed across caps so only the cap moves.
+  for cap in $BACKPROP_CAPS; do
+    run_arm "backprop-cap-$cap" \
+      --timeout-seconds "$CAP_SECONDS" --candidates 100 --seed 51 \
+      --focus-policy weighted \
+      --backprop-max-bias-adjustment-scale "$cap"
+  done
+}
+
 arms=("$@")
 if [[ ${#arms[@]} -eq 0 ]]; then
   arms=(output-focus backprop-step batch-size multi-seed)
@@ -134,7 +174,9 @@ for arm in "${arms[@]}"; do
   backprop-step) arm_backprop_step ;;
   batch-size) arm_batch_size ;;
   multi-seed) arm_multi_seed ;;
-  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed)" ;;
+  output-neuron) arm_output_neuron ;;
+  backprop-cap) arm_backprop_cap ;;
+  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap)" ;;
   esac
 done
 
