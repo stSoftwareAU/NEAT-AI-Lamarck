@@ -20,12 +20,23 @@
 //!   optional on-disk snapshot.
 //! * [`filter`] (#91) — dropping known-failed candidates from a batch and
 //!   backfilling it so the scorer still runs at full width.
+//!
+//! [`economics`] (#92) then measures both sides of the ledger — estimated
+//! scorer time saved against measured overhead and footprint — and stands the
+//! cache down when it stops paying, so a cache that does not earn its keep
+//! degrades to the cache-off behaviour instead of degrading the run.
 
+pub mod economics;
 pub mod filter;
 pub mod fingerprint;
 pub mod rebuild;
 pub mod store;
 
+pub use economics::{
+    CacheEconomics, CacheEconomicsConfig, CeilingBite, DEFAULT_CACHE_MAX_RESIDENT_BYTES,
+    DEFAULT_CACHE_STAND_DOWN_MARGIN_MS, DEFAULT_CACHE_STAND_DOWN_WINDOW, EconomicsSummary,
+    ExperimentCost, ExperimentEconomics, StandDown,
+};
 pub use filter::{
     BACKFILL_PROPOSAL_BUDGET_MULTIPLE, FilteredBatch, filter_and_backfill, insert_failures,
     scored_candidate_indices,
@@ -40,6 +51,6 @@ pub use rebuild::{
     rebuild_from_journal, snapshot_path, write_snapshot,
 };
 pub use store::{
-    DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS, DEFAULT_FAILED_CACHE_MAX_ENTRIES,
+    CacheHit, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS, DEFAULT_FAILED_CACHE_MAX_ENTRIES,
     FAILED_CACHE_BYTES_PER_ENTRY, FailedCacheEntry, FailedCacheStats, FailedCandidateCache,
 };

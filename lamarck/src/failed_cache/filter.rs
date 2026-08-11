@@ -35,7 +35,17 @@ pub struct FilteredBatch {
     /// The batch to score: cache misses, topped up where possible.
     pub candidates: Vec<Candidate>,
     /// Proposals rejected by a cache hit.
+    ///
+    /// Only cache hits: a proposal that merely repeats one already accepted
+    /// into this batch is counted in [`Self::duplicates`] instead, because the
+    /// cache had nothing to do with it and must not be credited for it
+    /// (issue #92).
     pub skipped: usize,
+    /// Of those, the ones the cache had recorded as previously promoted, whose
+    /// skip therefore also avoided a full-corpus score (issue #92).
+    pub skipped_previously_promoted: usize,
+    /// Proposals dropped as near-duplicates of one already in this batch.
+    pub duplicates: usize,
     /// Replacement proposals accepted into the batch.
     pub backfilled: usize,
     /// Proposals examined in total, including the original batch.
@@ -46,6 +56,19 @@ pub struct FilteredBatch {
     pub cancelled: bool,
     /// Milliseconds spent in cache lookups and backfill.
     pub lookup_ms: u128,
+    /// The same cost in microseconds, for the economics ledger (issue #92).
+    ///
+    /// A small batch filters in well under a millisecond, and an overhead that
+    /// truncates to `0ms` would let a net-negative cache look free.
+    pub lookup_micros: u128,
+}
+
+/// Why proposals were dropped, kept apart so only cache hits credit the cache.
+#[derive(Debug, Default)]
+struct Rejections {
+    skipped: usize,
+    previously_promoted: usize,
+    duplicates: usize,
 }
 
 /// Drop known-failed candidates from `batch` and regenerate to refill it.
@@ -70,7 +93,6 @@ pub fn filter_and_backfill(
     let started = Instant::now();
     let mut kept: Vec<Candidate> = Vec::with_capacity(batch.len());
     let mut accepted: Vec<CandidateFingerprint> = Vec::with_capacity(batch.len());
-    let mut skipped = 0usize;
     let mut proposals = 0usize;
     let mut backfilled = 0usize;
     let mut cancelled = false;
@@ -78,17 +100,23 @@ pub fn filter_and_backfill(
     let tolerance = cache.tolerance();
     let consider = |candidate: Candidate,
                     kept: &mut Vec<Candidate>,
-                    accepted: &mut Vec<CandidateFingerprint>|
+                    accepted: &mut Vec<CandidateFingerprint>,
+                    counts: &mut Rejections|
      -> bool {
         let fingerprint =
             CandidateFingerprint::from_provenance(incumbent_id, &candidate.provenance);
-        if cache.contains(&fingerprint, now) {
+        if let Some(hit) = cache.hit(&fingerprint, now) {
+            counts.skipped += 1;
+            if hit.promoted {
+                counts.previously_promoted += 1;
+            }
             return false;
         }
         if accepted
             .iter()
             .any(|seen| seen.matches(&fingerprint, tolerance))
         {
+            counts.duplicates += 1;
             return false;
         }
         accepted.push(fingerprint);
@@ -96,11 +124,10 @@ pub fn filter_and_backfill(
         true
     };
 
+    let mut counts = Rejections::default();
     for candidate in batch {
         proposals += 1;
-        if !consider(candidate, &mut kept, &mut accepted) {
-            skipped += 1;
-        }
+        consider(candidate, &mut kept, &mut accepted, &mut counts);
     }
 
     let budget = target.saturating_mul(BACKFILL_PROPOSAL_BUDGET_MULTIPLE);
@@ -120,11 +147,9 @@ pub fn filter_and_backfill(
                 break;
             }
             proposals += 1;
-            if consider(candidate, &mut kept, &mut accepted) {
+            if consider(candidate, &mut kept, &mut accepted, &mut counts) {
                 backfilled += 1;
                 fresh += 1;
-            } else {
-                skipped += 1;
             }
         }
         if fresh == 0 {
@@ -134,14 +159,23 @@ pub fn filter_and_backfill(
         }
     }
 
+    let elapsed = started.elapsed();
+    let Rejections {
+        skipped,
+        previously_promoted: skipped_previously_promoted,
+        duplicates,
+    } = counts;
     FilteredBatch {
         short_batch: kept.len() < target,
         candidates: kept,
         skipped,
+        skipped_previously_promoted,
+        duplicates,
         backfilled,
         proposals,
         cancelled,
-        lookup_ms: started.elapsed().as_millis(),
+        lookup_ms: elapsed.as_millis(),
+        lookup_micros: elapsed.as_micros(),
     }
 }
 
@@ -164,11 +198,17 @@ where
 /// Callers must pass the **pre-acceptance** incumbent identity: the candidates
 /// were proposed against the creature that was incumbent when the batch was
 /// generated, not against the winner that replaced it.
+///
+/// `promoted` says whether these candidates failed at the full-corpus promote
+/// phase rather than at the screen. Only a promoted entry lets a later skip
+/// claim promote-phase savings, so a caller that cannot prove the candidate was
+/// promoted must pass `false` (issue #92).
 pub fn insert_failures<I>(
     cache: &mut FailedCandidateCache,
     incumbent_id: &str,
     candidates: &[Candidate],
     failed: I,
+    promoted: bool,
     now: u64,
 ) -> usize
 where
@@ -181,7 +221,12 @@ where
         };
         let fingerprint =
             CandidateFingerprint::from_provenance(incumbent_id, &candidate.provenance);
-        if cache.insert(fingerprint, now) {
+        let inserted = if promoted {
+            cache.insert_promoted(fingerprint, now)
+        } else {
+            cache.insert(fingerprint, now)
+        };
+        if inserted {
             stored += 1;
         }
     }
@@ -372,6 +417,13 @@ mod tests {
             "a duplicate of a candidate already in the batch is not a top-up"
         );
         assert_eq!(filtered.backfilled, 0);
+        // Issue #92: the cache had nothing to do with these rejections, so it
+        // must not be credited with a hit — or with the time — for them.
+        assert_eq!(filtered.skipped, 0, "no cache hit occurred");
+        assert!(
+            filtered.duplicates > 0,
+            "the repeats are counted as repeats"
+        );
     }
 
     #[test]
@@ -437,11 +489,51 @@ mod tests {
             .collect();
 
         // An out-of-range index (a stem from a longer earlier batch) is ignored.
-        let stored = insert_failures(&mut cache, INCUMBENT, &batch, [0, 2, 99], 1_000);
+        let stored = insert_failures(&mut cache, INCUMBENT, &batch, [0, 2, 99], false, 1_000);
         assert_eq!(stored, 2);
         assert!(cache.contains(&fingerprint_of(&batch[0]), 1_000));
         assert!(!cache.contains(&fingerprint_of(&batch[1]), 1_000));
         assert!(cache.contains(&fingerprint_of(&batch[2]), 1_000));
+    }
+
+    /// Issue #92: the ledger may only claim promote-phase savings for a skip
+    /// whose entry actually reached the promote phase.
+    #[test]
+    fn a_filtered_batch_separates_previously_promoted_skips() {
+        let mut cache = cache();
+        let screened = candidate("knob-screened", 1.0);
+        let promoted = candidate("knob-promoted", 2.0);
+        insert_failures(
+            &mut cache,
+            INCUMBENT,
+            std::slice::from_ref(&screened),
+            [0],
+            false,
+            1_000,
+        );
+        insert_failures(
+            &mut cache,
+            INCUMBENT,
+            std::slice::from_ref(&promoted),
+            [0],
+            true,
+            1_000,
+        );
+
+        let filtered = filter_and_backfill(
+            &cache,
+            INCUMBENT,
+            vec![screened, promoted, candidate("knob-fresh", 3.0)],
+            3,
+            1_000,
+            &CancelToken::new(),
+            no_regeneration,
+        );
+        assert_eq!(filtered.skipped, 2);
+        assert_eq!(
+            filtered.skipped_previously_promoted, 1,
+            "only the promoted entry's skip avoided a full-corpus score"
+        );
     }
 
     #[test]

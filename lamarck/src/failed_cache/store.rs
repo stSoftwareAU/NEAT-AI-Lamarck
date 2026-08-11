@@ -56,6 +56,15 @@ pub struct FailedCacheEntry {
     pub fingerprint: CandidateFingerprint,
     /// Unix timestamp the entry was recorded at, which fixes its age.
     pub inserted_unix: u64,
+    /// Whether this candidate reached the full-corpus promote phase before it
+    /// failed (issue #92).
+    ///
+    /// Skipping it therefore avoids promote time as well as screen time, and
+    /// the economics ledger is allowed to claim both. Defaulted to `false` so a
+    /// snapshot written before the flag existed reads as screen-cost only,
+    /// which under-claims rather than over-claims.
+    #[serde(default)]
+    pub promoted: bool,
 }
 
 /// Counters describing the cache's size and maintenance cost.
@@ -78,12 +87,20 @@ pub struct FailedCacheStats {
     pub last_maintenance_ms: u128,
 }
 
+/// What a lookup found (issue #92).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheHit {
+    /// Whether the matched entry had reached the promote phase before failing.
+    pub promoted: bool,
+}
+
 /// One entry as held inside its discrete bucket.
 #[derive(Debug, Clone)]
 struct BucketEntry {
     seq: u64,
     new_value: Option<f64>,
     inserted_unix: u64,
+    promoted: bool,
 }
 
 /// One entry as held in insertion order, for oldest-first eviction.
@@ -112,6 +129,7 @@ pub struct FailedCandidateCache {
     evicted: u64,
     expired: u64,
     last_maintenance_ms: u128,
+    maintenance_micros_owed: u128,
 }
 
 impl FailedCandidateCache {
@@ -133,6 +151,7 @@ impl FailedCandidateCache {
             evicted: 0,
             expired: 0,
             last_maintenance_ms: 0,
+            maintenance_micros_owed: 0,
         }
     }
 
@@ -167,9 +186,42 @@ impl FailedCandidateCache {
             .saturating_mul(FAILED_CACHE_BYTES_PER_ENTRY)
     }
 
+    /// Resident bytes the entries actually held occupy, at the budgeted
+    /// [`FAILED_CACHE_BYTES_PER_ENTRY`] each (issue #92).
+    pub fn resident_bytes(&self) -> usize {
+        self.len().saturating_mul(FAILED_CACHE_BYTES_PER_ENTRY)
+    }
+
+    /// Evict oldest-first until at most `max_entries` remain; returns how many
+    /// were dropped.
+    ///
+    /// This is how the byte ceiling is enforced: the caller converts its byte
+    /// bound into an entry count and evicts harder rather than letting the
+    /// cache grow (issue #92). The size cap itself is untouched.
+    pub fn trim_to(&mut self, max_entries: usize) -> usize {
+        let mut dropped = 0usize;
+        while self.order.len() > max_entries {
+            if !self.evict_oldest() {
+                break;
+            }
+            dropped += 1;
+        }
+        dropped
+    }
+
     /// Milliseconds spent in the most recent age sweep.
     pub fn last_maintenance_ms(&self) -> u128 {
         self.last_maintenance_ms
+    }
+
+    /// Microseconds of sweep maintenance since this was last called, and reset.
+    ///
+    /// The economics ledger charges maintenance once, so the counter has to be
+    /// drained rather than read: [`Self::last_maintenance_ms`] is the *most
+    /// recent* sweep and would be charged again by every experiment that
+    /// happened not to sweep (issue #92).
+    pub fn take_maintenance_micros(&mut self) -> u128 {
+        std::mem::take(&mut self.maintenance_micros_owed)
     }
 
     /// Size and maintenance counters for instrumentation.
@@ -191,7 +243,21 @@ impl FailedCandidateCache {
     /// non-cacheable fingerprint (non-finite scalar), a disabled cache, an
     /// already-expired timestamp or an existing live match are all declined.
     pub fn insert(&mut self, fingerprint: CandidateFingerprint, inserted_unix: u64) -> bool {
-        self.insert_aged(fingerprint, inserted_unix, inserted_unix)
+        self.insert_aged(fingerprint, inserted_unix, inserted_unix, false)
+    }
+
+    /// [`Self::insert`] for a candidate that failed at the promote phase.
+    ///
+    /// A repeat insert is still declined, so a candidate first recorded as a
+    /// screen failure keeps `promoted = false` even if a later experiment
+    /// promotes it: the economics ledger then under-claims the saving rather
+    /// than over-claiming it (issue #92).
+    pub fn insert_promoted(
+        &mut self,
+        fingerprint: CandidateFingerprint,
+        inserted_unix: u64,
+    ) -> bool {
+        self.insert_aged(fingerprint, inserted_unix, inserted_unix, true)
     }
 
     /// [`Self::insert`] for an entry recorded in the past.
@@ -206,6 +272,7 @@ impl FailedCandidateCache {
         fingerprint: CandidateFingerprint,
         inserted_unix: u64,
         now: u64,
+        promoted: bool,
     ) -> bool {
         if self.max_entries == 0 || !fingerprint.is_cacheable() {
             return false;
@@ -214,7 +281,7 @@ impl FailedCandidateCache {
             self.expired += 1;
             return false;
         }
-        if self.contains(&fingerprint, now) {
+        if self.hit(&fingerprint, now).is_some() {
             // A repeat rejection is already known; re-recording it would only
             // consume an entry, and must not refresh the original's age.
             return false;
@@ -234,6 +301,7 @@ impl FailedCandidateCache {
                 seq,
                 new_value: fingerprint.new_value,
                 inserted_unix,
+                promoted,
             });
         self.inserted += 1;
 
@@ -251,20 +319,32 @@ impl FailedCandidateCache {
 
     /// Whether a live (non-expired) entry matches `fingerprint` within tolerance.
     pub fn contains(&self, fingerprint: &CandidateFingerprint, now: u64) -> bool {
+        self.hit(fingerprint, now).is_some()
+    }
+
+    /// The live entry matching `fingerprint` within tolerance, when there is one.
+    ///
+    /// The hit carries whether that entry had been promoted, which is what
+    /// lets the economics ledger claim promote-phase savings only for a skip
+    /// that genuinely avoided a full-corpus score (issue #92).
+    pub fn hit(&self, fingerprint: &CandidateFingerprint, now: u64) -> Option<CacheHit> {
         if self.max_entries == 0 || !fingerprint.is_cacheable() {
-            return false;
+            return None;
         }
-        let Some(bucket) = self.buckets.get(&fingerprint.bucket) else {
-            return false;
-        };
-        bucket.iter().any(|entry| {
-            self.is_live(entry.inserted_unix, now)
-                && match (entry.new_value, fingerprint.new_value) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => self.tolerance.matches(a, b),
-                    (None, Some(_)) | (Some(_), None) => false,
-                }
-        })
+        let bucket = self.buckets.get(&fingerprint.bucket)?;
+        bucket
+            .iter()
+            .find(|entry| {
+                self.is_live(entry.inserted_unix, now)
+                    && match (entry.new_value, fingerprint.new_value) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => self.tolerance.matches(a, b),
+                        (None, Some(_)) | (Some(_), None) => false,
+                    }
+            })
+            .map(|entry| CacheHit {
+                promoted: entry.promoted,
+            })
     }
 
     /// Explicit-name alias for [`Self::contains`], which only ever hits live
@@ -290,6 +370,7 @@ impl FailedCandidateCache {
                         new_value: entry.new_value,
                     },
                     inserted_unix: entry.inserted_unix,
+                    promoted: entry.promoted,
                 })
             })
             .collect()
@@ -319,7 +400,9 @@ impl FailedCandidateCache {
         }
         self.order = kept;
         self.expired += dropped as u64;
-        self.last_maintenance_ms = started.elapsed().as_millis();
+        let elapsed = started.elapsed();
+        self.last_maintenance_ms = elapsed.as_millis();
+        self.maintenance_micros_owed += elapsed.as_micros();
         dropped
     }
 
@@ -554,6 +637,45 @@ mod tests {
             cache.len()
         );
         assert!(cache.stats().expired > 0);
+    }
+
+    /// Issue #92: promote-phase savings may only be claimed for a skip that
+    /// genuinely avoided a full-corpus score, so the flag has to survive both
+    /// the lookup and the snapshot.
+    #[test]
+    fn a_promoted_failure_is_reported_by_the_hit_and_snapshotted() {
+        let mut cache = new_cache(16, 0);
+        let screened = fingerprint("inc", "screened", Some(1.0));
+        let promoted = fingerprint("inc", "promoted", Some(2.0));
+        cache.insert(screened.clone(), 1_000);
+        cache.insert_promoted(promoted.clone(), 1_001);
+
+        assert_eq!(
+            cache.hit(&screened, 1_002),
+            Some(CacheHit { promoted: false })
+        );
+        assert_eq!(
+            cache.hit(&promoted, 1_002),
+            Some(CacheHit { promoted: true })
+        );
+        assert_eq!(
+            cache.hit(&fingerprint("inc", "unknown", Some(3.0)), 1_002),
+            None
+        );
+
+        // A later promote of an already-known screen failure is declined, so the
+        // ledger keeps under-claiming rather than over-claiming.
+        assert!(!cache.insert_promoted(screened.clone(), 1_003));
+        assert_eq!(
+            cache.hit(&screened, 1_004),
+            Some(CacheHit { promoted: false })
+        );
+
+        let entries = cache.snapshot_entries();
+        let decoded: Vec<FailedCacheEntry> =
+            serde_json::from_str(&serde_json::to_string(&entries).unwrap()).unwrap();
+        assert_eq!(decoded, entries);
+        assert!(!decoded[0].promoted && decoded[1].promoted);
     }
 
     #[test]

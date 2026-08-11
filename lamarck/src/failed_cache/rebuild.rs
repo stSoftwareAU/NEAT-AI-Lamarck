@@ -31,7 +31,12 @@ pub const FAILED_CACHE_SNAPSHOT_FILE: &str = "failed-candidates.cache.json";
 ///
 /// Bump this whenever the on-disk shape changes; a mismatch falls back to a
 /// journal rebuild rather than misreading old bytes.
-pub const FAILED_CACHE_SNAPSHOT_FORMAT_VERSION: &str = "1.0.0";
+///
+/// `1.1.0` added the per-entry `promoted` flag the economics ledger prices
+/// promote-phase savings from (issue #92). A `1.0.0` snapshot is discarded and
+/// replayed from the journal, which restores the flag rather than defaulting
+/// every entry to screen-cost only.
+pub const FAILED_CACHE_SNAPSHOT_FORMAT_VERSION: &str = "1.1.0";
 
 /// Where a loaded cache came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -163,7 +168,11 @@ pub fn rebuild_from_journal(
         report.lines_read += 1;
         let record = match JournalLine::parse(&line) {
             Ok(JournalLine::Experiment(record)) => *record,
-            Ok(JournalLine::Header(_) | JournalLine::GraftReplay(_)) => continue,
+            Ok(
+                JournalLine::Header(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::CacheStandDown(_),
+            ) => continue,
             Err(_) => {
                 report.lines_skipped += 1;
                 continue;
@@ -186,6 +195,7 @@ fn replay_experiment(record: &ExperimentRecord, cache: &mut FailedCandidateCache
     if record.scorer_error.is_some() || record.accepted {
         return 0;
     }
+    let promoted = promoted_candidate_indices(record);
     let mut offered = 0u64;
     for index in failed_candidate_indices(record) {
         let Some(provenance) = record.candidates.get(index) else {
@@ -196,6 +206,7 @@ fn replay_experiment(record: &ExperimentRecord, cache: &mut FailedCandidateCache
             CandidateFingerprint::from_provenance(&record.incumbent_id, provenance),
             record.timestamp_unix,
             now,
+            promoted.contains(&index),
         );
     }
     offered
@@ -208,6 +219,24 @@ fn failed_candidate_indices(record: &ExperimentRecord) -> BTreeSet<usize> {
         .scores
         .keys()
         .chain(screen)
+        .filter(|stem| record.winner.as_ref() != Some(*stem))
+        .filter_map(|stem| candidate_index_from_stem(stem))
+        .collect()
+}
+
+/// Indices that reached the full-corpus promote phase in one record (#92).
+///
+/// Only a two-phase experiment has a promote phase to have reached: when the
+/// record has no `screen_scores`, its `scores` *are* the first and only scoring
+/// phase, and treating them as promoted would let a later run claim a saving
+/// that never existed.
+fn promoted_candidate_indices(record: &ExperimentRecord) -> BTreeSet<usize> {
+    if record.screen_scores.is_none() {
+        return BTreeSet::new();
+    }
+    record
+        .scores
+        .keys()
         .filter(|stem| record.winner.as_ref() != Some(*stem))
         .filter_map(|stem| candidate_index_from_stem(stem))
         .collect()
@@ -238,7 +267,7 @@ pub fn load_or_rebuild(
     ) {
         Ok(Some(snapshot)) => {
             for entry in snapshot.entries {
-                cache.insert_aged(entry.fingerprint, entry.inserted_unix, now);
+                cache.insert_aged(entry.fingerprint, entry.inserted_unix, now, entry.promoted);
             }
             let report = RebuildReport {
                 source: RebuildSource::Snapshot,
@@ -392,6 +421,10 @@ mod tests {
             cache_size: None,
             cache_lookup_ms: None,
             cache_maintenance_ms: None,
+            cache_saved_ms: None,
+            cache_spent_ms: None,
+            cache_net_cumulative_ms: None,
+            cache_resident_bytes: None,
         }
     }
 
@@ -454,6 +487,55 @@ mod tests {
             );
         }
         assert_eq!(candidate_index_from_stem("baseline"), None);
+    }
+
+    /// Issue #92: a replayed rejection may only claim promote-phase savings
+    /// when the record shows it actually reached the promote phase. A run with
+    /// screening off has no promote phase for it to have reached, so its
+    /// `scores` must not be replayed as promoted.
+    #[test]
+    fn only_a_two_phase_record_replays_a_promoted_entry() {
+        let dir = tempdir().unwrap();
+
+        // Two-phase: candidate-000 was screened *and* fully scored (promoted),
+        // candidate-001 died at the screen.
+        let mut two_phase = experiment(1, 1_000, &["knob-a", "knob-b"]);
+        two_phase.scores = [("baseline".to_string(), 0.5), ("candidate-000".into(), 0.4)]
+            .into_iter()
+            .collect();
+        two_phase.screen_scores = Some(
+            [
+                ("baseline".to_string(), 0.5),
+                ("candidate-000".into(), 0.45),
+                ("candidate-001".into(), 0.4),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let path = write_journal(dir.path(), &[journal_line(&two_phase)]);
+        let mut cache = fresh_cache();
+        rebuild_from_journal(&path, &mut cache, 1_000);
+        assert_eq!(
+            cache.hit(&fingerprint("knob-a", Some(0.0)), 1_000),
+            Some(super::super::store::CacheHit { promoted: true })
+        );
+        assert_eq!(
+            cache.hit(&fingerprint("knob-b", Some(1.0)), 1_000),
+            Some(super::super::store::CacheHit { promoted: false })
+        );
+
+        // Single-phase (screening off): `scores` is the only phase there was.
+        let single_phase = experiment(1, 1_000, &["knob-a"]);
+        assert!(single_phase.screen_scores.is_none());
+        let single_dir = tempdir().unwrap();
+        let path = write_journal(single_dir.path(), &[journal_line(&single_phase)]);
+        let mut cache = fresh_cache();
+        rebuild_from_journal(&path, &mut cache, 1_000);
+        assert_eq!(
+            cache.hit(&fingerprint("knob-a", Some(0.0)), 1_000),
+            Some(super::super::store::CacheHit { promoted: false }),
+            "a run without a screen phase has no promote saving to claim"
+        );
     }
 
     #[test]

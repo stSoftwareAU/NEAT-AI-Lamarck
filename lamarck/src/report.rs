@@ -283,7 +283,9 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         // The run header (issue #71) is run metadata, not an experiment; the
         // graft-replay line (issue #74) is its own bucket.
         let record = match JournalLine::parse(&line)? {
-            JournalLine::Header(_) => continue,
+            // The stand-down event (issue #92) is cache economics, not an
+            // experiment; aggregating it is the `report` sub-issue of #69.
+            JournalLine::Header(_) | JournalLine::CacheStandDown(_) => continue,
             JournalLine::GraftReplay(replay) => {
                 let bucket = graft_replay.get_or_insert_with(GraftReplayStats::default);
                 bucket.replays += 1;
@@ -798,6 +800,10 @@ mod tests {
             cache_size: None,
             cache_lookup_ms: None,
             cache_maintenance_ms: None,
+            cache_saved_ms: None,
+            cache_spent_ms: None,
+            cache_net_cumulative_ms: None,
+            cache_resident_bytes: None,
         }
     }
 
@@ -913,6 +919,10 @@ mod tests {
             cache_size: None,
             cache_lookup_ms: None,
             cache_maintenance_ms: None,
+            cache_saved_ms: None,
+            cache_spent_ms: None,
+            cache_net_cumulative_ms: None,
+            cache_resident_bytes: None,
         };
         writeln!(file, "{}", serde_json::to_string(&header).unwrap()).unwrap();
         writeln!(file, "{}", serde_json::to_string(&experiment).unwrap()).unwrap();
@@ -1222,6 +1232,10 @@ mod tests {
             cache_size: None,
             cache_lookup_ms: None,
             cache_maintenance_ms: None,
+            cache_saved_ms: None,
+            cache_spent_ms: None,
+            cache_net_cumulative_ms: None,
+            cache_resident_bytes: None,
         };
         let rejected = ExperimentRecord {
             experiment_number: 2,
@@ -1255,6 +1269,10 @@ mod tests {
             cache_size: None,
             cache_lookup_ms: None,
             cache_maintenance_ms: None,
+            cache_saved_ms: None,
+            cache_spent_ms: None,
+            cache_net_cumulative_ms: None,
+            cache_resident_bytes: None,
         };
         writeln!(file, "{}", serde_json::to_string(&accepted).unwrap()).unwrap();
         writeln!(file, "{}", serde_json::to_string(&rejected).unwrap()).unwrap();

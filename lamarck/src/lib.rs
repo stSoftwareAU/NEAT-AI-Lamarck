@@ -38,11 +38,14 @@ pub use config::{
     LamarckConfig,
 };
 pub use failed_cache::{
-    CandidateFingerprint, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS, DEFAULT_FAILED_CACHE_MAX_ENTRIES,
-    DEFAULT_FAILED_CACHE_TOLERANCE_ABS, DEFAULT_FAILED_CACHE_TOLERANCE_REL, FailedCacheStats,
-    FailedCandidateCache, FilteredBatch, FingerprintBucketKey, RebuildReport, RebuildSource,
-    Tolerance, filter_and_backfill, insert_failures, load_or_rebuild, rebuild_from_journal,
-    scored_candidate_indices, write_snapshot,
+    CacheEconomics, CacheEconomicsConfig, CacheHit, CandidateFingerprint, CeilingBite,
+    DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
+    DEFAULT_CACHE_STAND_DOWN_WINDOW, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
+    DEFAULT_FAILED_CACHE_MAX_ENTRIES, DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
+    DEFAULT_FAILED_CACHE_TOLERANCE_REL, EconomicsSummary, ExperimentCost, ExperimentEconomics,
+    FailedCacheStats, FailedCandidateCache, FilteredBatch, FingerprintBucketKey, RebuildReport,
+    RebuildSource, StandDown, Tolerance, filter_and_backfill, insert_failures, load_or_rebuild,
+    rebuild_from_journal, scored_candidate_indices, write_snapshot,
 };
 pub use focus::{FocusChoice, FocusPolicy, WeightedFocusSelector};
 pub use grafts::{

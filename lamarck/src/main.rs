@@ -4,7 +4,8 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    CancelToken, DEFAULT_CANDIDATE_COUNT, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
+    CancelToken, DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
+    DEFAULT_CACHE_STAND_DOWN_WINDOW, DEFAULT_CANDIDATE_COUNT, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
     DEFAULT_FAILED_CACHE_MAX_ENTRIES, DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
     DEFAULT_FAILED_CACHE_TOLERANCE_REL, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
     DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
@@ -156,6 +157,22 @@ struct Cli {
     /// Relative bound for treating two candidate values as the same proposal.
     #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_TOLERANCE_REL)]
     failed_cache_tolerance_rel: f64,
+
+    /// Milliseconds the failed-candidate cache's cumulative overhead must
+    /// exceed its cumulative estimated savings by before an experiment counts
+    /// as net-negative (issue #92).
+    #[arg(long, default_value_t = DEFAULT_CACHE_STAND_DOWN_MARGIN_MS)]
+    failed_cache_stand_down_margin_ms: f64,
+
+    /// Consecutive net-negative experiments before the cache stands down for
+    /// the rest of the run. `0` disables the guardrail.
+    #[arg(long, default_value_t = DEFAULT_CACHE_STAND_DOWN_WINDOW)]
+    failed_cache_stand_down_window: usize,
+
+    /// Resident-footprint ceiling in bytes, enforced by evicting oldest-first.
+    /// `0` disables the ceiling; the entry cap still bounds the cache.
+    #[arg(long, default_value_t = DEFAULT_CACHE_MAX_RESIDENT_BYTES)]
+    failed_cache_max_bytes: usize,
 }
 
 #[derive(Debug, Subcommand)]
@@ -241,6 +258,9 @@ fn main() -> ExitCode {
         failed_cache_max_age_seconds: cli.failed_cache_max_age_seconds,
         failed_cache_tolerance_abs: cli.failed_cache_tolerance_abs,
         failed_cache_tolerance_rel: cli.failed_cache_tolerance_rel,
+        failed_cache_stand_down_margin_ms: cli.failed_cache_stand_down_margin_ms,
+        failed_cache_stand_down_window: cli.failed_cache_stand_down_window,
+        failed_cache_max_bytes: cli.failed_cache_max_bytes,
     };
 
     // Fail before spawning the scorer rather than deep inside the run.
