@@ -56,8 +56,9 @@ they are the last two sub-issues of #69.
 
 Backend/CLI change with no web interface, so there is no screenshot to capture.
 The evidence is the test suite plus `./quality.sh`, which passes cleanly
-(fmt, clippy `-D warnings`, cargo-deny, 219 lib tests + 7 new integration tests
-in `cache_economics` + the existing integration suites, rustdoc `-D warnings`).
+(fmt, clippy `-D warnings`, cargo-deny, 275 tests across the workspace —
+including the 8 new ones in `tests/cache_economics.rs` — and rustdoc
+`-D warnings`).
 
 ```mermaid
 flowchart TD
