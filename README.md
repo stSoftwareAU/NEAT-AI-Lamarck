@@ -774,7 +774,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
 | Issue | Gap |
 |-------|-----|
-| [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
+| [#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94) | Failed-candidate cache (#69) is implemented (`--failed-cache`, off by default) but the production go/no-go is **unmeasured**: `scripts/run-failed-cache-economics.sh` needs exclusive box time. See [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md). |
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Three economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
 
 ## Repository layout
