@@ -32,6 +32,26 @@
 //!   With screen-cost only — the default for every candidate never promoted —
 //!   the estimate understates rather than overstates.
 //!
+//! Only a **cache hit** counts as a skip. A proposal dropped because it repeats
+//! one already in the same batch is the generator's doing, not the cache's, and
+//! is reported separately by [`super::filter::FilteredBatch::duplicates`] so it
+//! cannot inflate the hit rate or the savings.
+//!
+//! ## What "saved" does and does not mean
+//!
+//! `saved_ms` is **redundant scorer work avoided** — the scorer time this run
+//! would have spent on candidates already known to fail. That is the quantity
+//! #69's constraint is stated in ("we spend more time than it saves in
+//! redundant scoring"), so it is what the guardrail compares overhead against.
+//!
+//! It is **not** the same as wall clock removed from the run. The batch is
+//! backfilled to full width (#91: the scorer batch is the unit of cost), so a
+//! skip that was replaced converts redundant scoring into fresh exploration
+//! rather than shortening the batch. Only the skips the backfill could not
+//! replace actually shrink the work the scorer does, and that part is reported
+//! separately as [`EconomicsSummary::wall_clock_saved_ms`] so the two are never
+//! confused.
+//!
 //! Spend, by contrast, is measured: lookup and backfill time, age-sweep and
 //! ceiling-eviction maintenance, the one-off startup rebuild, and the one-off
 //! snapshot write. Spend is accumulated in **microseconds** because a
@@ -41,27 +61,35 @@
 //!
 //! # Standing down
 //!
-//! When cumulative spend exceeds cumulative estimated savings by
-//! [`CacheEconomicsConfig::stand_down_margin_ms`] for
-//! [`CacheEconomicsConfig::stand_down_window`] consecutive experiments, the
-//! cache stands down: the caller logs the warning, journals the event and
-//! disables the cache for the remainder of the run. A bad cache then degrades
-//! to the cache-off behaviour instead of degrading the run.
+//! The guardrail looks at a **rolling window** of the most recent
+//! [`CacheEconomicsConfig::stand_down_window`] experiments: when the spend
+//! inside that window exceeds the savings inside it by
+//! [`CacheEconomicsConfig::stand_down_margin_ms`], the cache stands down. The
+//! caller logs the warning, journals the event and disables the cache for the
+//! remainder of the run.
+//!
+//! A window rather than the whole run matters: a run-long cumulative test lets
+//! a sunk one-off cost (a slow startup rebuild) condemn a cache that is
+//! currently profitable, which is not "it stopped paying" — and disabling it
+//! cannot un-spend that cost, it only removes the chance of earning it back.
+//! One-off costs therefore count in the run's cumulative ledger, which the
+//! summary reports, but not in the window the guardrail judges.
 
 use super::store::{
     DEFAULT_FAILED_CACHE_MAX_ENTRIES, FAILED_CACHE_BYTES_PER_ENTRY, FailedCandidateCache,
 };
+use std::collections::VecDeque;
 use std::time::Instant;
 
-/// Default margin, in milliseconds, that cumulative spend must exceed
-/// cumulative savings by before the cache is considered to be losing.
+/// Default margin, in milliseconds, that a window's spend must exceed its
+/// savings by before the cache is stood down.
 ///
 /// One second of run time is the smallest overspend worth acting on: below it
 /// the estimator's own noise (a screen batch that happened to be slow) is the
 /// larger term, and standing down on noise would silently revert the feature.
 pub const DEFAULT_CACHE_STAND_DOWN_MARGIN_MS: f64 = 1_000.0;
 
-/// Default number of consecutive net-negative experiments before standing down.
+/// Default length of the rolling window the guardrail judges the cache over.
 ///
 /// A cold cache is *always* net-negative for its first experiments — it pays
 /// lookup and rebuild cost before it holds anything to hit on — so the window
@@ -81,11 +109,11 @@ pub const DEFAULT_CACHE_MAX_RESIDENT_BYTES: usize =
 /// Guardrail knobs for the cache's economics.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CacheEconomicsConfig {
-    /// Milliseconds cumulative spend must exceed cumulative savings by before an
-    /// experiment counts as net-negative.
+    /// Milliseconds a window's spend must exceed its savings by before the
+    /// cache stands down.
     pub stand_down_margin_ms: f64,
-    /// Consecutive net-negative experiments before the cache stands down.
-    /// `0` disables the guardrail.
+    /// Experiments in the rolling window the guardrail judges. `0` disables the
+    /// guardrail.
     pub stand_down_window: usize,
     /// Resident-footprint ceiling in bytes. `0` disables the ceiling; the entry
     /// cap still bounds the cache.
@@ -107,10 +135,16 @@ impl Default for CacheEconomicsConfig {
 pub struct ExperimentCost {
     /// Proposals the cache examined, including the original batch.
     pub proposals: usize,
-    /// Proposals dropped by a cache hit.
+    /// Proposals dropped by a cache hit (cache hits only — not the generator's
+    /// own intra-batch duplicates).
     pub skipped: usize,
     /// Of those, the ones the cache had recorded as previously promoted.
     pub skipped_previously_promoted: usize,
+    /// Replacement proposals accepted into the batch to refill it.
+    ///
+    /// A refilled slot means the scorer still ran at full width, so only
+    /// `skipped - backfilled` shortened the work the scorer actually did.
+    pub backfilled: usize,
     /// Microseconds spent filtering and backfilling the batch.
     pub lookup_micros: u128,
     /// Microseconds spent in cache maintenance (the age sweep) this experiment.
@@ -122,9 +156,15 @@ pub struct ExperimentCost {
 /// What one experiment came to, and where the run's ledger stands after it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExperimentEconomics {
-    /// Scorer milliseconds this experiment's skips are estimated to have saved.
+    /// Redundant scorer milliseconds this experiment's skips are estimated to
+    /// have avoided.
     pub saved_ms: f64,
     /// Milliseconds this experiment spent on lookups and maintenance.
+    ///
+    /// Ceiling evictions, the startup rebuild and the snapshot write are run
+    /// costs rather than one experiment's, so they appear only in the run
+    /// totals: summing this column does not reproduce
+    /// [`EconomicsSummary::spent_ms`].
     pub spent_ms: f64,
     /// Cumulative saved minus cumulative spent for the run so far.
     pub net_cumulative_ms: f64,
@@ -137,15 +177,15 @@ pub struct ExperimentEconomics {
 pub struct StandDown {
     /// Experiment the guardrail fired on.
     pub experiment_number: u64,
-    /// Cumulative estimated savings at that point.
+    /// Estimated savings inside the window that triggered it.
     pub saved_ms: f64,
-    /// Cumulative measured spend at that point.
+    /// Measured spend inside the window that triggered it.
     pub spent_ms: f64,
-    /// `saved_ms - spent_ms`.
+    /// `saved_ms - spent_ms` for that window.
     pub net_ms: f64,
-    /// Consecutive net-negative experiments that triggered the stand-down.
+    /// Experiments in the window.
     pub window_experiments: usize,
-    /// Margin the net had to be worse than to count as net-negative.
+    /// Margin the window's net had to be worse than.
     pub margin_ms: f64,
     /// Live entries the cache is giving up.
     pub entries: usize,
@@ -155,12 +195,12 @@ impl StandDown {
     /// The warning line the caller logs and journals.
     pub fn message(&self) -> String {
         format!(
-            "failed-cache: STANDING DOWN at experiment {} — spent {:.1}ms to save an estimated {:.1}ms (net {:.1}ms) for {} consecutive experiment(s) beyond the {:.1}ms margin; disabling the cache for the rest of the run ({} entr(ies) dropped from play)",
+            "failed-cache: STANDING DOWN at experiment {} — over the last {} experiment(s) it spent {:.1}ms to avoid an estimated {:.1}ms of redundant scoring (net {:.1}ms, worse than the {:.1}ms margin); disabling the cache for the rest of the run ({} entr(ies) dropped from play)",
             self.experiment_number,
+            self.window_experiments,
             self.spent_ms,
             self.saved_ms,
             self.net_ms,
-            self.window_experiments,
             self.margin_ms,
             self.entries
         )
@@ -202,8 +242,17 @@ pub struct EconomicsSummary {
     pub skipped: u64,
     /// `skipped / proposals`, or `0` when nothing was examined.
     pub hit_rate: f64,
-    /// Cumulative estimated scorer milliseconds avoided.
+    /// Cumulative estimated milliseconds of **redundant scoring** avoided.
+    ///
+    /// See the [module documentation](self): this is the quantity #69's
+    /// constraint is stated in, not wall clock removed from the run.
     pub saved_ms: f64,
+    /// The part of [`Self::saved_ms`] that shortened the scorer's actual work.
+    ///
+    /// A skip the backfill replaced left the batch at full width, so it bought
+    /// fresh exploration rather than time. Only skips that could not be
+    /// replaced shrink the batch, and they are priced at screen cost alone.
+    pub wall_clock_saved_ms: f64,
     /// Cumulative measured milliseconds of cache overhead.
     pub spent_ms: f64,
     /// `saved_ms - spent_ms`.
@@ -231,10 +280,11 @@ impl EconomicsSummary {
     /// shape is asserted by test.
     pub fn summary_line(&self) -> String {
         format!(
-            "failed-cache economics: entries={} hitRate={:.4} savedMs={:.1} spentMs={:.1} netMs={:.1} peakMemoryBytes={} diskBytes={} standDown={} ceilingBites={}",
+            "failed-cache economics: entries={} hitRate={:.4} savedMs={:.1} wallClockSavedMs={:.1} spentMs={:.1} netMs={:.1} peakMemoryBytes={} diskBytes={} standDown={} ceilingBites={}",
             self.entries,
             self.hit_rate,
             self.saved_ms,
+            self.wall_clock_saved_ms,
             self.spent_ms,
             self.net_ms,
             self.peak_resident_bytes,
@@ -259,9 +309,12 @@ pub struct CacheEconomics {
     proposals: u64,
     skipped: u64,
     skipped_previously_promoted: u64,
+    skipped_not_backfilled: u64,
     spent_micros: u128,
+    /// Per-experiment `(skips, promoted skips, spend micros)` for the most
+    /// recent window, from which the guardrail's sums are taken.
+    window: VecDeque<(u64, u64, u128)>,
     experiments: u64,
-    consecutive_negative: usize,
     entries: usize,
     peak_resident_bytes: usize,
     disk_bytes: u64,
@@ -282,9 +335,10 @@ impl CacheEconomics {
             proposals: 0,
             skipped: 0,
             skipped_previously_promoted: 0,
+            skipped_not_backfilled: 0,
             spent_micros: 0,
+            window: VecDeque::new(),
             experiments: 0,
-            consecutive_negative: 0,
             entries: 0,
             peak_resident_bytes: 0,
             disk_bytes: 0,
@@ -300,6 +354,13 @@ impl CacheEconomics {
     }
 
     /// Charge the one-off startup rebuild (journal replay or snapshot load).
+    ///
+    /// It counts against the run's cumulative ledger — the summary's `netMs`
+    /// includes it — but deliberately **not** against the stand-down window.
+    /// The rebuild is sunk before the first experiment: no later experiment can
+    /// un-spend it, so standing the cache down over it would only remove the
+    /// chance of earning it back. The window answers "is the cache paying its
+    /// way now?"; the summary answers "did this run come out ahead?".
     pub fn record_startup_rebuild(&mut self, elapsed_ms: u128) {
         self.spent_micros += elapsed_ms.saturating_mul(1_000);
     }
@@ -318,7 +379,7 @@ impl CacheEconomics {
     /// with screening disabled, the single full-corpus batch is observed here —
     /// it is the phase a skipped candidate would have been scored in.
     pub fn observe_screen(&mut self, elapsed_ms: u128, creatures: usize) {
-        if creatures == 0 {
+        if creatures == 0 || self.stood_down {
             return;
         }
         self.screen_ms_total += elapsed_ms as f64;
@@ -326,8 +387,12 @@ impl CacheEconomics {
     }
 
     /// Observe a promote-phase batch: its wall clock and the creatures scored.
+    ///
+    /// Like [`Self::observe_screen`], ignored once the cache has stood down:
+    /// the ledger closes with the cache, so its means describe the run the
+    /// cache was actually part of.
     pub fn observe_promote(&mut self, elapsed_ms: u128, creatures: usize) {
-        if creatures == 0 {
+        if creatures == 0 || self.stood_down {
             return;
         }
         self.promote_ms_total += elapsed_ms as f64;
@@ -350,7 +415,7 @@ impl CacheEconomics {
         self.promote_ms_total / self.promote_creatures as f64
     }
 
-    /// Cumulative estimated scorer milliseconds the skips avoided.
+    /// Cumulative estimated milliseconds of redundant scoring the skips avoided.
     ///
     /// Every skip recorded so far is re-valued at the run's current measured
     /// means, so a mean that firms up over the run corrects the whole ledger
@@ -358,6 +423,15 @@ impl CacheEconomics {
     pub fn saved_ms(&self) -> f64 {
         self.skipped as f64 * self.mean_screen_ms()
             + self.skipped_previously_promoted as f64 * self.mean_promote_ms()
+    }
+
+    /// The part of [`Self::saved_ms`] that shortened the scorer's actual work.
+    ///
+    /// Screen cost only, and only for skips the backfill could not replace: a
+    /// refilled batch still scores at full width, so it bought exploration
+    /// rather than time.
+    pub fn wall_clock_saved_ms(&self) -> f64 {
+        self.skipped_not_backfilled as f64 * self.mean_screen_ms()
     }
 
     /// Cumulative measured milliseconds of cache overhead.
@@ -397,13 +471,20 @@ impl CacheEconomics {
         self.proposals += cost.proposals as u64;
         self.skipped += cost.skipped as u64;
         self.skipped_previously_promoted += cost.skipped_previously_promoted as u64;
+        self.skipped_not_backfilled += cost.skipped.saturating_sub(cost.backfilled) as u64;
         self.spent_micros += spent_micros;
         self.entries = cost.entries;
         let resident_bytes = cost.entries.saturating_mul(FAILED_CACHE_BYTES_PER_ENTRY);
         self.peak_resident_bytes = self.peak_resident_bytes.max(resident_bytes);
 
+        self.push_window(
+            cost.skipped as u64,
+            cost.skipped_previously_promoted as u64,
+            spent_micros,
+        );
+
         let net_cumulative_ms = self.net_ms();
-        self.test_guardrail(experiment_number, net_cumulative_ms);
+        self.test_guardrail(experiment_number);
 
         ExperimentEconomics {
             saved_ms,
@@ -450,6 +531,7 @@ impl CacheEconomics {
                 self.skipped as f64 / self.proposals as f64
             },
             saved_ms,
+            wall_clock_saved_ms: self.wall_clock_saved_ms(),
             spent_ms,
             net_ms: saved_ms - spent_ms,
             peak_resident_bytes: self.peak_resident_bytes,
@@ -459,26 +541,51 @@ impl CacheEconomics {
         }
     }
 
-    /// Count the experiment against the window and stand down when it is full.
-    fn test_guardrail(&mut self, experiment_number: u64, net_ms: f64) {
+    /// Add one experiment to the rolling window, dropping the oldest.
+    fn push_window(&mut self, skipped: u64, previously_promoted: u64, spent_micros: u128) {
+        let size = self.config.stand_down_window;
+        if size == 0 {
+            return;
+        }
+        self.window
+            .push_back((skipped, previously_promoted, spent_micros));
+        while self.window.len() > size {
+            self.window.pop_front();
+        }
+    }
+
+    /// Stand the cache down when the whole window has lost beyond the margin.
+    ///
+    /// The window's savings are valued at the run's current measured means, the
+    /// same figures the summary reports, so the decision and the report can
+    /// never disagree.
+    fn test_guardrail(&mut self, experiment_number: u64) {
         if self.stood_down || self.config.stand_down_window == 0 {
             return;
         }
-        if net_ms < -self.config.stand_down_margin_ms {
-            self.consecutive_negative += 1;
-        } else {
-            self.consecutive_negative = 0;
+        if self.window.len() < self.config.stand_down_window {
+            return;
         }
-        if self.consecutive_negative < self.config.stand_down_window {
+        let (skipped, promoted, spent_micros) = self.window.iter().fold(
+            (0u64, 0u64, 0u128),
+            |(s, p, micros), (skip, promo, spend)| {
+                (s + skip, p + promo, micros.saturating_add(*spend))
+            },
+        );
+        let saved_ms =
+            skipped as f64 * self.mean_screen_ms() + promoted as f64 * self.mean_promote_ms();
+        let spent_ms = spent_micros as f64 / 1_000.0;
+        let net_ms = saved_ms - spent_ms;
+        if net_ms >= -self.config.stand_down_margin_ms {
             return;
         }
         self.stood_down = true;
         self.pending_stand_down = Some(StandDown {
             experiment_number,
-            saved_ms: self.saved_ms(),
-            spent_ms: self.spent_ms(),
+            saved_ms,
+            spent_ms,
             net_ms,
-            window_experiments: self.consecutive_negative,
+            window_experiments: self.window.len(),
             margin_ms: self.config.stand_down_margin_ms,
             entries: self.entries,
         });
@@ -588,11 +695,11 @@ mod tests {
     }
 
     #[test]
-    fn the_window_must_be_full_of_consecutive_losses_before_standing_down() {
+    fn the_whole_window_must_lose_before_standing_down() {
         let mut econ = economics(1.0, 3, 0);
         econ.observe_screen(100, 10); // 10ms/creature
 
-        // Two losing experiments: net is -5ms, worse than the 1ms margin.
+        // Two losing experiments: 2.5ms each of pure overhead.
         for exp in 1..=2 {
             econ.record_experiment(
                 exp,
@@ -604,7 +711,7 @@ mod tests {
         }
         assert!(!econ.stood_down(), "the window is not full yet");
 
-        // One winning experiment resets the run of losses.
+        // A winning experiment inside the window carries the other two.
         econ.record_experiment(
             3,
             ExperimentCost {
@@ -612,16 +719,14 @@ mod tests {
                 ..ExperimentCost::default()
             },
         );
-        assert!(econ.net_ms() > 0.0);
-        assert!(!econ.stood_down());
+        assert!(!econ.stood_down(), "the window as a whole is ahead");
 
-        // Now three consecutive losses — each big enough to put the cumulative
-        // net back below the margin — fill the window.
+        // Once the win has rolled out of the window, three losses stand it down.
         for exp in 4..=6 {
             econ.record_experiment(
                 exp,
                 ExperimentCost {
-                    lookup_micros: 60_000,
+                    lookup_micros: 2_500,
                     ..ExperimentCost::default()
                 },
             );
@@ -630,7 +735,8 @@ mod tests {
         assert!(econ.stood_down());
         assert_eq!(stand_down.experiment_number, 6);
         assert_eq!(stand_down.window_experiments, 3);
-        assert!(stand_down.net_ms < 0.0);
+        assert_eq!(stand_down.saved_ms, 0.0);
+        assert_eq!(stand_down.spent_ms, 7.5, "only the window's own spend");
         assert!(
             stand_down.message().contains("STANDING DOWN"),
             "{}",
@@ -639,6 +745,37 @@ mod tests {
         assert!(
             econ.take_stand_down().is_none(),
             "the event is journalled exactly once"
+        );
+    }
+
+    /// A sunk one-off must not condemn a cache that is currently paying: the
+    /// rebuild is judged by the first window and then rolls out of view.
+    #[test]
+    fn a_sunk_startup_cost_does_not_condemn_a_profitable_cache() {
+        let mut econ = economics(1_000.0, 3, 0);
+        econ.observe_screen(100, 10); // 10ms/creature
+        econ.record_startup_rebuild(3_000); // a slow journal replay
+
+        // The cache earns 200ms an experiment — far more than it spends — but
+        // has not yet repaid the 3s rebuild.
+        for exp in 1..=6 {
+            econ.record_experiment(
+                exp,
+                ExperimentCost {
+                    skipped: 20,
+                    lookup_micros: 1_000,
+                    ..ExperimentCost::default()
+                },
+            );
+        }
+        assert!(
+            econ.net_ms() < 0.0,
+            "the run has still not repaid the rebuild: {}",
+            econ.net_ms()
+        );
+        assert!(
+            !econ.stood_down(),
+            "a cache that is currently paying must not be stood down for a sunk cost"
         );
     }
 

@@ -878,7 +878,11 @@ pub fn run_optimisation_cancellable(
             log::warn(&format!("failed-cache: ignoring snapshot — {reason}"));
         }
         // Rebuild cost is spend the cache has to earn back, so it opens the
-        // ledger rather than being waved through as a one-off.
+        // ledger rather than being waved through as a one-off. The replay's own
+        // age sweeps are already inside `elapsed_ms`, so the counter they left
+        // behind is discarded rather than charged a second time to the first
+        // experiment (issue #92).
+        let _ = cache.take_maintenance_micros();
         if let Some(economics) = cache_economics.as_mut() {
             economics.record_startup_rebuild(report.elapsed_ms);
         }
@@ -1183,17 +1187,18 @@ pub fn run_optimisation_cancellable(
             );
             if filtered.short_batch && !filtered.cancelled {
                 log::warn(&format!(
-                    "failed-cache: SHORT BATCH — scoring {} of {} candidates after {} cache skip(s) and {} backfill(s) from {} proposal(s); the generator can only re-propose known-failed candidates",
+                    "failed-cache: SHORT BATCH — scoring {} of {} candidates after {} cache skip(s) and {} repeat(s) of this batch, {} backfill(s) from {} proposal(s); the generator can only re-propose known-failed candidates",
                     filtered.candidates.len(),
                     config.candidates,
                     filtered.skipped,
+                    filtered.duplicates,
                     filtered.backfilled,
                     filtered.proposals
                 ));
-            } else if filtered.skipped > 0 {
+            } else if filtered.skipped > 0 || filtered.duplicates > 0 {
                 log::detail(&format!(
-                    "failed-cache: skipped {} known-failed candidate(s), backfilled {} in {}ms",
-                    filtered.skipped, filtered.backfilled, filtered.lookup_ms
+                    "failed-cache: skipped {} known-failed candidate(s) and {} repeat(s) of this batch, backfilled {} in {}ms",
+                    filtered.skipped, filtered.duplicates, filtered.backfilled, filtered.lookup_ms
                 ));
             }
             cache_skipped = Some(filtered.skipped);
@@ -1203,6 +1208,7 @@ pub fn run_optimisation_cancellable(
                 proposals: filtered.proposals,
                 skipped: filtered.skipped,
                 skipped_previously_promoted: filtered.skipped_previously_promoted,
+                backfilled: filtered.backfilled,
                 lookup_micros: filtered.lookup_micros,
                 ..ExperimentCost::default()
             };
@@ -1994,6 +2000,8 @@ pub fn run_optimisation_cancellable(
 ///
 /// Draining the cache's maintenance counter here is what keeps a sweep from
 /// being charged to every later experiment as well as to the one that swept.
+/// Once the cache has stood down the ledger is closed: later experiments are no
+/// longer part of the cache's economics and must not overwrite them.
 fn account_for_experiment(
     economics: Option<&mut CacheEconomics>,
     cache: Option<&mut FailedCandidateCache>,
@@ -2001,6 +2009,9 @@ fn account_for_experiment(
     cost: ExperimentCost,
 ) -> Option<ExperimentEconomics> {
     let economics = economics?;
+    if economics.stood_down() {
+        return None;
+    }
     let (maintenance_micros, entries) = match cache {
         Some(cache) => (cache.take_maintenance_micros(), cache.len()),
         None => (0, 0),

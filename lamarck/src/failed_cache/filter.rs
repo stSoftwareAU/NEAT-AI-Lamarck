@@ -35,10 +35,17 @@ pub struct FilteredBatch {
     /// The batch to score: cache misses, topped up where possible.
     pub candidates: Vec<Candidate>,
     /// Proposals rejected by a cache hit.
+    ///
+    /// Only cache hits: a proposal that merely repeats one already accepted
+    /// into this batch is counted in [`Self::duplicates`] instead, because the
+    /// cache had nothing to do with it and must not be credited for it
+    /// (issue #92).
     pub skipped: usize,
     /// Of those, the ones the cache had recorded as previously promoted, whose
     /// skip therefore also avoided a full-corpus score (issue #92).
     pub skipped_previously_promoted: usize,
+    /// Proposals dropped as near-duplicates of one already in this batch.
+    pub duplicates: usize,
     /// Replacement proposals accepted into the batch.
     pub backfilled: usize,
     /// Proposals examined in total, including the original batch.
@@ -54,6 +61,14 @@ pub struct FilteredBatch {
     /// A small batch filters in well under a millisecond, and an overhead that
     /// truncates to `0ms` would let a net-negative cache look free.
     pub lookup_micros: u128,
+}
+
+/// Why proposals were dropped, kept apart so only cache hits credit the cache.
+#[derive(Debug, Default)]
+struct Rejections {
+    skipped: usize,
+    previously_promoted: usize,
+    duplicates: usize,
 }
 
 /// Drop known-failed candidates from `batch` and regenerate to refill it.
@@ -78,8 +93,6 @@ pub fn filter_and_backfill(
     let started = Instant::now();
     let mut kept: Vec<Candidate> = Vec::with_capacity(batch.len());
     let mut accepted: Vec<CandidateFingerprint> = Vec::with_capacity(batch.len());
-    let mut skipped = 0usize;
-    let mut skipped_previously_promoted = 0usize;
     let mut proposals = 0usize;
     let mut backfilled = 0usize;
     let mut cancelled = false;
@@ -88,13 +101,14 @@ pub fn filter_and_backfill(
     let consider = |candidate: Candidate,
                     kept: &mut Vec<Candidate>,
                     accepted: &mut Vec<CandidateFingerprint>,
-                    skipped_previously_promoted: &mut usize|
+                    counts: &mut Rejections|
      -> bool {
         let fingerprint =
             CandidateFingerprint::from_provenance(incumbent_id, &candidate.provenance);
         if let Some(hit) = cache.hit(&fingerprint, now) {
+            counts.skipped += 1;
             if hit.promoted {
-                *skipped_previously_promoted += 1;
+                counts.previously_promoted += 1;
             }
             return false;
         }
@@ -102,6 +116,7 @@ pub fn filter_and_backfill(
             .iter()
             .any(|seen| seen.matches(&fingerprint, tolerance))
         {
+            counts.duplicates += 1;
             return false;
         }
         accepted.push(fingerprint);
@@ -109,16 +124,10 @@ pub fn filter_and_backfill(
         true
     };
 
+    let mut counts = Rejections::default();
     for candidate in batch {
         proposals += 1;
-        if !consider(
-            candidate,
-            &mut kept,
-            &mut accepted,
-            &mut skipped_previously_promoted,
-        ) {
-            skipped += 1;
-        }
+        consider(candidate, &mut kept, &mut accepted, &mut counts);
     }
 
     let budget = target.saturating_mul(BACKFILL_PROPOSAL_BUDGET_MULTIPLE);
@@ -138,16 +147,9 @@ pub fn filter_and_backfill(
                 break;
             }
             proposals += 1;
-            if consider(
-                candidate,
-                &mut kept,
-                &mut accepted,
-                &mut skipped_previously_promoted,
-            ) {
+            if consider(candidate, &mut kept, &mut accepted, &mut counts) {
                 backfilled += 1;
                 fresh += 1;
-            } else {
-                skipped += 1;
             }
         }
         if fresh == 0 {
@@ -158,11 +160,17 @@ pub fn filter_and_backfill(
     }
 
     let elapsed = started.elapsed();
+    let Rejections {
+        skipped,
+        previously_promoted: skipped_previously_promoted,
+        duplicates,
+    } = counts;
     FilteredBatch {
         short_batch: kept.len() < target,
         candidates: kept,
         skipped,
         skipped_previously_promoted,
+        duplicates,
         backfilled,
         proposals,
         cancelled,
@@ -409,6 +417,13 @@ mod tests {
             "a duplicate of a candidate already in the batch is not a top-up"
         );
         assert_eq!(filtered.backfilled, 0);
+        // Issue #92: the cache had nothing to do with these rejections, so it
+        // must not be credited with a hit — or with the time — for them.
+        assert_eq!(filtered.skipped, 0, "no cache hit occurred");
+        assert!(
+            filtered.duplicates > 0,
+            "the repeats are counted as repeats"
+        );
     }
 
     #[test]

@@ -189,13 +189,15 @@ fn accounting_matches_known_inputs() {
     assert_eq!(economics.mean_screen_ms(), 20.0);
     assert_eq!(economics.mean_promote_ms(), 100.0);
 
-    // Experiment 1: 4 skips, none previously promoted → screen cost only.
+    // Experiment 1: 4 skips, none previously promoted → screen cost only. Three
+    // of the four were backfilled, so only one shortened the scorer's work.
     let first = economics.record_experiment(
         1,
         ExperimentCost {
             proposals: 12,
             skipped: 4,
             skipped_previously_promoted: 0,
+            backfilled: 3,
             lookup_micros: 1_500,
             maintenance_micros: 500,
             entries: 20,
@@ -206,13 +208,15 @@ fn accounting_matches_known_inputs() {
     assert_eq!(first.net_cumulative_ms, 80.0 - (12.0 + 3.0 + 2.0));
     assert_eq!(first.resident_bytes, 20 * FAILED_CACHE_BYTES_PER_ENTRY);
 
-    // Experiment 2: 3 skips, one of which the cache had recorded as promoted.
+    // Experiment 2: 3 skips, one of which the cache had recorded as promoted;
+    // the batch was refilled completely, so no scorer work was shortened.
     let second = economics.record_experiment(
         2,
         ExperimentCost {
             proposals: 8,
             skipped: 3,
             skipped_previously_promoted: 1,
+            backfilled: 3,
             lookup_micros: 1_000,
             maintenance_micros: 0,
             entries: 25,
@@ -229,6 +233,10 @@ fn accounting_matches_known_inputs() {
     assert_eq!(summary.skipped, 7);
     assert_eq!(summary.hit_rate, 0.35);
     assert_eq!(summary.saved_ms, 7.0 * 20.0 + 1.0 * 100.0);
+    assert_eq!(
+        summary.wall_clock_saved_ms, 20.0,
+        "only the one skip the backfill could not replace shortened the batch"
+    );
     assert_eq!(summary.spent_ms, 12.0 + 3.0 + 2.0 + 1.0);
     assert_eq!(summary.net_ms, 240.0 - 18.0);
     assert_eq!(

@@ -191,8 +191,8 @@ Leaving these unset changes behaviour.
 | `--failed-cache-max-age-seconds` | Drop failed-candidate entries older than this. Entries age from insertion, not from last use. Default: `604800` (7 days). `0` keeps entries until the size cap evicts them. |
 | `--failed-cache-tolerance-abs` | Absolute bound for treating two candidate values as the same proposal: they match when their difference is within `max(abs, rel × largest magnitude)`. Default: `1e-9`; this is the bound that matches deltas passing through zero, where a relative bound has no scale to work with. |
 | `--failed-cache-tolerance-rel` | Relative bound for the same comparison, which carries the match at large magnitudes. Default: `1e-6`. Changing either tolerance invalidates an existing cache snapshot, which is then rebuilt from the journal. |
-| `--failed-cache-stand-down-margin-ms` | Milliseconds the cache's cumulative overhead must exceed its cumulative estimated savings by before an experiment counts as net-negative. Default: `1000` — below a second of wasted run time the estimate's own noise is the larger term. |
-| `--failed-cache-stand-down-window` | Consecutive net-negative experiments before the cache stands down for the rest of the run (logged, journalled as a `cacheStandDown` line, run continues). Default: `20`, long enough that a cold cache — which pays lookup cost before it holds anything to hit on — is not stood down before it can warm up. `0` disables the guardrail. |
+| `--failed-cache-stand-down-margin-ms` | Milliseconds the overhead inside the stand-down window must exceed the savings inside it by before the cache is stood down. Default: `1000` — below a second of wasted run time the estimate's own noise is the larger term. |
+| `--failed-cache-stand-down-window` | Experiments in the rolling window the guardrail judges the cache over; a losing window stands the cache down for the rest of the run (logged, journalled as a `cacheStandDown` line, run continues). Default: `20`, long enough that a cold cache — which pays lookup cost before it holds anything to hit on — is not stood down before it can warm up. `0` disables the guardrail. |
 | `--failed-cache-max-bytes` | Resident-footprint ceiling in bytes, enforced by evicting oldest-first and logged whenever it bites. Default: `25600000` (~25 MiB), the entry cap's own worst case. `0` disables the ceiling; `--failed-cache-max-entries` still bounds the cache. |
 
 ## How a run works
@@ -618,7 +618,7 @@ flowchart TD
     SCREEN[Measured screen cost per creature this run] --> SAVED
     SKIP[Candidates skipped by a cache hit] --> SAVED
     PROMO[Skips whose entry had reached promote] --> SAVED
-    SAVED[Estimated ms saved] --> NET{cumulative net < -margin<br/>for the whole window?}
+    SAVED[Estimated ms of redundant scoring avoided] --> NET{window spend exceeds<br/>window savings by the margin?}
     SPENT[Measured ms spent] --> NET
     NET -->|no| KEEP[Cache stays on]
     NET -->|yes| DOWN[Warn, journal cacheStandDown,<br/>disable the cache, run continues]
@@ -634,17 +634,31 @@ baseline's own cost cannot inflate it. In a run with screening off, the single
 full-corpus batch *is* that first phase and is priced as such. Promote-phase
 time is claimed only for a skip whose cache entry records that the candidate had
 actually reached the promote phase; every other skip is priced at screen cost
-only, which under-claims rather than over-claims. Spend is accumulated in
-microseconds because a whole-millisecond lookup timer truncates to zero on a
+only, which under-claims rather than over-claims. Only a genuine **cache hit**
+counts as a skip — a proposal dropped for repeating one already in the same
+batch is the generator's doing and is counted separately. Spend is accumulated
+in microseconds because a whole-millisecond lookup timer truncates to zero on a
 small batch, and an overhead that rounds to zero would let a losing cache look
 free.
 
-**Stand-down.** When the cumulative net stays worse than
-`--failed-cache-stand-down-margin-ms` for `--failed-cache-stand-down-window`
-consecutive experiments, Lamarck logs a warning, writes a `cacheStandDown`
-journal line and disables the cache for the rest of the run. The run continues
-and no snapshot is written: a cache that does not earn its keep degrades to the
-cache-off behaviour instead of degrading the run.
+**`savedMs` is redundant scoring avoided, not wall clock removed.** The batch is
+backfilled to full width, so a replaced skip converts redundant scoring into
+fresh exploration rather than shortening the batch. `savedMs` is the quantity in
+which issue #69's constraint is stated ("we spend more time than it saves in
+redundant scoring") and is what the guardrail judges; the part that shortened
+the scorer's work — the skips backfill could not replace — is reported
+separately as `wallClockSavedMs` so the two are never confused.
+
+**Stand-down.** The guardrail judges a **rolling window** of the most recent
+`--failed-cache-stand-down-window` experiments: when the spend inside that
+window exceeds the savings inside it by
+`--failed-cache-stand-down-margin-ms`, Lamarck logs a warning, writes a
+`cacheStandDown` journal line and disables the cache for the rest of the run.
+The run continues and no snapshot is written: a cache that does not earn its
+keep degrades to the cache-off behaviour instead of degrading the run. One-off
+costs (the startup rebuild, the snapshot write) count in the run's cumulative
+`netMs` but not in the window — they are sunk before the window opens, and
+disabling a currently-profitable cache cannot un-spend them.
 
 **Byte ceiling.** `--failed-cache-max-bytes` bounds the resident footprint. Past
 it the cache evicts oldest-first — the ceiling is a bound, not a target — and
@@ -653,7 +667,7 @@ every bite is logged, because a silently truncated cache reads as a working one.
 **End-of-run summary.** Every cache-on run ends with one parseable line:
 
 ```text
-● failed-cache economics: entries=1240 hitRate=0.1832 savedMs=48210.5 spentMs=311.2 netMs=47899.3 peakMemoryBytes=634880 diskBytes=98304 standDown=false ceilingBites=0
+● failed-cache economics: entries=1240 hitRate=0.1832 savedMs=48210.5 wallClockSavedMs=0.0 spentMs=311.2 netMs=47899.3 peakMemoryBytes=634880 diskBytes=98304 standDown=false ceilingBites=0
 ```
 
 ## Safety invariants
