@@ -7,7 +7,7 @@
 //!    `fixtures/focus/k1-candidate-stream.txt` was captured from the commit
 //!    before this change, so any leak of multi-focus plumbing into the default
 //!    — a stray rng draw, a reshaped journal — fails here. The comparison is
-//!    exact on structure and six significant figures on values, because the
+//!    exact on structure and seven significant figures on values, because the
 //!    analysis reduction is not bit-identical across architectures.
 //! 2. At `K > 1` the creature-wide passes still run **once** per experiment.
 //!    An implementation that loops the whole analysis per focus would be
@@ -162,8 +162,8 @@ fn experiments(result: &RunResult) -> Vec<ExperimentRecord> {
 /// grown-neuron UUID and ordering — because the analysis reduction is not
 /// bit-identical across architectures: the same proposal reads
 /// `w=-0.04081369646976907` on aarch64 and `w=-0.04081369645778815` on x86_64.
-/// The proposal's actual value is compared separately, to six significant
-/// figures, which is four orders of magnitude tighter than that drift.
+/// The proposal's actual value is compared separately, to seven significant
+/// figures, which is orders of magnitude tighter than that drift.
 ///
 /// Only runs containing a `.` are redacted, so hexadecimal UUID segments and
 /// integer counts survive verbatim.
@@ -208,41 +208,100 @@ fn redact_decimals(text: &str) -> String {
     out
 }
 
-/// Six significant figures — tight enough to catch a changed proposal, loose
-/// enough to survive a different FMA/vectorisation on another architecture.
+/// Seven significant figures of agreement — tight enough to catch a changed
+/// proposal, loose enough to survive a different FMA/vectorisation on another
+/// architecture.
+///
+/// The comparison is numeric rather than on formatted text: rounding a value to
+/// a fixed number of figures has a hard cliff, so two values differing far
+/// below the tolerance still render differently when they straddle a rounding
+/// boundary (`6.7130005e-3` → `6.713000e-3` on one architecture and
+/// `6.713001e-3` on another). A relative tolerance has no such boundary.
+const VALUE_TOLERANCE: f64 = 1e-7;
+
+/// Do two proposal values agree to within the drift tolerance?
+fn values_agree(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(l), Some(r)) => l == r || (l - r).abs() <= VALUE_TOLERANCE * l.abs().max(r.abs()),
+        _ => false,
+    }
+}
+
+/// Display form for failure messages only — never for the comparison itself.
 fn approx(value: Option<f64>) -> String {
     value.map_or_else(|| "null".to_string(), |v| format!("{v:.6e}"))
 }
 
-/// One comparable line per experiment: focus, then each candidate's strategy,
-/// focus, mutation shape and proposal values.
-fn normalise(focus: &str, candidates: &[CandidateProvenance]) -> String {
-    let body: Vec<String> = candidates
-        .iter()
-        .map(|p| {
-            format!(
-                "{}|{}|{}|{}|{}",
-                serde_json::to_value(p.strategy).unwrap(),
-                p.focus_neuron,
-                redact_decimals(&p.mutation),
-                approx(p.old_value),
-                approx(p.new_value)
-            )
-        })
-        .collect();
-    format!("\"{focus}\"|{}\n", body.join(" ;; "))
+/// One experiment reduced to comparable form: the focus, each candidate's
+/// shape (strategy, focus, mutation with decimals redacted) and its raw
+/// proposal values.
+struct ExperimentShape {
+    focus: String,
+    shapes: Vec<String>,
+    values: Vec<(Option<f64>, Option<f64>)>,
 }
 
-fn candidate_stream(result: &RunResult) -> String {
+fn normalise(focus: &str, candidates: &[CandidateProvenance]) -> ExperimentShape {
+    ExperimentShape {
+        focus: focus.to_string(),
+        shapes: candidates
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}|{}|{}",
+                    serde_json::to_value(p.strategy).unwrap(),
+                    p.focus_neuron,
+                    redact_decimals(&p.mutation)
+                )
+            })
+            .collect(),
+        values: candidates
+            .iter()
+            .map(|p| (p.old_value, p.new_value))
+            .collect(),
+    }
+}
+
+fn candidate_stream(result: &RunResult) -> Vec<ExperimentShape> {
     experiments(result)
         .iter()
         .map(|record| normalise(&record.focus_neuron, &record.candidates))
         .collect()
 }
 
+/// Structure must match exactly; values only to within the drift tolerance.
+fn assert_stream_matches(actual: &[ExperimentShape], golden: &[ExperimentShape]) {
+    assert_eq!(
+        actual.len(),
+        golden.len(),
+        "the run proposed {} experiments, the fixture holds {}",
+        actual.len(),
+        golden.len()
+    );
+    for (i, (a, g)) in actual.iter().zip(golden).enumerate() {
+        assert_eq!(a.focus, g.focus, "experiment {i}: focus neuron");
+        assert_eq!(a.shapes, g.shapes, "experiment {i}: candidate shapes");
+        for (j, (av, gv)) in a.values.iter().zip(&g.values).enumerate() {
+            assert!(
+                values_agree(av.0, gv.0),
+                "experiment {i} candidate {j}: old value {} vs fixture {}",
+                approx(av.0),
+                approx(gv.0)
+            );
+            assert!(
+                values_agree(av.1, gv.1),
+                "experiment {i} candidate {j}: new value {} vs fixture {}",
+                approx(av.1),
+                approx(gv.1)
+            );
+        }
+    }
+}
+
 /// The pre-#109 stream, captured from commit 993f853 and normalised the same
 /// way, so the two sides are compared on identical terms.
-fn golden_stream() -> String {
+fn golden_stream() -> Vec<ExperimentShape> {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/focus/k1-candidate-stream.txt");
     let text = std::fs::read_to_string(&path)
@@ -275,10 +334,10 @@ fn focus_count_one_reproduces_the_pre_change_candidate_stream() {
 
     let golden = golden_stream();
     assert!(
-        golden.lines().count() >= 3,
+        golden.len() >= 3,
         "the fixture must carry the whole pre-change stream"
     );
-    assert_eq!(candidate_stream(&result), golden);
+    assert_stream_matches(&candidate_stream(&result), &golden);
 }
 
 /// The normaliser must hide float drift without hiding a different proposal.
@@ -302,13 +361,18 @@ fn the_normaliser_redacts_drift_but_not_uuids_or_changed_values() {
     assert_eq!(redact_decimals("(count=64)"), "(count=64)");
     assert_eq!(redact_decimals("mean=1.2e-7 x"), "mean=<num> x");
 
-    // Six significant figures: drift collapses, a real change does not.
-    assert_eq!(
-        approx(Some(0.10061501836753808)),
-        approx(Some(0.10061501759267771))
-    );
-    assert_ne!(approx(Some(0.1006150)), approx(Some(0.1006151)));
-    assert_eq!(approx(None), "null");
+    // Seven significant figures: drift collapses, a real change does not.
+    assert!(values_agree(
+        Some(0.10061501836753808),
+        Some(0.10061501759267771)
+    ));
+    assert!(!values_agree(Some(0.1006150), Some(0.1006151)));
+    assert!(values_agree(None, None));
+    assert!(!values_agree(Some(0.0), None));
+    // Values either side of a formatting boundary agree, where the formatted
+    // text would not — this is the drift that failed CI.
+    assert_ne!(approx(Some(6.7130004e-3)), approx(Some(6.7130006e-3)));
+    assert!(values_agree(Some(6.7130004e-3), Some(6.7130006e-3)));
 }
 
 /// A single-focus journal keeps its pre-#109 shape: no focus set at all.
