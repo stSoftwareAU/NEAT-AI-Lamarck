@@ -170,21 +170,34 @@ pub struct CandidateBatch {
 impl CandidateBatch {
     /// Strategy mix of the batch — how many candidates each family contributed.
     pub fn strategy_mix(&self) -> BTreeMap<CandidateStrategy, usize> {
-        let mut mix = BTreeMap::new();
-        for candidate in &self.candidates {
-            *mix.entry(candidate.provenance.strategy).or_insert(0) += 1;
-        }
-        mix
+        strategy_mix(&self.candidates)
     }
 
     /// Strategy mix rendered for the run log, e.g. `structural_add=6 random=3`.
     pub fn strategy_mix_summary(&self) -> String {
-        self.strategy_mix()
-            .into_iter()
-            .map(|(strategy, n)| format!("{}={n}", strategy.label()))
-            .collect::<Vec<_>>()
-            .join(" ")
+        strategy_mix_summary(&self.candidates)
     }
+}
+
+/// Strategy mix of any candidate slice — how many each family contributed.
+///
+/// Takes a slice rather than a batch so a run that merged several per-focus
+/// batches into one population can still report its mix (issue #109).
+pub fn strategy_mix(candidates: &[Candidate]) -> BTreeMap<CandidateStrategy, usize> {
+    let mut mix = BTreeMap::new();
+    for candidate in candidates {
+        *mix.entry(candidate.provenance.strategy).or_insert(0) += 1;
+    }
+    mix
+}
+
+/// Strategy mix rendered for the run log, e.g. `structural_add=6 random=3`.
+pub fn strategy_mix_summary(candidates: &[Candidate]) -> String {
+    strategy_mix(candidates)
+        .into_iter()
+        .map(|(strategy, n)| format!("{}={n}", strategy.label()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Inputs shared by candidate generation for one focus-neuron experiment.

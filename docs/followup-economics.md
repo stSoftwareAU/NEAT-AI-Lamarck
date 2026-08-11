@@ -294,6 +294,50 @@ promote-scores per scorer-minute and score improvement per wall-clock hour. The
 default only changes if the scaled side wins on **promote rate and
 accepts-per-hour**, not on batch size.
 
+## Arm 6 — Multi-focus experiments (#109)
+
+**Not run on the production creature.** Like Arm 5 it needs exclusive use of
+the scorer and the 21 GiB corpus. The loop itself is measured, on the same
+synthetic shape the memo arm used (128 inputs, 24 TANH hiddens, one output;
+20 000 records; 60 s wall budget; seed 7; accept-free `min_improvement 1`), by
+`cargo run --release --example focus_fanout_bench`. Best of three interleaved
+repeats:
+
+| `--focus-count` | `--candidates` | Experiments | Candidates | Candidates/analysis-min | Promote scores/scorer-min |
+|---|---|---|---|---|---|
+| 1 | 12 | 380 | 4560 | 8955 | 9844 |
+| 3 | 12 | 324 | 3888 | 7507 | 8537 |
+| 3 | 36 | 180 | 6480 | **23 194** | 9392 |
+
+Two things to read off it. Holding the *total* batch at 12 makes K = 3 slightly
+**worse** on throughput (0.84×): the batch size did not move, but the experiment
+now pays three focus scans instead of one. The amortisation only pays when each
+focus keeps its own share of the budget — at 12 candidates *per focus* the same
+shared learning pass produces **2.6× the candidates per analysis-minute**, which
+is inside the 1.5×–3× the issue estimated, while the promote rate holds at 0.95×
+(9392 vs 9844), so the batch is not spread so thin that the structural quotas
+stop firing.
+
+In an accept-rich regime (`min_improvement 1e-6`, 45 s, best of two) the
+throughput result repeats (17 591 vs 5699 candidates/analysis-min, 3.1×) but
+K = 1 still won on improvement per wall-clock hour (1.73e-1 vs 1.64e-1): more
+focuses means each accept is followed by a memo invalidation covering work spent
+on focuses that did not win. That is the question the production arm has to
+settle, so `--focus-count` ships **opt-in at 1**, exactly as
+`--scale-candidate-quotas` did.
+
+Run the paired benchmark with:
+
+```bash
+FOCUS_COUNT_SECONDS=900 FOCUS_COUNT_CANDIDATES=40 \
+  scripts/run-followup-economics.sh focus-count
+```
+
+Both sides share seed 71, the wall budget and the per-focus candidate share
+(the K = 3 side asks for 3× the budget, because `--candidates` is split between
+the focuses); only `--focus-count` moves. The default only changes if the
+multi-focus side wins on **accepts-per-hour**, not on candidates per minute.
+
 ## Verdict — what to disable
 
 **Nothing is disabled.** Every strategy stays enabled. Across all five arms —
@@ -326,6 +370,7 @@ stays the default; nothing about it is changed here.
 | 3. Batch-size A/B | **Run** — see the ceiling result above |
 | 4. Multi-seed repeat | **Unrun** — 3 hours of exclusive box time |
 | #108. Candidate-quota scaling | **Unrun** — the generator change has landed behind `--scale-candidate-quotas`; the paired economics arm needs the same exclusive box time |
+| #109. Multi-focus experiments | **Unrun** — the loop change has landed behind `--focus-count`; the paired economics arm needs the same exclusive box time |
 
 The unrun work is one follow-up, not three: it is all "arms that need exclusive
 box time on the production creature". [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96)

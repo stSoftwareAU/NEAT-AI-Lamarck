@@ -45,6 +45,14 @@ pub const DEFAULT_SCREEN_PROMOTE_THRESHOLD: f64 = DEFAULT_MIN_IMPROVEMENT;
 /// Abort after this many consecutive scorer failures.
 pub const DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES: u32 = 3;
 
+/// Default focus neurons proposed against per experiment (issue #109).
+///
+/// `1` is the pre-#109 behaviour: one focus per experiment, paying the whole
+/// creature-wide analysis for a single neuron. Raising it amortises that
+/// analysis over several focuses and diversifies the batch, which is a batch
+/// economics change the paired benchmark has to justify before it moves.
+pub const DEFAULT_FOCUS_COUNT: usize = 1;
+
 /// Run-time knobs for a Lamarck optimisation session.
 #[derive(Debug, Clone)]
 pub struct LamarckConfig {
@@ -84,6 +92,13 @@ pub struct LamarckConfig {
     pub focus_neuron: Option<String>,
     /// Focus selection policy when `focus_neuron` is unset.
     pub focus_policy: FocusPolicy,
+    /// Focus neurons proposed against per experiment (issue #109).
+    ///
+    /// The creature-wide learning and output-residual passes run once per
+    /// experiment whatever this is, so `K > 1` amortises them over `K` focuses
+    /// and splits [`Self::candidates`] between them. `--focus-neuron` pins the
+    /// focus, so it caps this at 1.
+    pub focus_count: usize,
     /// Compute expensive input×input correlations in observations.
     pub compute_correlations: bool,
     /// Abort after this many consecutive scorer failures.
@@ -134,6 +149,19 @@ impl LamarckConfig {
         Ok(self.analysis_threads)
     }
 
+    /// Focus neurons per experiment, validated (issue #109).
+    ///
+    /// Zero focuses is a configuration fault, reported rather than silently
+    /// clamped to one: an experiment with no focus has nothing to propose
+    /// against, and a run that quietly ignored the flag would invalidate the
+    /// A/B it was set for.
+    pub fn focus_count(&self) -> Result<usize, String> {
+        if self.focus_count == 0 {
+            return Err("--focus-count must be at least 1 (got 0)".to_string());
+        }
+        Ok(self.focus_count)
+    }
+
     /// Backprop configuration for this run, with the CLI overrides applied.
     ///
     /// An override that is not finite and strictly positive is a configuration
@@ -182,6 +210,7 @@ impl Default for LamarckConfig {
             quick_sample_records: DEFAULT_QUICK_SAMPLE_RECORDS,
             focus_neuron: None,
             focus_policy: FocusPolicy::Weighted,
+            focus_count: DEFAULT_FOCUS_COUNT,
             compute_correlations: false,
             max_consecutive_scorer_failures: DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
             phase0_parity: true,
@@ -201,6 +230,28 @@ impl Default for LamarckConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #109: the default is one focus per experiment — the pre-#109 run.
+    #[test]
+    fn focus_count_defaults_to_one_and_rejects_zero() {
+        let config = LamarckConfig::default();
+        assert_eq!(config.focus_count, DEFAULT_FOCUS_COUNT);
+        assert_eq!(config.focus_count(), Ok(1));
+
+        let three = LamarckConfig {
+            focus_count: 3,
+            ..LamarckConfig::default()
+        };
+        assert_eq!(three.focus_count(), Ok(3));
+
+        // Zero focuses proposes nothing at all, so it is a fault, not a clamp.
+        let none = LamarckConfig {
+            focus_count: 0,
+            ..LamarckConfig::default()
+        };
+        let err = none.focus_count().expect_err("zero is rejected");
+        assert!(err.contains("--focus-count"), "error names the flag: {err}");
+    }
 
     #[test]
     fn backprop_config_keeps_the_port_default_rate_when_unset() {

@@ -5,9 +5,9 @@ use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
     CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS, DEFAULT_CANDIDATE_COUNT,
-    DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE,
-    DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig, print_run_summary, report_from_journal,
-    run_optimisation_cancellable,
+    DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
+    DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
+    print_run_summary, report_from_journal, run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -90,6 +90,15 @@ struct Cli {
     /// neuron. Zero-signal neurons are never selected.
     #[arg(long, default_value = "weighted")]
     focus_policy: String,
+
+    /// Focus neurons proposed against per experiment (issue #109). Must be >= 1.
+    ///
+    /// The creature-wide learning and output-residual passes run once per
+    /// experiment whatever this is, so `K > 1` amortises them over `K` focuses
+    /// and splits `--candidates` between them. `--focus-neuron` pins the focus
+    /// and caps this at 1.
+    #[arg(long, default_value_t = DEFAULT_FOCUS_COUNT)]
+    focus_count: usize,
 
     /// Compute expensive input×input correlations in observations.
     #[arg(long, default_value_t = false)]
@@ -226,6 +235,7 @@ fn main() -> ExitCode {
         quick_sample_records: cli.quick_sample_records,
         focus_neuron: cli.focus_neuron,
         focus_policy,
+        focus_count: cli.focus_count,
         compute_correlations: cli.compute_correlations,
         max_consecutive_scorer_failures: neat_ai_lamarck::DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
         phase0_parity: !cli.skip_phase0,
@@ -250,6 +260,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = config.analysis_threads() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.focus_count() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }

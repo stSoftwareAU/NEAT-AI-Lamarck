@@ -4,7 +4,7 @@ use crate::analysis::{ScanBudget, scan_post_focus, scan_pre_focus};
 use crate::cancel::CancelToken;
 use crate::candidates::{
     BatchLimit, Candidate, CandidateBudget, CandidateGenContext, CandidateProvenance,
-    CandidateStrategy, generate_candidate_batch, write_candidate_batch,
+    CandidateStrategy, generate_candidate_batch, strategy_mix_summary, write_candidate_batch,
 };
 use crate::combos::{
     ComboSelectRequest, ComboSelection, StackDampenReport, select_best_with_combinations,
@@ -14,7 +14,8 @@ use crate::focus::{
     FixedFocusSelector, FocusChoice, FocusNeuronStats, FocusPolicy, FocusSelector,
     HighErrorFocusSelector, RandomFocusSelector, UnsaturatedFocusSelector, WeightedFocusSelector,
     attach_focus_blame, attach_learning_to_incoming, build_improvement_signals,
-    select_highest_signal,
+    select_highest_signal, select_highest_signal_excluding, select_random_excluding,
+    select_unsaturated_excluding,
 };
 use crate::grafts::{
     GraftReplayRequest, GraftStore, default_graft_replay_budget, record_structural_acceptance,
@@ -56,8 +57,17 @@ pub struct ExperimentRecord {
     pub incumbent_id: String,
     /// Baseline authoritative score.
     pub baseline_score: f64,
-    /// Focus neuron UUID.
+    /// Primary focus neuron UUID (the first of [`Self::focus_neurons`]).
     pub focus_neuron: String,
+    /// Every focus neuron this experiment proposed against (issue #109).
+    ///
+    /// Omitted for a single-focus experiment — the pre-#109 shape, where
+    /// [`Self::focus_neuron`] already says everything — and absent from
+    /// journals written before the field existed. Each candidate's provenance
+    /// names the focus it was proposed for, so a winner is attributable to one
+    /// member of this set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_neurons: Option<Vec<String>>,
     /// Focus-neuron structure, activation statistics and backprop blame (#70).
     ///
     /// Omitted only when the focus scan did not run for this experiment (and on
@@ -216,6 +226,12 @@ pub struct RunConfigRecord {
     pub focus_neuron: Option<String>,
     /// Focus selection policy label.
     pub focus_policy: String,
+    /// Focus neurons proposed against per experiment (`--focus-count`, #109).
+    ///
+    /// `0` in journals written before the knob existed; a real run always
+    /// records at least 1.
+    #[serde(default)]
+    pub focus_count: usize,
     /// Observations mode label (`full` / `quick`).
     pub stats_mode: String,
     /// Record cap for quick-mode analysis sampling.
@@ -267,6 +283,7 @@ impl RunConfigRecord {
             screen_promote_threshold: config.screen_promote_threshold,
             focus_neuron: config.focus_neuron.clone(),
             focus_policy: config.focus_policy.label().to_string(),
+            focus_count: config.focus_count,
             stats_mode: config.stats_mode.label().to_string(),
             quick_sample_records: config.quick_sample_records,
             compute_correlations: config.compute_correlations,
@@ -418,6 +435,202 @@ pub struct RunResult {
     pub stop_reason: StopReason,
 }
 
+/// The focus selectors an optimisation run keeps across experiments.
+///
+/// Grouped so the multi-focus draw (issue #109) is one call rather than a
+/// policy `match` repeated per focus.
+struct FocusSelectors {
+    random: RandomFocusSelector,
+    unsaturated: UnsaturatedFocusSelector,
+    high_error: HighErrorFocusSelector,
+    weighted: WeightedFocusSelector,
+    fixed: Option<FixedFocusSelector>,
+}
+
+impl FocusSelectors {
+    /// Select up to `focus_count` distinct focus neurons for one experiment.
+    ///
+    /// The first focus is drawn exactly as the single-focus path always drew
+    /// it, so `focus_count == 1` consumes the same rng stream as before #109.
+    /// A pinned `--focus-neuron` yields exactly that neuron. Fewer than
+    /// `focus_count` focuses is legitimate — a creature can run out of neurons
+    /// carrying a non-zero improvement signal.
+    fn select_focus_set(
+        &mut self,
+        creature: &neat_core::CreatureExport,
+        policy: FocusPolicy,
+        focus_count: usize,
+        signals: &std::collections::HashMap<String, f64>,
+        rng: &mut StdRng,
+    ) -> Result<Vec<String>, String> {
+        if let Some(selector) = self.fixed.as_mut() {
+            let uuid = selector.select(creature, rng).ok_or_else(|| {
+                format!(
+                    "focus neuron '{}' not found (or is an input)",
+                    selector.uuid
+                )
+            })?;
+            log::detail(&format!("focus neuron: {uuid} (pinned)"));
+            return Ok(vec![uuid]);
+        }
+
+        let mut chosen = vec![self.select_primary(creature, policy, signals, rng)?];
+        while chosen.len() < focus_count {
+            let Some(choice) = self.select_additional(creature, policy, signals, &chosen, rng)
+            else {
+                log::detail(&format!(
+                    "focus set: {} of {focus_count} focuses available on this creature",
+                    chosen.len()
+                ));
+                break;
+            };
+            log::detail(&format!(
+                "focus neuron {}: {} ({})",
+                chosen.len() + 1,
+                choice.uuid,
+                choice.reason
+            ));
+            chosen.push(choice.uuid);
+        }
+        Ok(chosen)
+    }
+
+    /// Draw the experiment's primary focus (the pre-#109 selection).
+    fn select_primary(
+        &mut self,
+        creature: &neat_core::CreatureExport,
+        policy: FocusPolicy,
+        signals: &std::collections::HashMap<String, f64>,
+        rng: &mut StdRng,
+    ) -> Result<String, String> {
+        match policy {
+            FocusPolicy::Weighted => {
+                let choice = self
+                    .weighted
+                    .select_weighted(creature, signals, rng)
+                    .or_else(|| {
+                        log::warn("no non-zero improvement signal; falling back to first output");
+                        self.high_error
+                            .select(creature, rng)
+                            .map(|uuid| FocusChoice {
+                                uuid,
+                                weight: 0.0,
+                                reason: "fallback_first_output".into(),
+                            })
+                    })
+                    .ok_or_else(|| "no focus neuron available".to_string())?;
+                log::detail(&format!(
+                    "focus neuron: {} (weight={:.2}, {})",
+                    choice.uuid, choice.weight, choice.reason
+                ));
+                Ok(choice.uuid)
+            }
+            FocusPolicy::HighError => {
+                let choice = select_highest_signal(signals).or_else(|| {
+                    log::warn("no non-zero improvement signal; falling back to first output");
+                    self.high_error
+                        .select(creature, rng)
+                        .map(|uuid| FocusChoice {
+                            uuid,
+                            weight: 0.0,
+                            reason: "fallback_first_output".into(),
+                        })
+                });
+                let choice = choice.ok_or_else(|| "no focus neuron available".to_string())?;
+                log::detail(&format!(
+                    "focus neuron: {} ({})",
+                    choice.uuid, choice.reason
+                ));
+                Ok(choice.uuid)
+            }
+            FocusPolicy::Random => {
+                let uuid = self
+                    .random
+                    .select(creature, rng)
+                    .ok_or_else(|| "no focus neuron available".to_string())?;
+                log::detail(&format!("focus neuron: {uuid}"));
+                Ok(uuid)
+            }
+            FocusPolicy::Unsaturated => {
+                let uuid = self
+                    .unsaturated
+                    .select(creature, rng)
+                    .ok_or_else(|| "no focus neuron available".to_string())?;
+                log::detail(&format!("focus neuron: {uuid}"));
+                Ok(uuid)
+            }
+        }
+    }
+
+    /// Draw one further focus under `policy`, skipping the already-chosen set.
+    fn select_additional(
+        &mut self,
+        creature: &neat_core::CreatureExport,
+        policy: FocusPolicy,
+        signals: &std::collections::HashMap<String, f64>,
+        chosen: &[String],
+        rng: &mut StdRng,
+    ) -> Option<FocusChoice> {
+        match policy {
+            FocusPolicy::Weighted => self
+                .weighted
+                .select_weighted_excluding(creature, signals, chosen, rng),
+            FocusPolicy::HighError => select_highest_signal_excluding(signals, chosen),
+            FocusPolicy::Random => {
+                select_random_excluding(creature, chosen, rng).map(|uuid| FocusChoice {
+                    uuid,
+                    weight: 0.0,
+                    reason: "random".into(),
+                })
+            }
+            FocusPolicy::Unsaturated => {
+                select_unsaturated_excluding(creature, chosen, rng).map(|uuid| FocusChoice {
+                    uuid,
+                    weight: 0.0,
+                    reason: "unsaturated".into(),
+                })
+            }
+        }
+    }
+}
+
+/// Split a candidate budget across `focuses`, largest shares first.
+///
+/// A single focus keeps the whole budget, so `K = 1` proposes exactly the batch
+/// it did before #109. Any remainder goes to the earliest (highest-ranked)
+/// focuses rather than being dropped.
+fn split_candidate_budget(count: usize, focuses: usize) -> Vec<usize> {
+    if focuses == 0 {
+        return Vec::new();
+    }
+    let base = count / focuses;
+    let remainder = count % focuses;
+    (0..focuses)
+        .map(|i| base + usize::from(i < remainder))
+        .collect()
+}
+
+/// Why a merged multi-focus batch stopped growing (issue #109).
+///
+/// The batch is one journal line, so the per-focus limits collapse to the one
+/// that actually bound it: budget only when every focus filled its share, and
+/// otherwise the strictest ceiling any focus hit. A generator that ran dry for
+/// one focus must not be reported as a satisfied budget.
+fn merge_batch_limits(limits: &[BatchLimit]) -> BatchLimit {
+    if limits.contains(&BatchLimit::QuotaCeiling) {
+        BatchLimit::QuotaCeiling
+    } else if limits.contains(&BatchLimit::Exhausted) {
+        BatchLimit::Exhausted
+    } else {
+        BatchLimit::Budget
+    }
+}
+
+/// Index of a `candidate-NNN` stem, or `None` for any other stem.
+fn candidate_stem_index(stem: &str) -> Option<usize> {
+    stem.strip_prefix("candidate-")?.parse().ok()
+}
+
 /// Run the Lamarck optimisation loop with no external cancellation.
 ///
 /// Equivalent to [`run_optimisation_cancellable`] with a token that is never
@@ -445,6 +658,7 @@ pub fn run_optimisation_cancellable(
     // the run, never be silently replaced by the default mid-A/B.
     let backprop = config.backprop_config()?;
     let analysis_threads = config.analysis_threads()?;
+    let focus_count = config.focus_count()?;
     fs::create_dir_all(&config.output_dir).map_err(|e| e.to_string())?;
     let journal_path = config.output_dir.join("experiments.jsonl");
     let best_path = config.output_dir.join("best.json");
@@ -549,14 +763,16 @@ pub fn run_optimisation_cancellable(
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut random_focus = RandomFocusSelector;
-    let mut unsaturated_focus = UnsaturatedFocusSelector;
-    let mut high_error_focus = HighErrorFocusSelector;
-    let mut weighted_focus = WeightedFocusSelector::default();
-    let mut fixed_focus = config
-        .focus_neuron
-        .as_ref()
-        .map(|uuid| FixedFocusSelector { uuid: uuid.clone() });
+    let mut selectors = FocusSelectors {
+        random: RandomFocusSelector,
+        unsaturated: UnsaturatedFocusSelector,
+        high_error: HighErrorFocusSelector,
+        weighted: WeightedFocusSelector::default(),
+        fixed: config
+            .focus_neuron
+            .as_ref()
+            .map(|uuid| FixedFocusSelector { uuid: uuid.clone() }),
+    };
     let focus_sample_limit = match config.stats_mode {
         crate::observations::StatsMode::Quick => Some(config.quick_sample_records),
         crate::observations::StatsMode::Full => None,
@@ -754,8 +970,16 @@ pub fn run_optimisation_cancellable(
     ));
     if let Some(uuid) = &config.focus_neuron {
         log::detail(&format!("focus locked to {uuid}"));
+        if focus_count > 1 {
+            log::warn(&format!(
+                "--focus-count {focus_count} ignored: --focus-neuron pins the experiment to one focus"
+            ));
+        }
     } else {
-        log::detail(&format!("focus policy: {}", config.focus_policy.label()));
+        log::detail(&format!(
+            "focus policy: {} ({focus_count} focus neuron(s) per experiment)",
+            config.focus_policy.label()
+        ));
     }
 
     let stop_reason = loop {
@@ -791,7 +1015,7 @@ pub fn run_optimisation_cancellable(
         // Learning + output MAE first so weighted/high-error can rank by
         // improvement chance and skip zero-error / zero-blame neurons. Both are
         // focus-independent, so one scan feeds them (issue #105).
-        let needs_signals = fixed_focus.is_none()
+        let needs_signals = selectors.fixed.is_none()
             && matches!(
                 config.focus_policy,
                 FocusPolicy::Weighted | FocusPolicy::HighError
@@ -854,78 +1078,21 @@ pub fn run_optimisation_cancellable(
             std::collections::HashMap::new()
         };
 
-        let focus = if let Some(selector) = fixed_focus.as_mut() {
-            let uuid = selector.select(&incumbent, &mut rng).ok_or_else(|| {
-                format!(
-                    "focus neuron '{}' not found (or is an input)",
-                    selector.uuid
-                )
-            })?;
-            log::detail(&format!("focus neuron: {uuid} (pinned)"));
-            uuid
-        } else {
-            match config.focus_policy {
-                FocusPolicy::Weighted => {
-                    let choice = weighted_focus
-                        .select_weighted(&incumbent, &improvement_signals, &mut rng)
-                        .or_else(|| {
-                            log::warn(
-                                "no non-zero improvement signal; falling back to first output",
-                            );
-                            high_error_focus
-                                .select(&incumbent, &mut rng)
-                                .map(|uuid| FocusChoice {
-                                    uuid,
-                                    weight: 0.0,
-                                    reason: "fallback_first_output".into(),
-                                })
-                        })
-                        .ok_or_else(|| "no focus neuron available".to_string())?;
-                    log::detail(&format!(
-                        "focus neuron: {} (weight={:.2}, {})",
-                        choice.uuid, choice.weight, choice.reason
-                    ));
-                    choice.uuid
-                }
-                FocusPolicy::HighError => {
-                    let choice = select_highest_signal(&improvement_signals).or_else(|| {
-                        log::warn("no non-zero improvement signal; falling back to first output");
-                        high_error_focus
-                            .select(&incumbent, &mut rng)
-                            .map(|uuid| FocusChoice {
-                                uuid,
-                                weight: 0.0,
-                                reason: "fallback_first_output".into(),
-                            })
-                    });
-                    let choice = choice.ok_or_else(|| "no focus neuron available".to_string())?;
-                    log::detail(&format!(
-                        "focus neuron: {} ({})",
-                        choice.uuid, choice.reason
-                    ));
-                    choice.uuid
-                }
-                FocusPolicy::Random => {
-                    let uuid = random_focus
-                        .select(&incumbent, &mut rng)
-                        .ok_or_else(|| "no focus neuron available".to_string())?;
-                    log::detail(&format!("focus neuron: {uuid}"));
-                    uuid
-                }
-                FocusPolicy::Unsaturated => {
-                    let uuid = unsaturated_focus
-                        .select(&incumbent, &mut rng)
-                        .ok_or_else(|| "no focus neuron available".to_string())?;
-                    log::detail(&format!("focus neuron: {uuid}"));
-                    uuid
-                }
-            }
-        };
-        // Focus stats, incoming-source stats and the residual source ranking all
-        // need the focus uuid and nothing else — one scan feeds all three (#105).
-        // All three are pure functions of `(incumbent, focus, sample)`, so a
-        // repeated focus on an unchanged incumbent skips this scan outright
-        // (issue #106).
+        // Focus set for this experiment (issue #109). The creature-wide passes
+        // above ran once; each focus below pays only its own focus-specific
+        // scan, so K focuses amortise the expensive analysis over K proposals
+        // instead of one.
+        let focus_set = selectors.select_focus_set(
+            &incumbent,
+            config.focus_policy,
+            focus_count,
+            &improvement_signals,
+            &mut rng,
+        )?;
+        let focus = focus_set
+            .first()
+            .cloned()
+            .ok_or_else(|| "no focus neuron available".to_string())?;
         // Runtime key check: whatever the memo still holds must describe the
         // creature about to be analysed. In a debug/test build a missed
         // invalidation panics here instead of quietly proposing against the
@@ -942,134 +1109,160 @@ pub fn run_optimisation_cancellable(
                 "analysis memo is keyed to a different creature revision"
             );
         }
-        let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
-        let focus_scan_start = Instant::now();
-        let (post_focus, post_focus_from_memo) = match analysis_memo.post_focus(&memo_scope, &focus)
-        {
-            Some(cached) => (cached, true),
-            None => {
-                log::detail(
-                    "post-focus scan: focus stats + incoming sources + residual ranking...",
-                );
-                let scan = scan_post_focus(
-                    &incumbent,
-                    &mut network,
-                    &config.training_data,
-                    &focus,
-                    ScanBudget::new(focus_sample_limit, analysis_threads),
-                    Some(&observations),
-                    &prior_sources,
-                )?;
-                analysis_memo.store_post_focus(
-                    &memo_scope,
-                    &focus,
-                    scan.clone(),
-                    focus_scan_start.elapsed().as_millis(),
-                );
-                (scan, false)
-            }
-        };
-        let mut focus_stats = post_focus.focus_stats;
-        let mut incoming = post_focus.incoming;
-        let ranked_sources = post_focus.ranked_sources;
-        let focus_scan_ms = focus_scan_start.elapsed().as_millis();
-        if post_focus_from_memo {
-            log::ok(&format!(
-                "memo hit: focus scan for {focus} reused ({} records, no training scan)",
-                focus_stats.record_count
-            ));
-        } else {
-            log::ok(&format!(
-                "focus scan: {} records in {focus_scan_ms}ms",
-                focus_stats.record_count
-            ));
-        }
-        match (
-            focus_stats.mean_error,
-            focus_stats.mean_abs_error,
-            focus_stats.mean_adjusted_error,
-            focus_stats.mean_derivative,
-        ) {
-            (Some(me), Some(mae), Some(madj), Some(md)) => log::detail(&format!(
-                "focus error: mean={me:.6e}  mae={mae:.6e}  adj={madj:.6e}  deriv={md:.4}  sat={:.3}",
-                focus_stats.saturation_fraction
-            )),
-            _ => log::detail(&format!(
-                "focus (no target error): post_mean={:.6e}  pre_mean={:.6e}",
-                focus_stats.post_mean, focus_stats.pre_mean
-            )),
-        }
-        if matches!(config.stats_mode, crate::observations::StatsMode::Quick) {
-            log::detail(&format!(
-                "analysis sample={} records; acceptance uses full-corpus scorer",
-                focus_stats.record_count
-            ));
-        }
-
-        log::detail(&format!("incoming sources: {}", incoming.len()));
-
-        // Surface focus blame + incoming weight signals from real backprop (#4).
-        attach_focus_blame(&mut focus_stats, &incumbent, &learning);
         let lr = crate::backprop::calculate_learning_rate(&backprop, experiments, None);
-        attach_learning_to_incoming(&mut incoming, &learning, &backprop, lr);
-        if let Some(blame) = focus_stats.mean_blame {
-            log::detail(&format!(
-                "focus blame: mean={blame:.6e}  count={:.0}  no_change={}",
-                focus_stats.blame_count.unwrap_or(0.0),
-                focus_stats.blame_no_change.unwrap_or(false)
-            ));
-        }
-        let linked = incoming
-            .iter()
-            .filter(|s| s.proposed_weight_delta.is_some())
-            .count();
-        if linked > 0 {
-            log::detail(&format!("incoming weight-signals attached: {linked}"));
-        }
-
-        if let Some(best) = ranked_sources.first() {
-            log::detail(&format!(
-                "best unused source {} residual|corr|={:.4}",
-                best.from_uuid, best.score
-            ));
-        }
-        if let Some(best_hidden) = ranked_sources
-            .iter()
-            .find(|s| !is_input_source(&s.from_uuid))
-        {
-            log::detail(&format!(
-                "best unused hidden {} residual|corr|={:.4}",
-                best_hidden.from_uuid, best_hidden.score
-            ));
-        }
-
         if config.structural_only {
             log::detail("structural-only: synapse/neuron growth candidates only");
         }
-        let gen_ctx = CandidateGenContext {
-            incumbent: &incumbent,
-            focus_uuid: &focus,
-            focus_stats: &focus_stats,
-            incoming: &incoming,
-            observations: &observations,
-            ranked_sources: Some(&ranked_sources),
-            learning: Some(&learning),
-            backprop: &backprop,
-            structural_only: config.structural_only,
-        };
-        let gen_start = Instant::now();
-        let batch = generate_candidate_batch(
-            &gen_ctx,
-            CandidateBudget {
-                count: config.candidates,
-                scale_quotas: config.scale_candidate_quotas,
-            },
-            &mut rng,
-        );
-        let generate_ms = gen_start.elapsed().as_millis();
-        let batch_limit = batch.limit;
-        let strategy_mix = batch.strategy_mix_summary();
-        let candidates = batch.candidates;
+        let budgets = split_candidate_budget(config.candidates, focus_set.len());
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(config.candidates);
+        let mut focus_limits: Vec<BatchLimit> = Vec::with_capacity(focus_set.len());
+        let mut primary_focus_stats: Option<FocusNeuronStats> = None;
+        let mut generate_ms = 0u128;
+        for (index, focus_uuid) in focus_set.iter().enumerate() {
+            // Focus stats, incoming-source stats and the residual source ranking
+            // all need the focus uuid and nothing else — one scan feeds all
+            // three (#105). All three are pure functions of
+            // `(incumbent, focus, sample)`, so a repeated focus on an unchanged
+            // incumbent skips this scan outright (issue #106).
+            let prior_sources = rank_unused_sources(&incumbent, focus_uuid, &observations);
+            let focus_scan_start = Instant::now();
+            let (post_focus, post_focus_from_memo) =
+                match analysis_memo.post_focus(&memo_scope, focus_uuid) {
+                    Some(cached) => (cached, true),
+                    None => {
+                        log::detail(
+                            "post-focus scan: focus stats + incoming sources + residual ranking...",
+                        );
+                        let scan = scan_post_focus(
+                            &incumbent,
+                            &mut network,
+                            &config.training_data,
+                            focus_uuid,
+                            ScanBudget::new(focus_sample_limit, analysis_threads),
+                            Some(&observations),
+                            &prior_sources,
+                        )?;
+                        analysis_memo.store_post_focus(
+                            &memo_scope,
+                            focus_uuid,
+                            scan.clone(),
+                            focus_scan_start.elapsed().as_millis(),
+                        );
+                        (scan, false)
+                    }
+                };
+            let mut focus_stats = post_focus.focus_stats;
+            let mut incoming = post_focus.incoming;
+            let ranked_sources = post_focus.ranked_sources;
+            let focus_scan_ms = focus_scan_start.elapsed().as_millis();
+            if post_focus_from_memo {
+                log::ok(&format!(
+                    "memo hit: focus scan for {focus_uuid} reused ({} records, no training scan)",
+                    focus_stats.record_count
+                ));
+            } else {
+                log::ok(&format!(
+                    "focus scan {focus_uuid}: {} records in {focus_scan_ms}ms",
+                    focus_stats.record_count
+                ));
+            }
+            match (
+                focus_stats.mean_error,
+                focus_stats.mean_abs_error,
+                focus_stats.mean_adjusted_error,
+                focus_stats.mean_derivative,
+            ) {
+                (Some(me), Some(mae), Some(madj), Some(md)) => log::detail(&format!(
+                    "focus error: mean={me:.6e}  mae={mae:.6e}  adj={madj:.6e}  deriv={md:.4}  sat={:.3}",
+                    focus_stats.saturation_fraction
+                )),
+                _ => log::detail(&format!(
+                    "focus (no target error): post_mean={:.6e}  pre_mean={:.6e}",
+                    focus_stats.post_mean, focus_stats.pre_mean
+                )),
+            }
+            if matches!(config.stats_mode, crate::observations::StatsMode::Quick) {
+                log::detail(&format!(
+                    "analysis sample={} records; acceptance uses full-corpus scorer",
+                    focus_stats.record_count
+                ));
+            }
+
+            log::detail(&format!("incoming sources: {}", incoming.len()));
+
+            // Surface focus blame + incoming weight signals from real backprop (#4).
+            attach_focus_blame(&mut focus_stats, &incumbent, &learning);
+            attach_learning_to_incoming(&mut incoming, &learning, &backprop, lr);
+            if let Some(blame) = focus_stats.mean_blame {
+                log::detail(&format!(
+                    "focus blame: mean={blame:.6e}  count={:.0}  no_change={}",
+                    focus_stats.blame_count.unwrap_or(0.0),
+                    focus_stats.blame_no_change.unwrap_or(false)
+                ));
+            }
+            let linked = incoming
+                .iter()
+                .filter(|s| s.proposed_weight_delta.is_some())
+                .count();
+            if linked > 0 {
+                log::detail(&format!("incoming weight-signals attached: {linked}"));
+            }
+
+            if let Some(best) = ranked_sources.first() {
+                log::detail(&format!(
+                    "best unused source {} residual|corr|={:.4}",
+                    best.from_uuid, best.score
+                ));
+            }
+            if let Some(best_hidden) = ranked_sources
+                .iter()
+                .find(|s| !is_input_source(&s.from_uuid))
+            {
+                log::detail(&format!(
+                    "best unused hidden {} residual|corr|={:.4}",
+                    best_hidden.from_uuid, best_hidden.score
+                ));
+            }
+
+            let gen_ctx = CandidateGenContext {
+                incumbent: &incumbent,
+                focus_uuid,
+                focus_stats: &focus_stats,
+                incoming: &incoming,
+                observations: &observations,
+                ranked_sources: Some(&ranked_sources),
+                learning: Some(&learning),
+                backprop: &backprop,
+                structural_only: config.structural_only,
+            };
+            let gen_start = Instant::now();
+            let batch = generate_candidate_batch(
+                &gen_ctx,
+                CandidateBudget {
+                    count: budgets[index],
+                    scale_quotas: config.scale_candidate_quotas,
+                },
+                &mut rng,
+            );
+            generate_ms += gen_start.elapsed().as_millis();
+            if focus_set.len() > 1 {
+                log::detail(&format!(
+                    "focus {focus_uuid}: {} of {} candidates — {}",
+                    batch.candidates.len(),
+                    budgets[index],
+                    batch.limit.label()
+                ));
+            }
+            focus_limits.push(batch.limit);
+            candidates.extend(batch.candidates);
+            if index == 0 {
+                primary_focus_stats = Some(focus_stats);
+            }
+        }
+        let batch_limit = merge_batch_limits(&focus_limits);
+        let focus_stats = primary_focus_stats
+            .ok_or_else(|| "no focus neuron produced an analysis".to_string())?;
+        let strategy_mix = strategy_mix_summary(&candidates);
         let analysis_ms = analysis_start.elapsed().as_millis();
         // Journalled so the memo's value is auditable from experiments.jsonl,
         // the same way the scan and scorer economics already are (issue #106).
@@ -1084,9 +1277,10 @@ pub fn run_optimisation_cancellable(
             ));
         }
         log::ok(&format!(
-            "generated {} of {} requested candidates in {generate_ms}ms — {} (analysis total {analysis_ms}ms)",
+            "generated {} of {} requested candidates across {} focus neuron(s) in {generate_ms}ms — {} (analysis total {analysis_ms}ms)",
             candidates.len(),
             config.candidates,
+            focus_set.len(),
             batch_limit.label()
         ));
         log::detail(&format!("batch strategy mix: {strategy_mix}"));
@@ -1153,11 +1347,9 @@ pub fn run_optimisation_cancellable(
                     scorer_failures += 1;
                     consecutive_scorer_failures += 1;
                     log::warn(&format!("screen scorer failed: {e}"));
-                    weighted_focus.record_outcome(
-                        &focus,
-                        false,
-                        None,
-                        true,
+                    record_focus_failure(
+                        &mut selectors.weighted,
+                        &focus_set,
                         config.min_improvement,
                     );
                     append_journal(
@@ -1168,7 +1360,8 @@ pub fn run_optimisation_cancellable(
                             seed: Some(seed),
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
-                            focus_neuron: focus,
+                            focus_neuron: focus.clone(),
+                            focus_neurons: journal_focus_set(&focus_set),
                             focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                             candidates_requested: Some(config.candidates),
@@ -1224,13 +1417,15 @@ pub fn run_optimisation_cancellable(
             if promote_stems.is_empty() {
                 log::detail("screen empty: no sample improvers → skipping full-corpus score");
                 // Sterile focus: dampen so weighted draw explores elsewhere.
-                weighted_focus.record_outcome(
-                    &focus,
-                    false,
-                    Some(0.0),
-                    false,
-                    config.min_improvement,
-                );
+                for focus_uuid in &focus_set {
+                    selectors.weighted.record_outcome(
+                        focus_uuid,
+                        false,
+                        Some(0.0),
+                        false,
+                        config.min_improvement,
+                    );
+                }
                 append_journal(
                     &journal_path,
                     &ExperimentRecord {
@@ -1242,7 +1437,8 @@ pub fn run_optimisation_cancellable(
                             .get("baseline")
                             .map(|b| b.score)
                             .unwrap_or(best_score),
-                        focus_neuron: focus,
+                        focus_neuron: focus.clone(),
+                        focus_neurons: journal_focus_set(&focus_set),
                         focus_stats: Some(focus_stats.clone()),
                         candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                         candidates_requested: Some(config.candidates),
@@ -1297,11 +1493,9 @@ pub fn run_optimisation_cancellable(
                     scorer_failures += 1;
                     consecutive_scorer_failures += 1;
                     log::warn(&format!("promote scorer failed: {e}"));
-                    weighted_focus.record_outcome(
-                        &focus,
-                        false,
-                        None,
-                        true,
+                    record_focus_failure(
+                        &mut selectors.weighted,
+                        &focus_set,
                         config.min_improvement,
                     );
                     append_journal(
@@ -1312,7 +1506,8 @@ pub fn run_optimisation_cancellable(
                             seed: Some(seed),
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
-                            focus_neuron: focus,
+                            focus_neuron: focus.clone(),
+                            focus_neurons: journal_focus_set(&focus_set),
                             focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                             candidates_requested: Some(config.candidates),
@@ -1365,11 +1560,9 @@ pub fn run_optimisation_cancellable(
                     scorer_failures += 1;
                     consecutive_scorer_failures += 1;
                     log::warn(&format!("scorer failed: {e}"));
-                    weighted_focus.record_outcome(
-                        &focus,
-                        false,
-                        None,
-                        true,
+                    record_focus_failure(
+                        &mut selectors.weighted,
+                        &focus_set,
                         config.min_improvement,
                     );
                     append_journal(
@@ -1380,7 +1573,8 @@ pub fn run_optimisation_cancellable(
                             seed: Some(seed),
                             incumbent_id: incumbent_id(&incumbent),
                             baseline_score: best_score,
-                            focus_neuron: focus,
+                            focus_neuron: focus.clone(),
+                            focus_neurons: journal_focus_set(&focus_set),
                             focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                             candidates_requested: Some(config.candidates),
@@ -1480,6 +1674,11 @@ pub fn run_optimisation_cancellable(
         let mut improvement = None;
         let mut winner_stem = None;
         let mut winner_member_indices = None;
+        // Focuses credited with the accept. Only these are boosted; the rest of
+        // the focus set is dampened as sterile, exactly as a losing single-focus
+        // experiment always was (issue #109, following the #74 member rule).
+        let mut accepted_focuses: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         if let Some(sel) = selection
             && accepts_improvement(sel.result.score, baseline.score, config.min_improvement)
         {
@@ -1497,6 +1696,15 @@ pub fn run_optimisation_cancellable(
                 .first()
                 .and_then(|i| candidates.get(*i).map(|c| c.provenance.strategy))
                 .unwrap_or(CandidateStrategy::Random);
+            // Every member of the winner names the focus it was proposed for,
+            // so a K > 1 accept credits the focus that earned it rather than
+            // whichever focus happened to be drawn first (issue #109).
+            accepted_focuses = winning_focuses(&sel.member_indices, &candidates);
+            let winner_focus = accepted_focuses
+                .iter()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| focus.clone());
             let delta = sel.delta;
             log::ok(&format!(
                 "🏆 accepted {}: score={} (+{delta:.3e}, {} member(s))",
@@ -1511,7 +1719,7 @@ pub fn run_optimisation_cancellable(
             // replaced — every entry is stale from here (issue #106).
             analysis_memo.invalidate();
             let opening = opening_baseline_score.unwrap_or(baseline.score);
-            last_accept_focus = focus.clone();
+            last_accept_focus = winner_focus.clone();
             last_accept_strategy = strategy;
             last_accept_error = sel.result.error;
             creature_meta.stamp_acceptance(&LamarckProgress {
@@ -1519,7 +1727,7 @@ pub fn run_optimisation_cancellable(
                 score: sel.result.score,
                 error: sel.result.error,
                 opening_score: opening,
-                focus_neuron: &focus,
+                focus_neuron: &winner_focus,
                 strategy,
                 experiments,
             });
@@ -1598,12 +1806,12 @@ pub fn run_optimisation_cancellable(
             log::detail("no candidate met the acceptance threshold");
         }
 
-        let best_full_delta = best_candidate_delta(&scores);
-        weighted_focus.record_outcome(
-            &focus,
-            accepted,
-            best_full_delta,
-            false,
+        record_focus_outcomes(
+            &mut selectors.weighted,
+            &focus_set,
+            &accepted_focuses,
+            &scores,
+            &candidates,
             config.min_improvement,
         );
 
@@ -1616,7 +1824,8 @@ pub fn run_optimisation_cancellable(
                 seed: Some(seed),
                 incumbent_id: incumbent_id(&incumbent),
                 baseline_score: baseline.score,
-                focus_neuron: focus,
+                focus_neuron: focus.clone(),
+                focus_neurons: journal_focus_set(&focus_set),
                 focus_stats: Some(focus_stats.clone()),
                 candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                 candidates_requested: Some(config.candidates),
@@ -1704,14 +1913,86 @@ pub fn run_optimisation_cancellable(
     })
 }
 
-/// Best full-corpus Δ vs baseline among non-baseline stems (for focus history).
-fn best_candidate_delta(scores: &std::collections::BTreeMap<String, ScoreResult>) -> Option<f64> {
+/// Best full-corpus Δ vs baseline among the candidates proposed for `focus`.
+///
+/// With one focus every scored stem belongs to it, so this is the whole-batch
+/// best Δ the focus history has always been fed. With several, each focus is
+/// judged only on what it actually proposed (issue #109).
+fn best_focus_delta(
+    scores: &std::collections::BTreeMap<String, ScoreResult>,
+    candidates: &[Candidate],
+    focus: &str,
+) -> Option<f64> {
     let baseline = scores.get("baseline")?;
     scores
         .iter()
         .filter(|(stem, _)| stem.as_str() != "baseline")
+        .filter(|(stem, _)| {
+            candidate_stem_index(stem)
+                .and_then(|i| candidates.get(i))
+                .is_some_and(|c| c.provenance.focus_neuron == focus)
+        })
         .map(|(_, r)| improvement(r.score, baseline.score))
         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// Focuses that produced the accepted winner's members (issue #109).
+///
+/// A merged combo can span more than one focus, so every member's focus is
+/// credited — the same rule issue #74 applied to member strategies.
+fn winning_focuses(
+    member_indices: &[usize],
+    candidates: &[Candidate],
+) -> std::collections::BTreeSet<String> {
+    member_indices
+        .iter()
+        .filter_map(|i| candidates.get(*i))
+        .map(|c| c.provenance.focus_neuron.clone())
+        .collect()
+}
+
+/// Feed a scored experiment back into the weighted focus history (issue #109).
+///
+/// Each focus is judged on its **own** candidates: the focus that produced the
+/// winner is boosted, and a focus whose proposals went nowhere is dampened as
+/// sterile even when the experiment as a whole accepted. With one focus this is
+/// exactly the pre-#109 single call — the whole batch is that focus's.
+fn record_focus_outcomes(
+    selector: &mut WeightedFocusSelector,
+    focus_set: &[String],
+    accepted_focuses: &std::collections::BTreeSet<String>,
+    scores: &std::collections::BTreeMap<String, ScoreResult>,
+    candidates: &[Candidate],
+    min_improvement: f64,
+) {
+    for focus_uuid in focus_set {
+        selector.record_outcome(
+            focus_uuid,
+            accepted_focuses.contains(focus_uuid),
+            best_focus_delta(scores, candidates, focus_uuid),
+            false,
+            min_improvement,
+        );
+    }
+}
+
+/// Record a scorer failure against every focus the experiment proposed against.
+fn record_focus_failure(
+    selector: &mut WeightedFocusSelector,
+    focus_set: &[String],
+    min_improvement: f64,
+) {
+    for focus_uuid in focus_set {
+        selector.record_outcome(focus_uuid, false, None, true, min_improvement);
+    }
+}
+
+/// The focus set a journal line records.
+///
+/// `None` for a single focus, so a `--focus-count 1` journal keeps its
+/// pre-#109 shape and every existing reader stays correct.
+fn journal_focus_set(focus_set: &[String]) -> Option<Vec<String>> {
+    (focus_set.len() > 1).then(|| focus_set.to_vec())
 }
 
 fn incumbent_id(creature: &neat_core::CreatureExport) -> String {
@@ -1891,6 +2172,7 @@ mod tests {
             quick_sample_records: 8,
             focus_neuron: Some("o1".into()),
             focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
             compute_correlations: false,
             max_consecutive_scorer_failures: 3,
             phase0_parity: true,
@@ -2010,6 +2292,7 @@ mod tests {
             quick_sample_records: 8,
             focus_neuron: Some("o1".into()),
             focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
             compute_correlations: false,
             max_consecutive_scorer_failures: 3,
             phase0_parity: false,
@@ -2138,6 +2421,7 @@ mod tests {
             quick_sample_records: 8,
             focus_neuron: Some("o1".into()),
             focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
             compute_correlations: false,
             max_consecutive_scorer_failures: 3,
             phase0_parity: false,
@@ -2233,6 +2517,7 @@ mod tests {
             quick_sample_records: 8,
             focus_neuron: Some("o1".into()),
             focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
             compute_correlations: false,
             max_consecutive_scorer_failures: 3,
             phase0_parity: false,
@@ -2284,6 +2569,7 @@ mod tests {
             quick_sample_records: 8,
             focus_neuron: Some("o1".into()),
             focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
             compute_correlations: false,
             max_consecutive_scorer_failures: 3,
             phase0_parity: false,
@@ -3173,6 +3459,194 @@ mod tests {
         );
     }
 
+    /// Issue #109: one focus keeps the whole budget; several split it with the
+    /// remainder going to the earliest (highest-ranked) focuses.
+    #[test]
+    fn a_candidate_budget_splits_across_the_focus_set() {
+        assert_eq!(split_candidate_budget(100, 1), vec![100]);
+        assert_eq!(split_candidate_budget(100, 3), vec![34, 33, 33]);
+        assert_eq!(split_candidate_budget(6, 3), vec![2, 2, 2]);
+        assert_eq!(split_candidate_budget(2, 3), vec![1, 1, 0]);
+        assert_eq!(split_candidate_budget(0, 2), vec![0, 0]);
+        assert!(split_candidate_budget(10, 0).is_empty());
+        // Nothing is dropped: the shares always add back up to the budget.
+        for count in [0usize, 1, 7, 29, 100] {
+            for focuses in 1..=5 {
+                assert_eq!(
+                    split_candidate_budget(count, focuses).iter().sum::<usize>(),
+                    count,
+                    "budget {count} over {focuses} focuses lost candidates"
+                );
+            }
+        }
+    }
+
+    /// Issue #109: a merged batch reports the limit that actually bound it — a
+    /// focus whose generator ran dry must not be reported as budget-satisfied.
+    #[test]
+    fn a_merged_batch_reports_the_strictest_limit() {
+        assert_eq!(
+            merge_batch_limits(&[BatchLimit::Budget, BatchLimit::Budget]),
+            BatchLimit::Budget
+        );
+        assert_eq!(
+            merge_batch_limits(&[BatchLimit::Budget, BatchLimit::Exhausted]),
+            BatchLimit::Exhausted
+        );
+        assert_eq!(
+            merge_batch_limits(&[BatchLimit::Exhausted, BatchLimit::QuotaCeiling]),
+            BatchLimit::QuotaCeiling
+        );
+        // An empty focus set never reaches here; an empty list is "nothing
+        // stopped it short", which is the budget.
+        assert_eq!(merge_batch_limits(&[]), BatchLimit::Budget);
+    }
+
+    /// Issue #109: a single-focus journal keeps its pre-change shape.
+    #[test]
+    fn only_a_multi_focus_experiment_journals_a_focus_set() {
+        assert_eq!(journal_focus_set(&["o1".to_string()]), None);
+        assert_eq!(
+            journal_focus_set(&["o1".to_string(), "h1".to_string()]),
+            Some(vec!["o1".to_string(), "h1".to_string()])
+        );
+    }
+
+    fn scored(entries: &[(&str, f64)]) -> BTreeMap<String, ScoreResult> {
+        entries
+            .iter()
+            .map(|(stem, score)| {
+                (
+                    (*stem).to_string(),
+                    ScoreResult {
+                        score: *score,
+                        error: 1.0 - *score,
+                        complexity_penalty: 0.0,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Candidates whose provenance names `focus`, in stem order.
+    fn candidates_for(focuses: &[&str]) -> Vec<Candidate> {
+        let creature = parse_creature_json(
+            r#"{"semanticVersion":"4.0.0","forwardOnly":true,"input":1,"output":1,
+                "neurons":[{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}],
+                "synapses":[{"fromUUID":"input-0","toUUID":"o1","weight":1.0}]}"#,
+        )
+        .unwrap();
+        focuses
+            .iter()
+            .map(|focus| Candidate {
+                creature: creature.clone(),
+                provenance: CandidateProvenance {
+                    strategy: CandidateStrategy::Random,
+                    focus_neuron: (*focus).to_string(),
+                    mutation: "test".into(),
+                    old_value: None,
+                    new_value: None,
+                },
+            })
+            .collect()
+    }
+
+    /// Issue #109: each focus is judged on its own candidates, never on the
+    /// best of the whole batch.
+    #[test]
+    fn a_focus_is_scored_on_its_own_candidates() {
+        let candidates = candidates_for(&["a", "a", "b"]);
+        let scores = scored(&[
+            ("baseline", 0.5),
+            ("candidate-000", 0.5 + 1e-3),
+            ("candidate-001", 0.5),
+            ("candidate-002", 0.5 - 1e-3),
+        ]);
+
+        let a = best_focus_delta(&scores, &candidates, "a").expect("focus a scored");
+        let b = best_focus_delta(&scores, &candidates, "b").expect("focus b scored");
+        assert!((a - 1e-3).abs() < 1e-12, "focus a takes its own best: {a}");
+        assert!(b < 0.0, "focus b must not inherit focus a's winner: {b}");
+        assert_eq!(
+            best_focus_delta(&scores, &candidates, "unseen"),
+            None,
+            "a focus with no scored candidate has no delta"
+        );
+    }
+
+    /// Issue #109: an accept in a K=3 batch boosts only the winner's focus; the
+    /// other two are dampened as sterile, exactly as a losing experiment is.
+    #[test]
+    fn an_accept_boosts_only_the_winning_focus() {
+        let focus_set = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let candidates = candidates_for(&["a", "b", "c"]);
+        let scores = scored(&[
+            ("baseline", 0.5),
+            ("candidate-000", 0.5),
+            ("candidate-001", 0.5 + 1e-3),
+            ("candidate-002", 0.5),
+        ]);
+        let winners = winning_focuses(&[1], &candidates);
+        assert_eq!(winners, ["b".to_string()].into_iter().collect());
+
+        let mut selector = WeightedFocusSelector::default();
+        record_focus_outcomes(
+            &mut selector,
+            &focus_set,
+            &winners,
+            &scores,
+            &candidates,
+            1e-6,
+        );
+
+        let history = |uuid: &str| selector.history.get(uuid).cloned().unwrap_or_default();
+        assert_eq!(history("b").accepts, 1, "the winner's focus is boosted");
+        assert_eq!(history("b").hard_fails, 0);
+        for sterile in ["a", "c"] {
+            assert_eq!(
+                history(sterile).accepts,
+                0,
+                "focus {sterile} produced no winner"
+            );
+            assert_eq!(
+                history(sterile).hard_fails,
+                1,
+                "a focus whose candidates went nowhere is dampened"
+            );
+        }
+    }
+
+    /// Issue #109: a combo winner spanning two focuses credits both.
+    #[test]
+    fn a_combo_winner_credits_every_member_focus() {
+        let candidates = candidates_for(&["a", "b", "c"]);
+        let winners = winning_focuses(&[0, 2], &candidates);
+        assert_eq!(
+            winners,
+            ["a".to_string(), "c".to_string()].into_iter().collect()
+        );
+        assert!(
+            winning_focuses(&[9], &candidates).is_empty(),
+            "an out-of-range member credits nothing rather than guessing"
+        );
+    }
+
+    /// Issue #109: a scorer failure dampens every focus the batch served, not
+    /// just the primary — none of them produced a scored candidate.
+    #[test]
+    fn a_scorer_failure_dampens_the_whole_focus_set() {
+        let mut selector = WeightedFocusSelector::default();
+        let focus_set = vec!["a".to_string(), "b".to_string()];
+        record_focus_failure(&mut selector, &focus_set, 1e-6);
+        for uuid in &focus_set {
+            assert_eq!(
+                selector.history.get(uuid).map(|h| h.hard_fails),
+                Some(1),
+                "focus {uuid} carried the scorer failure"
+            );
+        }
+    }
+
     #[test]
     fn consecutive_scorer_failures_abort() {
         let dir = tempdir().unwrap();
@@ -3193,6 +3667,7 @@ mod tests {
             quick_sample_records: 8,
             focus_neuron: Some("o1".into()),
             focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
             compute_correlations: false,
             max_consecutive_scorer_failures: 2,
             phase0_parity: false,

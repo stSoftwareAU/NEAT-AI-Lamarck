@@ -187,6 +187,39 @@ fn the_candidate_quotas_arm_varies_only_the_quota_scaling() {
     }
 }
 
+/// Issue #109: the paired multi-focus benchmark varies only the focus count,
+/// keeping each focus's share of `--candidates` the same on both sides.
+#[test]
+fn the_focus_count_arm_varies_only_the_focus_count() {
+    let campaign = Campaign::new();
+    let runs = campaign
+        .run_arm(
+            "focus-count",
+            &[
+                ("FOCUS_COUNT_SECONDS", "1"),
+                ("FOCUS_COUNT_CANDIDATES", "40"),
+            ],
+        )
+        .expect("focus-count arm completes");
+    assert_eq!(runs.len(), 2, "the A/B is a pair of runs: {runs:?}");
+    assert!(
+        runs[0].contains("--focus-count 1") && runs[0].contains("--candidates 40"),
+        "the control serves one focus with the whole budget: {}",
+        runs[0]
+    );
+    assert!(
+        runs[1].contains("--focus-count 3") && runs[1].contains("--candidates 120"),
+        "the treatment serves three focuses at the same share each: {}",
+        runs[1]
+    );
+    for argv in &runs {
+        assert!(
+            argv.contains("--seed 71") && argv.contains("--focus-policy weighted"),
+            "both sides share the seed and the policy: {argv}"
+        );
+    }
+}
+
 #[test]
 fn an_unknown_arm_fails_loudly() {
     let campaign = Campaign::new();
@@ -211,6 +244,7 @@ fn the_binary_accepts_the_flags_the_campaign_arms_pass() {
         "--backprop-learning-rate",
         "--backprop-max-bias-adjustment-scale",
         "--scale-candidate-quotas",
+        "--focus-count",
     ] {
         assert!(help.contains(flag), "the binary has no `{flag}`");
     }

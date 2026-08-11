@@ -20,18 +20,32 @@ pub struct RandomFocusSelector;
 
 impl FocusSelector for RandomFocusSelector {
     fn select(&mut self, creature: &CreatureExport, rng: &mut impl Rng) -> Option<String> {
-        let candidates: Vec<&str> = creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type != "input")
-            .map(|n| n.uuid.as_str())
-            .collect();
-        if candidates.is_empty() {
-            return None;
-        }
-        let idx = rng.random_range(0..candidates.len());
-        Some(candidates[idx].to_string())
+        select_random_excluding(creature, &[], rng)
     }
+}
+
+/// Draw a random non-input neuron that is not already in `excluded` (issue #109).
+///
+/// With an empty exclusion list this is exactly [`RandomFocusSelector::select`]
+/// — one `random_range` draw — so a single-focus experiment keeps its rng
+/// stream.
+pub fn select_random_excluding(
+    creature: &CreatureExport,
+    excluded: &[String],
+    rng: &mut impl Rng,
+) -> Option<String> {
+    let candidates: Vec<&str> = creature
+        .neurons
+        .iter()
+        .filter(|n| n.neuron_type != "input")
+        .map(|n| n.uuid.as_str())
+        .filter(|uuid| !excluded.iter().any(|e| e == uuid))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let idx = rng.random_range(0..candidates.len());
+    Some(candidates[idx].to_string())
 }
 
 /// Always select a caller-specified non-input neuron UUID (for tests / smoke runs).
@@ -57,18 +71,28 @@ pub struct UnsaturatedFocusSelector;
 
 impl FocusSelector for UnsaturatedFocusSelector {
     fn select(&mut self, creature: &CreatureExport, rng: &mut impl Rng) -> Option<String> {
-        let outputs: Vec<&str> = creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type == "output")
-            .map(|n| n.uuid.as_str())
-            .collect();
-        if !outputs.is_empty() {
-            let idx = rng.random_range(0..outputs.len());
-            return Some(outputs[idx].to_string());
-        }
-        RandomFocusSelector.select(creature, rng)
+        select_unsaturated_excluding(creature, &[], rng)
     }
+}
+
+/// Prefer an unselected output, else any unselected non-input (issue #109).
+pub fn select_unsaturated_excluding(
+    creature: &CreatureExport,
+    excluded: &[String],
+    rng: &mut impl Rng,
+) -> Option<String> {
+    let outputs: Vec<&str> = creature
+        .neurons
+        .iter()
+        .filter(|n| n.neuron_type == "output")
+        .map(|n| n.uuid.as_str())
+        .filter(|uuid| !excluded.iter().any(|e| e == uuid))
+        .collect();
+    if !outputs.is_empty() {
+        let idx = rng.random_range(0..outputs.len());
+        return Some(outputs[idx].to_string());
+    }
+    select_random_excluding(creature, excluded, rng)
 }
 
 /// Prefer the first output neuron when present (fallback when no signals yet).
@@ -86,8 +110,17 @@ impl FocusSelector for HighErrorFocusSelector {
 
 /// Pick the neuron with the largest improvement signal (high-error policy).
 pub fn select_highest_signal(signals: &HashMap<String, f64>) -> Option<FocusChoice> {
+    select_highest_signal_excluding(signals, &[])
+}
+
+/// Highest-signal neuron that is not already in `excluded` (issue #109).
+pub fn select_highest_signal_excluding(
+    signals: &HashMap<String, f64>,
+    excluded: &[String],
+) -> Option<FocusChoice> {
     signals
         .iter()
+        .filter(|(uuid, _)| !excluded.iter().any(|e| e == *uuid))
         .filter(|(_, s)| **s > FOCUS_SIGNAL_EPS)
         .max_by(|a, b| {
             a.1.partial_cmp(b.1)
@@ -226,7 +259,22 @@ impl WeightedFocusSelector {
         signals: &HashMap<String, f64>,
         rng: &mut impl Rng,
     ) -> Option<FocusChoice> {
-        let ranked = self.rank_candidates(creature, signals);
+        self.select_weighted_excluding(creature, signals, &[], rng)
+    }
+
+    /// Draw a focus neuron ∝ improvement signal, skipping `excluded` (#109).
+    ///
+    /// With an empty exclusion list this is exactly [`Self::select_weighted`],
+    /// so a single-focus experiment keeps its rng stream unchanged.
+    pub fn select_weighted_excluding(
+        &self,
+        creature: &CreatureExport,
+        signals: &HashMap<String, f64>,
+        excluded: &[String],
+        rng: &mut impl Rng,
+    ) -> Option<FocusChoice> {
+        let mut ranked = self.rank_candidates(creature, signals);
+        ranked.retain(|(uuid, _, _)| !excluded.iter().any(|e| e == uuid));
         if ranked.is_empty() {
             return None;
         }
@@ -1520,6 +1568,94 @@ mod tests {
                 || incoming[0].proposed_weight_delta.is_some(),
             "incoming weight signal should attach for hidden focus"
         );
+    }
+
+    /// Issue #109: an excluded focus is never drawn again, whatever the policy.
+    #[test]
+    fn exclusion_skips_already_chosen_focuses() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let mut rng = StdRng::seed_from_u64(3);
+
+        // Random: excluding one of two non-inputs leaves exactly the other.
+        for _ in 0..8 {
+            assert_eq!(
+                select_random_excluding(&creature, &["h1".into()], &mut rng),
+                Some("o1".to_string())
+            );
+        }
+        assert_eq!(
+            select_random_excluding(&creature, &["h1".into(), "o1".into()], &mut rng),
+            None,
+            "a fully excluded creature yields no focus rather than repeating one"
+        );
+
+        // Unsaturated prefers outputs, so excluding the output falls back.
+        assert_eq!(
+            select_unsaturated_excluding(&creature, &["o1".into()], &mut rng),
+            Some("h1".to_string())
+        );
+
+        // High-error picks the next strongest signal once the top is taken.
+        let signals: HashMap<String, f64> =
+            [("o1".to_string(), 1.0), ("h1".to_string(), 0.5)].into();
+        assert_eq!(
+            select_highest_signal(&signals).map(|c| c.uuid),
+            Some("o1".to_string())
+        );
+        assert_eq!(
+            select_highest_signal_excluding(&signals, &["o1".into()]).map(|c| c.uuid),
+            Some("h1".to_string())
+        );
+        assert!(
+            select_highest_signal_excluding(&signals, &["o1".into(), "h1".into()]).is_none(),
+            "no unexcluded signal means no focus"
+        );
+
+        // Weighted: with the only other neuron excluded the draw is forced.
+        let selector = WeightedFocusSelector::default();
+        for _ in 0..8 {
+            let choice = selector
+                .select_weighted_excluding(&creature, &signals, &["o1".into()], &mut rng)
+                .expect("one candidate remains");
+            assert_eq!(choice.uuid, "h1");
+        }
+        assert!(
+            selector
+                .select_weighted_excluding(
+                    &creature,
+                    &signals,
+                    &["o1".into(), "h1".into()],
+                    &mut rng
+                )
+                .is_none()
+        );
+    }
+
+    /// Issue #109: excluding nothing must consume the rng exactly as the
+    /// unfiltered draw did, or a K=1 run would drift from its recorded seed.
+    #[test]
+    fn an_empty_exclusion_draws_exactly_as_before() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let signals: HashMap<String, f64> =
+            [("o1".to_string(), 1.0), ("h1".to_string(), 0.5)].into();
+        let selector = WeightedFocusSelector::default();
+
+        let mut a = StdRng::seed_from_u64(11);
+        let mut b = StdRng::seed_from_u64(11);
+        for _ in 0..16 {
+            let plain = selector.select_weighted(&creature, &signals, &mut a);
+            let excluding = selector.select_weighted_excluding(&creature, &signals, &[], &mut b);
+            assert_eq!(plain.map(|c| c.uuid), excluding.map(|c| c.uuid));
+        }
+
+        let mut a = StdRng::seed_from_u64(5);
+        let mut b = StdRng::seed_from_u64(5);
+        for _ in 0..16 {
+            assert_eq!(
+                RandomFocusSelector.select(&creature, &mut a),
+                select_random_excluding(&creature, &[], &mut b)
+            );
+        }
     }
 
     #[test]
