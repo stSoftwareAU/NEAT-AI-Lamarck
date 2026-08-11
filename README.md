@@ -167,6 +167,7 @@ The run always uses these; the flag only overrides the value.
 | `--screen-promote-threshold` | `1e-6` | Minimum sample-score Δ before a candidate earns a full-corpus score. |
 | `--focus-policy` | `weighted` | `weighted` \| `high-error` \| `random` \| `unsaturated`. |
 | `--quick-sample-records` | `25000` | Record cap for `--quick` observations / focus / learning scans. |
+| `--analysis-memo-entries` | `16` | Focus-dependent entries the cross-experiment analysis memo may hold. `0` disables memoisation; every entry is dropped whenever the incumbent changes. See [Memoised analysis across experiments](#memoised-analysis-across-experiments). |
 
 ### Genuinely optional
 
@@ -332,6 +333,57 @@ keeps its own streaming accumulator, and the standalone `collect_*` / `refine_*`
 functions drive those same accumulators, so a fused result is bit-identical to
 the per-pass one. The residual ranking streams the sample rather than
 materialising it as activation probes.
+
+#### Memoised analysis across experiments
+
+The incumbent only changes when an experiment is **accepted**, and accepts are
+rare — `docs/followup-economics.md` records 0 accepts in 118 experiments. So for
+almost every experiment the creature that scan 2 describes is byte-identical to
+the one the previous experiment described, and a repeated focus makes the whole
+scan redundant. Lamarck memoises the two incumbent-invariant results
+(`lamarck/src/memo.rs`):
+
+| Cached | Key | Effect on a hit |
+|--------|-----|-----------------|
+| Focus stats + incoming sources + ranked sources | `(incumbent, focus, sample)` | Scan 2 is skipped entirely. |
+| Per-output MAE | `(incumbent, sample)` | Scan 1 still runs for the learning signal; only the residual accumulation is skipped. |
+
+The learning signal is **never** cached: it is driven by a per-experiment seeded
+RNG (`select_sparse`) and is deliberately different every experiment.
+
+```mermaid
+flowchart TD
+    START(["experiment N"]) --> KEY["scope = content hash of incumbent<br/>+ analysis sample config"]
+    KEY --> CHECK{"same scope as<br/>the held entries?"}
+    CHECK -- no --> DROP["drop every entry"] --> MISS
+    CHECK -- yes --> LOOK{"focus cached?"}
+    LOOK -- no --> MISS["scan 2 runs, result stored<br/>with its measured ms"]
+    LOOK -- yes --> HIT["memo hit — no training scan"]
+    MISS --> J["journal memoHits / memoMisses / memoMsSaved"]
+    HIT --> J
+
+    classDef scan fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef step fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    classDef drop fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+    class MISS,HIT scan
+    class START,KEY,J step
+    class DROP drop
+```
+
+The scope is a **content** hash of the creature, not the journal's coarse
+`incumbentId` (which counts neurons and synapses only): a weight-only accept
+leaves that id unchanged, so keying on it would serve stale analysis to the very
+experiment after an accept. Any incumbent change — an accepted candidate, a
+Phase-G graft, a changed `--quick-sample-records` — is a changed scope, and a
+changed scope drops every entry before the next lookup is answered. Debug builds
+additionally assert the held scope still matches the incumbent at use time.
+
+Memory is bounded by `--analysis-memo-entries` (default 16), evicted
+least-recently-used; each entry holds one focus's statistics, incoming rows and
+ranked sources, so the bound is the focus fan-in, never the creature's neuron
+count. `memoHits`, `memoMisses` and `memoMsSaved` are journalled per experiment
+and totalled by `report`, so the memo's value is auditable — and a hit rate that
+stays at 100% across an accept is the signature of a stale cache.
 
 ### Backpropagation
 
@@ -568,6 +620,7 @@ Every following line is one experiment:
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
 | `winner`, `improvement`, `accepted` | Outcome of the experiment. |
 | `analysisMs`, `scorerMs` | Where the time went. |
+| `memoHits`, `memoMisses`, `memoMsSaved` | Analysis-memo accounting for this experiment (issue #106): lookups served from the memo, lookups recomputed, and the training-scan milliseconds the hits avoided. `memoMsSaved` counts whole scans skipped, measured on the miss that stored the entry — a cached output-MAE map saves only the residual accumulation inside a scan that still runs for the learning signal, so it is deliberately not counted. Journals written before the field existed read as `0`. |
 | `scorerError` | Present when the batch failed. |
 | `comboMembers`, `combosScored`, `combosDampened`, `comboDampen` | Combination-scoring detail. |
 | `comboMemberIndices` | Indices into `candidates[]` of the accepted winner's members — one entry for a single, several for a merged `combo-NNN-kM`. Present only on an acceptance, and absent from journals written before issue #74. |
@@ -599,6 +652,13 @@ for **every** member strategy and is also carried in that row's `comboWins`
 combos win. A combo win in a journal written before `comboMemberIndices` existed
 names no members, so it cannot be attributed at all — those are counted in
 `comboAcceptancesUnattributed` rather than silently dropped.
+
+The `analysisMemo` report bucket totals the memo columns — `hits`, `misses`,
+`msSaved`, `hitRate` and `analysisMsSavedFraction` (saved milliseconds as a share
+of analysis + saved time). A pre-memo journal, or a run started with
+`--analysis-memo-entries 0`, reports zeros. Keep this accounting separate from
+the candidate-level economics: the memo caches *incumbent analysis*, never a
+candidate outcome, so no saving is counted twice.
 
 Phase-G replay gets its own `graftReplay` bucket — `replays`, `accepts`,
 `graftsApplied`, `cumulativeImprovement`, `scorerFailures` and `replayErrors` —

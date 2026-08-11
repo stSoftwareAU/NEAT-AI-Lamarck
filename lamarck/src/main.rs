@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    CancelToken, DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT,
+    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT,
     DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
     ExternalScorer, LamarckConfig, print_run_summary, report_from_journal,
     run_optimisation_cancellable,
@@ -123,6 +123,17 @@ struct Cli {
     #[arg(long)]
     backprop_learning_rate: Option<f64>,
 
+    /// Focus-dependent entries the cross-experiment analysis memo may hold
+    /// (issue #106).
+    ///
+    /// While the incumbent is unchanged, the focus stats / incoming-source /
+    /// residual-ranking scan is a pure function of `(incumbent, focus, sample)`,
+    /// so a repeated focus is served from the memo and skips a whole training
+    /// scan. `0` disables memoisation. Every entry is dropped whenever the
+    /// incumbent changes.
+    #[arg(long, default_value_t = DEFAULT_ANALYSIS_MEMO_ENTRIES)]
+    analysis_memo_entries: usize,
+
     /// Cap on one `backprop` bias step, overriding
     /// `BackpropConfig::maximum_bias_adjustment_scale` (default: 10). Must be > 0.
     ///
@@ -210,6 +221,7 @@ fn main() -> ExitCode {
         grafts_path: cli.grafts_path,
         graft_replay_budget: cli.graft_replay_budget_seconds.map(Duration::from_secs),
         backprop_learning_rate: cli.backprop_learning_rate,
+        analysis_memo_entries: cli.analysis_memo_entries,
         backprop_max_bias_adjustment_scale: cli.backprop_max_bias_adjustment_scale,
     };
 

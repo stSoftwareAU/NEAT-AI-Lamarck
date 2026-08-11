@@ -4,6 +4,7 @@ use crate::backprop::BackpropConfig;
 #[cfg(test)]
 use crate::backprop::BiasSignal;
 use crate::focus::FocusPolicy;
+use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -94,6 +95,9 @@ pub struct LamarckConfig {
     /// Backprop learning-rate override for candidate proposal (issue #75 A/B).
     /// `None` keeps the [`BackpropConfig::default`] rate.
     pub backprop_learning_rate: Option<f64>,
+    /// Focus-dependent entries the cross-experiment analysis memo may hold
+    /// (issue #106). `0` disables memoisation and recomputes every experiment.
+    pub analysis_memo_entries: usize,
     /// Override for [`BackpropConfig::maximum_bias_adjustment_scale`], the ±cap
     /// on one `backprop` bias proposal (issue #96 A/B).
     ///
@@ -161,6 +165,7 @@ impl Default for LamarckConfig {
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
+            analysis_memo_entries: DEFAULT_ANALYSIS_MEMO_ENTRIES,
             backprop_max_bias_adjustment_scale: None,
         }
     }

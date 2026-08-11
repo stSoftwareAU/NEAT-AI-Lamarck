@@ -15,6 +15,7 @@ pub mod focus;
 pub mod grafts;
 pub mod learning;
 pub mod log;
+pub mod memo;
 pub mod observations;
 pub mod parity;
 pub mod propagate_layout;
@@ -45,6 +46,9 @@ pub use focus::{FocusChoice, FocusPolicy, WeightedFocusSelector};
 pub use grafts::{
     Graft, GraftKind, GraftReplayError, GraftReplayRequest, GraftStore, MAX_GRAFT_COMBO_CANDIDATES,
     classify_graft, extract_structural_graft, is_present, replay_grafts,
+};
+pub use memo::{
+    AnalysisMemo, DEFAULT_ANALYSIS_MEMO_ENTRIES, MemoScope, MemoStats, creature_fingerprint,
 };
 pub use parity::{
     PHASE0_ERROR_ABS_TOL, PHASE0_ERROR_REL_TOL, PHASE0_SCORE_ABS_TOL, PHASE0_SCORE_REL_TOL,

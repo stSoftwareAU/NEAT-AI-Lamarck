@@ -43,14 +43,19 @@ Lamarck must not duplicate this authority.
    excluded). Prefer this over `high-error`, which sticks on a single neuron.
 5. **Scan 2 (post-focus):** measure the chosen focus on the incumbent — focus
    statistics, incoming-source statistics and residual source ranking share one
-   pass (`lamarck/src/analysis.rs`).
+   pass (`lamarck/src/analysis.rs`). While the incumbent is unchanged this is a
+   pure function of `(incumbent, focus, sample)`, so a repeated focus is served
+   from the analysis memo and the scan is skipped entirely
+   (`lamarck/src/memo.rs`, `--analysis-memo-entries`). The learning signal in
+   scan 1 is rng-driven and is never memoised.
 6. Generate ~100 candidates (default; keep the scorer CPU-saturated) from backpropagation, statistical, structural and random strategies.
 7. **Screen** on a cheap scorer subsample (default 5% of rows); promote only sample Δ `> 1e-6`.
 8. **Full-corpus** score baseline + promoted candidates.
 9. **Combine** improving candidates (pairs first) with stacked-synapse
    dampening and score those on the full corpus too; accept the best result only
    if Δ score clears `1e-6`.
-10. Treat creature-specific statistics as stale after an acceptance, and record
+10. Treat creature-specific statistics as stale after an acceptance — the
+    analysis memo is invalidated on every incumbent change — and record
     structural accepts into the graft store.
 11. Repeat until the wall-clock budget (45 minutes by default) expires.
 

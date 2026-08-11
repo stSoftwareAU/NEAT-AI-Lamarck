@@ -21,6 +21,7 @@ use crate::grafts::{
     replay_grafts,
 };
 use crate::log;
+use crate::memo::{AnalysisMemo, MemoScope};
 use crate::observations::ensure_statistics;
 use crate::parity::{check_phase0_parity, compute_local_mse};
 use crate::scorer::improvement;
@@ -78,6 +79,20 @@ pub struct ExperimentRecord {
     pub accepted: bool,
     /// Analysis elapsed milliseconds.
     pub analysis_ms: u128,
+    /// Analysis-memo lookups served from the memo this experiment (issue #106).
+    #[serde(default)]
+    pub memo_hits: u64,
+    /// Analysis-memo lookups that had to be recomputed this experiment.
+    #[serde(default)]
+    pub memo_misses: u64,
+    /// Training-scan milliseconds avoided by memo hits this experiment.
+    ///
+    /// Counts whole scans skipped, measured on the miss that stored the entry.
+    /// A cached output-MAE map saves only the error accumulation inside a scan
+    /// that still has to run for the (uncached) learning signal, so it is
+    /// deliberately not counted here — this number never over-claims.
+    #[serde(default)]
+    pub memo_ms_saved: u128,
     /// Scorer elapsed milliseconds (screen + promote when both ran).
     pub scorer_ms: u128,
     /// Scorer error message when the batch failed.
@@ -215,6 +230,9 @@ pub struct RunConfigRecord {
     /// Backprop bias-step cap in force for this run (issue #96 A/B arm).
     #[serde(default)]
     pub backprop_max_bias_adjustment_scale: Option<f64>,
+    /// Analysis-memo entry cap in force for this run (`0` = memo off, #106).
+    #[serde(default)]
+    pub analysis_memo_entries: usize,
 }
 
 impl RunConfigRecord {
@@ -243,6 +261,7 @@ impl RunConfigRecord {
             graft_replay_budget_seconds: config.graft_replay_budget.map(|d| d.as_secs()),
             backprop_learning_rate: config.backprop_learning_rate,
             backprop_max_bias_adjustment_scale: config.backprop_max_bias_adjustment_scale,
+            analysis_memo_entries: config.analysis_memo_entries,
         }
     }
 }
@@ -524,6 +543,26 @@ pub fn run_optimisation_cancellable(
         crate::observations::StatsMode::Full => None,
     };
 
+    // Cross-experiment analysis memo (issue #106). The sample key pins every
+    // input the cached scans read besides the creature itself, so a run that
+    // changed `--quick-sample-records` mid-flight could never hit a stale entry.
+    let analysis_sample_key = format!(
+        "{}:{}:{}:{}",
+        config.stats_mode.label(),
+        focus_sample_limit.map_or_else(|| "all".to_string(), |n| n.to_string()),
+        config.training_data.display(),
+        config.compute_correlations
+    );
+    let mut analysis_memo = AnalysisMemo::new(config.analysis_memo_entries);
+    if analysis_memo.is_enabled() {
+        log::detail(&format!(
+            "analysis memo: up to {} focus entries per incumbent",
+            analysis_memo.capacity()
+        ));
+    } else {
+        log::detail("analysis memo: disabled (--analysis-memo-entries 0)");
+    }
+
     let deadline = Instant::now() + config.timeout;
     let mut experiments = 0u64;
     let mut acceptances = 0u64;
@@ -596,6 +635,9 @@ pub fn run_optimisation_cancellable(
                 let mut graft_accepted = false;
                 if replay.grafts_applied > 0 {
                     incumbent = replay.creature;
+                    // Phase-G rewrites the incumbent before the loop starts —
+                    // anything cached against the pre-graft creature is stale.
+                    analysis_memo.invalidate();
                     if let (Some(score), Some(error)) = (replay.score, replay.error) {
                         best_score = score;
                         last_accept_error = error;
@@ -716,6 +758,12 @@ pub fn run_optimisation_cancellable(
         ));
         let analysis_start = Instant::now();
         let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
+        // Memo scope for this experiment's incumbent (issue #106). Building it
+        // fresh from the creature every experiment is what makes a missed
+        // invalidation impossible: a changed creature is a changed scope, and a
+        // changed scope drops every entry before the first lookup is answered.
+        let memo_scope = MemoScope::new(incumbent_id(&incumbent), &incumbent, &analysis_sample_key);
+        let memo_before = analysis_memo.stats();
 
         // Learning + output MAE first so weighted/high-error can rank by
         // improvement chance and skip zero-error / zero-blame neurons. Both are
@@ -725,6 +773,14 @@ pub fn run_optimisation_cancellable(
                 config.focus_policy,
                 FocusPolicy::Weighted | FocusPolicy::HighError
             );
+        // The output MAE is a pure function of `(incumbent, sample)`; the
+        // learning signal is rng-driven and deliberately never cached, so the
+        // scan still runs — the hit skips the per-record error accumulation.
+        let cached_output_errors = if needs_signals {
+            analysis_memo.output_errors(&memo_scope)
+        } else {
+            None
+        };
         log::detail("pre-focus scan: creature learning signal + output residuals...");
         let learn_start = Instant::now();
         let mut learn_rng = StdRng::seed_from_u64(
@@ -738,7 +794,7 @@ pub fn run_optimisation_cancellable(
             &backprop,
             focus_sample_limit,
             &mut learn_rng,
-            needs_signals,
+            needs_signals && cached_output_errors.is_none(),
         )?;
         let learning = pre_focus.learning;
         log::ok(&format!(
@@ -747,10 +803,25 @@ pub fn run_optimisation_cancellable(
             learning.biases.iter().map(|b| b.count).sum::<f64>(),
             learning.weights.iter().map(|w| w.count).sum::<f64>()
         ));
+        let output_errors = match cached_output_errors {
+            Some(cached) => {
+                log::detail("memo hit: output residuals reused from the last experiment");
+                cached
+            }
+            None => {
+                if needs_signals {
+                    analysis_memo.store_output_errors(
+                        &memo_scope,
+                        pre_focus.output_errors.clone(),
+                        0,
+                    );
+                }
+                pre_focus.output_errors
+            }
+        };
 
         let improvement_signals = if needs_signals {
-            let signals =
-                build_improvement_signals(&incumbent, &pre_focus.output_errors, &learning);
+            let signals = build_improvement_signals(&incumbent, &output_errors, &learning);
             log::detail(&format!(
                 "error-influence signals: {} eligible neurons",
                 signals.len()
@@ -829,26 +900,67 @@ pub fn run_optimisation_cancellable(
         };
         // Focus stats, incoming-source stats and the residual source ranking all
         // need the focus uuid and nothing else — one scan feeds all three (#105).
-        log::detail("post-focus scan: focus stats + incoming sources + residual ranking...");
-        let focus_scan_start = Instant::now();
+        // All three are pure functions of `(incumbent, focus, sample)`, so a
+        // repeated focus on an unchanged incumbent skips this scan outright
+        // (issue #106).
+        // Runtime key check: whatever the memo still holds must describe the
+        // creature about to be analysed. In a debug/test build a missed
+        // invalidation panics here instead of quietly proposing against the
+        // wrong creature.
+        if let Some(scope) = analysis_memo.scope() {
+            debug_assert_eq!(
+                scope.incumbent_id,
+                incumbent_id(&incumbent),
+                "analysis memo is keyed to a different incumbent"
+            );
+            debug_assert_eq!(
+                scope.fingerprint,
+                crate::memo::creature_fingerprint(&incumbent),
+                "analysis memo is keyed to a different creature revision"
+            );
+        }
         let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
-        let post_focus = scan_post_focus(
-            &incumbent,
-            &mut network,
-            &config.training_data,
-            &focus,
-            focus_sample_limit,
-            Some(&observations),
-            &prior_sources,
-        )?;
+        let focus_scan_start = Instant::now();
+        let (post_focus, post_focus_from_memo) = match analysis_memo.post_focus(&memo_scope, &focus)
+        {
+            Some(cached) => (cached, true),
+            None => {
+                log::detail(
+                    "post-focus scan: focus stats + incoming sources + residual ranking...",
+                );
+                let scan = scan_post_focus(
+                    &incumbent,
+                    &mut network,
+                    &config.training_data,
+                    &focus,
+                    focus_sample_limit,
+                    Some(&observations),
+                    &prior_sources,
+                )?;
+                analysis_memo.store_post_focus(
+                    &memo_scope,
+                    &focus,
+                    scan.clone(),
+                    focus_scan_start.elapsed().as_millis(),
+                );
+                (scan, false)
+            }
+        };
         let mut focus_stats = post_focus.focus_stats;
         let mut incoming = post_focus.incoming;
         let ranked_sources = post_focus.ranked_sources;
         let focus_scan_ms = focus_scan_start.elapsed().as_millis();
-        log::ok(&format!(
-            "focus scan: {} records in {focus_scan_ms}ms",
-            focus_stats.record_count
-        ));
+        if post_focus_from_memo {
+            log::ok(&format!(
+                "memo hit: focus scan for {focus} reused ({} records, no training scan)",
+                focus_stats.record_count
+            ));
+        } else {
+            log::ok(&format!(
+                "focus scan: {} records in {focus_scan_ms}ms",
+                focus_stats.record_count
+            ));
+        }
         match (
             focus_stats.mean_error,
             focus_stats.mean_abs_error,
@@ -926,6 +1038,18 @@ pub fn run_optimisation_cancellable(
         let candidates = generate_candidates(&gen_ctx, config.candidates, &mut rng);
         let generate_ms = gen_start.elapsed().as_millis();
         let analysis_ms = analysis_start.elapsed().as_millis();
+        // Journalled so the memo's value is auditable from experiments.jsonl,
+        // the same way the scan and scorer economics already are (issue #106).
+        let memo_delta = analysis_memo.stats().since(memo_before);
+        if analysis_memo.is_enabled() {
+            log::detail(&format!(
+                "analysis memo: {} hit(s), {} miss(es), {}ms saved ({} entries)",
+                memo_delta.hits,
+                memo_delta.misses,
+                memo_delta.ms_saved,
+                analysis_memo.len()
+            ));
+        }
         log::ok(&format!(
             "generated {} candidates in {generate_ms}ms (analysis total {analysis_ms}ms)",
             candidates.len()
@@ -998,6 +1122,9 @@ pub fn run_optimisation_cancellable(
                             improvement: None,
                             accepted: false,
                             analysis_ms,
+                            memo_hits: memo_delta.hits,
+                            memo_misses: memo_delta.misses,
+                            memo_ms_saved: memo_delta.ms_saved,
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
@@ -1067,6 +1194,9 @@ pub fn run_optimisation_cancellable(
                         improvement: None,
                         accepted: false,
                         analysis_ms,
+                        memo_hits: memo_delta.hits,
+                        memo_misses: memo_delta.misses,
+                        memo_ms_saved: memo_delta.ms_saved,
                         scorer_ms: screen_ms,
                         scorer_error: None,
                         combo_members: None,
@@ -1132,6 +1262,9 @@ pub fn run_optimisation_cancellable(
                             improvement: None,
                             accepted: false,
                             analysis_ms,
+                            memo_hits: memo_delta.hits,
+                            memo_misses: memo_delta.misses,
+                            memo_ms_saved: memo_delta.ms_saved,
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
@@ -1195,6 +1328,9 @@ pub fn run_optimisation_cancellable(
                             improvement: None,
                             accepted: false,
                             analysis_ms,
+                            memo_hits: memo_delta.hits,
+                            memo_misses: memo_delta.misses,
+                            memo_ms_saved: memo_delta.ms_saved,
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
@@ -1308,6 +1444,9 @@ pub fn run_optimisation_cancellable(
             let winner_json = fs::read_to_string(&sel.creature_path).map_err(|e| e.to_string())?;
             let previous = incumbent.clone();
             incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
+            // The analysis the memo holds describes the creature we just
+            // replaced — every entry is stale from here (issue #106).
+            analysis_memo.invalidate();
             let opening = opening_baseline_score.unwrap_or(baseline.score);
             last_accept_focus = focus.clone();
             last_accept_strategy = strategy;
@@ -1423,6 +1562,9 @@ pub fn run_optimisation_cancellable(
                 improvement,
                 accepted,
                 analysis_ms,
+                memo_hits: memo_delta.hits,
+                memo_misses: memo_delta.misses,
+                memo_ms_saved: memo_delta.ms_saved,
                 scorer_ms,
                 scorer_error: None,
                 combo_members,
@@ -1693,6 +1835,7 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -1809,6 +1952,7 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
         };
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
@@ -1935,6 +2079,7 @@ mod tests {
             graft_replay_budget: Some(Duration::from_secs(5)),
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
         };
         let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
         (result, grafts_path)
@@ -2026,6 +2171,7 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -2074,6 +2220,7 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
         }
     }
 
@@ -2302,6 +2449,10 @@ mod tests {
         // Weighted focus exercises the output-MAE pass fused into scan one.
         config.focus_neuron = None;
         config.focus_policy = FocusPolicy::Weighted;
+        // The #105 contract is "two scans per *computed* experiment"; issue #106
+        // then removes scan two on a memo hit, so the memo is off here and the
+        // count below stays the pre-memo one.
+        config.analysis_memo_entries = 0;
 
         crate::analysis::reset_training_scan_count();
         let result = run_optimisation(
@@ -2317,6 +2468,293 @@ mod tests {
             crate::analysis::training_scans_opened(),
             2 * result.experiments,
             "each experiment must open exactly two analysis training scans"
+        );
+        for record in experiment_records(&result.journal_path) {
+            assert_eq!(
+                (record.memo_hits, record.memo_misses, record.memo_ms_saved),
+                (0, 0, 0),
+                "a disabled memo journals zeros, never a phantom saving"
+            );
+        }
+    }
+
+    /// Every `ExperimentRecord` in a journal, in order.
+    fn experiment_records(path: &Path) -> Vec<ExperimentRecord> {
+        journal_lines(path)
+            .into_iter()
+            .filter_map(|line| match line {
+                JournalLine::Experiment(record) => Some(*record),
+                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+            })
+            .collect()
+    }
+
+    /// Never improves anything, so the incumbent survives the whole run.
+    struct FlatScorer;
+
+    impl DirectoryScorer for FlatScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            const BASE_SCORE: f64 = 0.64;
+            let mut map = BTreeMap::new();
+            map.insert(
+                "baseline".into(),
+                ScoreResult {
+                    score: BASE_SCORE,
+                    error: 1.0 - BASE_SCORE,
+                    complexity_penalty: 0.0,
+                },
+            );
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(stem) = name.strip_suffix(".json")
+                    && stem != "baseline"
+                {
+                    map.insert(
+                        stem.to_string(),
+                        ScoreResult {
+                            score: BASE_SCORE,
+                            error: 1.0 - BASE_SCORE,
+                            complexity_penalty: 0.0,
+                        },
+                    );
+                }
+            }
+            Ok(map)
+        }
+    }
+
+    /// Improves `candidate-000` on exactly one scorer batch, so the run has one
+    /// accept in a known place.
+    struct AcceptOnceScorer {
+        accept_on_call: usize,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl DirectoryScorer for AcceptOnceScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let accepting = *calls == self.accept_on_call;
+            const BASE_SCORE: f64 = 0.64;
+            let mut map = BTreeMap::new();
+            map.insert(
+                "baseline".into(),
+                ScoreResult {
+                    score: BASE_SCORE,
+                    error: 1.0 - BASE_SCORE,
+                    complexity_penalty: 0.0,
+                },
+            );
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(stem) = name.strip_suffix(".json")
+                    && stem != "baseline"
+                {
+                    let score = if accepting && stem == "candidate-000" {
+                        BASE_SCORE + 2e-6
+                    } else {
+                        BASE_SCORE
+                    };
+                    map.insert(
+                        stem.to_string(),
+                        ScoreResult {
+                            score,
+                            error: 1.0 - score,
+                            complexity_penalty: 0.0,
+                        },
+                    );
+                }
+            }
+            Ok(map)
+        }
+    }
+
+    /// Issue #106: an unchanged incumbent on a repeated focus reuses the whole
+    /// post-focus scan — experiment 2 opens no scan for it and reports the same
+    /// numbers experiment 1 measured.
+    #[test]
+    fn an_unchanged_incumbent_reuses_the_focus_scan() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut config = reproducibility_config(creature_path, training, dir.path().join("out"));
+        config.max_experiments = Some(3);
+        config.timeout = Duration::from_secs(30);
+        config.seed = Some(1);
+        config.focus_neuron = Some("o1".into());
+
+        crate::analysis::reset_training_scan_count();
+        let result = run_optimisation(&config, &FlatScorer).unwrap();
+        let records = experiment_records(&result.journal_path);
+        assert_eq!(records.len() as u64, result.experiments);
+        assert!(result.experiments >= 2, "need a second experiment to reuse");
+        assert_eq!(result.acceptances, 0, "FlatScorer never improves anything");
+
+        assert_eq!(
+            crate::analysis::training_scans_opened(),
+            result.experiments + 1,
+            "only the first experiment scans twice; later ones reuse the focus scan \
+             and open just the (uncacheable) learning scan"
+        );
+
+        let first = &records[0];
+        assert_eq!(first.memo_hits, 0, "the first experiment cannot hit");
+        assert!(first.memo_misses >= 1);
+        for record in &records[1..] {
+            assert_eq!(
+                record.memo_hits, 1,
+                "experiment {} reuses the focus scan",
+                record.experiment_number
+            );
+            assert_eq!(record.memo_misses, 0);
+        }
+
+        // The reused numbers are the measured ones, not a fresh approximation.
+        let scan_fields = |record: &ExperimentRecord| {
+            let stats = record.focus_stats.clone().expect("focus stats journalled");
+            format!(
+                "{}|{}|{}|{:?}|{:?}|{}",
+                stats.record_count,
+                stats.pre_mean,
+                stats.post_mean,
+                stats.mean_abs_error,
+                stats.mean_derivative,
+                stats.saturation_fraction
+            )
+        };
+        assert_eq!(
+            scan_fields(&records[0]),
+            scan_fields(&records[1]),
+            "a memo hit must reproduce the scan it replaced"
+        );
+    }
+
+    /// Issue #106: memoisation is an optimisation, not a behaviour change — the
+    /// same seed must produce the same experiments with the memo off and on.
+    #[test]
+    fn the_memo_does_not_move_the_candidate_stream() {
+        let run = |entries: usize, out: PathBuf| {
+            let dir = tempdir().unwrap();
+            let (creature_path, training) = tiny_setup(dir.path());
+            let mut config = reproducibility_config(creature_path, training, out);
+            config.max_experiments = Some(3);
+            config.timeout = Duration::from_secs(30);
+            config.seed = Some(9);
+            config.focus_neuron = None;
+            config.focus_policy = FocusPolicy::Weighted;
+            config.analysis_memo_entries = entries;
+            let result = run_optimisation(&config, &FlatScorer).unwrap();
+            // The tempdir must outlive the run, so return the journal contents.
+            experiment_records(&result.journal_path)
+        };
+
+        let out = tempdir().unwrap();
+        let without = run(0, out.path().join("off"));
+        let with = run(
+            crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            out.path().join("on"),
+        );
+
+        assert_eq!(without.len(), with.len(), "same cap, same experiment count");
+        for (a, b) in without.iter().zip(with.iter()) {
+            assert_eq!(a.focus_neuron, b.focus_neuron, "focus choice must not move");
+            assert_eq!(
+                serde_json::to_string(&a.candidates).unwrap(),
+                serde_json::to_string(&b.candidates).unwrap(),
+                "experiment {} proposed a different candidate stream with the memo on",
+                a.experiment_number
+            );
+            assert_eq!(
+                serde_json::to_string(&a.focus_stats).unwrap(),
+                serde_json::to_string(&b.focus_stats).unwrap(),
+                "experiment {} journalled different focus statistics",
+                a.experiment_number
+            );
+        }
+        assert!(
+            with.iter().any(|r| r.memo_hits > 0),
+            "the memo arm must actually have hit, or this proves nothing"
+        );
+    }
+
+    /// Issue #106: accepting a winner invalidates the memo, so the experiment
+    /// after an accept recomputes everything against the new incumbent.
+    #[test]
+    fn an_accept_invalidates_the_memo_for_the_next_experiment() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut config = reproducibility_config(creature_path, training, dir.path().join("out"));
+        config.max_experiments = Some(4);
+        config.timeout = Duration::from_secs(30);
+        config.seed = Some(1);
+        config.focus_neuron = Some("o1".into());
+
+        // Accept on the second batch: experiment 2 changes the incumbent, so
+        // experiment 3 must miss even though it uses the same focus.
+        let result = run_optimisation(
+            &config,
+            &AcceptOnceScorer {
+                accept_on_call: 2,
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+        let records = experiment_records(&result.journal_path);
+        assert_eq!(result.acceptances, 1, "exactly one accept");
+        let accept_at = records
+            .iter()
+            .position(|r| r.accepted)
+            .expect("one experiment accepted");
+        assert!(
+            records.len() > accept_at + 1,
+            "need an experiment after the accept"
+        );
+
+        let after = &records[accept_at + 1];
+        assert_eq!(
+            after.memo_hits, 0,
+            "the experiment after an accept analyses a new creature — no hits"
+        );
+        assert!(after.memo_misses >= 1, "it recomputes the focus scan");
+        assert_eq!(after.memo_ms_saved, 0);
+        // The winner here is a weight/bias nudge, so neuron and synapse counts
+        // are untouched and the coarse journal id cannot see the change. Only
+        // the content fingerprint invalidated the memo — which is the whole
+        // reason the scope is not keyed on `incumbentId` alone.
+        assert_eq!(
+            after.incumbent_id, records[accept_at].incumbent_id,
+            "a weight-only accept leaves the coarse incumbentId unchanged"
+        );
+    }
+
+    /// Issue #106: a Phase-G graft rewrites the incumbent before the loop, so
+    /// the first experiment must analyse the grafted creature from scratch.
+    #[test]
+    fn phase_g_graft_leaves_the_memo_cold_for_the_first_experiment() {
+        let dir = tempdir().unwrap();
+        let (result, _) = graft_replay_run(dir.path());
+        assert!(result.acceptances >= 1, "phase-G applied the graft");
+
+        let records = experiment_records(&result.journal_path);
+        let first = records.first().expect("at least one experiment ran");
+        assert_eq!(
+            first.memo_hits, 0,
+            "nothing cached against the pre-graft creature may be served"
+        );
+        assert!(first.memo_misses >= 1);
+        assert!(
+            first.incumbent_id.ends_with("-s3"),
+            "experiments analyse the grafted creature (3 synapses), got {}",
+            first.incumbent_id
         );
     }
 
@@ -2571,6 +3009,7 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));
