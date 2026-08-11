@@ -29,8 +29,8 @@ use rand::Rng;
 
 use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::focus::{
-    FocusNeuronStats, FocusStatsScan, IncomingSourceScan, IncomingSourceStats, OutputErrorInfluence,
-    OutputErrorScan,
+    FocusNeuronStats, FocusStatsScan, IncomingSourceScan, IncomingSourceStats,
+    OutputErrorInfluence, OutputErrorScan,
 };
 use crate::observations::ObservationsStatistics;
 use crate::propagate_layout::LearningScan;
@@ -120,7 +120,10 @@ pub fn scan_pre_focus(
         count += 1;
         learning_scan.observe(network, &record.outputs);
         if want_errors {
-            error_scan.observe(&traced[..creature.output.min(traced.len())], &record.outputs);
+            error_scan.observe(
+                &traced[..creature.output.min(traced.len())],
+                &record.outputs,
+            );
         }
     }
 
@@ -181,13 +184,7 @@ pub fn scan_post_focus(
     // Fewer than two rows cannot carry a residual statistic — fall back to
     // synthetic probes exactly as the standalone refine does.
     let ranked_sources = if count < 2 {
-        refine_sources_from_synthetic(
-            creature,
-            network,
-            focus_uuid,
-            prior_sources,
-            observations,
-        )?
+        refine_sources_from_synthetic(creature, network, focus_uuid, prior_sources, observations)?
     } else {
         residual_scan.finish(prior_sources)
     };
@@ -267,9 +264,13 @@ mod tests {
             &mut rng_a,
         )
         .unwrap();
-        let output_errors =
-            crate::focus::collect_output_mean_abs_errors(&creature, &mut net_a, dir.path(), Some(50))
-                .unwrap();
+        let output_errors = crate::focus::collect_output_mean_abs_errors(
+            &creature,
+            &mut net_a,
+            dir.path(),
+            Some(50),
+        )
+        .unwrap();
 
         let mut net_b = compile_creature(&creature).unwrap();
         let mut rng_b = StdRng::seed_from_u64(42);
@@ -408,8 +409,16 @@ mod tests {
         let dir = write_sample(64);
         let creature = parse_creature_json(CREATURE).unwrap();
         let mut network = compile_creature(&creature).unwrap();
-        let fused =
-            scan_post_focus(&creature, &mut network, dir.path(), "o1", Some(25), None, &[]).unwrap();
+        let fused = scan_post_focus(
+            &creature,
+            &mut network,
+            dir.path(),
+            "o1",
+            Some(25),
+            None,
+            &[],
+        )
+        .unwrap();
         assert_eq!(fused.focus_stats.record_count, 25);
     }
 

@@ -443,9 +443,7 @@ impl ResidualScan {
             Some(out_idx) => {
                 let relative_idx = neuron_index(creature, focus_uuid)
                     .and_then(|i| i.checked_sub(creature.input))
-                    .ok_or_else(|| {
-                        format!("focus neuron {focus_uuid} missing compiled index")
-                    })?;
+                    .ok_or_else(|| format!("focus neuron {focus_uuid} missing compiled index"))?;
                 ResidualMode::Residual {
                     out_idx,
                     relative_idx,
@@ -557,8 +555,8 @@ impl ResidualScan {
                         self.sum_ee,
                         self.sum_xy[j],
                     );
-                    let var_x = ((self.sum_xx[j] / self.n) - (self.sum_x[j] / self.n).powi(2))
-                        .max(0.0);
+                    let var_x =
+                        ((self.sum_xx[j] / self.n) - (self.sum_x[j] / self.n).powi(2)).max(0.0);
                     let std_x = var_x.sqrt().max(MIN_ACT_STD);
                     src.direction = corr;
                     src.score = corr.abs();

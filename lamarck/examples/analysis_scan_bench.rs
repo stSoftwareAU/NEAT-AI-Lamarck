@@ -26,9 +26,7 @@ use neat_ai_lamarck::focus::{
     collect_focus_stats, collect_incoming_source_stats, collect_output_mean_abs_errors,
 };
 use neat_ai_lamarck::propagate_layout::accumulate_creature_learning;
-use neat_ai_lamarck::structural::{
-    RankedSource, refine_sources_by_residual_with_observations,
-};
+use neat_ai_lamarck::structural::{RankedSource, refine_sources_by_residual_with_observations};
 use neat_core::{CreatureExport, compile_creature, parse_creature_json};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -123,8 +121,12 @@ fn fused(creature: &CreatureExport, data: &Path, limit: Option<u64>, prior: &[Ra
     let mut network = compile_creature(creature).unwrap();
     let cfg = BackpropConfig::default();
     let mut rng = StdRng::seed_from_u64(11);
+    let mut lap = Instant::now();
     let pre = scan_pre_focus(creature, &mut network, data, &cfg, limit, &mut rng, true).unwrap();
+    println!("    A pre-focus     : {} ms", lap.elapsed().as_millis());
+    lap = Instant::now();
     let post = scan_post_focus(creature, &mut network, data, FOCUS, limit, None, prior).unwrap();
+    println!("    B post-focus    : {} ms", lap.elapsed().as_millis());
     std::hint::black_box((pre, post));
 }
 
@@ -153,15 +155,20 @@ fn main() {
         })
         .collect();
 
-    println!("records={records} inputs={inputs} hidden={hidden}");
-    if mode == "legacy" || mode == "both" {
-        let start = Instant::now();
-        legacy(&creature, dir.path(), limit, &prior);
-        println!("legacy (5 scans): {} ms", start.elapsed().as_millis());
-    }
-    if mode == "fused" || mode == "both" {
-        let start = Instant::now();
-        fused(&creature, dir.path(), limit, &prior);
-        println!("fused  (2 scans): {} ms", start.elapsed().as_millis());
+    let repeats: usize = arg(4, "1").parse().expect("REPEATS must be a number");
+
+    println!("records={records} inputs={inputs} hidden={hidden} repeats={repeats}");
+    // Alternate the two modes so page-cache state and machine drift hit both.
+    for _ in 0..repeats {
+        if mode == "legacy" || mode == "both" {
+            let start = Instant::now();
+            legacy(&creature, dir.path(), limit, &prior);
+            println!("legacy (5 scans): {} ms", start.elapsed().as_millis());
+        }
+        if mode == "fused" || mode == "both" {
+            let start = Instant::now();
+            fused(&creature, dir.path(), limit, &prior);
+            println!("fused  (2 scans): {} ms", start.elapsed().as_millis());
+        }
     }
 }

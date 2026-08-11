@@ -738,18 +738,17 @@ impl FocusStatsScan {
     /// Consume the accumulator and hand back the focus statistics.
     pub(crate) fn finish(self) -> FocusNeuronStats {
         let count = self.count;
-        let (mean_error, mean_abs_error, mean_adjusted_error, mean_derivative) = if self.err_count
-            > 0
-        {
-            (
-                Some(self.err_sum / self.err_count as f64),
-                Some(self.abs_err_sum / self.err_count as f64),
-                Some(self.adj_err_sum / self.err_count as f64),
-                Some(self.deriv_sum / self.err_count as f64),
-            )
-        } else {
-            (None, None, None, None)
-        };
+        let (mean_error, mean_abs_error, mean_adjusted_error, mean_derivative) =
+            if self.err_count > 0 {
+                (
+                    Some(self.err_sum / self.err_count as f64),
+                    Some(self.abs_err_sum / self.err_count as f64),
+                    Some(self.adj_err_sum / self.err_count as f64),
+                    Some(self.deriv_sum / self.err_count as f64),
+                )
+            } else {
+                (None, None, None, None)
+            };
 
         FocusNeuronStats {
             neuron_uuid: self.focus_uuid,
