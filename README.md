@@ -180,6 +180,7 @@ Leaving these unset changes behaviour.
 | `--max-experiments` | Stop after this many experiments, whichever of it and `--timeout-seconds` comes first. Unset = wall-clock bounded only. |
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
+| `--scale-candidate-quotas` | Scale the generator's per-phase quotas with `--candidates` so the budget binds until the generator is genuinely exhausted (issue #108). Unset, the fixed quotas cap a batch at ~29 on the production creature whatever `--candidates` says. Opt-in until the paired batch-economics benchmark in [`docs/followup-economics.md`](docs/followup-economics.md) justifies making it the default. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
 | `--compute-correlations` | Compute the expensive input×input correlation matrix in observations. |
 | `--skip-phase0` | Skip the Phase-0 parity gate. |
@@ -485,6 +486,34 @@ sized to keep a ~10-core scorer box saturated. The generator front-loads
 structural probes, then round-robins the remaining budget across the strategies
 below; `--structural-only` restricts it to growth candidates.
 
+Those opening phases carry **fixed** quotas, so the batch tops out at ~29 on the
+production creature whatever `--candidates` says.
+`--scale-candidate-quotas` (issue #108) keeps going after them, sweeping the
+ranked-source × weight-scale and ranked-source × squash grids a slice of every
+family at a time, until the budget is met or the generator is genuinely
+exhausted. Duplicate proposals are dropped rather than counted, and every
+experiment logs — and journals, as `candidatesRequested` / `batchLimit` — which
+of the three limits bound it:
+
+```mermaid
+flowchart LR
+    OPEN["fixed opening quotas"] --> FULL{"budget met?"}
+    FULL -- yes --> BUDGET(["budget reached"])
+    FULL -- "no, flag unset" --> CEIL(["fixed quota ceiling"])
+    FULL -- "no, --scale-candidate-quotas" --> ROUND["round: adds x scales,<br/>growths x squashes,<br/>one of each weight strategy"]
+    ROUND --> NEW{"anything new,<br/>or grid left?"}
+    NEW -- yes --> FULL
+    NEW -- no --> DRY(["generator exhausted"])
+
+    classDef stage fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef stop fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef warn fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+
+    class OPEN,ROUND stage
+    class BUDGET stop
+    class CEIL,DRY warn
+```
+
 | Journal tag | What it proposes |
 |-------------|------------------|
 | `backprop` | Bias, or the strongest incoming weight, stepped by the accumulated learning signal (absolute weight delta capped at `0.01`). Skipped entirely when no blame reached the focus — the batch slot goes to a strategy that can clear `--min-improvement` (issue #83). |
@@ -659,6 +688,7 @@ Every following line is one experiment:
 | `focusNeuron` | Selected neuron UUID. |
 | `focusStats` | The focus scan that drove the experiment (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`. |
+| `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — pass `--scale-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
 | `winner`, `improvement`, `accepted` | Outcome of the experiment. |
 | `analysisMs`, `scorerMs` | Where the time went. |
@@ -677,6 +707,12 @@ neat_ai_lamarck report experiments.jsonl
 It emits per-strategy appearances/wins/acceptance rate, focus history,
 improvement series, candidates per scorer-minute and per screen-minute,
 analysis-time fraction, projected batches per 45 minutes, and combo totals.
+
+The `candidateBatch` bucket reports the achieved batch size (issue #108):
+`meanGenerated`, `minGenerated`, `maxGenerated`, the `requested` budget when
+every experiment agreed on one, and how many experiments stopped at the
+`quotaCeiling` or ran the generator `exhausted`. A journal written before those
+fields existed still reports the sizes, with `requested` `null`.
 
 `openingBaselineScore` is anchored on a **full-corpus** score only (issue #84):
 the `scores.baseline` of the first experiment that actually promoted, which is
@@ -788,9 +824,10 @@ Questions 1–3 and 8 have a first single-seed answer. The follow-up campaign
 for #75 — an output-focus slice, a backprop step A/B and a batch-size A/B,
 118 further experiments — is written up in
 [`docs/followup-economics.md`](docs/followup-economics.md). Its headline: **no
-strategy has earned removal**, `--candidates` above ~29 buys nothing on this
-creature, and `backprop` fails on a saturated step cap rather than on its
-learning rate. Questions 4–7 need the arms wired up by
+strategy has earned removal**, `--candidates` above ~29 bought nothing on this
+creature under the fixed quotas (`--scale-candidate-quotas` lifts that ceiling —
+its own paired benchmark is still to run), and `backprop` fails on a saturated
+step cap rather than on its learning rate. Questions 4–7 need the arms wired up by
 [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) and still to be
 run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 

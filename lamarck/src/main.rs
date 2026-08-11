@@ -41,6 +41,13 @@ struct Cli {
     #[arg(long, default_value_t = DEFAULT_CANDIDATE_COUNT)]
     candidates: usize,
 
+    /// Scale the generator's per-phase quotas with `--candidates` (issue #108).
+    ///
+    /// Without it the fixed quotas cap the batch at ~29 on the production
+    /// creature whatever `--candidates` says.
+    #[arg(long, default_value_t = false)]
+    scale_candidate_quotas: bool,
+
     /// Minimum absolute score improvement (strict `>`).
     #[arg(long, default_value_t = DEFAULT_MIN_IMPROVEMENT)]
     min_improvement: f64,
@@ -205,6 +212,7 @@ fn main() -> ExitCode {
         timeout: Duration::from_secs(cli.timeout_seconds),
         max_experiments: cli.max_experiments,
         candidates: cli.candidates,
+        scale_candidate_quotas: cli.scale_candidate_quotas,
         min_improvement: cli.min_improvement,
         seed: cli.seed,
         scorer_path: cli.scorer.clone(),
