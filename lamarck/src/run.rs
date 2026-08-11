@@ -1,6 +1,6 @@
 //! End-to-end Lamarck optimisation loop and experiment journal.
 
-use crate::analysis::{scan_post_focus, scan_pre_focus};
+use crate::analysis::{ScanBudget, scan_post_focus, scan_pre_focus};
 use crate::cancel::CancelToken;
 use crate::candidates::{
     Candidate, CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
@@ -233,6 +233,13 @@ pub struct RunConfigRecord {
     /// Analysis-memo entry cap in force for this run (`0` = memo off, #106).
     #[serde(default)]
     pub analysis_memo_entries: usize,
+    /// Analysis worker threads in force for this run (issue #107).
+    ///
+    /// The scans are bit-identical at every thread count, so this identifies a
+    /// wall-clock arm — a parallel run that is *slower* than serial is visible
+    /// from the journal alone, without guessing what the host chose.
+    #[serde(default)]
+    pub analysis_threads: usize,
 }
 
 impl RunConfigRecord {
@@ -262,6 +269,7 @@ impl RunConfigRecord {
             backprop_learning_rate: config.backprop_learning_rate,
             backprop_max_bias_adjustment_scale: config.backprop_max_bias_adjustment_scale,
             analysis_memo_entries: config.analysis_memo_entries,
+            analysis_threads: config.analysis_threads,
         }
     }
 }
@@ -426,6 +434,7 @@ pub fn run_optimisation_cancellable(
     // Validate before the expensive Phase-0 gate: a bad learning rate must stop
     // the run, never be silently replaced by the default mid-A/B.
     let backprop = config.backprop_config()?;
+    let analysis_threads = config.analysis_threads()?;
     fs::create_dir_all(&config.output_dir).map_err(|e| e.to_string())?;
     let journal_path = config.output_dir.join("experiments.jsonl");
     let best_path = config.output_dir.join("best.json");
@@ -562,6 +571,10 @@ pub fn run_optimisation_cancellable(
     } else {
         log::detail("analysis memo: disabled (--analysis-memo-entries 0)");
     }
+    log::detail(&format!(
+        "analysis scans: {analysis_threads} worker thread(s), {} records per chunk",
+        crate::chunks::ANALYSIS_CHUNK_RECORDS
+    ));
 
     let deadline = Instant::now() + config.timeout;
     let mut experiments = 0u64;
@@ -792,7 +805,7 @@ pub fn run_optimisation_cancellable(
             &mut network,
             &config.training_data,
             &backprop,
-            focus_sample_limit,
+            ScanBudget::new(focus_sample_limit, analysis_threads),
             &mut learn_rng,
             needs_signals && cached_output_errors.is_none(),
         )?;
@@ -933,7 +946,7 @@ pub fn run_optimisation_cancellable(
                     &mut network,
                     &config.training_data,
                     &focus,
-                    focus_sample_limit,
+                    ScanBudget::new(focus_sample_limit, analysis_threads),
                     Some(&observations),
                     &prior_sources,
                 )?;
@@ -1836,6 +1849,7 @@ mod tests {
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -1953,6 +1967,7 @@ mod tests {
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
         };
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
@@ -2080,6 +2095,7 @@ mod tests {
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
         };
         let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
         (result, grafts_path)
@@ -2172,6 +2188,7 @@ mod tests {
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -2221,6 +2238,7 @@ mod tests {
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
         }
     }
 
@@ -2362,6 +2380,81 @@ mod tests {
 
     /// Issue #96: the backprop cap A/B is only readable from its journal if the
     /// cap in force is recorded, exactly as the learning rate already is.
+    #[test]
+    fn run_header_records_the_analysis_thread_count() {
+        let config = LamarckConfig {
+            analysis_threads: 8,
+            ..LamarckConfig::default()
+        };
+        let record = RunConfigRecord::from_config(&config);
+        assert_eq!(record.analysis_threads, 8);
+
+        // Without this field a parallel arm and a serial arm are
+        // indistinguishable from their journals, so a run that was *slower*
+        // than serial could not be diagnosed after the fact (issue #107).
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert!(
+            encoded.contains("\"analysisThreads\":8"),
+            "thread count missing from the encoded header: {encoded}"
+        );
+        let decoded: RunConfigRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.analysis_threads, 8);
+
+        // Journals written before the knob existed must still parse.
+        let legacy = encoded.replace(",\"analysisThreads\":8", "");
+        let legacy: RunConfigRecord = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(legacy.analysis_threads, 0);
+    }
+
+    /// Seed replay must survive parallel analysis at every thread count (#107).
+    #[test]
+    fn recorded_seed_replays_the_candidate_stream_at_every_thread_count() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let candidates_at = |threads: usize, label: &str, seed: Option<u64>| -> (u64, String) {
+            let mut config = reproducibility_config(
+                creature_path.clone(),
+                training.clone(),
+                dir.path().join(label),
+            );
+            config.analysis_threads = threads;
+            config.seed = seed;
+            let result = run_optimisation(
+                &config,
+                &ScriptedScorer {
+                    calls: Arc::new(Mutex::new(0)),
+                },
+            )
+            .unwrap();
+            let experiment = journal_lines(&result.journal_path)
+                .into_iter()
+                .find_map(|l| match l {
+                    JournalLine::Experiment(record) => Some(*record),
+                    JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                })
+                .expect("at least one experiment");
+            (
+                result.seed,
+                format!(
+                    "{}|{}",
+                    experiment.focus_neuron,
+                    serde_json::to_string(&experiment.candidates).unwrap()
+                ),
+            )
+        };
+
+        let (seed, baseline) = candidates_at(1, "threads-1", None);
+        for threads in [2, 8] {
+            let (replay_seed, replayed) =
+                candidates_at(threads, &format!("threads-{threads}"), Some(seed));
+            assert_eq!(replay_seed, seed);
+            assert_eq!(
+                baseline, replayed,
+                "the recorded seed must regenerate the same candidate stream at {threads} threads"
+            );
+        }
+    }
+
     #[test]
     fn run_header_records_the_backprop_bias_cap() {
         let config = LamarckConfig {
@@ -3010,6 +3103,7 @@ mod tests {
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));

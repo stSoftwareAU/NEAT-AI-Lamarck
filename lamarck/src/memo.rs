@@ -302,7 +302,7 @@ impl AnalysisMemo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::scan_post_focus;
+    use crate::analysis::{ScanBudget, scan_post_focus};
     use neat_core::{compile_creature, parse_creature_json};
     use std::io::Write;
     use tempfile::{TempDir, tempdir};
@@ -367,7 +367,7 @@ mod tests {
             &mut network,
             dir.path(),
             "o1",
-            Some(40),
+            ScanBudget::serial(Some(40)),
             None,
             &[],
         )
@@ -385,7 +385,7 @@ mod tests {
             &mut network,
             dir.path(),
             "o1",
-            Some(40),
+            ScanBudget::serial(Some(40)),
             None,
             &[],
         )

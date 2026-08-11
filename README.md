@@ -168,6 +168,7 @@ The run always uses these; the flag only overrides the value.
 | `--focus-policy` | `weighted` | `weighted` \| `high-error` \| `random` \| `unsaturated`. |
 | `--quick-sample-records` | `25000` | Record cap for `--quick` observations / focus / learning scans. |
 | `--analysis-memo-entries` | `16` | Focus-dependent entries the cross-experiment analysis memo may hold. `0` disables memoisation; every entry is dropped whenever the incumbent changes. See [Memoised analysis across experiments](#memoised-analysis-across-experiments). |
+| `--analysis-threads` | `4` | Worker threads folding record chunks in the two analysis scans. The analysis is **bit-identical at every thread count** — only the wall clock moves. `0` aborts the run. Not `num_cpus` on purpose: the scorer owns the box whenever it runs. See [Parallel analysis scans](#parallel-analysis-scans). |
 
 ### Genuinely optional
 
@@ -333,6 +334,47 @@ keeps its own streaming accumulator, and the standalone `collect_*` / `refine_*`
 functions drive those same accumulators, so a fused result is bit-identical to
 the per-pass one. The residual ranking streams the sample rather than
 materialising it as activation probes.
+
+#### Parallel analysis scans
+
+Both scans are read-only reductions: each record contributes independently to a
+set of accumulators. They therefore fold record chunks on `--analysis-threads`
+workers (default 4, `lamarck/src/chunks.rs`).
+
+Determinism comes from the **partition**, not the schedule. The sample is cut
+into fixed 2048-record chunks — a function of the sample alone, never of the
+thread count, the core count or the host — and the per-chunk partials are merged
+in ascending **chunk order**, whichever worker finished first. One thread and
+eight threads therefore fold the same partials in the same order and produce
+bit-identical accumulators; `--seed` replay is unaffected. Every RNG draw
+(`select_sparse`) happens on the calling thread before the workers start.
+
+```mermaid
+flowchart LR
+    S["sample<br/>N records"] --> C1["chunk 0"] & C2["chunk 1"] & C3["chunk k"]
+    C1 --> W["workers<br/>(--analysis-threads)"]
+    C2 --> W
+    C3 --> W
+    W --> M["merge in chunk order<br/>0 → 1 → … → k"]
+    M --> R(["one accumulator set<br/>identical at 1, 2, 8 threads"])
+
+    classDef scan fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef step fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    classDef out fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    class C1,C2,C3,W scan
+    class S,M step
+    class R out
+```
+
+A creature that is not `forwardOnly` carries activation state from one record to
+the next, so it is folded as a **single chunk** — correctness before speed.
+
+Measured on the 10-core M4 host with a production-shaped sample (25 000 records
+× 2 511 inputs, `cargo run --release --example analysis_threads_bench`): the
+analysis phase runs 1.9× faster at 2 threads, 3.1× at the default 4, and 4.1× at
+8. The thread count in force is recorded in the journal `runHeader` as
+`analysisThreads`, so a parallel arm that turned out *slower* than a serial one
+is identifiable from its journal alone.
 
 #### Memoised analysis across experiments
 
@@ -591,7 +633,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -707,6 +749,15 @@ remains: the experiment count is wall-clock bounded and the screen phase is
 derived from the experiment index, so a differently timed replay may run a
 different number of experiments and reach a different point in that identical
 stream.
+
+`--analysis-threads` is deliberately **outside** that contract's inputs: the
+analysis scans partition the sample into fixed record chunks and merge the
+partials in chunk order, so the accumulators — and every candidate derived from
+them — are bit-identical at any thread count (see
+[Parallel analysis scans](#parallel-analysis-scans)). A replay may use a
+different thread count than the run it replays. The value in force is recorded
+in `runHeader.config.analysisThreads` anyway, because the wall clock is not
+identical and a slow arm must be diagnosable after the fact.
 
 ## What we have learnt so far
 

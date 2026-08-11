@@ -371,6 +371,16 @@ impl OutputErrorScan {
         }
     }
 
+    /// Fold another chunk's accumulator into this one (issue #107).
+    ///
+    /// Both sides describe the same creature, so the residual sums simply add.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.count += other.count;
+        for (mine, theirs) in self.abs_sums.iter_mut().zip(&other.abs_sums) {
+            *mine += *theirs;
+        }
+    }
+
     /// Consume the accumulator and hand back per-output residual summaries.
     pub(crate) fn finish(self) -> HashMap<String, OutputErrorInfluence> {
         let mut map = HashMap::with_capacity(self.outputs.len());
@@ -735,6 +745,44 @@ impl FocusStatsScan {
         }
     }
 
+    /// Fold another chunk's accumulator into this one (issue #107).
+    ///
+    /// The pre/post activation moments are Welford accumulators, so they merge
+    /// by Chan's parallel formula rather than by adding means; every other
+    /// field is a plain count or sum. Callers merge in chunk order, which is
+    /// what keeps the result independent of how the chunks were scheduled.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        if other.count == 0 {
+            return;
+        }
+        if self.count == 0 {
+            self.pre_mean = other.pre_mean;
+            self.pre_m2 = other.pre_m2;
+            self.post_mean = other.post_mean;
+            self.post_m2 = other.post_m2;
+        } else {
+            let na = self.count as f64;
+            let nb = other.count as f64;
+            let n = na + nb;
+            let pre_delta = other.pre_mean - self.pre_mean;
+            self.pre_mean += pre_delta * nb / n;
+            self.pre_m2 += other.pre_m2 + pre_delta * pre_delta * na * nb / n;
+            let post_delta = other.post_mean - self.post_mean;
+            self.post_mean += post_delta * nb / n;
+            self.post_m2 += other.post_m2 + post_delta * post_delta * na * nb / n;
+        }
+        self.count += other.count;
+        self.pre_min = self.pre_min.min(other.pre_min);
+        self.pre_max = self.pre_max.max(other.pre_max);
+        self.near_zero += other.near_zero;
+        self.saturated += other.saturated;
+        self.err_sum += other.err_sum;
+        self.abs_err_sum += other.abs_err_sum;
+        self.adj_err_sum += other.adj_err_sum;
+        self.deriv_sum += other.deriv_sum;
+        self.err_count += other.err_count;
+    }
+
     /// Consume the accumulator and hand back the focus statistics.
     pub(crate) fn finish(self) -> FocusNeuronStats {
         let count = self.count;
@@ -993,6 +1041,25 @@ impl IncomingSourceScan {
             self.sq[i] += act * act;
             self.cross[i] += act * err;
         }
+    }
+
+    /// Fold another chunk's accumulator into this one (issue #107).
+    ///
+    /// Every accumulated field is a plain sum; the per-source descriptions are
+    /// identical on both sides because both were built from the same creature.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in self.sums.iter_mut().zip(&other.sums) {
+            *mine += *theirs;
+        }
+        for (mine, theirs) in self.sq.iter_mut().zip(&other.sq) {
+            *mine += *theirs;
+        }
+        for (mine, theirs) in self.cross.iter_mut().zip(&other.cross) {
+            *mine += *theirs;
+        }
+        self.err_sum += other.err_sum;
+        self.err_sq += other.err_sq;
+        self.count += other.count;
     }
 
     /// Consume the accumulator and hand back the per-source statistics.
