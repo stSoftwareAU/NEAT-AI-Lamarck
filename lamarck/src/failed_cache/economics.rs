@@ -209,6 +209,11 @@ pub struct EconomicsSummary {
     /// `saved_ms - spent_ms`.
     pub net_ms: f64,
     /// Largest resident footprint the cache reached.
+    ///
+    /// Measured *before* any ceiling eviction, so it reports the bytes that
+    /// were genuinely resident rather than the bound that reclaimed them: a
+    /// peak above the ceiling is the honest number, and the matching
+    /// [`Self::ceiling_bites`] says how often it was pulled back.
     pub peak_resident_bytes: usize,
     /// Bytes the snapshot occupies on disk.
     pub disk_bytes: u64,
