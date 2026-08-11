@@ -20,8 +20,11 @@ TRAIN_DATA="${TRAIN_DATA:-.lamarck-followup/train-data}"
 SCORER="${SCORER:-../NEAT-AI-scorer/target/release/rust_scorer}"
 OUT_DIR="${OUT_DIR:-.lamarck-followup}"
 
-# Short-arm budget (seconds). The batch-size A/B is fixed-wall by design.
+# Short-arm budget (seconds). The batch-size A/B is fixed at 15 minutes by
+# design (#75.3); the output-focus arm gets longer because #75.1 asks for >=15
+# experiments and this box runs ~60s/experiment beside GRQ.
 ARM_SECONDS="${ARM_SECONDS:-900}"
+OUTPUT_FOCUS_SECONDS="${OUTPUT_FOCUS_SECONDS:-1200}"
 # Production-budget budget for the multi-seed repeat.
 SEED_SECONDS="${SEED_SECONDS:-2700}"
 # Seeds for the multi-seed repeat (the #8 baseline used seed 1).
@@ -82,7 +85,7 @@ arm_output_focus() {
   # #75.1 — output-residual economics. `high-error` sticks on the largest
   # residual neuron, which is what the arm wants to measure.
   run_arm "output-focus" \
-    --timeout-seconds "$ARM_SECONDS" --candidates 100 --seed 11 \
+    --timeout-seconds "$OUTPUT_FOCUS_SECONDS" --candidates 100 --seed 11 \
     --focus-policy high-error
 }
 

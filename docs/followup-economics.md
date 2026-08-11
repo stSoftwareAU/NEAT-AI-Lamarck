@@ -51,3 +51,27 @@ the same background load. Each arm records its own `loadBefore` / `loadAfter` in
 The creature has also moved on since #8 — GRQ evolution lifted the opening score
 from `0.344965` to `0.346760`, so accept rates here are measured against a
 harder incumbent.
+
+## Arm 1 — Output-focus slice (#75.1)
+
+Two slices, because the two the issue offered are not the same experiment.
+
+| Slice | Flags | Exps | Accepts | Screen scores | Full scores | Promote/scorer-min | Analysis share |
+|-------|-------|------|---------|---------------|-------------|--------------------|----------------|
+| `high-error` policy | `--focus-policy high-error`, 1200 s | 35 | 0 | 1015 | 29 | 2.02 | 30% |
+
+### `high-error` never reaches the output
+
+All 35 experiments landed on the same **hidden** neuron
+(`neuron-1062597868`): `TANH`, mean saturation **0.99992**, 105 incoming links,
+mean `|blame|` 2.3e13. `mean_error_bias` did not appear once, exactly as in #8 —
+so `--focus-policy high-error` **cannot** measure output-residual economics. It
+ranks by error-influence mass, and the hidden blame mass on this creature is
+~10 orders of magnitude above the output residual.
+
+Worse, the neuron it sticks on is saturated to four nines: a `TANH` at
+`|post| ≈ 1` has a derivative of ~0, so every proposal on it is fighting a dead
+gradient. 1015 screened candidates produced 29 promotions and **zero** accepts.
+That is a result about the policy, not about the output: `high-error` is a
+throughput sink on a fine-tuned creature, and #8's advice to prefer `weighted`
+is confirmed rather than softened.

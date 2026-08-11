@@ -39,6 +39,42 @@ for report in "${reports[@]}"; do
 done
 
 echo
+echo "How close each strategy came (screen Δ is 5%-sample, full Δ is authoritative):"
+echo
+echo "| Arm | Strategy | Candidates | Best screen Δ | Promoted | Best full-corpus Δ |"
+echo "|-----|----------|------------|---------------|----------|--------------------|"
+for report in "${reports[@]}"; do
+  dir="$(dirname "$report")"
+  arm="$(basename "$dir")"
+  jq -s -r --arg arm "$arm" '
+    [ .[] | select(.experimentNumber) ] as $exps
+    | [ $exps[]
+        | (.screenScores.baseline) as $sb
+        | (.scores.baseline) as $fb
+        | . as $e
+        | [ range(0; ($e.candidates | length)) as $i
+            | ("candidate-" + ("00" + ($i | tostring) | .[-3:])) as $name
+            | { strategy: $e.candidates[$i].strategy,
+                screen: (($e.screenScores[$name] // null) as $s
+                         | if $s == null or $sb == null then null else $s - $sb end),
+                full: (($e.scores[$name] // null) as $s
+                       | if $s == null or $fb == null then null else $s - $fb end) } ]
+      ] | add // []
+    | group_by(.strategy)
+    | map({ strategy: .[0].strategy,
+            candidates: length,
+            bestScreen: ([.[].screen | select(. != null)] | if length > 0 then max else null end),
+            promoted: ([.[].full | select(. != null)] | length),
+            bestFull: ([.[].full | select(. != null)] | if length > 0 then max else null end) })
+    | .[]
+    | "| " + $arm + " | `" + .strategy + "` | " + (.candidates | tostring) + " | " +
+      (if .bestScreen == null then "n/a" else (.bestScreen | tostring) end) + " | " +
+      (.promoted | tostring) + " | " +
+      (if .bestFull == null then "not promoted" else (.bestFull | tostring) end) + " |"
+  ' "$dir/experiments.jsonl"
+done
+
+echo
 echo "Per-arm strategy appearances and wins:"
 echo
 echo "| Arm | Strategy | Appearances | Wins | Combo wins | Acceptance rate |"
