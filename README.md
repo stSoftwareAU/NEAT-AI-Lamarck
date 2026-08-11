@@ -308,6 +308,31 @@ source's relationship with the neuron's learning/error signal. Raw observation
 sources reuse `observations.statistics` where mathematically equivalent; hidden
 sources are measured from the current creature.
 
+#### Two scans per experiment
+
+The analysis work is grouped by what it depends on, so an experiment walks the
+training sample **twice**, not once per measurement (`lamarck/src/analysis.rs`):
+
+```mermaid
+flowchart LR
+    A["scan 1 — pre-focus<br/>learning signal + output MAE"] --> F(["choose focus neuron"])
+    F --> B["scan 2 — post-focus<br/>focus stats + incoming sources<br/>+ residual source ranking"]
+    B --> GEN(["candidate generation"])
+
+    classDef scan fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef step fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    class A,B scan
+    class F,GEN step
+```
+
+Scan 1 is focus-independent; scan 2 needs the focus that the first scan's
+signals select — everything in a group shares one activation per record. Each
+measurement
+keeps its own streaming accumulator, and the standalone `collect_*` / `refine_*`
+functions drive those same accumulators, so a fused result is bit-identical to
+the per-pass one. The residual ranking streams the sample rather than
+materialising it as activation probes.
+
 ### Backpropagation
 
 Lamarck ports NEAT-AI backprop behaviour by wiring creatures through neat-core's
@@ -684,6 +709,7 @@ NEAT-AI-Lamarck/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
     ├── config.rs            # defaults and run options
+    ├── analysis.rs          # the two fused per-experiment training scans
     ├── parity.rs            # Phase-0 scorer parity gate
     ├── observations.rs      # observations.statistics cache
     ├── focus.rs             # focus-neuron selection policies

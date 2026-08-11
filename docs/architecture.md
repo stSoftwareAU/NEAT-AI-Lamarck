@@ -37,11 +37,13 @@ Lamarck must not duplicate this authority.
 2. Verify baseline score/parity.
 3. Replay stored structural grafts onto the opening fittest when
    `--grafts-path` is set (phase G, 10% of the budget by default).
-4. Accumulate learning + output residuals, then select one focus neuron
-   (default: `weighted` random by error-influence mass — output residual L1 and
-   depth-decayed hidden blame; zero-signal neurons excluded). Prefer this over
-   `high-error`, which sticks on a single neuron.
-5. Scan/measure the chosen focus on the incumbent.
+4. **Scan 1 (pre-focus):** accumulate learning + output residuals in one pass,
+   then select one focus neuron (default: `weighted` random by error-influence
+   mass — output residual L1 and depth-decayed hidden blame; zero-signal neurons
+   excluded). Prefer this over `high-error`, which sticks on a single neuron.
+5. **Scan 2 (post-focus):** measure the chosen focus on the incumbent — focus
+   statistics, incoming-source statistics and residual source ranking share one
+   pass (`lamarck/src/analysis.rs`).
 6. Generate ~100 candidates (default; keep the scorer CPU-saturated) from backpropagation, statistical, structural and random strategies.
 7. **Screen** on a cheap scorer subsample (default 5% of rows); promote only sample Δ `> 1e-6`.
 8. **Full-corpus** score baseline + promoted candidates.

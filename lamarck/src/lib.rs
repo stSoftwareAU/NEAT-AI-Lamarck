@@ -5,6 +5,7 @@
 
 #![warn(missing_docs)]
 
+pub mod analysis;
 pub mod backprop;
 pub mod cancel;
 pub mod candidates;
@@ -23,6 +24,10 @@ pub mod scorer;
 pub mod structural;
 pub mod tags;
 
+pub use analysis::{
+    PostFocusScan, PreFocusScan, reset_training_scan_count, scan_post_focus, scan_pre_focus,
+    training_scans_opened,
+};
 pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
 pub use cancel::CancelToken;
 pub use combos::{
