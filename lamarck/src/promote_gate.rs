@@ -341,24 +341,36 @@ impl PromoteGateReplayAccumulator {
         self.screened += deltas.len() as u64;
         self.promoted_under_gate +=
             deltas.iter().filter(|d| **d > resolved.threshold).count() as u64;
+        // Only stems the screen also scored were *promoted*: a merged combo is
+        // assembled after the screen, so counting it here would overstate what
+        // the gate could have avoided.
         self.promoted_as_run += record
             .scores
             .keys()
-            .filter(|stem| stem.as_str() != "baseline")
+            .filter(|stem| stem.as_str() != "baseline" && screen.contains_key(stem.as_str()))
             .count() as u64;
 
         if record.accepted
             && let Some(stem) = &record.winner
         {
             let screen_delta = screen.get(stem).map(|score| score - baseline);
+            let would_promote = match screen_delta {
+                Some(delta) => delta > resolved.threshold,
+                // A merged combo has no screen score of its own; it survives
+                // only if the gate would still have promoted every member it
+                // was assembled from. Members that cannot be resolved — a
+                // journal written before `comboMemberIndices` (issue #74) —
+                // count as dropped, so an unknowable accept surfaces as a
+                // failure rather than passing silently.
+                None => combo_members_survive(record, screen, baseline, resolved.threshold),
+            };
             self.accepts.push(ReplayedAccept {
                 experiment_number: record.experiment_number,
                 stem: stem.clone(),
                 screen_delta,
                 threshold: resolved.threshold,
                 sigma: resolved.sigma,
-                // No screen Δ means the screen never gated it (a merged combo).
-                would_promote: screen_delta.is_none_or(|delta| delta > resolved.threshold),
+                would_promote,
             });
         }
         Ok(())
@@ -398,6 +410,29 @@ impl PromoteGateReplayAccumulator {
             accepts: self.accepts,
         }
     }
+}
+
+/// Whether every member a merged combo was assembled from clears the gate.
+///
+/// `false` when the members are unknown: a combo can only exist if its members
+/// were promoted, so an unresolvable winner is treated as lost rather than kept.
+fn combo_members_survive(
+    record: &ExperimentRecord,
+    screen: &BTreeMap<String, f64>,
+    baseline: f64,
+    threshold: f64,
+) -> bool {
+    let Some(indices) = &record.combo_member_indices else {
+        return false;
+    };
+    if indices.is_empty() {
+        return false;
+    }
+    indices.iter().all(|index| {
+        screen
+            .get(&format!("candidate-{index:03}"))
+            .is_some_and(|score| score - baseline > threshold)
+    })
 }
 
 /// Screen deltas of one score map, baseline excluded.
@@ -604,6 +639,144 @@ mod tests {
         for mode in [PromoteGateMode::Absolute, PromoteGateMode::NoiseAware] {
             assert_eq!(PromoteGateMode::parse(mode.label()), Some(mode));
         }
+    }
+
+    /// A journal-shaped record with a screened batch, for the replay tests.
+    fn experiment(number: u64, screen: &[(&str, f64)]) -> ExperimentRecord {
+        use crate::candidates::{CandidateProvenance, CandidateStrategy};
+        ExperimentRecord {
+            experiment_number: number,
+            timestamp_unix: 1000 + number,
+            seed: Some(1),
+            incumbent_id: "x".into(),
+            baseline_score: 0.5,
+            focus_neuron: "h1".into(),
+            focus_neurons: None,
+            focus_stats: None,
+            candidates: vec![
+                CandidateProvenance {
+                    strategy: CandidateStrategy::Random,
+                    focus_neuron: "h1".into(),
+                    mutation: "x".into(),
+                    old_value: None,
+                    new_value: None,
+                };
+                8
+            ],
+            candidates_requested: None,
+            batch_limit: None,
+            scores: BTreeMap::new(),
+            screen_scores: Some(
+                screen
+                    .iter()
+                    .map(|(stem, score)| ((*stem).to_string(), *score))
+                    .collect(),
+            ),
+            screen_tiers: None,
+            winner: None,
+            improvement: None,
+            accepted: false,
+            analysis_ms: 1,
+            memo_hits: 0,
+            memo_misses: 0,
+            memo_ms_saved: 0,
+            scorer_ms: 2,
+            scorer_error: None,
+            combo_members: None,
+            combo_member_indices: None,
+            combos_scored: None,
+            combos_dampened: None,
+            combo_dampen: None,
+        }
+    }
+
+    /// A wobbly batch with one real improver: the gate keeps the improver.
+    fn wobbly_batch() -> Vec<(&'static str, f64)> {
+        vec![
+            ("baseline", 0.5),
+            ("candidate-000", 0.5 + 5e-5),
+            ("candidate-001", 0.5 + 1.2e-6),
+            ("candidate-002", 0.5 - 1.1e-6),
+            ("candidate-003", 0.5 + 1.4e-6),
+            ("candidate-004", 0.5 - 1.3e-6),
+            ("candidate-005", 0.5 + 1.1e-6),
+            ("candidate-006", 0.5 - 9e-7),
+        ]
+    }
+
+    /// A merged combo has no screen score of its own, so it survives the replay
+    /// only if every member it was assembled from would still be promoted.
+    #[test]
+    fn a_combo_accept_survives_only_when_all_its_members_do() {
+        let promoted_members = vec![0usize];
+        let wobble_member = vec![0usize, 1usize];
+        for (members, expected) in [(promoted_members, true), (wobble_member, false)] {
+            let mut record = experiment(1, &wobbly_batch());
+            record.scores = BTreeMap::from([
+                ("baseline".to_string(), 0.5),
+                ("combo-000-k2".to_string(), 0.5 + 2e-6),
+            ]);
+            record.accepted = true;
+            record.winner = Some("combo-000-k2".to_string());
+            record.combo_member_indices = Some(members.clone());
+
+            let mut acc = PromoteGateReplayAccumulator::with_sigma_k(3.0);
+            acc.push_experiment(&record).expect("well-formed fixture");
+            let replayed = acc.finish();
+            assert_eq!(
+                replayed.accepts[0].would_promote, expected,
+                "members {members:?} should resolve to {expected}"
+            );
+        }
+    }
+
+    /// Pre-#74 journals name no members, so the combo cannot be shown to
+    /// survive — and an unknowable accept must surface, not pass silently.
+    #[test]
+    fn a_combo_accept_with_unknowable_members_counts_as_dropped() {
+        let mut record = experiment(1, &wobbly_batch());
+        record.scores = BTreeMap::from([
+            ("baseline".to_string(), 0.5),
+            ("combo-000-k2".to_string(), 0.5 + 2e-6),
+        ]);
+        record.accepted = true;
+        record.winner = Some("combo-000-k2".to_string());
+        record.combo_member_indices = None;
+
+        let mut acc = PromoteGateReplayAccumulator::with_sigma_k(3.0);
+        acc.push_experiment(&record).expect("well-formed fixture");
+        let replayed = acc.finish();
+        assert_eq!(replayed.accepts_dropped, 1);
+        assert_eq!(replayed.accepts_kept, 0);
+    }
+
+    /// A combo stem in `scores` was never screened, so counting it as a
+    /// promotion would overstate what the gate could have avoided.
+    #[test]
+    fn only_screened_stems_count_as_promotions() {
+        let mut record = experiment(1, &wobbly_batch());
+        record.scores = BTreeMap::from([
+            ("baseline".to_string(), 0.5),
+            ("candidate-000".to_string(), 0.5 - 1e-4),
+            ("candidate-001".to_string(), 0.5 - 1e-4),
+            ("combo-000-k2".to_string(), 0.5 - 1e-4),
+        ]);
+        let mut acc = PromoteGateReplayAccumulator::with_sigma_k(3.0);
+        acc.push_experiment(&record).expect("well-formed fixture");
+        let replayed = acc.finish();
+        assert_eq!(replayed.promoted_as_run, 2, "the combo is not a promotion");
+        assert_eq!(replayed.screened, 7);
+        assert_eq!(replayed.promoted_under_gate, 1, "only the real improver");
+        assert_eq!(replayed.promotions_avoided, 1);
+    }
+
+    /// A screened batch with no baseline anchor cannot be replayed silently.
+    #[test]
+    fn a_screen_map_without_a_baseline_fails_loudly() {
+        let record = experiment(1, &[("candidate-000", 0.5)]);
+        let mut acc = PromoteGateReplayAccumulator::with_sigma_k(3.0);
+        let err = acc.push_experiment(&record).expect_err("no anchor");
+        assert!(err.contains("baseline"), "error names the anchor: {err}");
     }
 
     #[test]
