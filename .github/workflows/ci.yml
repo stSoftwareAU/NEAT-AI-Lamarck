@@ -15,6 +15,9 @@ on:
     types: [opened, synchronize, reopened]
     branches:
       - Develop
+      # Milestone branches carry the same required checks as Develop, so PRs
+      # from issue branches into a milestone must run CI too (Issue #89).
+      - "milestone/**"
   workflow_dispatch:
 
 permissions:

@@ -20,7 +20,9 @@ name: SBOM
 
 on:
   pull_request:
-    branches: ["*"]
+    # "**" not "*": a single star does not match "/" so PRs targeting
+    # milestone/<slug> branches would silently skip this required check.
+    branches: ["**"]
   push:
     branches: [Develop]
     paths-ignore:
