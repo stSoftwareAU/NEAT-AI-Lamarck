@@ -2659,7 +2659,10 @@ mod tests {
 
         let out = tempdir().unwrap();
         let without = run(0, out.path().join("off"));
-        let with = run(crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES, out.path().join("on"));
+        let with = run(
+            crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            out.path().join("on"),
+        );
 
         assert_eq!(without.len(), with.len(), "same cap, same experiment count");
         for (a, b) in without.iter().zip(with.iter()) {
@@ -2696,7 +2699,7 @@ mod tests {
         config.focus_neuron = Some("o1".into());
 
         // Accept on the second batch: experiment 2 changes the incumbent, so
-        // experiment 3 must miss even though it re-uses the same focus.
+        // experiment 3 must miss even though it uses the same focus.
         let result = run_optimisation(
             &config,
             &AcceptOnceScorer {
