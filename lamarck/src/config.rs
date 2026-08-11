@@ -3,6 +3,7 @@
 use crate::backprop::BackpropConfig;
 #[cfg(test)]
 use crate::backprop::BiasSignal;
+use crate::chunks::DEFAULT_ANALYSIS_THREADS;
 use crate::focus::FocusPolicy;
 use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
@@ -106,9 +107,25 @@ pub struct LamarckConfig {
     /// knob that moves the step. `None` keeps the [`BackpropConfig::default`]
     /// cap of `10.0`.
     pub backprop_max_bias_adjustment_scale: Option<f64>,
+    /// Worker threads folding record chunks in the two analysis scans
+    /// (issue #107). The result does not depend on this value — the chunk
+    /// partition and merge order are fixed — but the wall clock does.
+    pub analysis_threads: usize,
 }
 
 impl LamarckConfig {
+    /// Worker threads for the analysis scans, validated.
+    ///
+    /// Zero workers is a configuration fault, reported rather than silently
+    /// clamped to one: a run that quietly ignored the flag would invalidate the
+    /// A/B it was set for.
+    pub fn analysis_threads(&self) -> Result<usize, String> {
+        if self.analysis_threads == 0 {
+            return Err("--analysis-threads must be at least 1 (got 0)".to_string());
+        }
+        Ok(self.analysis_threads)
+    }
+
     /// Backprop configuration for this run, with the CLI overrides applied.
     ///
     /// An override that is not finite and strictly positive is a configuration
@@ -167,6 +184,7 @@ impl Default for LamarckConfig {
             backprop_learning_rate: None,
             analysis_memo_entries: DEFAULT_ANALYSIS_MEMO_ENTRIES,
             backprop_max_bias_adjustment_scale: None,
+            analysis_threads: DEFAULT_ANALYSIS_THREADS,
         }
     }
 }
@@ -293,6 +311,33 @@ mod tests {
                 "error should name the flag: {err}"
             );
         }
+    }
+
+    #[test]
+    fn the_default_analysis_thread_count_is_the_documented_one() {
+        let threads = LamarckConfig::default()
+            .analysis_threads()
+            .expect("the default must be valid");
+        assert_eq!(threads, DEFAULT_ANALYSIS_THREADS);
+        assert!(
+            threads >= 1,
+            "a run must always have at least one analysis worker"
+        );
+    }
+
+    #[test]
+    fn a_zero_analysis_thread_count_is_rejected_loudly() {
+        let config = LamarckConfig {
+            analysis_threads: 0,
+            ..LamarckConfig::default()
+        };
+        let err = config
+            .analysis_threads()
+            .expect_err("zero workers must not fall back to the default");
+        assert!(
+            err.contains("--analysis-threads"),
+            "error names the flag: {err}"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod analysis;
 pub mod backprop;
 pub mod cancel;
 pub mod candidates;
+pub mod chunks;
 pub mod combos;
 pub mod config;
 pub mod focus;
@@ -31,6 +32,7 @@ pub use analysis::{
 };
 pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
 pub use cancel::CancelToken;
+pub use chunks::{ANALYSIS_CHUNK_RECORDS, DEFAULT_ANALYSIS_THREADS};
 pub use combos::{
     ComboSelectRequest, ComboSelection, Improver, MAX_COMBO_CANDIDATES, STACK_DAMPEN_EXPONENT,
     StackDampenReport, StackDampenTarget, collect_improvers, combination_index_sets,

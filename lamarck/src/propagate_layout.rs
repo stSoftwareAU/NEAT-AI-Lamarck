@@ -430,28 +430,26 @@ fn build_neuron_inputs(
     neurons
 }
 
-/// Streaming accumulator for a creature-wide [`LearningSignal`].
+/// Per-creature caches every chunk accumulator of one learning scan shares.
 ///
-/// Holds the per-creature topology caches so one already-activated record can
-/// be folded in at a time. [`accumulate_creature_learning`] drives it over its
-/// own scan; [`crate::analysis::scan_pre_focus`] drives it over the fused
-/// analysis scan (issue #105). Both share this arithmetic, so the numbers
-/// cannot drift apart.
-pub(crate) struct LearningScan {
+/// The sparse selection is drawn from the run's RNG, so it is built **once**,
+/// on the calling thread, before any parallel region starts (issue #107) — a
+/// draw inside a worker would scramble the stream and break `--seed` replay.
+/// Everything here is immutable for the life of the scan, so the per-chunk
+/// accumulators borrow it instead of rebuilding the topology.
+pub(crate) struct LearningPlan {
     layout: PropagateLayout,
     sparse: SparseSelection,
-    learning: LearningSignal,
-    /// Working inward adjacency — aggregate slices are rewritten per record.
-    inward_counts: Vec<u32>,
-    inward_indices: Vec<u32>,
     /// Record-independent: weights come from the creature, not the record.
     synapses: Vec<SynapseInput>,
+    neuron_count: usize,
+    synapse_count: usize,
     plank_constant: f32,
     normalise_gradients: bool,
 }
 
-impl LearningScan {
-    /// Build the accumulator, drawing the sparse selection from `rng`.
+impl LearningPlan {
+    /// Build the caches, drawing the sparse selection from `rng`.
     pub(crate) fn new(
         creature: &CreatureExport,
         config: &BackpropConfig,
@@ -459,8 +457,6 @@ impl LearningScan {
     ) -> Result<Self, String> {
         let layout = PropagateLayout::from_creature(creature)?;
         let sparse = select_sparse(creature, &layout, config, rng);
-        let inward_counts = layout.inward_counts.clone();
-        let inward_indices = layout.inward_synapse_indices.clone();
         let synapses: Vec<SynapseInput> = layout
             .synapse_templates
             .iter()
@@ -475,15 +471,41 @@ impl LearningScan {
         Ok(Self {
             layout,
             sparse,
-            learning: LearningSignal::new(creature.neurons.len(), creature.synapses.len()),
-            inward_counts,
-            inward_indices,
             synapses,
+            neuron_count: creature.neurons.len(),
+            synapse_count: creature.synapses.len(),
             plank_constant: config.plank_constant as f32,
             normalise_gradients: config.normalise_gradients,
         })
     }
 
+    /// Fresh accumulator for one record chunk, borrowing these caches.
+    pub(crate) fn scan(&self) -> LearningScan<'_> {
+        LearningScan {
+            inward_counts: self.layout.inward_counts.clone(),
+            inward_indices: self.layout.inward_synapse_indices.clone(),
+            learning: LearningSignal::new(self.neuron_count, self.synapse_count),
+            plan: self,
+        }
+    }
+}
+
+/// Streaming accumulator for a creature-wide [`LearningSignal`].
+///
+/// Holds the per-creature topology caches so one already-activated record can
+/// be folded in at a time. [`accumulate_creature_learning`] drives it over its
+/// own scan; [`crate::analysis::scan_pre_focus`] drives one per record chunk
+/// over the fused analysis scan (issues #105, #107). Both share this
+/// arithmetic, so the numbers cannot drift apart.
+pub(crate) struct LearningScan<'a> {
+    plan: &'a LearningPlan,
+    learning: LearningSignal,
+    /// Working inward adjacency — aggregate slices are rewritten per record.
+    inward_counts: Vec<u32>,
+    inward_indices: Vec<u32>,
+}
+
+impl LearningScan<'_> {
     /// Fold one record whose activation already sits in `network`.
     ///
     /// The caller must have run `activate_and_trace` for this record.
@@ -492,15 +514,16 @@ impl LearningScan {
         // Destructured so the hot per-neuron loop reads plain locals rather
         // than fields behind `&mut self` (measurably faster on wide creatures).
         let Self {
-            layout,
-            sparse,
+            plan,
             learning,
             inward_counts,
             inward_indices,
-            synapses,
-            plank_constant,
-            normalise_gradients,
         } = self;
+        let layout = &plan.layout;
+        let sparse = &plan.sparse;
+        let synapses = &plan.synapses;
+        let plank_constant = &plan.plank_constant;
+        let normalise_gradients = &plan.normalise_gradients;
 
         if !layout.aggregates.is_empty() {
             layout.linearise_aggregates(&network.activations, inward_counts, inward_indices);
@@ -532,6 +555,14 @@ impl LearningScan {
     }
 }
 
+impl std::fmt::Debug for LearningScan<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LearningScan")
+            .field("learning", &self.learning)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Accumulate a full-creature [`LearningSignal`] over training records.
 ///
 /// Analyse-without-apply: the creature and network weights are not mutated.
@@ -543,7 +574,8 @@ pub fn accumulate_creature_learning(
     max_records: Option<u64>,
     rng: &mut impl Rng,
 ) -> Result<LearningSignal, String> {
-    let mut scan = LearningScan::new(creature, config, rng)?;
+    let plan = LearningPlan::new(creature, config, rng)?;
+    let mut scan = plan.scan();
 
     let td_cfg = TrainingDataConfig::new(creature.input, creature.output);
     let mut iter = crate::analysis::open_training_scan(training_data, td_cfg)?;

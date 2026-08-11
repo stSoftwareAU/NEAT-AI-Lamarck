@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The per-experiment analysis scans fold record chunks across cores (Issue
+  #107).** Both scans are read-only reductions, so they now run on
+  `--analysis-threads` workers (default `4`, `0` aborts the run). Determinism
+  comes from the partition rather than the schedule: the sample is cut into
+  fixed 2048-record chunks — a function of the sample alone, never of the thread
+  count or the host — and the per-chunk partials are merged in ascending chunk
+  order, so 1, 2 and 8 threads produce **bit-identical** accumulators and
+  `--seed` replay is unaffected. Every RNG draw (`select_sparse`) stays on the
+  calling thread, ahead of the parallel region, and a creature that is not
+  `forwardOnly` is folded as a single chunk because its activations carry state
+  between records. Measured on the 10-core M4 host at production sample shape:
+  the analysis phase is **1.9× faster at 2 threads, 3.1× at the default 4 and
+  4.1× at 8** (`cargo run --release --example analysis_threads_bench`). The
+  thread count in force is recorded in the journal `runHeader` as
+  `analysisThreads`.
+
 - **The three exclusive-box economics arms are wired up (Issue #96).**
   `scripts/run-followup-economics.sh` gains an `output-neuron` arm (pins
   `--focus-neuron output-0`, the slice `--focus-policy high-error` cannot reach

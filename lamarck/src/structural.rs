@@ -536,6 +536,25 @@ impl ResidualScan {
         }
     }
 
+    /// Fold another chunk's accumulator into this one (issue #107).
+    ///
+    /// Every accumulated field is a plain sum, and both sides share the same
+    /// shortlist because both were built from the same creature and prior.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in self.sum_x.iter_mut().zip(&other.sum_x) {
+            *mine += *theirs;
+        }
+        for (mine, theirs) in self.sum_xx.iter_mut().zip(&other.sum_xx) {
+            *mine += *theirs;
+        }
+        for (mine, theirs) in self.sum_xy.iter_mut().zip(&other.sum_xy) {
+            *mine += *theirs;
+        }
+        self.sum_e += other.sum_e;
+        self.sum_ee += other.sum_ee;
+        self.n += other.n;
+    }
+
     /// Consume the accumulator and hand back the re-ranked sources.
     ///
     /// Falls back to `prior` when too few probes were seen to rank anything.

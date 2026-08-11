@@ -20,7 +20,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
-use neat_ai_lamarck::analysis::{scan_post_focus, scan_pre_focus};
+use neat_ai_lamarck::analysis::{ScanBudget, scan_post_focus, scan_pre_focus};
 use neat_ai_lamarck::backprop::BackpropConfig;
 use neat_ai_lamarck::focus::{
     collect_focus_stats, collect_incoming_source_stats, collect_output_mean_abs_errors,
@@ -116,16 +116,34 @@ fn legacy(creature: &CreatureExport, data: &Path, limit: Option<u64>, prior: &[R
     std::hint::black_box((learning, errors, stats, incoming, ranked));
 }
 
-/// The two fused scans.
+/// The two fused scans, folded serially (one worker).
 fn fused(creature: &CreatureExport, data: &Path, limit: Option<u64>, prior: &[RankedSource]) {
     let mut network = compile_creature(creature).unwrap();
     let cfg = BackpropConfig::default();
     let mut rng = StdRng::seed_from_u64(11);
     let mut lap = Instant::now();
-    let pre = scan_pre_focus(creature, &mut network, data, &cfg, limit, &mut rng, true).unwrap();
+    let pre = scan_pre_focus(
+        creature,
+        &mut network,
+        data,
+        &cfg,
+        ScanBudget::serial(limit),
+        &mut rng,
+        true,
+    )
+    .unwrap();
     println!("    A pre-focus     : {} ms", lap.elapsed().as_millis());
     lap = Instant::now();
-    let post = scan_post_focus(creature, &mut network, data, FOCUS, limit, None, prior).unwrap();
+    let post = scan_post_focus(
+        creature,
+        &mut network,
+        data,
+        FOCUS,
+        ScanBudget::serial(limit),
+        None,
+        prior,
+    )
+    .unwrap();
     println!("    B post-focus    : {} ms", lap.elapsed().as_millis());
     std::hint::black_box((pre, post));
 }
