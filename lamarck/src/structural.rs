@@ -4,7 +4,7 @@ use crate::focus::{FocusNeuronStats, IncomingSourceStats, neuron_index};
 use crate::observations::ObservationsStatistics;
 use neat_core::{
     CompiledNetwork, CreatureExport, NeuronExport, SynapseExport, TrainingDataConfig,
-    TrainingDataIterator,
+    TrainingRecord,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::path::Path;
@@ -397,6 +397,221 @@ fn residual_shortlist(prior: &[RankedSource]) -> Vec<RankedSource> {
     shortlist
 }
 
+/// Which residual statistic the scan is accumulating.
+#[derive(Clone, Copy)]
+enum ResidualMode {
+    /// Focus is an output: correlate source activation with the focus residual.
+    Residual {
+        /// Index of the focus within the creature's outputs.
+        out_idx: usize,
+        /// Focus offset within the traced post-activation block.
+        relative_idx: usize,
+    },
+    /// Focus is hidden: rank sources by measured activation std-dev.
+    ActivationStd,
+}
+
+/// Streaming accumulator behind [`refine_sources_from_probes`].
+///
+/// Fed one already-traced probe at a time so the fused post-focus scan can
+/// share its activation with the focus-stats and incoming-source passes, and
+/// never materialise the sample as `Vec<ActivationProbe>` (issue #105).
+pub(crate) struct ResidualScan {
+    mode: ResidualMode,
+    /// `false` when no probe can change the outcome — `finish` returns `prior`.
+    active: bool,
+    input_count: usize,
+    post_offset: usize,
+    shortlist: Vec<RankedSource>,
+    acts: Vec<Option<ResidualAct>>,
+    sum_x: Vec<f64>,
+    sum_xx: Vec<f64>,
+    sum_xy: Vec<f64>,
+    sum_e: f64,
+    sum_ee: f64,
+    n: f64,
+}
+
+impl ResidualScan {
+    /// Build the accumulator for a focus neuron and its prior ranking.
+    pub(crate) fn new(
+        creature: &CreatureExport,
+        focus_uuid: &str,
+        prior: &[RankedSource],
+    ) -> Result<Self, String> {
+        let mode = match focus_output_index(creature, focus_uuid) {
+            Some(out_idx) => {
+                let relative_idx = neuron_index(creature, focus_uuid)
+                    .and_then(|i| i.checked_sub(creature.input))
+                    .ok_or_else(|| {
+                        format!("focus neuron {focus_uuid} missing compiled index")
+                    })?;
+                ResidualMode::Residual {
+                    out_idx,
+                    relative_idx,
+                }
+            }
+            None => ResidualMode::ActivationStd,
+        };
+        let shortlist = residual_shortlist(prior);
+        let acts: Vec<Option<ResidualAct>> = shortlist
+            .iter()
+            .map(|s| residual_act_for(creature, &s.from_uuid))
+            .collect();
+        // The residual path bails out before scanning when nothing is rankable;
+        // the activation-std path scores an empty shortlist to `prior` anyway.
+        let active = match mode {
+            ResidualMode::Residual { .. } => {
+                !shortlist.is_empty() && acts.iter().any(Option::is_some)
+            }
+            ResidualMode::ActivationStd => true,
+        };
+        let k = shortlist.len();
+        Ok(Self {
+            mode,
+            active,
+            input_count: creature.input,
+            post_offset: creature.output,
+            shortlist,
+            acts,
+            sum_x: vec![0.0f64; k],
+            sum_xx: vec![0.0f64; k],
+            sum_xy: vec![0.0f64; k],
+            sum_e: 0.0,
+            sum_ee: 0.0,
+            n: 0.0,
+        })
+    }
+
+    /// Whether this probe is usable — callers skip activation when it is not.
+    pub(crate) fn wants_probe(&self, inputs: &[f32], outputs: &[f32]) -> bool {
+        if !self.active || inputs.len() < self.input_count {
+            return false;
+        }
+        match self.mode {
+            ResidualMode::Residual { out_idx, .. } => out_idx < outputs.len(),
+            ResidualMode::ActivationStd => true,
+        }
+    }
+
+    /// Fold one traced probe (`activate_and_trace` output) plus its inputs and targets.
+    pub(crate) fn observe(&mut self, inputs: &[f32], outputs: &[f32], traced: &[f32]) {
+        match self.mode {
+            ResidualMode::Residual {
+                out_idx,
+                relative_idx,
+            } => {
+                if self.post_offset + relative_idx >= traced.len() {
+                    return;
+                }
+                let post = f64::from(traced[self.post_offset + relative_idx]);
+                let err = f64::from(outputs[out_idx]) - post;
+                self.n += 1.0;
+                self.sum_e += err;
+                self.sum_ee += err * err;
+                for (j, act) in self.acts.iter().enumerate() {
+                    let Some(act) = *act else {
+                        continue;
+                    };
+                    let x = residual_activation(act, inputs, traced, self.post_offset);
+                    self.sum_x[j] += x;
+                    self.sum_xx[j] += x * x;
+                    self.sum_xy[j] += x * err;
+                }
+            }
+            ResidualMode::ActivationStd => {
+                self.n += 1.0;
+                for (j, act) in self.acts.iter().enumerate() {
+                    let Some(act) = *act else {
+                        continue;
+                    };
+                    let x = residual_activation(act, inputs, traced, self.post_offset);
+                    self.sum_x[j] += x;
+                    self.sum_xx[j] += x * x;
+                }
+            }
+        }
+    }
+
+    /// Consume the accumulator and hand back the re-ranked sources.
+    ///
+    /// Falls back to `prior` when too few probes were seen to rank anything.
+    pub(crate) fn finish(mut self, prior: &[RankedSource]) -> Vec<RankedSource> {
+        if !self.active {
+            return prior.to_vec();
+        }
+        match self.mode {
+            ResidualMode::Residual { .. } => {
+                if self.n < 2.0 {
+                    return prior.to_vec();
+                }
+                for (j, src) in self.shortlist.iter_mut().enumerate() {
+                    if self.acts[j].is_none() {
+                        continue;
+                    }
+                    let corr = pearson(
+                        self.n,
+                        self.sum_x[j],
+                        self.sum_e,
+                        self.sum_xx[j],
+                        self.sum_ee,
+                        self.sum_xy[j],
+                    );
+                    let var_x = ((self.sum_xx[j] / self.n) - (self.sum_x[j] / self.n).powi(2))
+                        .max(0.0);
+                    let std_x = var_x.sqrt().max(MIN_ACT_STD);
+                    src.direction = corr;
+                    src.score = corr.abs();
+                    src.weight_scale = TARGET_PRE_DELTA / std_x;
+                    // Univariate OLS of residual on source: cov(x,e) / var(x).
+                    let cov = self.sum_xy[j] - (self.sum_x[j] * self.sum_e) / self.n;
+                    let var_x_n = self.sum_xx[j] - (self.sum_x[j] * self.sum_x[j]) / self.n;
+                    if var_x_n > 1e-12 {
+                        src.ols_weight = Some(cov / var_x_n);
+                    }
+                    // Dead / flat units stay near zero score even if floating noise correlates weakly.
+                    if std_x <= MIN_ACT_STD * 1.5 && !is_input_source(&src.from_uuid) {
+                        src.score = 0.0;
+                        src.ols_weight = None;
+                    }
+                }
+            }
+            ResidualMode::ActivationStd => {
+                if self.n < 1.0 {
+                    return prior.to_vec();
+                }
+                for (j, src) in self.shortlist.iter_mut().enumerate() {
+                    if self.acts[j].is_none() {
+                        continue;
+                    }
+                    let mean = self.sum_x[j] / self.n;
+                    let var = ((self.sum_xx[j] / self.n) - mean * mean).max(0.0);
+                    let std = var.sqrt().max(MIN_ACT_STD);
+                    src.weight_scale = TARGET_PRE_DELTA / std;
+                    // Calculated usefulness prior — dead units rank last.
+                    src.score = (std / (1.0 + std)) * 0.05;
+                    if std <= MIN_ACT_STD * 1.5 && !is_input_source(&src.from_uuid) {
+                        src.score = 0.0;
+                    }
+                }
+            }
+        }
+        self.shortlist.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.from_uuid.cmp(&b.from_uuid))
+        });
+        let mut out = self.shortlist;
+        for src in prior {
+            if !out.iter().any(|s| s.from_uuid == src.from_uuid) {
+                out.push(src.clone());
+            }
+        }
+        out
+    }
+}
+
 /// Activation residual refine: re-rank unused inputs **and previous hiddens** by
 /// flowing observation probes through the compiled network and measuring
 /// Pearson(post-activation, focus residual).
@@ -410,167 +625,15 @@ pub fn refine_sources_from_probes(
     prior: &[RankedSource],
     probes: &[ActivationProbe],
 ) -> Result<Vec<RankedSource>, String> {
-    let Some(out_idx) = focus_output_index(creature, focus_uuid) else {
-        // Non-output focus: rank unused hiddens by measured activation usefulness.
-        return Ok(score_sources_by_activation_std(
-            creature, network, focus_uuid, prior, probes,
-        ));
-    };
-    let relative_idx = neuron_index(creature, focus_uuid)
-        .and_then(|i| i.checked_sub(creature.input))
-        .ok_or_else(|| format!("focus neuron {focus_uuid} missing compiled index"))?;
-
-    let mut shortlist = residual_shortlist(prior);
-    if shortlist.is_empty() {
-        return Ok(prior.to_vec());
-    }
-
-    let acts: Vec<Option<ResidualAct>> = shortlist
-        .iter()
-        .map(|s| residual_act_for(creature, &s.from_uuid))
-        .collect();
-    if acts.iter().all(|a| a.is_none()) {
-        return Ok(prior.to_vec());
-    }
-
-    let k = shortlist.len();
-    let mut sum_x = vec![0.0f64; k];
-    let mut sum_xx = vec![0.0f64; k];
-    let mut sum_xy = vec![0.0f64; k];
-    let mut sum_e = 0.0f64;
-    let mut sum_ee = 0.0f64;
-    let mut n = 0.0f64;
-
+    let mut scan = ResidualScan::new(creature, focus_uuid, prior)?;
     for probe in probes {
-        if probe.inputs.len() < creature.input || out_idx >= probe.outputs.len() {
+        if !scan.wants_probe(&probe.inputs, &probe.outputs) {
             continue;
         }
         let traced = network.activate_and_trace(&probe.inputs, creature.output);
-        let post_offset = creature.output;
-        if post_offset + relative_idx >= traced.len() {
-            continue;
-        }
-        let post = f64::from(traced[post_offset + relative_idx]);
-        let err = f64::from(probe.outputs[out_idx]) - post;
-        n += 1.0;
-        sum_e += err;
-        sum_ee += err * err;
-        for (j, act) in acts.iter().enumerate() {
-            let Some(act) = *act else {
-                continue;
-            };
-            let x = residual_activation(act, &probe.inputs, &traced, post_offset);
-            sum_x[j] += x;
-            sum_xx[j] += x * x;
-            sum_xy[j] += x * err;
-        }
+        scan.observe(&probe.inputs, &probe.outputs, &traced);
     }
-
-    if n < 2.0 {
-        return Ok(prior.to_vec());
-    }
-
-    for (j, src) in shortlist.iter_mut().enumerate() {
-        if acts[j].is_none() {
-            continue;
-        }
-        let corr = pearson(n, sum_x[j], sum_e, sum_xx[j], sum_ee, sum_xy[j]);
-        let var_x = ((sum_xx[j] / n) - (sum_x[j] / n).powi(2)).max(0.0);
-        let std_x = var_x.sqrt().max(MIN_ACT_STD);
-        src.direction = corr;
-        src.score = corr.abs();
-        src.weight_scale = TARGET_PRE_DELTA / std_x;
-        // Univariate OLS of residual on source: cov(x,e) / var(x).
-        let cov = sum_xy[j] - (sum_x[j] * sum_e) / n;
-        let var_x_n = sum_xx[j] - (sum_x[j] * sum_x[j]) / n;
-        if var_x_n > 1e-12 {
-            src.ols_weight = Some(cov / var_x_n);
-        }
-        // Dead / flat units stay near zero score even if floating noise correlates weakly.
-        if std_x <= MIN_ACT_STD * 1.5 && !is_input_source(&src.from_uuid) {
-            src.score = 0.0;
-            src.ols_weight = None;
-        }
-    }
-    shortlist.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.from_uuid.cmp(&b.from_uuid))
-    });
-
-    let mut out = shortlist;
-    for src in prior {
-        if !out.iter().any(|s| s.from_uuid == src.from_uuid) {
-            out.push(src.clone());
-        }
-    }
-    Ok(out)
-}
-
-/// When the focus is not an output, score unused sources by measured activation std.
-fn score_sources_by_activation_std(
-    creature: &CreatureExport,
-    network: &mut CompiledNetwork,
-    _focus_uuid: &str,
-    prior: &[RankedSource],
-    probes: &[ActivationProbe],
-) -> Vec<RankedSource> {
-    let mut shortlist = residual_shortlist(prior);
-    let acts: Vec<Option<ResidualAct>> = shortlist
-        .iter()
-        .map(|s| residual_act_for(creature, &s.from_uuid))
-        .collect();
-    let k = shortlist.len();
-    let mut sum_x = vec![0.0f64; k];
-    let mut sum_xx = vec![0.0f64; k];
-    let mut n = 0.0f64;
-    for probe in probes {
-        if probe.inputs.len() < creature.input {
-            continue;
-        }
-        let traced = network.activate_and_trace(&probe.inputs, creature.output);
-        let post_offset = creature.output;
-        n += 1.0;
-        for (j, act) in acts.iter().enumerate() {
-            let Some(act) = *act else {
-                continue;
-            };
-            let x = residual_activation(act, &probe.inputs, &traced, post_offset);
-            sum_x[j] += x;
-            sum_xx[j] += x * x;
-        }
-    }
-    if n < 1.0 {
-        return prior.to_vec();
-    }
-    for (j, src) in shortlist.iter_mut().enumerate() {
-        if acts[j].is_none() {
-            continue;
-        }
-        let mean = sum_x[j] / n;
-        let var = ((sum_xx[j] / n) - mean * mean).max(0.0);
-        let std = var.sqrt().max(MIN_ACT_STD);
-        src.weight_scale = TARGET_PRE_DELTA / std;
-        // Calculated usefulness prior — dead units rank last.
-        src.score = (std / (1.0 + std)) * 0.05;
-        if std <= MIN_ACT_STD * 1.5 && !is_input_source(&src.from_uuid) {
-            src.score = 0.0;
-        }
-    }
-    shortlist.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.from_uuid.cmp(&b.from_uuid))
-    });
-    let mut out = shortlist;
-    for src in prior {
-        if !out.iter().any(|s| s.from_uuid == src.from_uuid) {
-            out.push(src.clone());
-        }
-    }
-    out
+    Ok(scan.finish(prior))
 }
 
 /// Load training records as activation probes, then
@@ -597,7 +660,30 @@ pub fn refine_sources_by_residual(
     )
 }
 
+/// Build the synthetic-probe fallback ranking used when the corpus yields
+/// fewer than two rows.
+///
+/// Returns `prior` unchanged when there are no observations to synthesise from.
+pub(crate) fn refine_sources_from_synthetic(
+    creature: &CreatureExport,
+    network: &mut CompiledNetwork,
+    focus_uuid: &str,
+    prior: &[RankedSource],
+    observations: Option<&ObservationsStatistics>,
+) -> Result<Vec<RankedSource>, String> {
+    let Some(obs) = observations else {
+        return Ok(prior.to_vec());
+    };
+    let mut rng = StdRng::seed_from_u64(0xA07E_u64);
+    let probes = synthetic_observation_probes(obs, creature.input, creature.output, 64, &mut rng);
+    refine_sources_from_probes(creature, network, focus_uuid, prior, &probes)
+}
+
 /// Like [`refine_sources_by_residual`], with optional synthetic-probe fallback.
+///
+/// Streams the sample: at most two records are held at once (the corpus needs
+/// two rows before the residual statistics mean anything), instead of
+/// materialising every record as an [`ActivationProbe`].
 pub fn refine_sources_by_residual_with_observations(
     creature: &CreatureExport,
     network: &mut CompiledNetwork,
@@ -607,9 +693,12 @@ pub fn refine_sources_by_residual_with_observations(
     max_records: Option<u64>,
     observations: Option<&ObservationsStatistics>,
 ) -> Result<Vec<RankedSource>, String> {
+    let mut scan = ResidualScan::new(creature, focus_uuid, prior)?;
     let config = TrainingDataConfig::new(creature.input, creature.output);
-    let mut iter = TrainingDataIterator::new(training_data, config).map_err(|e| e.to_string())?;
-    let mut probes = Vec::new();
+    let mut iter = crate::analysis::open_training_scan(training_data, config)?;
+    // Hold the first two records back: with fewer than two the sample is
+    // discarded for the synthetic fallback, and nothing must be activated.
+    let mut held: Vec<TrainingRecord> = Vec::with_capacity(2);
     let mut count = 0u64;
     while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
         if let Some(limit) = max_records
@@ -618,23 +707,37 @@ pub fn refine_sources_by_residual_with_observations(
             break;
         }
         count += 1;
-        probes.push(ActivationProbe {
-            inputs: record.inputs,
-            outputs: record.outputs,
-        });
-    }
-
-    if probes.len() < 2 {
-        if let Some(obs) = observations {
-            let mut rng = StdRng::seed_from_u64(0xA07E_u64);
-            probes =
-                synthetic_observation_probes(obs, creature.input, creature.output, 64, &mut rng);
-        } else {
-            return Ok(prior.to_vec());
+        if count <= 2 {
+            held.push(record);
+            if count == 2 {
+                for held_record in std::mem::take(&mut held) {
+                    activate_and_observe(&mut scan, network, creature, &held_record);
+                }
+            }
+            continue;
         }
+        activate_and_observe(&mut scan, network, creature, &record);
     }
 
-    refine_sources_from_probes(creature, network, focus_uuid, prior, &probes)
+    if count < 2 {
+        return refine_sources_from_synthetic(creature, network, focus_uuid, prior, observations);
+    }
+
+    Ok(scan.finish(prior))
+}
+
+/// Activate one training record and fold it into the residual scan.
+fn activate_and_observe(
+    scan: &mut ResidualScan,
+    network: &mut CompiledNetwork,
+    creature: &CreatureExport,
+    record: &TrainingRecord,
+) {
+    if !scan.wants_probe(&record.inputs, &record.outputs) {
+        return;
+    }
+    let traced = network.activate_and_trace(&record.inputs, creature.output);
+    scan.observe(&record.inputs, &record.outputs, &traced);
 }
 
 /// Deterministic UUID v4 from the RNG (seeded runs stay reproducible).

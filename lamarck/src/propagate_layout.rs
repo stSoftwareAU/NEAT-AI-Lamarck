@@ -9,7 +9,7 @@ use crate::backprop::{BackpropConfig, LearningSignal};
 use neat_core::{
     CompiledNetwork, CreatureExport, NEURON_TYPE_CONSTANT, NEURON_TYPE_HIDDEN, NEURON_TYPE_INPUT,
     NEURON_TYPE_OUTPUT, NeuronInput, PropagateInput, SquashType, SynapseInput, SynapseType,
-    TrainingDataConfig, TrainingDataIterator, apply_get_range, parse_squash_name,
+    TrainingDataConfig, apply_get_range, parse_squash_name,
     parse_synapse_type, propagate_topological_loop,
 };
 use rand::Rng;
@@ -390,71 +390,40 @@ pub fn select_sparse(
     }
 }
 
-/// Accumulate a full-creature [`LearningSignal`] over training records.
+/// Streaming accumulator for a creature-wide [`LearningSignal`].
 ///
-/// Analyse-without-apply: the creature and network weights are not mutated.
-pub fn accumulate_creature_learning(
-    creature: &CreatureExport,
-    network: &mut CompiledNetwork,
-    training_data: &Path,
-    config: &BackpropConfig,
-    max_records: Option<u64>,
-    rng: &mut impl Rng,
-) -> Result<LearningSignal, String> {
-    let layout = PropagateLayout::from_creature(creature)?;
-    let sparse = select_sparse(creature, &layout, config, rng);
-    let mut learning = LearningSignal::new(creature.neurons.len(), creature.synapses.len());
-    // Working inward adjacency — aggregate slices are rewritten per record.
-    let mut inward_counts = layout.inward_counts.clone();
-    let mut inward_indices = layout.inward_synapse_indices.clone();
+/// Holds the per-creature topology caches so one already-activated record can
+/// be folded in at a time. [`accumulate_creature_learning`] drives it over its
+/// own scan; [`crate::analysis::scan_pre_focus`] drives it over the fused
+/// analysis scan (issue #105). Both share this arithmetic, so the numbers
+/// cannot drift apart.
+pub(crate) struct LearningScan {
+    layout: PropagateLayout,
+    sparse: SparseSelection,
+    learning: LearningSignal,
+    /// Working inward adjacency — aggregate slices are rewritten per record.
+    inward_counts: Vec<u32>,
+    inward_indices: Vec<u32>,
+    /// Per-record scratch, refilled rather than reallocated.
+    neurons: Vec<NeuronInput>,
+    /// Record-independent: weights come from the creature, not the record.
+    synapses: Vec<SynapseInput>,
+    plank_constant: f32,
+    normalise_gradients: bool,
+}
 
-    let td_cfg = TrainingDataConfig::new(creature.input, creature.output);
-    let mut iter = TrainingDataIterator::new(training_data, td_cfg).map_err(|e| e.to_string())?;
-    let mut count = 0u64;
-
-    while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
-        if let Some(limit) = max_records
-            && count >= limit
-        {
-            break;
-        }
-        let _traced = network.activate_and_trace(&record.inputs, creature.output);
-        count += 1;
-
-        if !layout.aggregates.is_empty() {
-            layout.linearise_aggregates(
-                &network.activations,
-                &mut inward_counts,
-                &mut inward_indices,
-            );
-        }
-
-        let mut neurons: Vec<NeuronInput> = Vec::with_capacity(layout.neuron_count);
-        for (prop_idx, tmpl) in layout.neuron_templates.iter().enumerate() {
-            let activation = network.activations.get(prop_idx).copied().unwrap_or(0.0);
-            let hint = if prop_idx < layout.input_count {
-                activation
-            } else {
-                let rel = prop_idx - layout.input_count;
-                network
-                    .hint_values_buffer
-                    .get(rel)
-                    .copied()
-                    .unwrap_or(activation)
-            };
-            neurons.push(NeuronInput {
-                squash_type: tmpl.squash_type,
-                neuron_type: tmpl.neuron_type,
-                propagate_needed: sparse.propagate_needed.contains(&prop_idx),
-                update_needed: sparse.update_needed.contains(&prop_idx),
-                hint_value: hint,
-                range_low: tmpl.range_low,
-                range_high: tmpl.range_high,
-                adjusted_activation: activation,
-                adjusted_bias: tmpl.bias as f32,
-            });
-        }
-
+impl LearningScan {
+    /// Build the accumulator, drawing the sparse selection from `rng`.
+    pub(crate) fn new(
+        creature: &CreatureExport,
+        config: &BackpropConfig,
+        rng: &mut impl Rng,
+    ) -> Result<Self, String> {
+        let layout = PropagateLayout::from_creature(creature)?;
+        let sparse = select_sparse(creature, &layout, config, rng);
+        let inward_counts = layout.inward_counts.clone();
+        let inward_indices = layout.inward_synapse_indices.clone();
+        let neurons = Vec::with_capacity(layout.neuron_count);
         let synapses: Vec<SynapseInput> = layout
             .synapse_templates
             .iter()
@@ -466,27 +435,111 @@ pub fn accumulate_creature_learning(
                 is_self_loop: s.from == s.to,
             })
             .collect();
-
-        let expected = record.outputs.to_vec();
-        let input = PropagateInput {
-            neurons: &neurons,
-            synapses: &synapses,
-            inward_starts: &layout.inward_starts,
-            inward_counts: &inward_counts,
-            inward_synapse_indices: &inward_indices,
-            reverse_topo_order: &layout.reverse_topo_order,
-            expected: &expected,
-            input_count: layout.input_count as u32,
-            output_count: layout.output_count as u32,
+        Ok(Self {
+            layout,
+            sparse,
+            learning: LearningSignal::new(creature.neurons.len(), creature.synapses.len()),
+            inward_counts,
+            inward_indices,
+            neurons,
+            synapses,
             plank_constant: config.plank_constant as f32,
             normalise_gradients: config.normalise_gradients,
+        })
+    }
+
+    /// Fold one record whose activation already sits in `network`.
+    ///
+    /// The caller must have run `activate_and_trace` for this record.
+    pub(crate) fn observe(&mut self, network: &CompiledNetwork, expected: &[f32]) {
+        if !self.layout.aggregates.is_empty() {
+            self.layout.linearise_aggregates(
+                &network.activations,
+                &mut self.inward_counts,
+                &mut self.inward_indices,
+            );
+        }
+
+        self.neurons.clear();
+        for (prop_idx, tmpl) in self.layout.neuron_templates.iter().enumerate() {
+            let activation = network.activations.get(prop_idx).copied().unwrap_or(0.0);
+            let hint = if prop_idx < self.layout.input_count {
+                activation
+            } else {
+                let rel = prop_idx - self.layout.input_count;
+                network
+                    .hint_values_buffer
+                    .get(rel)
+                    .copied()
+                    .unwrap_or(activation)
+            };
+            self.neurons.push(NeuronInput {
+                squash_type: tmpl.squash_type,
+                neuron_type: tmpl.neuron_type,
+                propagate_needed: self.sparse.propagate_needed.contains(&prop_idx),
+                update_needed: self.sparse.update_needed.contains(&prop_idx),
+                hint_value: hint,
+                range_low: tmpl.range_low,
+                range_high: tmpl.range_high,
+                adjusted_activation: activation,
+                adjusted_bias: tmpl.bias as f32,
+            });
+        }
+
+        let input = PropagateInput {
+            neurons: &self.neurons,
+            synapses: &self.synapses,
+            inward_starts: &self.layout.inward_starts,
+            inward_counts: &self.inward_counts,
+            inward_synapse_indices: &self.inward_indices,
+            reverse_topo_order: &self.layout.reverse_topo_order,
+            expected,
+            input_count: self.layout.input_count as u32,
+            output_count: self.layout.output_count as u32,
+            plank_constant: self.plank_constant,
+            normalise_gradients: self.normalise_gradients,
         };
 
         let output = propagate_topological_loop(&input);
-        learning.accumulate_propagate_output(&output, layout.input_count);
+        self.learning
+            .accumulate_propagate_output(&output, self.layout.input_count);
     }
 
-    Ok(learning)
+    /// Consume the accumulator and hand back the learning signal.
+    pub(crate) fn finish(self) -> LearningSignal {
+        self.learning
+    }
+}
+
+/// Accumulate a full-creature [`LearningSignal`] over training records.
+///
+/// Analyse-without-apply: the creature and network weights are not mutated.
+pub fn accumulate_creature_learning(
+    creature: &CreatureExport,
+    network: &mut CompiledNetwork,
+    training_data: &Path,
+    config: &BackpropConfig,
+    max_records: Option<u64>,
+    rng: &mut impl Rng,
+) -> Result<LearningSignal, String> {
+    let mut scan = LearningScan::new(creature, config, rng)?;
+
+    let td_cfg = TrainingDataConfig::new(creature.input, creature.output);
+    let mut iter = crate::analysis::open_training_scan(training_data, td_cfg)?;
+    let mut count = 0u64;
+
+    while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
+        if let Some(limit) = max_records
+            && count >= limit
+        {
+            break;
+        }
+        let _traced = network.activate_and_trace(&record.inputs, creature.output);
+        count += 1;
+        scan.observe(network, &record.outputs);
+    }
+
+    Ok(scan.finish())
 }
 
 #[cfg(test)]

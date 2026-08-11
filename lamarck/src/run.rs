@@ -1,5 +1,6 @@
 //! End-to-end Lamarck optimisation loop and experiment journal.
 
+use crate::analysis::{scan_post_focus, scan_pre_focus};
 use crate::cancel::CancelToken;
 use crate::candidates::{
     Candidate, CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
@@ -13,7 +14,6 @@ use crate::focus::{
     FixedFocusSelector, FocusChoice, FocusNeuronStats, FocusPolicy, FocusSelector,
     HighErrorFocusSelector, RandomFocusSelector, UnsaturatedFocusSelector, WeightedFocusSelector,
     attach_focus_blame, attach_learning_to_incoming, build_improvement_signals,
-    collect_focus_stats, collect_incoming_source_stats, collect_output_mean_abs_errors,
     select_highest_signal,
 };
 use crate::grafts::{
@@ -23,15 +23,12 @@ use crate::grafts::{
 use crate::log;
 use crate::observations::ensure_statistics;
 use crate::parity::{check_phase0_parity, compute_local_mse};
-use crate::propagate_layout::accumulate_creature_learning;
 use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
     screen_promote_stems, write_promote_batch,
 };
-use crate::structural::{
-    is_input_source, rank_unused_sources, refine_sources_by_residual_with_observations,
-};
+use crate::structural::{is_input_source, rank_unused_sources};
 use crate::tags::{CreatureMeta, LamarckProgress, serialize_creature_with_meta};
 use neat_core::{
     TrainingDataConfig, compile_creature, creature_to_json_pretty, parse_creature_json,
@@ -721,21 +718,29 @@ pub fn run_optimisation_cancellable(
         let mut network = compile_creature(&incumbent).map_err(|e| e.to_string())?;
 
         // Learning + output MAE first so weighted/high-error can rank by
-        // improvement chance and skip zero-error / zero-blame neurons.
-        log::detail("accumulating creature learning signal (propagate_topological_loop)...");
+        // improvement chance and skip zero-error / zero-blame neurons. Both are
+        // focus-independent, so one scan feeds them (issue #105).
+        let needs_signals = fixed_focus.is_none()
+            && matches!(
+                config.focus_policy,
+                FocusPolicy::Weighted | FocusPolicy::HighError
+            );
+        log::detail("pre-focus scan: creature learning signal + output residuals...");
         let learn_start = Instant::now();
         let mut learn_rng = StdRng::seed_from_u64(
             seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
                 .wrapping_add(experiments),
         );
-        let learning = accumulate_creature_learning(
+        let pre_focus = scan_pre_focus(
             &incumbent,
             &mut network,
             &config.training_data,
             &backprop,
             focus_sample_limit,
             &mut learn_rng,
+            needs_signals,
         )?;
+        let learning = pre_focus.learning;
         log::ok(&format!(
             "learning signal in {}ms (bias_count={:.0}, weight_count={:.0})",
             learn_start.elapsed().as_millis(),
@@ -743,25 +748,12 @@ pub fn run_optimisation_cancellable(
             learning.weights.iter().map(|w| w.count).sum::<f64>()
         ));
 
-        let needs_signals = fixed_focus.is_none()
-            && matches!(
-                config.focus_policy,
-                FocusPolicy::Weighted | FocusPolicy::HighError
-            );
         let improvement_signals = if needs_signals {
-            log::detail("scanning output residuals for focus ranking...");
-            let mae_start = Instant::now();
-            let output_errors = collect_output_mean_abs_errors(
-                &incumbent,
-                &mut network,
-                &config.training_data,
-                focus_sample_limit,
-            )?;
-            let signals = build_improvement_signals(&incumbent, &output_errors, &learning);
+            let signals =
+                build_improvement_signals(&incumbent, &pre_focus.output_errors, &learning);
             log::detail(&format!(
-                "error-influence signals: {} eligible neurons in {}ms",
-                signals.len(),
-                mae_start.elapsed().as_millis()
+                "error-influence signals: {} eligible neurons",
+                signals.len()
             ));
             signals
         } else {
@@ -835,15 +827,23 @@ pub fn run_optimisation_cancellable(
                 }
             }
         };
-        log::detail("scanning incumbent for focus stats...");
+        // Focus stats, incoming-source stats and the residual source ranking all
+        // need the focus uuid and nothing else — one scan feeds all three (#105).
+        log::detail("post-focus scan: focus stats + incoming sources + residual ranking...");
         let focus_scan_start = Instant::now();
-        let mut focus_stats = collect_focus_stats(
+        let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
+        let post_focus = scan_post_focus(
             &incumbent,
             &mut network,
             &config.training_data,
             &focus,
             focus_sample_limit,
+            Some(&observations),
+            &prior_sources,
         )?;
+        let mut focus_stats = post_focus.focus_stats;
+        let mut incoming = post_focus.incoming;
+        let ranked_sources = post_focus.ranked_sources;
         let focus_scan_ms = focus_scan_start.elapsed().as_millis();
         log::ok(&format!(
             "focus scan: {} records in {focus_scan_ms}ms",
@@ -871,14 +871,6 @@ pub fn run_optimisation_cancellable(
             ));
         }
 
-        let mut incoming = collect_incoming_source_stats(
-            &incumbent,
-            &mut network,
-            &config.training_data,
-            &focus,
-            focus_sample_limit,
-            Some(&observations),
-        )?;
         log::detail(&format!("incoming sources: {}", incoming.len()));
 
         // Surface focus blame + incoming weight signals from real backprop (#4).
@@ -900,16 +892,6 @@ pub fn run_optimisation_cancellable(
             log::detail(&format!("incoming weight-signals attached: {linked}"));
         }
 
-        let prior_sources = rank_unused_sources(&incumbent, &focus, &observations);
-        let ranked_sources = refine_sources_by_residual_with_observations(
-            &incumbent,
-            &mut network,
-            &config.training_data,
-            &focus,
-            &prior_sources,
-            focus_sample_limit,
-            Some(&observations),
-        )?;
         if let Some(best) = ranked_sources.first() {
             log::detail(&format!(
                 "best unused source {} residual|corr|={:.4}",
@@ -2306,6 +2288,35 @@ mod tests {
             serde_json::to_string(&a.candidates).unwrap(),
             serde_json::to_string(&b.candidates).unwrap(),
             "same seed must regenerate the same candidate stream"
+        );
+    }
+
+    /// Issue #105: an experiment fuses its five analysis passes into two scans.
+    #[test]
+    fn each_experiment_opens_at_most_two_training_scans() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut config = reproducibility_config(creature_path, training, dir.path().join("out"));
+        config.max_experiments = Some(2);
+        config.timeout = Duration::from_secs(30);
+        // Weighted focus exercises the output-MAE pass fused into scan one.
+        config.focus_neuron = None;
+        config.focus_policy = FocusPolicy::Weighted;
+
+        crate::analysis::reset_training_scan_count();
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+
+        assert!(result.experiments >= 1, "expected at least one experiment");
+        assert_eq!(
+            crate::analysis::training_scans_opened(),
+            2 * result.experiments,
+            "each experiment must open exactly two analysis training scans"
         );
     }
 
