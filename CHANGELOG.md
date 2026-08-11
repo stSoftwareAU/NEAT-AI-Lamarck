@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The failed-candidate cache now measures its own cost and stands down when it
+  stops paying (Issue #92).** The hard constraint on #69 — the cache must not
+  cost more time than it saves, or grow without bound — is enforced in
+  `lamarck/src/failed_cache/economics.rs` rather than asserted in a report:
+  - *Accounting.* Savings are **estimated** from this run's own measured screen
+    cost (`skipped × mean screen ms per scored creature`, the baseline included
+    in the divisor so it cannot inflate the figure), never from a constant. In a
+    run with screening off, the single full-corpus batch is that first phase.
+    Promote-phase time is claimed only for a skip whose cache entry records the
+    candidate as having actually been promoted — every other skip is priced at
+    screen cost only, so the estimate under-claims rather than over-claims.
+    Spend is **measured**: lookup, maintenance, the startup rebuild and the
+    snapshot write, accumulated in microseconds because a whole-millisecond
+    timer truncates a small batch's overhead to zero.
+  - *Stand-down.* When the cumulative net stays worse than
+    `--failed-cache-stand-down-margin-ms` (default `1000`) for
+    `--failed-cache-stand-down-window` (default `20`) consecutive experiments,
+    Lamarck warns, writes a `cacheStandDown` journal line and disables the cache
+    for the rest of the run — which continues. A cache that does not earn its
+    keep degrades to the cache-off behaviour instead of degrading the run.
+  - *Byte ceiling.* `--failed-cache-max-bytes` (default ~25 MiB) bounds the
+    resident footprint; past it the cache evicts oldest-first and logs the bite,
+    because a silently truncated cache reads as a working one.
+  - *Reporting.* Each experiment journals `cacheSavedMs`, `cacheSpentMs`,
+    `cacheNetCumulativeMs` and `cacheResidentBytes`, and every cache-on run ends
+    with one parseable summary line carrying entries, hit rate, ms saved, ms
+    spent, net, peak memory bytes and disk bytes. The snapshot format is now
+    `1.1.0` (per-entry `promoted` flag); a `1.0.0` snapshot is replayed from the
+    journal rather than misread.
+
 - **Known-failed candidates are no longer re-scored (Issues #88–#91).** Lamarck
   re-proposes the same mutations across experiments and across runs, and
   re-scoring one that already failed costs full scorer time for nothing. The new

@@ -46,8 +46,10 @@ pub const DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES: u32 = 3;
 // Failed-candidate cache knobs (issue #69). Re-exported rather than restated so
 // the CLI defaults can never drift from the cache's own documented bounds.
 pub use crate::failed_cache::{
-    DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS, DEFAULT_FAILED_CACHE_MAX_ENTRIES,
-    DEFAULT_FAILED_CACHE_TOLERANCE_ABS, DEFAULT_FAILED_CACHE_TOLERANCE_REL,
+    DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
+    DEFAULT_CACHE_STAND_DOWN_WINDOW, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
+    DEFAULT_FAILED_CACHE_MAX_ENTRIES, DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
+    DEFAULT_FAILED_CACHE_TOLERANCE_REL,
 };
 
 /// Run-time knobs for a Lamarck optimisation session.
@@ -122,6 +124,26 @@ pub struct LamarckConfig {
     pub failed_cache_tolerance_abs: f64,
     /// Relative bound for near-duplicate candidate matching.
     pub failed_cache_tolerance_rel: f64,
+    /// Milliseconds cumulative cache overhead must exceed cumulative estimated
+    /// savings by before an experiment counts as net-negative (issue #92).
+    pub failed_cache_stand_down_margin_ms: f64,
+    /// Consecutive net-negative experiments before the cache stands down for
+    /// the rest of the run. `0` disables the guardrail.
+    pub failed_cache_stand_down_window: usize,
+    /// Resident-footprint ceiling in bytes, enforced by eviction. `0` disables
+    /// the ceiling; the entry cap still bounds the cache.
+    pub failed_cache_max_bytes: usize,
+}
+
+impl LamarckConfig {
+    /// Guardrail knobs for the failed-candidate cache's economics (issue #92).
+    pub fn cache_economics_config(&self) -> crate::failed_cache::CacheEconomicsConfig {
+        crate::failed_cache::CacheEconomicsConfig {
+            stand_down_margin_ms: self.failed_cache_stand_down_margin_ms,
+            stand_down_window: self.failed_cache_stand_down_window,
+            max_resident_bytes: self.failed_cache_max_bytes,
+        }
+    }
 }
 
 impl LamarckConfig {
@@ -187,6 +209,9 @@ impl Default for LamarckConfig {
             failed_cache_max_age_seconds: DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
             failed_cache_tolerance_abs: DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
             failed_cache_tolerance_rel: DEFAULT_FAILED_CACHE_TOLERANCE_REL,
+            failed_cache_stand_down_margin_ms: DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
+            failed_cache_stand_down_window: DEFAULT_CACHE_STAND_DOWN_WINDOW,
+            failed_cache_max_bytes: DEFAULT_CACHE_MAX_RESIDENT_BYTES,
         }
     }
 }
@@ -339,6 +364,20 @@ mod tests {
             config.failed_cache_tolerance_rel,
             DEFAULT_FAILED_CACHE_TOLERANCE_REL
         );
+    }
+
+    /// Issue #92: the guardrail is part of the feature, so turning the cache on
+    /// must never leave the run without a stand-down rule or a byte ceiling.
+    #[test]
+    fn the_economics_guardrail_is_configured_by_default() {
+        let guard = LamarckConfig::default().cache_economics_config();
+        assert_eq!(
+            guard.stand_down_margin_ms,
+            DEFAULT_CACHE_STAND_DOWN_MARGIN_MS
+        );
+        assert_eq!(guard.stand_down_window, DEFAULT_CACHE_STAND_DOWN_WINDOW);
+        assert_eq!(guard.max_resident_bytes, DEFAULT_CACHE_MAX_RESIDENT_BYTES);
+        assert!(guard.stand_down_window > 0 && guard.max_resident_bytes > 0);
     }
 
     #[test]
