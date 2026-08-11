@@ -864,7 +864,7 @@ pub fn run_optimisation_cancellable(
         .failed_cache
         .then(|| CacheEconomics::new(config.cache_economics_config()));
     let mut failed_cache = if config.failed_cache {
-        let (cache, report) = load_or_rebuild(
+        let (mut cache, report) = load_or_rebuild(
             &config.output_dir,
             Tolerance::new(
                 config.failed_cache_tolerance_abs,
@@ -882,6 +882,10 @@ pub fn run_optimisation_cancellable(
         if let Some(economics) = cache_economics.as_mut() {
             economics.record_startup_rebuild(report.elapsed_ms);
         }
+        // A rebuild can land above the ceiling — a snapshot written under a
+        // larger one, say — so the bound is applied before the loop rather than
+        // waiting for the first insert to notice (issue #92).
+        enforce_cache_ceiling(cache_economics.as_mut(), &mut cache);
         log::info(&format!(
             "failed-cache: {} entr(ies) from {} in {}ms (cap={}, max_age={}s, worst case {} bytes)",
             report.entries,

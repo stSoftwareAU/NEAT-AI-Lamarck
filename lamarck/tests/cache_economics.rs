@@ -442,6 +442,47 @@ fn end_of_run_summary_line_carries_every_field() {
     assert!(summary.disk_bytes > 0, "the snapshot is on disk");
 }
 
+/// A cache restored from a run with a larger ceiling must be brought under the
+/// current one before the loop starts, not after the first insert notices.
+#[test]
+fn a_warm_cache_above_the_ceiling_is_evicted_at_startup() {
+    let dir = tempdir().unwrap();
+    let mut warm = cache_run_config(dir.path(), 8, 2);
+    warm.failed_cache_stand_down_window = 0;
+    let first = run_optimisation(
+        &warm,
+        &LosingScorer {
+            batch_delay: Duration::from_millis(5),
+        },
+    )
+    .expect("run completes");
+    let cached = first.cache_economics.expect("a ledger").entries;
+    assert!(cached > 4, "the first run has to fill the cache: {cached}");
+
+    // Second run over the same output directory, under a four-entry ceiling.
+    let ceiling = 4 * FAILED_CACHE_BYTES_PER_ENTRY;
+    let mut tight = cache_run_config(dir.path(), 8, 1);
+    tight.failed_cache_stand_down_window = 0;
+    tight.failed_cache_max_bytes = ceiling;
+    let second = run_optimisation(
+        &tight,
+        &LosingScorer {
+            batch_delay: Duration::from_millis(5),
+        },
+    )
+    .expect("run completes");
+
+    let summary = second.cache_economics.expect("a ledger");
+    assert!(
+        summary.ceiling_bites > 0,
+        "the ceiling has to bite on the restored cache: {summary:?}"
+    );
+    assert!(
+        summary.entries * FAILED_CACHE_BYTES_PER_ENTRY <= ceiling,
+        "the resident footprint must end at or under the ceiling: {summary:?}"
+    );
+}
+
 /// With the cache off there is no ledger at all — and no economics fields in the
 /// journal, so a cache-off arm journals exactly what it always did.
 #[test]
