@@ -612,10 +612,10 @@ proposals the cache recognised as known-failed — the cache's saving, and the
 only input to `estimatedSavedMs`. `deduplicated` counts near-duplicates within a
 single batch: real avoided work, but the generator's repetition rather than the
 cache's memory, so it is reported apart. Generation-time gating, such as
-`backprop` declining to propose on a focus with no accumulated blame (issue
-#83), suppresses candidates before they ever become proposals, so they are
-absent from `proposalsExamined` entirely and cannot be double-counted against a
-cache hit. What that gating does change is batch size, which is why
+`backprop` declining to propose on a focus with no accumulated blame
+(issue #83), suppresses candidates before they ever become proposals, so they
+are absent from `proposalsExamined` entirely and cannot be double-counted
+against a cache hit. What that gating does change is batch size, which is why
 `batchCandidates` reports the batch that was actually scored rather than
 assuming `--candidates`.
 
