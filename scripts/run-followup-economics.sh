@@ -12,12 +12,13 @@
 #   ARM_SECONDS=900 scripts/run-followup-economics.sh batch-size
 #
 # Arms: output-focus | backprop-step | batch-size | multi-seed
-#       output-neuron | backprop-cap | candidate-quotas
+#       output-neuron | backprop-cap | candidate-quotas | focus-count
 #
 # `output-neuron` and `backprop-cap` are #96 arms, `candidate-quotas` is the
-# #108 arm, and none of the three is in the default set: like `multi-seed` they
-# need the production creature and exclusive use of the scorer, so name them
-# explicitly and run them one at a time.
+# #108 arm, `focus-count` is the #109 arm, and none of the four is in the
+# default set: like `multi-seed` they need the production creature and
+# exclusive use of the scorer, so name them explicitly and run them one at a
+# time.
 set -euo pipefail
 
 LAMARCK="${LAMARCK:-./target/release/neat_ai_lamarck}"
@@ -52,6 +53,13 @@ CAP_SECONDS="${CAP_SECONDS:-400}"
 # is whether the generator's quotas scale with `--candidates`.
 QUOTA_CANDIDATES="${QUOTA_CANDIDATES:-100}"
 QUOTA_SECONDS="${QUOTA_SECONDS:-900}"
+# #109 multi-focus A/B: the same per-focus budget on both sides, so the shared
+# learning pass is amortised over K focuses instead of one. `--candidates` is
+# split between the focuses, so the K=3 side asks for 3x the K=1 budget to keep
+# each focus's share the same.
+FOCUS_COUNTS="${FOCUS_COUNTS:-1 3}"
+FOCUS_COUNT_CANDIDATES="${FOCUS_COUNT_CANDIDATES:-40}"
+FOCUS_COUNT_SECONDS="${FOCUS_COUNT_SECONDS:-900}"
 # Neuron pinned by the #96 output slice. NEAT-AI names output neurons
 # `output-<index>`; a UUID that does not exist aborts the run rather than
 # quietly falling back to policy selection.
@@ -184,6 +192,22 @@ arm_backprop_cap() {
   done
 }
 
+arm_focus_count() {
+  # #109 — the paired multi-focus benchmark. Every side shares the seed, the
+  # wall budget and the per-focus candidate share; only the number of focus
+  # neurons an experiment serves moves. Compare candidates per analysis-minute,
+  # promote-scores per scorer-minute, accepts and improvement per wall-clock
+  # hour: a K that spreads proposals so thin that the structural quotas stop
+  # firing shows up as a fall in the promote rate.
+  for k in $FOCUS_COUNTS; do
+    run_arm "focus-count-$k" \
+      --timeout-seconds "$FOCUS_COUNT_SECONDS" \
+      --candidates "$((FOCUS_COUNT_CANDIDATES * k))" --seed 71 \
+      --focus-policy weighted \
+      --focus-count "$k"
+  done
+}
+
 arms=("$@")
 if [[ ${#arms[@]} -eq 0 ]]; then
   arms=(output-focus backprop-step batch-size multi-seed)
@@ -198,7 +222,8 @@ for arm in "${arms[@]}"; do
   output-neuron) arm_output_neuron ;;
   backprop-cap) arm_backprop_cap ;;
   candidate-quotas) arm_candidate_quotas ;;
-  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap | candidate-quotas)" ;;
+  focus-count) arm_focus_count ;;
+  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap | candidate-quotas | focus-count)" ;;
   esac
 done
 
