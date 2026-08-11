@@ -240,10 +240,11 @@ strategy is disabled below.
 | `mean_error_bias` | **0** | — | — | **Unmeasured** — needs an output focus, which no arm reached; cannot be judged |
 | `stats_skew_bias` | **0** | — | — | **Unmeasured** — same reason: it proposes from the output target's skew, so it needs the same slice |
 
-The one operational change this campaign does support is a **default**, not a
-disable: `--focus-policy high-error` should not be used on a fine-tuned
-creature. It pinned all 35 experiments on a `TANH` saturated to 0.99992 and
-returned zero accepts from 1015 screened candidates.
+The campaign supports one operational recommendation, and it is about a flag
+rather than a strategy: **do not run `--focus-policy high-error` on a
+fine-tuned creature.** It pinned all 35 experiments on a `TANH` saturated to
+0.99992 and returned zero accepts from 1015 screened candidates. `weighted`
+stays the default; nothing about it is changed here.
 
 ## Coverage and what is still unrun
 
