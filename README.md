@@ -647,16 +647,21 @@ The open experimental questions the journal is designed to answer:
 7. As the incumbent improves, how quickly does the hit rate fall?
 8. Given the 45-minute useful-life constraint, how much analysis is economically justified before trying another candidate batch?
 
-Questions 1–3 and 8 have a first single-seed answer; the follow-up runs needed
-to answer the rest are tracked in
-[#75](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/75).
+Questions 1–3 and 8 have a first single-seed answer. The follow-up campaign
+for #75 — an output-focus slice, a backprop step A/B and a batch-size A/B,
+118 further experiments — is written up in
+[`docs/followup-economics.md`](docs/followup-economics.md). Its headline: **no
+strategy has earned removal**, `--candidates` above ~29 buys nothing on this
+creature, and `backprop` fails on a saturated step cap rather than on its
+learning rate. Questions 4–7 need the arms still outstanding in
+[#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96).
 
 ## Outstanding work
 
 | Issue | Gap |
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
-| [#75](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/75) | The follow-up economics experiments recommended by the #8 baseline are unrun. |
+| [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) | Three economics arms still need exclusive box time: the multi-seed repeat, the `output-0` slice and the backprop cap A/B. |
 
 ## Repository layout
 

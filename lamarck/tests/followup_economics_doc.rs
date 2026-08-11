@@ -30,7 +30,9 @@ fn label(strategy: CandidateStrategy) -> String {
 }
 
 fn repo_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(relative)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(relative)
 }
 
 fn read(relative: &str) -> String {

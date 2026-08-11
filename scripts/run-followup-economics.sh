@@ -29,8 +29,11 @@ OUTPUT_FOCUS_SECONDS="${OUTPUT_FOCUS_SECONDS:-1200}"
 SEED_SECONDS="${SEED_SECONDS:-2700}"
 # Seeds for the multi-seed repeat (the #8 baseline used seed 1).
 SEEDS="${SEEDS:-2 3 4 5}"
-# Candidate counts for the batch-size A/B.
-BATCH_SIZES="${BATCH_SIZES:-40 100 150}"
+# Candidate counts for the batch-size A/B. #75 asked for 40/100/150, but
+# candidate generation has a fixed per-phase ceiling (~29 on the GRQ creature),
+# so every budget at or above it fills the same batch — see the ceiling test in
+# lamarck/src/candidates.rs. 12 is added as a point that actually binds.
+BATCH_SIZES="${BATCH_SIZES:-12 40 100 150}"
 # Learning rates for the backprop step A/B (default arm first).
 BACKPROP_RATES="${BACKPROP_RATES:-0.01 0.001}"
 

@@ -157,7 +157,10 @@ mod tests {
     fn backprop_config_keeps_the_port_default_rate_when_unset() {
         let config = LamarckConfig::default();
         let backprop = config.backprop_config().expect("default rate is valid");
-        assert_eq!(backprop.learning_rate, BackpropConfig::default().learning_rate);
+        assert_eq!(
+            backprop.learning_rate,
+            BackpropConfig::default().learning_rate
+        );
     }
 
     #[test]
@@ -175,9 +178,11 @@ mod tests {
 
     #[test]
     fn a_larger_rate_proposes_a_proportionally_larger_bias_step() {
-        let mut signal = BiasSignal::default();
-        signal.count = 1.0;
-        signal.total_adjusted_bias = 0.5;
+        let signal = BiasSignal {
+            count: 1.0,
+            total_adjusted_bias: 0.5,
+            ..BiasSignal::default()
+        };
         let small = LamarckConfig {
             backprop_learning_rate: Some(0.001),
             ..LamarckConfig::default()
