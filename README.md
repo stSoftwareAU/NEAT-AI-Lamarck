@@ -654,15 +654,16 @@ for #75 — an output-focus slice, a backprop step A/B and a batch-size A/B,
 [`docs/followup-economics.md`](docs/followup-economics.md). Its headline: **no
 strategy has earned removal**, `--candidates` above ~29 buys nothing on this
 creature, and `backprop` fails on a saturated step cap rather than on its
-learning rate. Questions 4–7 need the arms still outstanding in
-[#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96).
+learning rate. Questions 4–7 need the arms wired up by
+[#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) and still to be
+run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
 ## Outstanding work
 
 | Issue | Gap |
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
-| [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) | Three economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
+| [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Three economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
 
 ## Repository layout
 

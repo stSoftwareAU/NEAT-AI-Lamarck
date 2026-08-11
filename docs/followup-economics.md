@@ -209,7 +209,7 @@ exclusive box time — longer than the whole campaign above — and it cannot be
 interleaved with the other arms without contending for the scorer and
 invalidating every per-minute figure. It is the one recommendation of the four
 still outstanding, tracked in
-[#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) with the exact
+[#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) with the exact
 command to run:
 
 ```bash
@@ -256,8 +256,9 @@ stays the default; nothing about it is changed here.
 | 4. Multi-seed repeat | **Unrun** — 3 hours of exclusive box time |
 
 The unrun work is one follow-up, not three: it is all "arms that need exclusive
-box time on the production creature", tracked in
-[#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96).
+box time on the production creature". [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96)
+wired the arms up; running them is tracked in
+[#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
 ### The three outstanding arms are now wired up (#96)
 
