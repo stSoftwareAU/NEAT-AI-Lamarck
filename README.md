@@ -180,6 +180,7 @@ Leaving these unset changes behaviour.
 | `--max-experiments` | Stop after this many experiments, whichever of it and `--timeout-seconds` comes first. Unset = wall-clock bounded only. |
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
+| `--scale-candidate-quotas` | Scale the generator's per-phase quotas with `--candidates` so the budget binds until the generator is genuinely exhausted (issue #108). Unset, the fixed quotas cap a batch at ~29 on the production creature whatever `--candidates` says. Opt-in until the paired batch-economics benchmark in [`docs/followup-economics.md`](docs/followup-economics.md) justifies making it the default. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
 | `--compute-correlations` | Compute the expensive input×input correlation matrix in observations. |
 | `--skip-phase0` | Skip the Phase-0 parity gate. |

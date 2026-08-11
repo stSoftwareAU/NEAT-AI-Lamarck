@@ -3,8 +3,8 @@
 use crate::analysis::{ScanBudget, scan_post_focus, scan_pre_focus};
 use crate::cancel::CancelToken;
 use crate::candidates::{
-    Candidate, CandidateGenContext, CandidateProvenance, CandidateStrategy, generate_candidates,
-    write_candidate_batch,
+    BatchLimit, Candidate, CandidateBudget, CandidateGenContext, CandidateProvenance,
+    CandidateStrategy, generate_candidate_batch, write_candidate_batch,
 };
 use crate::combos::{
     ComboSelectRequest, ComboSelection, StackDampenReport, select_best_with_combinations,
@@ -66,6 +66,16 @@ pub struct ExperimentRecord {
     pub focus_stats: Option<FocusNeuronStats>,
     /// Candidate provenances.
     pub candidates: Vec<CandidateProvenance>,
+    /// Candidates the run asked the generator for (`--candidates`).
+    ///
+    /// Recorded with [`Self::batch_limit`] so `report` can show the achieved
+    /// batch size against the budget and say which limit bound it (issue #108).
+    /// Absent from journals written before the fields existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates_requested: Option<usize>,
+    /// Why the batch stopped growing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_limit: Option<BatchLimit>,
     /// Authoritative (full-corpus) scores by stem when a promote/full score ran.
     pub scores: std::collections::BTreeMap<String, f64>,
     /// Screen-phase (subsample) scores by stem when two-phase scoring is enabled.
@@ -1048,8 +1058,18 @@ pub fn run_optimisation_cancellable(
             structural_only: config.structural_only,
         };
         let gen_start = Instant::now();
-        let candidates = generate_candidates(&gen_ctx, config.candidates, &mut rng);
+        let batch = generate_candidate_batch(
+            &gen_ctx,
+            CandidateBudget {
+                count: config.candidates,
+                scale_quotas: config.scale_candidate_quotas,
+            },
+            &mut rng,
+        );
         let generate_ms = gen_start.elapsed().as_millis();
+        let batch_limit = batch.limit;
+        let strategy_mix = batch.strategy_mix_summary();
+        let candidates = batch.candidates;
         let analysis_ms = analysis_start.elapsed().as_millis();
         // Journalled so the memo's value is auditable from experiments.jsonl,
         // the same way the scan and scorer economics already are (issue #106).
@@ -1064,9 +1084,31 @@ pub fn run_optimisation_cancellable(
             ));
         }
         log::ok(&format!(
-            "generated {} candidates in {generate_ms}ms (analysis total {analysis_ms}ms)",
-            candidates.len()
+            "generated {} of {} requested candidates in {generate_ms}ms — {} (analysis total {analysis_ms}ms)",
+            candidates.len(),
+            config.candidates,
+            batch_limit.label()
         ));
+        log::detail(&format!("batch strategy mix: {strategy_mix}"));
+        // An under-filled batch says which limit bound it, so a generator that
+        // quietly runs dry is visible in the log rather than inferred (#108).
+        if candidates.len() < config.candidates {
+            match batch_limit {
+                BatchLimit::QuotaCeiling => log::warn(&format!(
+                    "candidate budget {} unmet: the fixed per-phase quotas topped out at {} \
+                     — pass --scale-candidate-quotas to let the budget bind",
+                    config.candidates,
+                    candidates.len()
+                )),
+                BatchLimit::Exhausted => log::warn(&format!(
+                    "candidate budget {} unmet: the generator is exhausted at {} \
+                     (every ranked source and squash proposed)",
+                    config.candidates,
+                    candidates.len()
+                )),
+                BatchLimit::Budget => {}
+            }
+        }
 
         // Scoring dominates an experiment, so poll here: a signal arriving
         // during analysis abandons this experiment before any working
@@ -1129,6 +1171,8 @@ pub fn run_optimisation_cancellable(
                             focus_neuron: focus,
                             focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+                            candidates_requested: Some(config.candidates),
+                            batch_limit: Some(batch_limit),
                             scores: Default::default(),
                             screen_scores: None,
                             winner: None,
@@ -1201,6 +1245,8 @@ pub fn run_optimisation_cancellable(
                         focus_neuron: focus,
                         focus_stats: Some(focus_stats.clone()),
                         candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+                        candidates_requested: Some(config.candidates),
+                        batch_limit: Some(batch_limit),
                         scores: Default::default(),
                         screen_scores: screen_score_map,
                         winner: None,
@@ -1269,6 +1315,8 @@ pub fn run_optimisation_cancellable(
                             focus_neuron: focus,
                             focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+                            candidates_requested: Some(config.candidates),
+                            batch_limit: Some(batch_limit),
                             scores: Default::default(),
                             screen_scores: screen_score_map,
                             winner: None,
@@ -1335,6 +1383,8 @@ pub fn run_optimisation_cancellable(
                             focus_neuron: focus,
                             focus_stats: Some(focus_stats.clone()),
                             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+                            candidates_requested: Some(config.candidates),
+                            batch_limit: Some(batch_limit),
                             scores: Default::default(),
                             screen_scores: None,
                             winner: None,
@@ -1569,6 +1619,8 @@ pub fn run_optimisation_cancellable(
                 focus_neuron: focus,
                 focus_stats: Some(focus_stats.clone()),
                 candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+                candidates_requested: Some(config.candidates),
+                batch_limit: Some(batch_limit),
                 scores: score_map,
                 screen_scores: screen_score_map,
                 winner: winner_stem,
@@ -1829,6 +1881,7 @@ mod tests {
             timeout: Duration::from_millis(500),
             max_experiments: None,
             candidates: 4,
+            scale_candidate_quotas: false,
             min_improvement: 1e-6,
             seed: Some(1),
             scorer_path: PathBuf::from("rust_scorer"),
@@ -1947,6 +2000,7 @@ mod tests {
             timeout: Duration::from_millis(800),
             max_experiments: None,
             candidates: 4,
+            scale_candidate_quotas: false,
             min_improvement: 1e-6,
             seed: Some(1),
             scorer_path: PathBuf::from("rust_scorer"),
@@ -2074,6 +2128,7 @@ mod tests {
             timeout: Duration::from_millis(500),
             max_experiments: None,
             candidates: 2,
+            scale_candidate_quotas: false,
             min_improvement: 1e-6,
             seed: Some(1),
             scorer_path: PathBuf::from("rust_scorer"),
@@ -2168,6 +2223,7 @@ mod tests {
             timeout: Duration::from_millis(500),
             max_experiments: Some(1),
             candidates: 4,
+            scale_candidate_quotas: false,
             min_improvement: 1e-6,
             seed: Some(1),
             scorer_path: PathBuf::from("rust_scorer"),
@@ -2218,6 +2274,7 @@ mod tests {
             timeout: Duration::from_millis(400),
             max_experiments: None,
             candidates: 4,
+            scale_candidate_quotas: false,
             min_improvement: 1e-6,
             seed: None,
             scorer_path: PathBuf::from("rust_scorer"),
@@ -2328,6 +2385,49 @@ mod tests {
         // The field must survive the journal encoding, under its camelCase name.
         let encoded = fs::read_to_string(&result.journal_path).unwrap();
         assert!(encoded.contains("\"focusStats\""));
+    }
+
+    /// Issue #108: every experiment records the budget it asked for and why the
+    /// batch stopped, so an under-filled generator is visible in `report`.
+    #[test]
+    fn experiment_records_the_requested_budget_and_batch_limit() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut config = reproducibility_config(creature_path, training, dir.path().join("out"));
+        // Far past what a two-neuron creature can propose.
+        config.candidates = 64;
+        config.scale_candidate_quotas = true;
+        let scorer = ScriptedScorer {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let result = run_optimisation(&config, &scorer).unwrap();
+
+        let experiments: Vec<ExperimentRecord> = journal_lines(&result.journal_path)
+            .into_iter()
+            .filter_map(|l| match l {
+                JournalLine::Experiment(record) => Some(*record),
+                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+            })
+            .collect();
+        assert!(!experiments.is_empty(), "run wrote at least one experiment");
+        for record in &experiments {
+            assert_eq!(record.candidates_requested, Some(64));
+            let limit = record.batch_limit.expect("batch limit is journalled");
+            if record.candidates.len() < 64 {
+                assert_eq!(
+                    limit,
+                    BatchLimit::Exhausted,
+                    "an under-filled scaled batch must name exhaustion"
+                );
+            } else {
+                assert_eq!(limit, BatchLimit::Budget);
+            }
+        }
+
+        // The fields must survive the journal encoding, under their camelCase names.
+        let encoded = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(encoded.contains("\"candidatesRequested\""));
+        assert!(encoded.contains("\"batchLimit\""));
     }
 
     /// Issue #71: the run header carries the knobs needed to replay the run.
@@ -3083,6 +3183,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             max_experiments: None,
             candidates: 2,
+            scale_candidate_quotas: false,
             min_improvement: 1e-6,
             seed: Some(1),
             scorer_path: PathBuf::from("rust_scorer"),

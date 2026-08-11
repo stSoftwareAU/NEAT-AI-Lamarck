@@ -1,6 +1,6 @@
 //! Benchmark / strategy economics reporting from `experiments.jsonl`.
 
-use crate::candidates::CandidateStrategy;
+use crate::candidates::{BatchLimit, CandidateStrategy};
 use crate::log;
 use crate::run::{JournalLine, RunResult};
 use serde::Serialize;
@@ -240,6 +240,30 @@ pub struct JournalReport {
     pub graft_replay: Option<GraftReplayStats>,
     /// Cross-experiment analysis-memo economics (issue #106).
     pub analysis_memo: AnalysisMemoStats,
+    /// Achieved candidate batch size per experiment (issue #108).
+    pub candidate_batch: CandidateBatchStats,
+}
+
+/// Achieved candidate batch size across a journal (issue #108).
+///
+/// A journal written before the generator recorded its budget reports the
+/// achieved sizes with `requested` `None`: the batches are real, only the
+/// budget they were measured against is unknown.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateBatchStats {
+    /// Mean candidates actually generated per experiment.
+    pub mean_generated: f64,
+    /// Smallest batch generated.
+    pub min_generated: usize,
+    /// Largest batch generated.
+    pub max_generated: usize,
+    /// `--candidates` recorded by the experiments, when they agree on one value.
+    pub requested: Option<usize>,
+    /// Experiments whose batch stopped at the fixed pre-#108 quota ceiling.
+    pub quota_ceiling_experiments: u64,
+    /// Experiments whose generator ran genuinely dry.
+    pub exhausted_experiments: u64,
 }
 
 /// Cross-experiment analysis-memo economics summed over a journal (issue #106).
@@ -296,6 +320,13 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut combo_acceptances_with_dampen = 0u64;
     let mut combo_acceptances_unattributed = 0u64;
     let mut graft_replay: Option<GraftReplayStats> = None;
+    let mut batch_generated_total = 0u64;
+    let mut batch_min: Option<usize> = None;
+    let mut batch_max = 0usize;
+    let mut batch_requested: Option<usize> = None;
+    let mut batch_requested_mixed = false;
+    let mut batch_quota_ceiling = 0u64;
+    let mut batch_exhausted = 0u64;
     let mut focus_all = FocusStatsAccumulator::default();
     let mut focus_accepted = FocusStatsAccumulator::default();
     let mut focus_rejected = FocusStatsAccumulator::default();
@@ -348,6 +379,25 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         for prov in &record.candidates {
             let key = strategy_name(prov.strategy);
             *appearances_total.entry(key).or_default() += 1;
+        }
+
+        batch_generated_total += record.candidates.len() as u64;
+        batch_min = Some(batch_min.map_or(record.candidates.len(), |n: usize| {
+            n.min(record.candidates.len())
+        }));
+        batch_max = batch_max.max(record.candidates.len());
+        if let Some(requested) = record.candidates_requested {
+            match batch_requested {
+                None => batch_requested = Some(requested),
+                // Journals from an A/B with several budgets have no single one.
+                Some(seen) if seen != requested => batch_requested_mixed = true,
+                Some(_) => {}
+            }
+        }
+        match record.batch_limit {
+            Some(BatchLimit::QuotaCeiling) => batch_quota_ceiling += 1,
+            Some(BatchLimit::Exhausted) => batch_exhausted += 1,
+            Some(BatchLimit::Budget) | None => {}
         }
 
         if record.scorer_error.is_some() {
@@ -568,6 +618,18 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         combo_acceptances_unattributed,
         graft_replay,
         analysis_memo,
+        candidate_batch: CandidateBatchStats {
+            mean_generated: if experiments > 0 {
+                batch_generated_total as f64 / experiments as f64
+            } else {
+                0.0
+            },
+            min_generated: batch_min.unwrap_or(0),
+            max_generated: batch_max,
+            requested: batch_requested.filter(|_| !batch_requested_mixed),
+            quota_ceiling_experiments: batch_quota_ceiling,
+            exhausted_experiments: batch_exhausted,
+        },
     })
 }
 
@@ -593,17 +655,7 @@ fn winner_member_indices(record: &crate::run::ExperimentRecord) -> Vec<usize> {
 }
 
 fn strategy_name(strategy: CandidateStrategy) -> String {
-    match strategy {
-        CandidateStrategy::Backprop => "backprop".into(),
-        CandidateStrategy::MeanErrorBias => "mean_error_bias".into(),
-        CandidateStrategy::StatsWeight => "stats_weight".into(),
-        CandidateStrategy::StatsBias => "stats_bias".into(),
-        CandidateStrategy::StatsSkewBias => "stats_skew_bias".into(),
-        CandidateStrategy::StructuralAdd => "structural_add".into(),
-        CandidateStrategy::StructuralAddNeuron => "structural_add_neuron".into(),
-        CandidateStrategy::StructuralWeaken => "structural_weaken".into(),
-        CandidateStrategy::Random => "random".into(),
-    }
+    strategy.label().to_string()
 }
 
 fn format_ms(ms: u128) -> String {
@@ -687,6 +739,22 @@ pub fn print_run_summary(result: &RunResult) {
             report.candidates_scored,
             report.projected_batches_per_45_min
         ));
+        let batch = &report.candidate_batch;
+        if report.experiments > 0 {
+            let requested = match batch.requested {
+                Some(n) => format!("{n} requested"),
+                None => "budget unrecorded".to_string(),
+            };
+            log::detail(&format!(
+                "batch size:    mean {:.1} generated ({}–{} range, {requested}); \
+                 quota-ceiling {}  exhausted {}",
+                batch.mean_generated,
+                batch.min_generated,
+                batch.max_generated,
+                batch.quota_ceiling_experiments,
+                batch.exhausted_experiments
+            ));
+        }
         let memo = &report.analysis_memo;
         if memo.hits + memo.misses > 0 {
             log::detail(&format!(
@@ -838,6 +906,8 @@ mod tests {
             focus_neuron: "h1".into(),
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
+            candidates_requested: None,
+            batch_limit: None,
             scores: BTreeMap::new(),
             screen_scores: None,
             winner: accepted.then(|| "candidate-000".to_string()),
@@ -863,6 +933,41 @@ mod tests {
             writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
         }
         file
+    }
+
+    /// Issue #108: the achieved batch size per experiment is reportable, and
+    /// an under-filled batch says which limit bound it.
+    #[test]
+    fn report_summarises_the_achieved_candidate_batch_size() {
+        let mut small = experiment(1, false);
+        small.candidates = vec![prov(CandidateStrategy::Random); 29];
+        small.candidates_requested = Some(100);
+        small.batch_limit = Some(BatchLimit::QuotaCeiling);
+        let mut large = experiment(2, false);
+        large.candidates = vec![prov(CandidateStrategy::Random); 61];
+        large.candidates_requested = Some(100);
+        large.batch_limit = Some(BatchLimit::Exhausted);
+        let file = journal_of(&[small, large]);
+
+        let batch = report_from_journal(file.path()).unwrap().candidate_batch;
+        assert!((batch.mean_generated - 45.0).abs() < 1e-12);
+        assert_eq!(batch.min_generated, 29);
+        assert_eq!(batch.max_generated, 61);
+        assert_eq!(batch.requested, Some(100));
+        assert_eq!(batch.quota_ceiling_experiments, 1);
+        assert_eq!(batch.exhausted_experiments, 1);
+    }
+
+    /// A journal written before the generator recorded its budget still reports
+    /// the achieved sizes — only the budget behind them is unknown.
+    #[test]
+    fn a_journal_without_batch_fields_still_reports_the_sizes() {
+        let file = journal_of(&[experiment(1, false), experiment(2, false)]);
+        let batch = report_from_journal(file.path()).unwrap().candidate_batch;
+        assert!((batch.mean_generated - 1.0).abs() < 1e-12);
+        assert_eq!(batch.requested, None);
+        assert_eq!(batch.quota_ceiling_experiments, 0);
+        assert_eq!(batch.exhausted_experiments, 0);
     }
 
     /// Issue #70: focus structure/statistics/blame aggregate, split by outcome.
@@ -951,6 +1056,8 @@ mod tests {
             focus_neuron: "h1".into(),
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
+            candidates_requested: None,
+            batch_limit: None,
             scores: BTreeMap::new(),
             screen_scores: None,
             winner: None,
@@ -1247,6 +1354,8 @@ mod tests {
                 prov(CandidateStrategy::Random),
                 prov(CandidateStrategy::Backprop),
             ],
+            candidates_requested: None,
+            batch_limit: None,
             scores: {
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.4);
@@ -1284,6 +1393,8 @@ mod tests {
             focus_neuron: "h1".into(),
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
+            candidates_requested: None,
+            batch_limit: None,
             scores: {
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.400002);
