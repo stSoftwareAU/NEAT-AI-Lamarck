@@ -365,7 +365,11 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         elapsed += record.analysis_ms + record.scorer_ms;
         first_ts = Some(first_ts.map_or(record.timestamp_unix, |t| t.min(record.timestamp_unix)));
         last_ts = Some(last_ts.map_or(record.timestamp_unix, |t| t.max(record.timestamp_unix)));
-        *focus_counts.entry(record.focus_neuron.clone()).or_default() += 1;
+        // An experiment serves every focus in its set (issue #109); a
+        // pre-#109 journal has no set and names exactly one focus.
+        for focus in record_focus_set(&record) {
+            *focus_counts.entry(focus).or_default() += 1;
+        }
 
         if let Some(stats) = &record.focus_stats {
             focus_all.push(stats);
@@ -448,10 +452,14 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             if let Some(delta) = record.improvement {
                 let base = last_best.unwrap_or(record.baseline_score);
                 last_best = Some(base + delta);
-                *focus_accepts
-                    .entry(record.focus_neuron.clone())
-                    .or_default() += 1;
-                *focus_delta.entry(record.focus_neuron.clone()).or_default() += delta;
+                // Credit the focus the winner was actually proposed against,
+                // not whichever focus the experiment drew first (issue #109).
+                let credited = accepted_focuses(&record);
+                let share = delta / credited.len() as f64;
+                for focus in credited {
+                    *focus_accepts.entry(focus.clone()).or_default() += 1;
+                    *focus_delta.entry(focus).or_default() += share;
+                }
             }
             for prov in &record.candidates {
                 let key = strategy_name(prov.strategy);
@@ -652,6 +660,36 @@ fn winner_member_indices(record: &crate::run::ExperimentRecord) -> Vec<usize> {
         .and_then(|s| s.parse::<usize>().ok())
         .map(|idx| vec![idx])
         .unwrap_or_default()
+}
+
+/// Every focus neuron an experiment proposed against (issue #109).
+///
+/// A journal written before the focus set existed names one focus, which is
+/// exactly the set it served.
+fn record_focus_set(record: &crate::run::ExperimentRecord) -> Vec<String> {
+    match &record.focus_neurons {
+        Some(set) if !set.is_empty() => set.clone(),
+        _ => vec![record.focus_neuron.clone()],
+    }
+}
+
+/// Focuses credited with an acceptance (issue #109).
+///
+/// Derived from the winner's members, each of which names the focus it was
+/// proposed for. Falls back to the record's primary focus when the members
+/// cannot be resolved — a pre-#74 journal names only a merged combo stem.
+fn accepted_focuses(record: &crate::run::ExperimentRecord) -> Vec<String> {
+    let mut focuses: Vec<String> = winner_member_indices(record)
+        .into_iter()
+        .filter_map(|idx| record.candidates.get(idx))
+        .map(|prov| prov.focus_neuron.clone())
+        .collect();
+    focuses.sort();
+    focuses.dedup();
+    if focuses.is_empty() {
+        focuses.push(record.focus_neuron.clone());
+    }
+    focuses
 }
 
 fn strategy_name(strategy: CandidateStrategy) -> String {
@@ -904,6 +942,7 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.4,
             focus_neuron: "h1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
             candidates_requested: None,
@@ -933,6 +972,78 @@ mod tests {
             writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
         }
         file
+    }
+
+    /// Provenance naming a specific focus (issue #109).
+    fn prov_for(focus: &str) -> CandidateProvenance {
+        CandidateProvenance {
+            focus_neuron: focus.into(),
+            ..prov(CandidateStrategy::Random)
+        }
+    }
+
+    /// Issue #109: `focusHistory` counts every focus an experiment served, and
+    /// credits the accept to the focus the winner was proposed against.
+    #[test]
+    fn report_renders_focus_history_for_a_multi_focus_journal() {
+        let mut record = experiment(1, true);
+        record.focus_neuron = "a".into();
+        record.focus_neurons = Some(vec!["a".into(), "b".into(), "c".into()]);
+        record.candidates = vec![prov_for("a"), prov_for("b"), prov_for("c")];
+        // The winner is candidate 1 — focus `b`, not the primary.
+        record.winner = Some("candidate-001".into());
+        record.combo_member_indices = Some(vec![1]);
+        record.improvement = Some(2e-6);
+        let file = journal_of(&[record]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.focus_counts.get("a"), Some(&1));
+        assert_eq!(report.focus_counts.get("b"), Some(&1));
+        assert_eq!(report.focus_counts.get("c"), Some(&1));
+        let credited: Vec<&str> = report
+            .focus_history
+            .iter()
+            .filter(|h| h.accepts > 0)
+            .map(|h| h.focus_neuron.as_str())
+            .collect();
+        assert_eq!(credited, vec!["b"], "only the winner's focus is credited");
+        let b = report
+            .focus_history
+            .iter()
+            .find(|h| h.focus_neuron == "b")
+            .expect("focus b in history");
+        assert!((b.cumulative_improvement - 2e-6).abs() < 1e-15);
+    }
+
+    /// Issue #109: a single-focus journal reports exactly what it always did.
+    #[test]
+    fn report_renders_focus_history_for_a_single_focus_journal() {
+        let file = journal_of(&[experiment(1, true), experiment(2, false)]);
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.focus_counts, [("h1".to_string(), 2)].into());
+        assert_eq!(report.focus_history.len(), 1);
+        assert_eq!(report.focus_history[0].focus_neuron, "h1");
+        assert_eq!(report.focus_history[0].accepts, 1);
+    }
+
+    /// Issue #109: a journal written before the focus set existed — and before
+    /// `comboMemberIndices` did — still attributes to the one focus it names.
+    #[test]
+    fn report_reads_a_pre_change_journal_with_no_focus_set() {
+        let mut record = experiment(1, true);
+        record.focus_neurons = None;
+        // Pre-#74: a merged combo stem with no member indices.
+        record.winner = Some("combo-001-k2".into());
+        record.combo_member_indices = None;
+        let file = journal_of(&[record]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.focus_counts, [("h1".to_string(), 1)].into());
+        assert_eq!(report.focus_history[0].focus_neuron, "h1");
+        assert_eq!(
+            report.focus_history[0].accepts, 1,
+            "an unattributable winner still credits the experiment's focus"
+        );
     }
 
     /// Issue #108: the achieved batch size per experiment is reportable, and
@@ -1054,6 +1165,7 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.4,
             focus_neuron: "h1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
             candidates_requested: None,
@@ -1349,6 +1461,7 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.4,
             focus_neuron: "h1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: vec![
                 prov(CandidateStrategy::Random),
@@ -1391,6 +1504,7 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.400002,
             focus_neuron: "h1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
             candidates_requested: None,

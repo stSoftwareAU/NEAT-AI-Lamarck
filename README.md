@@ -31,7 +31,7 @@ This document describes what the code does today. Known gaps are listed under
 
 ```mermaid
 flowchart TD
-    FIT(["current fittest creature"]) --> FOCUS["analyse one selected neuron"]
+    FIT(["current fittest creature"]) --> FOCUS["analyse the selected neuron(s)<br/>(--focus-count, default 1)"]
 
     FOCUS --> STAT["statistical<br/>candidates"]
     FOCUS --> BACK["backprop<br/>candidates"]
@@ -166,6 +166,7 @@ The run always uses these; the flag only overrides the value.
 | `--screen-sample-rate` | `0.05` | Scorer subsample for the screen phase. `1` (or `>= 1`) disables screening. |
 | `--screen-promote-threshold` | `1e-6` | Minimum sample-score Δ before a candidate earns a full-corpus score. |
 | `--focus-policy` | `weighted` | `weighted` \| `high-error` \| `random` \| `unsaturated`. |
+| `--focus-count` | `1` | Focus neurons an experiment proposes against (issue #109). The creature-wide learning and output-residual passes run **once per experiment** whatever this is, so `K > 1` amortises them over `K` focuses and splits `--candidates` between them. `0` aborts the run; `--focus-neuron` pins the focus and caps this at 1. See [Phase 2](#phase-2--select-the-focus-neurons). |
 | `--quick-sample-records` | `25000` | Record cap for `--quick` observations / focus / learning scans. |
 | `--analysis-memo-entries` | `16` | Focus-dependent entries the cross-experiment analysis memo may hold. `0` disables memoisation; every entry is dropped whenever the incumbent changes. See [Memoised analysis across experiments](#memoised-analysis-across-experiments). |
 | `--analysis-threads` | `4` | Worker threads folding record chunks in the two analysis scans. The analysis is **bit-identical at every thread count** — only the wall clock moves. `0` aborts the run. Not `num_cpus` on purpose: the scorer owns the box whenever it runs. See [Parallel analysis scans](#parallel-analysis-scans). |
@@ -287,18 +288,64 @@ grafts are retired. New structural accepts are recorded back into the store —
 for a combo accept, each structural member is recorded at its **solo** weights,
 never the dampened merge, so replay cannot double-dampen.
 
-### Phase 2 — select a focus neuron
+### Phase 2 — select the focus neurons
 
-Each iteration focuses on one non-input neuron. The default policy
-(`--focus-policy weighted`) draws weighted-random by **error influence**: output
-residual L1 mass, or hidden `|total blame|` decayed by distance to the nearest
-output, so deep diluted neurons rarely win. Outputs are usually strongest but
-are not chosen every time, and zero-signal neurons are never selected. The
-selector also folds in each neuron's own accept history.
+Each iteration focuses on `--focus-count` non-input neurons (default 1). The
+default policy (`--focus-policy weighted`) draws weighted-random by **error
+influence**: output residual L1 mass, or hidden `|total blame|` decayed by
+distance to the nearest output, so deep diluted neurons rarely win. Outputs are
+usually strongest but are not chosen every time, and zero-signal neurons are
+never selected. The selector also folds in each neuron's own accept history.
 
 `high-error` always picks the single strongest neuron and sticks there — avoid
 it in production. `random` and `unsaturated` remain available for A/B work, and
 `--focus-neuron` pins a UUID for debug and smoke runs.
+
+#### Several focuses per experiment (`--focus-count`)
+
+Most of the analysis phase is not focus-specific: the backprop learning signal
+and the output-residual scan describe the **whole creature**, and the
+improvement-signal ranking scores every eligible neuron. Spending all of that on
+one focus amortises it over a single neuron — and if that neuron is saturated
+with a dead gradient, over nothing at all.
+
+`--focus-count K` draws `K` distinct focuses from the same ranking, runs the
+focus-specific work (focus stats, incoming sources, residual refine) once per
+focus, and merges the per-focus batches into one scored population.
+`--candidates` is split between the focuses, largest share first.
+
+```mermaid
+flowchart TD
+    S1["scan 1 — pre-focus (once per experiment)<br/>learning signal + output MAE"] --> RANK(["rank every eligible neuron"])
+    RANK --> F1["focus 1<br/>focus scan + candidates"]
+    RANK --> F2["focus 2<br/>focus scan + candidates"]
+    RANK --> FK["focus K<br/>focus scan + candidates"]
+    F1 --> POP[["one merged candidate batch"]]
+    F2 --> POP
+    FK --> POP
+    POP --> SCORE{"screen / promote scoring"}
+    SCORE --> WIN(["winner names its own focus"])
+    WIN --> HIST["boost that focus;<br/>dampen the sterile ones"]
+
+    classDef shared fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef focus fill:#cffafe,stroke:#0e7490,stroke-width:2px,color:#083344
+    classDef pool fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    classDef outcome fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+
+    class S1,RANK shared
+    class F1,F2,FK focus
+    class POP,SCORE pool
+    class WIN,HIST outcome
+```
+
+`K = 1` is the default and reproduces the pre-#109 run exactly, down to the
+candidate stream for a given seed: the extra focuses are drawn only when they
+are asked for, so the rng stream is untouched at `K = 1`.
+
+Attribution follows the issue #74 member rule. Each candidate's provenance names
+the focus it was proposed for, so an accepted winner boosts only **that**
+focus's history in the weighted selector, and every other focus in the set is
+dampened as sterile on its own candidates' full-corpus Δ.
 
 ### Phase 3 — creature-specific analysis
 
@@ -662,7 +709,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -685,7 +732,8 @@ Every following line is one experiment:
 | `seed` | Effective run seed (matches the header). |
 | `incumbentId` | Incumbent shape identity (`in…-out…-n…-s…`). |
 | `baselineScore` | Authoritative baseline for this experiment. |
-| `focusNeuron` | Selected neuron UUID. |
+| `focusNeuron` | Primary focus neuron UUID (the first of `focusNeurons`). |
+| `focusNeurons` | Every focus this experiment proposed against (issue #109). Omitted for a single-focus experiment — `focusNeuron` already says it — and absent from journals written before the field existed. Each entry of `candidates[]` names its own `focusNeuron`, so a winner is attributable to one member of this set. |
 | `focusStats` | The focus scan that drove the experiment (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`. |
 | `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — pass `--scale-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
@@ -723,6 +771,14 @@ thousands of times the accept threshold, so it is never used as the anchor. Both
 `openingBaselineScore` and `totalScoreImprovement` (and with them
 `relativeScoreImprovement`) are `null` until a full-corpus baseline exists,
 rather than reporting a difference between two different quantities.
+
+`focusHistory[]` counts every focus an experiment served, so at
+`--focus-count K` one experiment contributes to `K` rows. Accepts and
+`cumulativeImprovement` are credited to the focus the **winner** was proposed
+against, read from `comboMemberIndices` → `candidates[].focusNeuron`; a win
+spanning several focuses splits its Δ evenly between them. A journal with no
+focus set, or one whose members cannot be resolved, falls back to `focusNeuron`
+— so pre-#109 journals report exactly what they always did.
 
 Wins are attributed from `comboMemberIndices`, so a merged combo win counts once
 for **every** member strategy and is also carried in that row's `comboWins`
