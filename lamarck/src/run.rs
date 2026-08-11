@@ -1448,12 +1448,11 @@ pub fn run_optimisation_cancellable(
                 }
             };
             let screen_ms = scorer_start.elapsed().as_millis();
-            log_scorer_batch_stats_labeled(
-                &screen_scores,
-                screen_ms,
-                config.screen_promote_threshold,
-                "screen",
-            );
+            let decision = screen_promote_decision(&screen_scores, &promote_gate)
+                .map_err(|e| e.to_string())?;
+            // Report the batch against the threshold the gate actually applied,
+            // so the ">threshold" count cannot disagree with what is promoted.
+            log_scorer_batch_stats_labeled(&screen_scores, screen_ms, decision.threshold, "screen");
             consecutive_scorer_failures = 0;
             scorer_successes += 1;
             screen_score_map = Some(
@@ -1463,8 +1462,6 @@ pub fn run_optimisation_cancellable(
                     .collect(),
             );
 
-            let decision = screen_promote_decision(&screen_scores, &promote_gate)
-                .map_err(|e| e.to_string())?;
             let promote_stems = decision.stems.clone();
             screen_tiers = Some(ScreenTierRecord {
                 gate: promote_gate.label().to_string(),
