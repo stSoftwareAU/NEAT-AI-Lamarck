@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`report` measures the screen against the full corpus (Issue #110).** A new
+  `screenCalibration` section pairs every candidate that carries **both** a
+  `screenScores` and a `scores` entry into a (screen Δ, full Δ) point and
+  reports the Spearman rank correlation, the promote gate's precision, the
+  full-corpus spread of what it promoted, the screen's empirical noise floor,
+  the subsample-versus-corpus baseline gap and the screen Δ of every accepted
+  candidate. Only the intersection of the two stem sets is paired — the
+  remainder is counted (`screenOnlyCandidates` / `fullOnlyCandidates`), never
+  dropped — `baseline` is excluded from both sides, a journal with no screen
+  phase reports `screenEnabled: false` instead of a fabricated correlation, and
+  a score map missing its `baseline` anchor fails loudly. `distinctPairs` and
+  `spearmanDistinct` expose repeated proposals so a sample size cannot be
+  overstated. Measured over the journals in hand (222 experiments, 6805 screened
+  candidates, 244 promotions, 136 distinct points, **2** accepts): rank
+  correlation **-0.55**, promote precision **15.2%**, and a `1e-6` threshold
+  sitting at ~1σ of the screen's own noise — written up with its limits in
+  `docs/screen-calibration.md`, reproducible via
+  `scripts/summarise-screen-calibration.sh`. No default flag changes; the
+  promote gate itself is issue #111.
+
 - **The candidate generator's per-phase quotas can scale with the budget (Issue
   #108).** `--scale-candidate-quotas` keeps generating after the fixed opening
   quotas are spent, sweeping the ranked-source × weight-scale and

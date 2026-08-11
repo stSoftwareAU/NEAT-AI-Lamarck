@@ -23,6 +23,7 @@ pub mod propagate_layout;
 pub mod report;
 pub mod run;
 pub mod scorer;
+pub mod screen_calibration;
 pub mod structural;
 pub mod tags;
 
@@ -67,5 +68,9 @@ pub use run::{
 pub use scorer::{
     ExternalScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats,
     screen_promote_stems, write_promote_batch,
+};
+pub use screen_calibration::{
+    AcceptedScreenPoint, BaselineSampleGap, DeltaDistribution, ScreenCalibration,
+    ScreenCalibrationAccumulator, ScreenNoise, ScreenPair, spearman_rank_correlation,
 };
 pub use tags::{CreatureMeta, CreatureTag, LamarckProgress, serialize_creature_with_meta};
