@@ -10,6 +10,7 @@ pub mod cancel;
 pub mod candidates;
 pub mod combos;
 pub mod config;
+pub mod failed_cache;
 pub mod focus;
 pub mod grafts;
 pub mod learning;
@@ -35,6 +36,13 @@ pub use config::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES, DEFAULT_MIN_IMPROVEMENT,
     DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
     LamarckConfig,
+};
+pub use failed_cache::{
+    CandidateFingerprint, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS, DEFAULT_FAILED_CACHE_MAX_ENTRIES,
+    DEFAULT_FAILED_CACHE_TOLERANCE_ABS, DEFAULT_FAILED_CACHE_TOLERANCE_REL, FailedCacheStats,
+    FailedCandidateCache, FilteredBatch, FingerprintBucketKey, RebuildReport, RebuildSource,
+    Tolerance, filter_and_backfill, insert_failures, load_or_rebuild, rebuild_from_journal,
+    scored_candidate_indices, write_snapshot,
 };
 pub use focus::{FocusChoice, FocusPolicy, WeightedFocusSelector};
 pub use grafts::{

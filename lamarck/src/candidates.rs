@@ -17,7 +17,11 @@ use std::fs;
 use std::path::Path;
 
 /// Strategy label recorded in the experiment journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Hash` is part of the failed-candidate cache's bucket key (issue #88): the
+/// strategy is one of the discrete fields that must match exactly for two
+/// candidates to be the same proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateStrategy {
     /// Conventional backprop-derived bias/weight change.

@@ -9,6 +9,10 @@ use crate::combos::{
     ComboSelectRequest, ComboSelection, StackDampenReport, select_best_with_combinations,
 };
 use crate::config::LamarckConfig;
+use crate::failed_cache::{
+    FailedCandidateCache, Tolerance, filter_and_backfill, insert_failures, load_or_rebuild,
+    scored_candidate_indices, snapshot_path, write_snapshot,
+};
 use crate::focus::{
     FixedFocusSelector, FocusChoice, FocusNeuronStats, FocusPolicy, FocusSelector,
     HighErrorFocusSelector, RandomFocusSelector, UnsaturatedFocusSelector, WeightedFocusSelector,
@@ -106,6 +110,24 @@ pub struct ExperimentRecord {
     /// Per-target dampen detail for the accepted winner (when any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combo_dampen: Option<StackDampenReport>,
+    /// Proposals dropped this experiment by a failed-candidate cache hit (#91).
+    ///
+    /// This and the other `cache*` fields are omitted when `--failed-cache` is
+    /// off, and are absent from journals written before the cache existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_skipped: Option<usize>,
+    /// Replacement proposals accepted into the batch to refill it (#91).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_backfilled: Option<usize>,
+    /// Live cache entries after this experiment (#91).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_size: Option<usize>,
+    /// Milliseconds spent filtering and backfilling the batch (#91).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_lookup_ms: Option<u128>,
+    /// Milliseconds spent in the cache's most recent age sweep (#91).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_maintenance_ms: Option<u128>,
 }
 
 /// Marks a journal line as the one-off run header (issue #71).
@@ -218,6 +240,31 @@ pub struct RunConfigRecord {
     /// Backprop bias-step cap in force for this run (issue #96 A/B arm).
     #[serde(default)]
     pub backprop_max_bias_adjustment_scale: Option<f64>,
+    /// Whether the failed-candidate cache was on (issue #69).
+    ///
+    /// The cache knobs are omitted entirely from a cache-off header: a run that
+    /// never consulted the cache has no cache settings to identify it by, and
+    /// the benchmark sub-issue tells paired runs apart on the presence of these
+    /// fields.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub failed_cache: bool,
+    /// Failed-candidate size cap when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_max_entries: Option<usize>,
+    /// Failed-candidate age bound in seconds when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_max_age_seconds: Option<u64>,
+    /// Near-duplicate absolute tolerance when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_tolerance_abs: Option<f64>,
+    /// Near-duplicate relative tolerance when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_tolerance_rel: Option<f64>,
+}
+
+/// `skip_serializing_if` helper for a flag that is omitted when unset.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl RunConfigRecord {
@@ -246,6 +293,19 @@ impl RunConfigRecord {
             graft_replay_budget_seconds: config.graft_replay_budget.map(|d| d.as_secs()),
             backprop_learning_rate: config.backprop_learning_rate,
             backprop_max_bias_adjustment_scale: config.backprop_max_bias_adjustment_scale,
+            failed_cache: config.failed_cache,
+            failed_cache_max_entries: config
+                .failed_cache
+                .then_some(config.failed_cache_max_entries),
+            failed_cache_max_age_seconds: config
+                .failed_cache
+                .then_some(config.failed_cache_max_age_seconds),
+            failed_cache_tolerance_abs: config
+                .failed_cache
+                .then_some(config.failed_cache_tolerance_abs),
+            failed_cache_tolerance_rel: config
+                .failed_cache
+                .then_some(config.failed_cache_tolerance_rel),
         }
     }
 }
@@ -696,6 +756,38 @@ pub fn run_optimisation_cancellable(
         log::detail(&format!("focus policy: {}", config.focus_policy.label()));
     }
 
+    // Failed-candidate cache (issue #69), off by default. Rebuilt from this
+    // output directory's journal — or its snapshot — so rejections survive
+    // across runs. Rebuild cost is overhead the cache has to earn back, so it
+    // is logged rather than assumed negligible.
+    let mut failed_cache = if config.failed_cache {
+        let (cache, report) = load_or_rebuild(
+            &config.output_dir,
+            Tolerance::new(
+                config.failed_cache_tolerance_abs,
+                config.failed_cache_tolerance_rel,
+            ),
+            config.failed_cache_max_entries,
+            config.failed_cache_max_age_seconds,
+            unix_now(),
+        );
+        if let Some(reason) = &report.snapshot_rejected {
+            log::warn(&format!("failed-cache: ignoring snapshot — {reason}"));
+        }
+        log::info(&format!(
+            "failed-cache: {} entr(ies) from {} in {}ms (cap={}, max_age={}s, worst case {} bytes)",
+            report.entries,
+            report.source.label(),
+            report.elapsed_ms,
+            cache.max_entries(),
+            cache.max_age_seconds(),
+            cache.worst_case_bytes()
+        ));
+        Some(cache)
+    } else {
+        None
+    };
+
     let stop_reason = loop {
         // Stopping rules, cheapest and most urgent first.
         if cancel.is_cancelled() {
@@ -941,13 +1033,52 @@ pub fn run_optimisation_cancellable(
             structural_only: config.structural_only,
         };
         let gen_start = Instant::now();
-        let candidates = generate_candidates(&gen_ctx, config.candidates, &mut rng);
+        let mut candidates = generate_candidates(&gen_ctx, config.candidates, &mut rng);
         let generate_ms = gen_start.elapsed().as_millis();
         let analysis_ms = analysis_start.elapsed().as_millis();
         log::ok(&format!(
             "generated {} candidates in {generate_ms}ms (analysis total {analysis_ms}ms)",
             candidates.len()
         ));
+
+        // The identity every candidate in this batch was proposed against.
+        // Captured *before* any acceptance swaps the incumbent: a post-accept
+        // id would key the batch's rejections to a creature they were never
+        // proposed for (issue #91).
+        let experiment_incumbent_id = incumbent_id(&incumbent);
+        let mut cache_skipped = None;
+        let mut cache_backfilled = None;
+        let mut cache_lookup_ms = None;
+        if let Some(cache) = failed_cache.as_ref() {
+            let filtered = filter_and_backfill(
+                cache,
+                &experiment_incumbent_id,
+                candidates,
+                config.candidates,
+                unix_now(),
+                cancel,
+                |wanted| generate_candidates(&gen_ctx, wanted, &mut rng),
+            );
+            if filtered.short_batch && !filtered.cancelled {
+                log::warn(&format!(
+                    "failed-cache: SHORT BATCH — scoring {} of {} candidates after {} cache skip(s) and {} backfill(s) from {} proposal(s); the generator can only re-propose known-failed candidates",
+                    filtered.candidates.len(),
+                    config.candidates,
+                    filtered.skipped,
+                    filtered.backfilled,
+                    filtered.proposals
+                ));
+            } else if filtered.skipped > 0 {
+                log::detail(&format!(
+                    "failed-cache: skipped {} known-failed candidate(s), backfilled {} in {}ms",
+                    filtered.skipped, filtered.backfilled, filtered.lookup_ms
+                ));
+            }
+            cache_skipped = Some(filtered.skipped);
+            cache_backfilled = Some(filtered.backfilled);
+            cache_lookup_ms = Some(filtered.lookup_ms);
+            candidates = filtered.candidates;
+        }
 
         // Scoring dominates an experiment, so poll here: a signal arriving
         // during analysis abandons this experiment before any working
@@ -1023,6 +1154,16 @@ pub fn run_optimisation_cancellable(
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
+                            // A scorer crash is not evidence about the
+                            // mutations, so nothing is cached — but the work
+                            // the cache already saved this experiment is.
+                            cache_skipped,
+                            cache_backfilled,
+                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
+                            cache_lookup_ms,
+                            cache_maintenance_ms: failed_cache
+                                .as_ref()
+                                .map(FailedCandidateCache::last_maintenance_ms),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -1065,6 +1206,28 @@ pub fn run_optimisation_cancellable(
                     false,
                     config.min_improvement,
                 );
+                // Screen-dropped candidates were scored on the sample and did
+                // not clear the promote threshold: exactly the redundant work
+                // the cache exists to avoid repeating (issue #91).
+                let mut cache_size = None;
+                let mut cache_maintenance_ms = None;
+                if let Some(cache) = failed_cache.as_mut() {
+                    let screened = scored_candidate_indices(
+                        screen_score_map
+                            .iter()
+                            .flat_map(|scores| scores.keys())
+                            .map(String::as_str),
+                    );
+                    insert_failures(
+                        cache,
+                        &experiment_incumbent_id,
+                        &candidates,
+                        screened,
+                        unix_now(),
+                    );
+                    cache_size = Some(cache.len());
+                    cache_maintenance_ms = Some(cache.last_maintenance_ms());
+                }
                 append_journal(
                     &journal_path,
                     &ExperimentRecord {
@@ -1092,6 +1255,11 @@ pub fn run_optimisation_cancellable(
                         combos_scored: None,
                         combos_dampened: None,
                         combo_dampen: None,
+                        cache_skipped,
+                        cache_backfilled,
+                        cache_size,
+                        cache_lookup_ms,
+                        cache_maintenance_ms,
                     },
                 )?;
                 if !config.preserve_losers {
@@ -1157,6 +1325,13 @@ pub fn run_optimisation_cancellable(
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
+                            cache_skipped,
+                            cache_backfilled,
+                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
+                            cache_lookup_ms,
+                            cache_maintenance_ms: failed_cache
+                                .as_ref()
+                                .map(FailedCandidateCache::last_maintenance_ms),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -1220,6 +1395,16 @@ pub fn run_optimisation_cancellable(
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
+                            // A scorer crash is not evidence about the
+                            // mutations, so nothing is cached — but the work
+                            // the cache already saved this experiment is.
+                            cache_skipped,
+                            cache_backfilled,
+                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
+                            cache_lookup_ms,
+                            cache_maintenance_ms: failed_cache
+                                .as_ref()
+                                .map(FailedCandidateCache::last_maintenance_ms),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -1423,6 +1608,34 @@ pub fn run_optimisation_cancellable(
             config.min_improvement,
         );
 
+        // Every scored candidate that did not win is a known failure, keyed to
+        // the incumbent it was proposed against rather than to a winner that
+        // has already replaced it (issue #91).
+        let mut cache_size = None;
+        let mut cache_maintenance_ms = None;
+        if let Some(cache) = failed_cache.as_mut() {
+            let mut failed = scored_candidate_indices(
+                scores.keys().map(String::as_str).chain(
+                    screen_score_map
+                        .iter()
+                        .flat_map(|screen| screen.keys())
+                        .map(String::as_str),
+                ),
+            );
+            for index in winner_member_indices.iter().flatten() {
+                failed.remove(index);
+            }
+            insert_failures(
+                cache,
+                &experiment_incumbent_id,
+                &candidates,
+                failed,
+                unix_now(),
+            );
+            cache_size = Some(cache.len());
+            cache_maintenance_ms = Some(cache.last_maintenance_ms());
+        }
+
         let score_map = scores.iter().map(|(k, v)| (k.clone(), v.score)).collect();
         append_journal(
             &journal_path,
@@ -1448,6 +1661,11 @@ pub fn run_optimisation_cancellable(
                 combos_scored,
                 combos_dampened,
                 combo_dampen,
+                cache_skipped,
+                cache_backfilled,
+                cache_size,
+                cache_lookup_ms,
+                cache_maintenance_ms,
             },
         )?;
 
@@ -1499,6 +1717,20 @@ pub fn run_optimisation_cancellable(
                 .unwrap_or("(no lamarck tag)")
         ));
         fs::write(&best_path, &tagged).map_err(|e| e.to_string())?;
+    }
+
+    // Snapshot the cache so the next run does not have to replay the journal.
+    // A failed write is a warning, never a failed run: the journal remains the
+    // source of truth and the next startup can always rebuild from it.
+    if let Some(cache) = failed_cache.as_ref() {
+        match write_snapshot(&config.output_dir, cache, unix_now()) {
+            Ok(bytes) => log::info(&format!(
+                "failed-cache: wrote {} entr(ies) ({bytes} bytes) to {}",
+                cache.len(),
+                snapshot_path(&config.output_dir).display()
+            )),
+            Err(e) => log::warn(&format!("failed-cache: could not write snapshot: {e}")),
+        }
     }
 
     Ok(RunResult {
@@ -1711,6 +1943,11 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            failed_cache: false,
+            failed_cache_max_entries: 0,
+            failed_cache_max_age_seconds: 0,
+            failed_cache_tolerance_abs: 0.0,
+            failed_cache_tolerance_rel: 0.0,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -1827,6 +2064,11 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            failed_cache: false,
+            failed_cache_max_entries: 0,
+            failed_cache_max_age_seconds: 0,
+            failed_cache_tolerance_abs: 0.0,
+            failed_cache_tolerance_rel: 0.0,
         };
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
@@ -1953,6 +2195,11 @@ mod tests {
             graft_replay_budget: Some(Duration::from_secs(5)),
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            failed_cache: false,
+            failed_cache_max_entries: 0,
+            failed_cache_max_age_seconds: 0,
+            failed_cache_tolerance_abs: 0.0,
+            failed_cache_tolerance_rel: 0.0,
         };
         let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
         (result, grafts_path)
@@ -2044,6 +2291,11 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            failed_cache: false,
+            failed_cache_max_entries: 0,
+            failed_cache_max_age_seconds: 0,
+            failed_cache_tolerance_abs: 0.0,
+            failed_cache_tolerance_rel: 0.0,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -2092,6 +2344,11 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            failed_cache: false,
+            failed_cache_max_entries: 0,
+            failed_cache_max_age_seconds: 0,
+            failed_cache_tolerance_abs: 0.0,
+            failed_cache_tolerance_rel: 0.0,
         }
     }
 
@@ -2531,6 +2788,179 @@ mod tests {
         );
     }
 
+    /// Issue #96: the backprop cap A/B is only readable from its journal if the
+    /// cap in force is recorded — the same holds for the cache knobs (#89).
+    #[test]
+    fn run_header_records_failed_cache_knobs() {
+        // Cache off: the knobs are omitted entirely, so a paired benchmark can
+        // tell a cache-off arm from a cache-on one by their presence alone.
+        let off = RunConfigRecord::from_config(&LamarckConfig::default());
+        assert!(!off.failed_cache);
+        assert_eq!(off.failed_cache_max_entries, None);
+        let encoded = serde_json::to_string(&off).unwrap();
+        assert!(
+            !encoded.contains("failedCache"),
+            "a cache-off header must carry no cache knobs: {encoded}"
+        );
+
+        let config = LamarckConfig {
+            failed_cache: true,
+            failed_cache_max_entries: 1_234,
+            failed_cache_max_age_seconds: 60,
+            failed_cache_tolerance_abs: 1e-9,
+            failed_cache_tolerance_rel: 1e-6,
+            ..LamarckConfig::default()
+        };
+        let record = RunConfigRecord::from_config(&config);
+        assert!(record.failed_cache);
+        assert_eq!(record.failed_cache_max_entries, Some(1_234));
+        assert_eq!(record.failed_cache_max_age_seconds, Some(60));
+        assert_eq!(record.failed_cache_tolerance_abs, Some(1e-9));
+        assert_eq!(record.failed_cache_tolerance_rel, Some(1e-6));
+
+        // The arm is identified from its journal alone, so the fields have to
+        // survive read-back under their camelCase names.
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert!(
+            encoded.contains("\"failedCache\":true")
+                && encoded.contains("\"failedCacheMaxEntries\":1234")
+                && encoded.contains("\"failedCacheMaxAgeSeconds\":60"),
+            "cache knobs missing from the encoded header: {encoded}"
+        );
+        let decoded: RunConfigRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, record);
+
+        // Headers written before the knobs existed must still parse.
+        let legacy: RunConfigRecord = serde_json::from_str(
+            &serde_json::to_string(&RunConfigRecord::from_config(&LamarckConfig::default()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!legacy.failed_cache);
+    }
+
+    /// Issue #91: with the cache off the journal must look exactly as it did
+    /// before the feature existed — no cache field, and no extra RNG draw.
+    #[test]
+    fn cache_off_omits_cache_journal_fields() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut config = reproducibility_config(creature_path, training, dir.path().join("out"));
+        config.seed = Some(1);
+        config.max_experiments = Some(2);
+        config.timeout = Duration::from_secs(300);
+        assert!(!config.failed_cache, "the default path is cache-off");
+
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+
+        let encoded = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(
+            !encoded.contains("cacheSkipped")
+                && !encoded.contains("cacheBackfilled")
+                && !encoded.contains("cacheSize")
+                && !encoded.contains("cacheLookupMs")
+                && !encoded.contains("cacheMaintenanceMs")
+                && !encoded.contains("failedCache"),
+            "a cache-off run must journal exactly what it journalled before: {encoded}"
+        );
+        for record in journal_lines(&result.journal_path)
+            .into_iter()
+            .filter_map(|l| match l {
+                JournalLine::Experiment(record) => Some(*record),
+                _ => None,
+            })
+        {
+            assert_eq!(record.cache_skipped, None);
+            assert_eq!(record.cache_backfilled, None);
+            assert_eq!(record.cache_size, None);
+        }
+        assert!(
+            !crate::failed_cache::snapshot_path(&config.output_dir).exists(),
+            "a cache-off run must not write a snapshot"
+        );
+    }
+
+    /// Issue #91: once a batch has been rejected, re-proposing it must show up
+    /// as a skip rather than as another scorer batch.
+    #[test]
+    fn cache_on_journals_skip_counts_after_rejects() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out");
+        let mut config = reproducibility_config(creature_path, training, out.clone());
+        config.seed = Some(1);
+        config.timeout = Duration::from_secs(300);
+        config.max_experiments = Some(3);
+        // Every candidate loses on the sample, so each experiment fills the
+        // cache with the whole batch and the next one keeps re-proposing it.
+        config.screen_sample_rate = Some(0.05);
+        config.screen_promote_threshold = 0.0;
+        config.failed_cache = true;
+        config.failed_cache_max_entries = 1_000;
+        config.failed_cache_max_age_seconds = 0;
+        config.failed_cache_tolerance_abs = crate::failed_cache::DEFAULT_FAILED_CACHE_TOLERANCE_ABS;
+        config.failed_cache_tolerance_rel = crate::failed_cache::DEFAULT_FAILED_CACHE_TOLERANCE_REL;
+
+        let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
+        assert_eq!(result.acceptances, 0, "nothing clears the screen");
+
+        let experiments: Vec<ExperimentRecord> = journal_lines(&result.journal_path)
+            .into_iter()
+            .filter_map(|l| match l {
+                JournalLine::Experiment(record) => Some(*record),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            experiments.len() >= 2,
+            "need a second look at the same knobs"
+        );
+
+        let first = &experiments[0];
+        assert_eq!(first.cache_skipped, Some(0), "an empty cache skips nothing");
+        assert!(
+            first.cache_size.is_some_and(|size| size > 0),
+            "the rejected batch is cached: {:?}",
+            first.cache_size
+        );
+        assert!(
+            experiments
+                .iter()
+                .skip(1)
+                .any(|record| record.cache_skipped.is_some_and(|skipped| skipped > 0)),
+            "a re-proposed known-failed candidate must be skipped, not re-scored"
+        );
+        for record in &experiments {
+            assert!(record.cache_lookup_ms.is_some());
+            assert!(record.cache_maintenance_ms.is_some());
+        }
+
+        // The knobs are in the header and the cache is on disk for the next run.
+        let encoded = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(encoded.contains("\"failedCache\":true"));
+        assert!(encoded.contains("\"cacheSkipped\""));
+        let snapshot = crate::failed_cache::snapshot_path(&out);
+        assert!(snapshot.is_file(), "the run snapshots its cache");
+        let (restored, report) = crate::failed_cache::load_or_rebuild(
+            &out,
+            crate::failed_cache::Tolerance::new(
+                config.failed_cache_tolerance_abs,
+                config.failed_cache_tolerance_rel,
+            ),
+            config.failed_cache_max_entries,
+            config.failed_cache_max_age_seconds,
+            unix_now(),
+        );
+        assert_eq!(report.source, crate::failed_cache::RebuildSource::Snapshot);
+        assert!(!restored.is_empty(), "the next run starts warm");
+    }
+
     #[test]
     fn consecutive_scorer_failures_abort() {
         let dir = tempdir().unwrap();
@@ -2560,6 +2990,11 @@ mod tests {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            failed_cache: false,
+            failed_cache_max_entries: 0,
+            failed_cache_max_age_seconds: 0,
+            failed_cache_tolerance_abs: 0.0,
+            failed_cache_tolerance_rel: 0.0,
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));

@@ -8,6 +8,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Known-failed candidates are no longer re-scored (Issues #88–#91).** Lamarck
+  re-proposes the same mutations across experiments and across runs, and
+  re-scoring one that already failed costs full scorer time for nothing. The new
+  `lamarck/src/failed_cache/` module remembers rejections and keeps them out of
+  the batch, behind `--failed-cache` (**off by default** until the benchmark
+  sub-issue of #69 says it pays for itself):
+  - *Identity (#88).* A candidate is fingerprinted from its provenance —
+    incumbent, strategy, focus neuron, mutation — never from its creature JSON.
+    The changed scalar matches within a relative-**or**-absolute tolerance
+    (`--failed-cache-tolerance-abs` / `-rel`), because production deltas pass
+    through zero *and* span orders of magnitude. Non-finite values never match,
+    not even themselves. The discrete part is the hash key, so a lookup only
+    compares scalars inside one bucket.
+  - *Bounded store (#89).* The cache is bounded by both a size cap
+    (`--failed-cache-max-entries`, default `50000` ≈ 25 MiB worst case) and an
+    age bound (`--failed-cache-max-age-seconds`, default 7 days), with an
+    amortised sweep so lookups never scan. Entries age from insertion rather
+    than last use, and survive an incumbent acceptance.
+  - *Persistence (#90).* The cache is rebuilt at startup from
+    `experiments.jsonl`, so it can never disagree with the run history, and
+    snapshotted to `failed-candidates.cache.json` to avoid re-reading a long
+    journal. A missing, corrupt, version-mismatched or differently-tuned
+    snapshot falls back to a journal rebuild instead of failing the run.
+    Experiments with a `scorerError` contribute nothing (a scorer crash is not
+    evidence about the mutation), and neither do accepted experiments (their
+    journalled `incumbentId` is post-accept).
+  - *Run loop (#91).* Cache hits are dropped before the batch is written and the
+    batch is **backfilled** back up to `--candidates`, because the scorer batch
+    is the unit of cost and a short batch just wastes the box. The retry is
+    bounded and a short batch is logged loudly. Each experiment journals
+    `cacheSkipped`, `cacheBackfilled`, `cacheSize`, `cacheLookupMs` and
+    `cacheMaintenanceMs`, and the `runHeader` records the knobs in force.
+    With the cache off nothing runs: no extra RNG draw, no new journal field,
+    and the #71 replay contract for existing runs is untouched.
+
 - **The three exclusive-box economics arms are wired up (Issue #96).**
   `scripts/run-followup-economics.sh` gains an `output-neuron` arm (pins
   `--focus-neuron output-0`, the slice `--focus-policy high-error` cannot reach

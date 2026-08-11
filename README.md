@@ -186,6 +186,11 @@ Leaving these unset changes behaviour.
 | `--graft-replay-budget-seconds` | Wall-clock budget for Phase-G replay. Default: 10% of `--timeout-seconds`. |
 | `--backprop-learning-rate` | Learning rate for `backprop` candidate proposals. Default: `0.01` (the NEAT-AI port value). Must be `> 0` — a non-positive or non-finite value aborts the run instead of reverting to the default. Recorded in the journal `runHeader` so an A/B arm is identifiable. |
 | `--backprop-max-bias-adjustment-scale` | ± cap on one `backprop` bias step (`BackpropConfig::maximum_bias_adjustment_scale`). Default: `10`. On a focus whose blame mass saturates the cap the step is cap-bound at every learning rate, so this is the knob that resizes it — see [`docs/followup-economics.md`](docs/followup-economics.md). Must be `> 0`; a non-positive or non-finite value aborts the run. Recorded in the journal `runHeader`. |
+| `--failed-cache` | Skip candidates a previous experiment or run already scored as failures, and backfill the batch so the scorer still runs at full width. **Off by default** until the feature proves it saves more scorer time than it costs. The cache is rebuilt at startup from `experiments.jsonl` (or its `failed-candidates.cache.json` snapshot), so it survives across runs. Turning it on adds RNG draws during backfill; with it off the run's RNG stream and journal are unchanged. |
+| `--failed-cache-max-entries` | Size cap on the failed-candidate cache; the oldest entries are evicted past it. Default: `50000`, a worst case of ~25 MiB resident. `0` disables the cache. |
+| `--failed-cache-max-age-seconds` | Drop failed-candidate entries older than this. Entries age from insertion, not from last use. Default: `604800` (7 days). `0` keeps entries until the size cap evicts them. |
+| `--failed-cache-tolerance-abs` | Absolute bound for treating two candidate values as the same proposal: they match when their difference is within `max(abs, rel × largest magnitude)`. Default: `1e-9`; this is the bound that matches deltas passing through zero, where a relative bound has no scale to work with. |
+| `--failed-cache-tolerance-rel` | Relative bound for the same comparison, which carries the match at large magnitudes. Default: `1e-6`. Changing either tolerance invalidates an existing cache snapshot, which is then rebuilt from the journal. |
 
 ## How a run works
 
@@ -514,7 +519,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`. A cache-on run additionally records `failedCache`, `failedCacheMaxEntries`, `failedCacheMaxAgeSeconds`, `failedCacheToleranceAbs` and `failedCacheToleranceRel`; these are omitted entirely when the cache is off, which is how a paired benchmark tells the two arms apart. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -546,6 +551,8 @@ Every following line is one experiment:
 | `scorerError` | Present when the batch failed. |
 | `comboMembers`, `combosScored`, `combosDampened`, `comboDampen` | Combination-scoring detail. |
 | `comboMemberIndices` | Indices into `candidates[]` of the accepted winner's members — one entry for a single, several for a merged `combo-NNN-kM`. Present only on an acceptance, and absent from journals written before issue #74. |
+| `cacheSkipped`, `cacheBackfilled` | Proposals dropped by a failed-candidate cache hit, and replacement proposals accepted to refill the batch. Omitted unless `--failed-cache` is on. |
+| `cacheSize`, `cacheLookupMs`, `cacheMaintenanceMs` | Live cache entries after the experiment, time spent filtering and backfilling, and time spent in the cache's most recent age sweep. Omitted unless `--failed-cache` is on. |
 
 Summarise strategy economics from a journal with the `report` subcommand:
 

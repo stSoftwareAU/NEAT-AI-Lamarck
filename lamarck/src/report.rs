@@ -793,6 +793,11 @@ mod tests {
             combos_scored: None,
             combos_dampened: None,
             combo_dampen: None,
+            cache_skipped: None,
+            cache_backfilled: None,
+            cache_size: None,
+            cache_lookup_ms: None,
+            cache_maintenance_ms: None,
         }
     }
 
@@ -903,6 +908,11 @@ mod tests {
             combos_scored: None,
             combos_dampened: None,
             combo_dampen: None,
+            cache_skipped: None,
+            cache_backfilled: None,
+            cache_size: None,
+            cache_lookup_ms: None,
+            cache_maintenance_ms: None,
         };
         writeln!(file, "{}", serde_json::to_string(&header).unwrap()).unwrap();
         writeln!(file, "{}", serde_json::to_string(&experiment).unwrap()).unwrap();
@@ -1207,6 +1217,11 @@ mod tests {
             combos_scored: None,
             combos_dampened: None,
             combo_dampen: None,
+            cache_skipped: None,
+            cache_backfilled: None,
+            cache_size: None,
+            cache_lookup_ms: None,
+            cache_maintenance_ms: None,
         };
         let rejected = ExperimentRecord {
             experiment_number: 2,
@@ -1235,6 +1250,11 @@ mod tests {
             combos_scored: None,
             combos_dampened: None,
             combo_dampen: None,
+            cache_skipped: None,
+            cache_backfilled: None,
+            cache_size: None,
+            cache_lookup_ms: None,
+            cache_maintenance_ms: None,
         };
         writeln!(file, "{}", serde_json::to_string(&accepted).unwrap()).unwrap();
         writeln!(file, "{}", serde_json::to_string(&rejected).unwrap()).unwrap();
