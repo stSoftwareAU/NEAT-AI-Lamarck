@@ -609,6 +609,14 @@ Scoring runs in three steps:
    `k^-0.5` so a merge is not louder than the sum of its evidence. Conflicting
    edits to the same neuron or edge are skipped.
 
+How well that screen predicts the full-corpus verdict is measured, from the
+journals already in hand, in
+[`docs/screen-calibration.md`](docs/screen-calibration.md): over 244 promotions
+the rank correlation between screen Δ and full-corpus Δ is **-0.55**, and the
+`1e-6` threshold sits at about **one** standard deviation of the screen's own
+sampling noise. No default is changed on that evidence — the promote gate is
+issue #111.
+
 Scorer argv is the locked two-argument form plus the screen sampling flags only;
 Lamarck never passes `--gpu` or `--cost`, so scorer defaults decide backend and
 loss. Pass `--screen-sample-rate 1` to disable screening.
@@ -798,6 +806,27 @@ Phase-G replay gets its own `graftReplay` bucket — `replays`, `accepts`,
 `graftsApplied`, `cumulativeImprovement`, `scorerFailures` and `replayErrors` —
 which is `null` for a journal with no replay line.
 
+The `screenCalibration` bucket measures the screen against the full corpus from
+the two score maps the journal already holds (issue #110). Every candidate
+scored on **both** sides becomes a paired (screen Δ, full Δ) point, from which it
+reports the Spearman rank correlation (`spearman`, plus `spearmanDistinct` over
+`distinctPairs` — the same mutation re-proposed against the same focus is one
+hypothesis, not several), the promote gate's precision (`promotionPrecision`,
+`promotedImproved` / `promotedWorse` / `promotedClearingAcceptBar` /
+`promotedMateriallyWorse`), the `fullDelta` spread of what was promoted, the
+`screenNoise` floor (screen Δ among candidates the full corpus scored flat), the
+`baselineSampleGap` (the same creature scored on the subsample and the corpus),
+and the screen Δ of every `acceptedCandidates` entry. Only the intersection of
+the two stem sets is paired: the remainder is counted in `screenOnlyCandidates`
+(screened, never promoted) and `fullOnlyCandidates`, never dropped silently, and
+`baseline` is excluded from both sides because it is the anchor the deltas are
+measured against. A journal with screening disabled reports
+`screenEnabled: false` and a `null` correlation rather than a fabricated one.
+Run it over several journals with
+`scripts/summarise-screen-calibration.sh JOURNAL...`; the measured result for
+the journals in hand is
+[`docs/screen-calibration.md`](docs/screen-calibration.md).
+
 `focusStats` is aggregated into a `focusStats` report object with three buckets —
 `all`, `accepted` and `rejected` — each carrying `experiments`,
 `meanIncomingCount`, `meanSaturationFraction`, `meanNearZeroFraction`,
@@ -908,7 +937,8 @@ NEAT-AI-Lamarck/
 ├── scripts/
 ├── docs/
 │   ├── architecture.md
-│   └── baseline-economics.md
+│   ├── baseline-economics.md
+│   └── screen-calibration.md
 └── lamarck/src/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
@@ -927,6 +957,7 @@ NEAT-AI-Lamarck/
     ├── scorer.rs
     ├── run.rs
     ├── report.rs
+    ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
     └── log.rs
 ```

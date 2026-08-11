@@ -3,6 +3,7 @@
 use crate::candidates::{BatchLimit, CandidateStrategy};
 use crate::log;
 use crate::run::{JournalLine, RunResult};
+use crate::screen_calibration::{ScreenCalibration, ScreenCalibrationAccumulator};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -242,6 +243,8 @@ pub struct JournalReport {
     pub analysis_memo: AnalysisMemoStats,
     /// Achieved candidate batch size per experiment (issue #108).
     pub candidate_batch: CandidateBatchStats,
+    /// How well the 5% screen predicted the full-corpus score (issue #110).
+    pub screen_calibration: ScreenCalibration,
 }
 
 /// Achieved candidate batch size across a journal (issue #108).
@@ -327,6 +330,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut batch_requested_mixed = false;
     let mut batch_quota_ceiling = 0u64;
     let mut batch_exhausted = 0u64;
+    let mut screen_calibration = ScreenCalibrationAccumulator::default();
     let mut focus_all = FocusStatsAccumulator::default();
     let mut focus_accepted = FocusStatsAccumulator::default();
     let mut focus_rejected = FocusStatsAccumulator::default();
@@ -339,7 +343,10 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         // The run header (issue #71) is run metadata, not an experiment; the
         // graft-replay line (issue #74) is its own bucket.
         let record = match JournalLine::parse(&line)? {
-            JournalLine::Header(_) => continue,
+            JournalLine::Header(header) => {
+                screen_calibration.push_header(&header.config);
+                continue;
+            }
             JournalLine::GraftReplay(replay) => {
                 let bucket = graft_replay.get_or_insert_with(GraftReplayStats::default);
                 bucket.replays += 1;
@@ -357,6 +364,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             JournalLine::Experiment(record) => *record,
         };
         experiments += 1;
+        screen_calibration.push_experiment(&record)?;
         memo_hits += record.memo_hits;
         memo_misses += record.memo_misses;
         memo_ms_saved = memo_ms_saved.saturating_add(record.memo_ms_saved);
@@ -638,6 +646,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             quota_ceiling_experiments: batch_quota_ceiling,
             exhausted_experiments: batch_exhausted,
         },
+        screen_calibration: screen_calibration.finish(),
     })
 }
 
@@ -802,6 +811,22 @@ pub fn print_run_summary(result: &RunResult) {
                 memo.hit_rate * 100.0,
                 format_ms(memo.ms_saved),
                 memo.analysis_ms_saved_fraction * 100.0
+            ));
+        }
+        let screen = &report.screen_calibration;
+        if screen.paired_candidates > 0 {
+            let rho = match screen.spearman {
+                Some(rho) => format!("{rho:+.2}"),
+                None => "n/a".to_string(),
+            };
+            log::detail(&format!(
+                "screen gate:   {} paired (of {} screened)  rank ρ {rho}  precision {}",
+                screen.paired_candidates,
+                screen.paired_candidates + screen.screen_only_candidates,
+                match screen.promotion_precision {
+                    Some(p) => format!("{:.0}%", p * 100.0),
+                    None => "n/a".to_string(),
+                }
             ));
         }
         if let Some(ms) = report.time_to_first_acceptance_ms {
@@ -1558,6 +1583,98 @@ mod tests {
         assert_eq!(backprop.wins, 0);
         assert_eq!(backprop.appearances_total, 1);
         assert_eq!(backprop.appearances_in_accepted, 1);
+    }
+
+    /// Issue #110: `report` carries the screen-versus-full-corpus calibration,
+    /// paired from the two score maps the journal already holds.
+    #[test]
+    fn report_calibrates_the_screen_against_the_full_corpus() {
+        let mut promoted = experiment(1, false);
+        promoted.screen_scores = Some({
+            let mut m = BTreeMap::new();
+            m.insert("baseline".into(), 0.40);
+            m.insert("candidate-000".into(), 0.40 + 1e-5);
+            m.insert("candidate-001".into(), 0.40 + 2e-5);
+            // Screened, never promoted: no full score to pair with.
+            m.insert("candidate-002".into(), 0.40 - 1e-5);
+            m
+        });
+        promoted.scores = {
+            let mut m = BTreeMap::new();
+            m.insert("baseline".into(), 0.50);
+            m.insert("candidate-000".into(), 0.50 + 2e-6);
+            m.insert("candidate-001".into(), 0.50 - 3e-6);
+            m
+        };
+        let file = journal_of(&[promoted, screened_empty(2, 0.3475)]);
+
+        let calibration = report_from_journal(file.path()).unwrap().screen_calibration;
+        assert!(calibration.screen_enabled);
+        assert_eq!(calibration.experiments_screened, 2);
+        assert_eq!(calibration.paired_candidates, 2);
+        // candidate-002 plus the screen-empty experiment's own candidate.
+        assert_eq!(calibration.screen_only_candidates, 2);
+        assert_eq!(calibration.full_only_candidates, 0);
+        assert_eq!(calibration.promoted_improved, 1);
+        assert_eq!(calibration.promoted_worse, 1);
+        assert!((calibration.promotion_precision.unwrap() - 0.5).abs() < 1e-12);
+        // Two pairs is below the three the coefficient needs.
+        assert_eq!(calibration.spearman, None);
+        assert_eq!(calibration.pairs.len(), 2);
+        assert!((calibration.pairs[0].screen_delta - 1e-5).abs() < 1e-15);
+        assert!((calibration.pairs[0].full_delta - 2e-6).abs() < 1e-15);
+    }
+
+    /// A journal with screening disabled reports "not applicable", not a
+    /// fabricated correlation — and `report` still produces every other field.
+    #[test]
+    fn report_reads_a_journal_with_no_screen_phase() {
+        let file = journal_of(&[promoted(1, 0.3470, Some(2e-6))]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.experiments, 1);
+        let calibration = report.screen_calibration;
+        assert!(!calibration.screen_enabled);
+        assert_eq!(calibration.experiments_without_screen, 1);
+        assert_eq!(calibration.spearman, None);
+        assert_eq!(calibration.promotion_precision, None);
+        assert!(calibration.pairs.is_empty());
+    }
+
+    /// Issue #110: the run header's knobs are quoted beside the calibration, so
+    /// a threshold recommendation names the gate it was measured under.
+    #[test]
+    fn report_quotes_the_screen_knobs_from_the_run_header() {
+        use crate::run::{RunConfigRecord, RunHeaderRecord, SeedSource};
+
+        let mut file = NamedTempFile::new().unwrap();
+        let header = RunHeaderRecord::new(
+            42,
+            SeedSource::Drawn,
+            RunConfigRecord::from_config(&crate::config::LamarckConfig::default()),
+            1000,
+        );
+        writeln!(file, "{}", serde_json::to_string(&header).unwrap()).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&experiment(1, false)).unwrap()
+        )
+        .unwrap();
+
+        let calibration = report_from_journal(file.path()).unwrap().screen_calibration;
+        assert_eq!(
+            calibration.screen_sample_rate,
+            Some(crate::config::DEFAULT_SCREEN_SAMPLE_RATE)
+        );
+        assert_eq!(
+            calibration.promote_threshold,
+            Some(crate::config::DEFAULT_SCREEN_PROMOTE_THRESHOLD)
+        );
+        assert_eq!(
+            calibration.accept_bar,
+            Some(crate::config::DEFAULT_MIN_IMPROVEMENT)
+        );
     }
 
     /// Issue #106: the memo's value is auditable from the journal.
