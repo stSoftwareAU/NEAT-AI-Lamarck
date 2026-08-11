@@ -1048,8 +1048,17 @@ mod tests {
         );
     }
 
-    /// Context over [`TINY`] with a bias signal of the given blame mass on `o1`.
+    /// Step a `backprop` candidate proposes at the port-default bias cap.
     fn backprop_step_for(total_adjusted_bias: f64, learning_rate: f64) -> f64 {
+        backprop_step_capped(
+            total_adjusted_bias,
+            learning_rate,
+            BackpropConfig::default().maximum_bias_adjustment_scale,
+        )
+    }
+
+    /// Context over [`TINY`] with a bias signal of the given blame mass on `o1`.
+    fn backprop_step_capped(total_adjusted_bias: f64, learning_rate: f64, cap: f64) -> f64 {
         let incumbent = parse_creature_json(TINY).unwrap();
         let focus = FocusNeuronStats {
             neuron_uuid: "o1".into(),
@@ -1060,6 +1069,7 @@ mod tests {
         let cfg = BackpropConfig {
             learning_rate,
             initial_learning_rate: learning_rate,
+            maximum_bias_adjustment_scale: cap,
             ..BackpropConfig::default()
         };
         let mut learning = LearningSignal::new(incumbent.neurons.len(), incumbent.synapses.len());
@@ -1114,6 +1124,28 @@ mod tests {
         assert!(
             small_fast.abs() > small_slow.abs(),
             "small blame should scale with the rate: {small_fast} vs {small_slow}"
+        );
+    }
+
+    /// Issue #96 item 3: the cap *is* the knob the #75 A/B needed. On the same
+    /// saturating blame mass, lowering `maximum_bias_adjustment_scale` resizes
+    /// the proposed bias step in step with it — down to the `1e-6` accept bar
+    /// the ±10 default overshoots by ~7 orders of magnitude.
+    #[test]
+    fn lowering_the_bias_cap_resizes_the_saturated_backprop_step() {
+        // The GRQ focus carried mean |blame| ≈ 2.3e13 over 6 accumulations.
+        let big = 6.0 * 2.3e13;
+        for cap in [10.0, 0.01, 1e-6] {
+            let step = backprop_step_capped(big, 0.01, cap);
+            assert!(
+                (step.abs() - cap).abs() < cap * 1e-9,
+                "expected the step pinned at the ±{cap} cap, got {step}"
+            );
+        }
+        // Direction is a property of the blame, not of the cap.
+        assert!(
+            backprop_step_capped(big, 0.01, 1e-6) * backprop_step_capped(big, 0.01, 10.0) > 0.0,
+            "shrinking the cap must not flip the step's direction"
         );
     }
 

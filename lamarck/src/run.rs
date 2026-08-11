@@ -215,6 +215,9 @@ pub struct RunConfigRecord {
     /// Backprop learning rate in force for this run (issue #75 A/B arms).
     #[serde(default)]
     pub backprop_learning_rate: Option<f64>,
+    /// Backprop bias-step cap in force for this run (issue #96 A/B arm).
+    #[serde(default)]
+    pub backprop_max_bias_adjustment_scale: Option<f64>,
 }
 
 impl RunConfigRecord {
@@ -242,6 +245,7 @@ impl RunConfigRecord {
             grafts_path: config.grafts_path.clone(),
             graft_replay_budget_seconds: config.graft_replay_budget.map(|d| d.as_secs()),
             backprop_learning_rate: config.backprop_learning_rate,
+            backprop_max_bias_adjustment_scale: config.backprop_max_bias_adjustment_scale,
         }
     }
 }
@@ -1706,6 +1710,7 @@ mod tests {
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -1821,6 +1826,7 @@ mod tests {
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
         };
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
@@ -1946,6 +1952,7 @@ mod tests {
             // Explicit budget so phase-G is not starved by a sub-second run timeout.
             graft_replay_budget: Some(Duration::from_secs(5)),
             backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
         };
         let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
         (result, grafts_path)
@@ -2036,6 +2043,7 @@ mod tests {
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -2083,6 +2091,7 @@ mod tests {
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
         }
     }
 
@@ -2220,6 +2229,36 @@ mod tests {
         // The header must survive a round-trip through the journal encoding.
         let encoded = serde_json::to_string(header.as_ref()).unwrap();
         assert!(encoded.contains("\"record\":\"runHeader\""));
+    }
+
+    /// Issue #96: the backprop cap A/B is only readable from its journal if the
+    /// cap in force is recorded, exactly as the learning rate already is.
+    #[test]
+    fn run_header_records_the_backprop_bias_cap() {
+        let config = LamarckConfig {
+            backprop_learning_rate: Some(0.001),
+            backprop_max_bias_adjustment_scale: Some(1e-6),
+            ..LamarckConfig::default()
+        };
+        let record = RunConfigRecord::from_config(&config);
+        assert_eq!(record.backprop_max_bias_adjustment_scale, Some(1e-6));
+        assert_eq!(record.backprop_learning_rate, Some(0.001));
+
+        // Round-trip through the journal encoding: an arm is identified from
+        // its journal alone, so the field has to survive read-back.
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert!(
+            encoded.contains("\"backpropMaxBiasAdjustmentScale\":1e-6"),
+            "cap missing from the encoded header: {encoded}"
+        );
+        let decoded: RunConfigRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.backprop_max_bias_adjustment_scale, Some(1e-6));
+
+        // Older journals predate the field and must still parse (fail loud on
+        // a real fault, not on a header written before the knob existed).
+        let legacy = encoded.replace(",\"backpropMaxBiasAdjustmentScale\":1e-6", "");
+        let legacy: RunConfigRecord = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(legacy.backprop_max_bias_adjustment_scale, None);
     }
 
     /// Issue #71: replaying the recorded seed reproduces the candidate stream.
@@ -2520,6 +2559,7 @@ mod tests {
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));

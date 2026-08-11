@@ -185,6 +185,7 @@ Leaving these unset changes behaviour.
 | `--grafts-path` | JSON store for structural graft memory; enables Phase-G replay and recording. Keep it outside any wiped work directory. |
 | `--graft-replay-budget-seconds` | Wall-clock budget for Phase-G replay. Default: 10% of `--timeout-seconds`. |
 | `--backprop-learning-rate` | Learning rate for `backprop` candidate proposals. Default: `0.01` (the NEAT-AI port value). Must be `> 0` — a non-positive or non-finite value aborts the run instead of reverting to the default. Recorded in the journal `runHeader` so an A/B arm is identifiable. |
+| `--backprop-max-bias-adjustment-scale` | ± cap on one `backprop` bias step (`BackpropConfig::maximum_bias_adjustment_scale`). Default: `10`. On a focus whose blame mass saturates the cap the step is cap-bound at every learning rate, so this is the knob that resizes it — see [`docs/followup-economics.md`](docs/followup-economics.md). Must be `> 0`; a non-positive or non-finite value aborts the run. Recorded in the journal `runHeader`. |
 
 ## How a run works
 
@@ -653,15 +654,16 @@ for #75 — an output-focus slice, a backprop step A/B and a batch-size A/B,
 [`docs/followup-economics.md`](docs/followup-economics.md). Its headline: **no
 strategy has earned removal**, `--candidates` above ~29 buys nothing on this
 creature, and `backprop` fails on a saturated step cap rather than on its
-learning rate. Questions 4–7 need the arms still outstanding in
-[#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96).
+learning rate. Questions 4–7 need the arms wired up by
+[#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) and still to be
+run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
 ## Outstanding work
 
 | Issue | Gap |
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
-| [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) | Three economics arms still need exclusive box time: the multi-seed repeat, the `output-0` slice and the backprop cap A/B. |
+| [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Three economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
 
 ## Repository layout
 

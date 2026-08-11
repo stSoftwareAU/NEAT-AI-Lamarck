@@ -94,15 +94,23 @@ pub struct LamarckConfig {
     /// Backprop learning-rate override for candidate proposal (issue #75 A/B).
     /// `None` keeps the [`BackpropConfig::default`] rate.
     pub backprop_learning_rate: Option<f64>,
+    /// Override for [`BackpropConfig::maximum_bias_adjustment_scale`], the ±cap
+    /// on one `backprop` bias proposal (issue #96 A/B).
+    ///
+    /// On a creature whose focus carries a saturating blame mass the proposal
+    /// hits this cap at every learning rate, so the cap — not the rate — is the
+    /// knob that moves the step. `None` keeps the [`BackpropConfig::default`]
+    /// cap of `10.0`.
+    pub backprop_max_bias_adjustment_scale: Option<f64>,
 }
 
 impl LamarckConfig {
-    /// Backprop configuration for this run, with the learning-rate override applied.
+    /// Backprop configuration for this run, with the CLI overrides applied.
     ///
     /// An override that is not finite and strictly positive is a configuration
     /// fault, reported as an error rather than silently reverting to the
-    /// default rate — a run that quietly ignored the flag would invalidate the
-    /// A/B it was set for.
+    /// default — a run that quietly ignored the flag would invalidate the A/B
+    /// it was set for.
     pub fn backprop_config(&self) -> Result<BackpropConfig, String> {
         let mut backprop = BackpropConfig::default();
         if let Some(rate) = self.backprop_learning_rate {
@@ -113,6 +121,14 @@ impl LamarckConfig {
             }
             backprop.learning_rate = rate;
             backprop.initial_learning_rate = rate;
+        }
+        if let Some(cap) = self.backprop_max_bias_adjustment_scale {
+            if !cap.is_finite() || cap <= 0.0 {
+                return Err(format!(
+                    "--backprop-max-bias-adjustment-scale must be finite and greater than 0 (got {cap})"
+                ));
+            }
+            backprop.maximum_bias_adjustment_scale = cap;
         }
         Ok(backprop)
     }
@@ -145,6 +161,7 @@ impl Default for LamarckConfig {
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
         }
     }
 }
@@ -201,6 +218,76 @@ mod tests {
             large_step.abs() > small_step.abs() * 5.0,
             "10x rate should move the bias far further: {small_step} vs {large_step}"
         );
+    }
+
+    #[test]
+    fn backprop_config_keeps_the_port_default_bias_cap_when_unset() {
+        let config = LamarckConfig::default();
+        let backprop = config.backprop_config().expect("default cap is valid");
+        assert_eq!(
+            backprop.maximum_bias_adjustment_scale,
+            BackpropConfig::default().maximum_bias_adjustment_scale
+        );
+    }
+
+    #[test]
+    fn backprop_config_applies_the_bias_cap_override() {
+        let config = LamarckConfig {
+            backprop_max_bias_adjustment_scale: Some(0.001),
+            ..LamarckConfig::default()
+        };
+        let backprop = config.backprop_config().expect("0.001 is valid");
+        assert_eq!(backprop.maximum_bias_adjustment_scale, 0.001);
+        // The cap override must not disturb the weight cap: the #96 A/B varies
+        // the bias step alone, and a moved weight cap would confound it.
+        assert_eq!(
+            backprop.maximum_weight_adjustment_scale,
+            BackpropConfig::default().maximum_weight_adjustment_scale
+        );
+    }
+
+    #[test]
+    fn a_smaller_cap_shrinks_a_blame_saturated_bias_step() {
+        // Blame mass far above the cap: the step is cap-bound, not rate-bound
+        // (issue #96 item 3 — the knob the #75 A/B actually needed).
+        let signal = BiasSignal {
+            count: 6.0,
+            total_adjusted_bias: 6.0 * 2.3e13,
+            ..BiasSignal::default()
+        };
+        let step_at = |cap: f64| {
+            let backprop = LamarckConfig {
+                backprop_max_bias_adjustment_scale: Some(cap),
+                ..LamarckConfig::default()
+            }
+            .backprop_config()
+            .expect("positive cap is valid");
+            (signal.propose(0.0, &backprop, backprop.learning_rate) - 0.0).abs()
+        };
+        for cap in [10.0, 0.01, 1e-6] {
+            let step = step_at(cap);
+            assert!(
+                (step - cap).abs() < cap * 1e-9,
+                "saturating blame should pin the step at the ±{cap} cap, got {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_positive_or_non_finite_cap_is_rejected_loudly() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let config = LamarckConfig {
+                backprop_max_bias_adjustment_scale: Some(bad),
+                ..LamarckConfig::default()
+            };
+            let err = config
+                .backprop_config()
+                .expect_err("invalid cap must not fall back to the default");
+            assert!(
+                err.contains("--backprop-max-bias-adjustment-scale"),
+                "error should name the flag: {err}"
+            );
+        }
     }
 
     #[test]

@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The three exclusive-box economics arms are wired up (Issue #96).**
+  `scripts/run-followup-economics.sh` gains an `output-neuron` arm (pins
+  `--focus-neuron output-0`, the slice `--focus-policy high-error` cannot reach
+  on a fine-tuned creature) and a `backprop-cap` arm (a cap ladder on one seed).
+  Neither is in the default arm set: like `multi-seed` they need the production
+  creature and exclusive use of the scorer. The cap arm needed a knob that did
+  not exist — `--backprop-max-bias-adjustment-scale` overrides
+  `BackpropConfig::maximum_bias_adjustment_scale` (default `10`), mirroring
+  `--backprop-learning-rate`: non-positive or non-finite aborts the run rather
+  than silently reverting to the default, and the cap in force is recorded in
+  the journal `runHeader` so an arm is identifiable from its journal alone. The
+  measurements themselves remain unrun — they need ~4.5 hours of exclusive time
+  on the production box.
+
 - **The #8 baseline's follow-up economics experiments were run (Issue #75).**
   `docs/followup-economics.md` records 118 further experiments across three
   arms: an output-focus slice, a backprop step A/B and a batch-size A/B.
