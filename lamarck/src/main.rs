@@ -4,10 +4,11 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    CancelToken, DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT,
-    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
-    ExternalScorer, LamarckConfig, print_run_summary, report_from_journal,
-    run_optimisation_cancellable,
+    CancelToken, DEFAULT_CANDIDATE_COUNT, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
+    DEFAULT_FAILED_CACHE_MAX_ENTRIES, DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
+    DEFAULT_FAILED_CACHE_TOLERANCE_REL, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
+    DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
+    print_run_summary, report_from_journal, run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -131,6 +132,30 @@ struct Cli {
     /// the knob that resizes the step (issue #96).
     #[arg(long)]
     backprop_max_bias_adjustment_scale: Option<f64>,
+
+    /// Skip candidates a previous experiment or run already scored as failures
+    /// (issue #69), backfilling the batch so the scorer still runs at full
+    /// width. Off by default until the feature proves it saves more scorer time
+    /// than it costs.
+    #[arg(long, default_value_t = false)]
+    failed_cache: bool,
+
+    /// Size cap on the failed-candidate cache. `0` disables the cache.
+    #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_MAX_ENTRIES)]
+    failed_cache_max_entries: usize,
+
+    /// Drop failed-candidate entries older than this many seconds. `0` keeps
+    /// entries until the size cap evicts them.
+    #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS)]
+    failed_cache_max_age_seconds: u64,
+
+    /// Absolute bound for treating two candidate values as the same proposal.
+    #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_TOLERANCE_ABS)]
+    failed_cache_tolerance_abs: f64,
+
+    /// Relative bound for treating two candidate values as the same proposal.
+    #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_TOLERANCE_REL)]
+    failed_cache_tolerance_rel: f64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -211,6 +236,11 @@ fn main() -> ExitCode {
         graft_replay_budget: cli.graft_replay_budget_seconds.map(Duration::from_secs),
         backprop_learning_rate: cli.backprop_learning_rate,
         backprop_max_bias_adjustment_scale: cli.backprop_max_bias_adjustment_scale,
+        failed_cache: cli.failed_cache,
+        failed_cache_max_entries: cli.failed_cache_max_entries,
+        failed_cache_max_age_seconds: cli.failed_cache_max_age_seconds,
+        failed_cache_tolerance_abs: cli.failed_cache_tolerance_abs,
+        failed_cache_tolerance_rel: cli.failed_cache_tolerance_rel,
     };
 
     // Fail before spawning the scorer rather than deep inside the run.

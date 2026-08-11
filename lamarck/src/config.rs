@@ -43,6 +43,13 @@ pub const DEFAULT_SCREEN_PROMOTE_THRESHOLD: f64 = DEFAULT_MIN_IMPROVEMENT;
 /// Abort after this many consecutive scorer failures.
 pub const DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES: u32 = 3;
 
+// Failed-candidate cache knobs (issue #69). Re-exported rather than restated so
+// the CLI defaults can never drift from the cache's own documented bounds.
+pub use crate::failed_cache::{
+    DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS, DEFAULT_FAILED_CACHE_MAX_ENTRIES,
+    DEFAULT_FAILED_CACHE_TOLERANCE_ABS, DEFAULT_FAILED_CACHE_TOLERANCE_REL,
+};
+
 /// Run-time knobs for a Lamarck optimisation session.
 #[derive(Debug, Clone)]
 pub struct LamarckConfig {
@@ -102,6 +109,19 @@ pub struct LamarckConfig {
     /// knob that moves the step. `None` keeps the [`BackpropConfig::default`]
     /// cap of `10.0`.
     pub backprop_max_bias_adjustment_scale: Option<f64>,
+    /// Skip candidates already known to have failed (issue #69).
+    ///
+    /// **Off by default.** The feature has to prove it saves more scorer time
+    /// than it costs before it becomes the default.
+    pub failed_cache: bool,
+    /// Size cap on the failed-candidate cache (`0` disables the cache).
+    pub failed_cache_max_entries: usize,
+    /// Age bound on failed-candidate entries (`0` = no age bound).
+    pub failed_cache_max_age_seconds: u64,
+    /// Absolute bound for near-duplicate candidate matching.
+    pub failed_cache_tolerance_abs: f64,
+    /// Relative bound for near-duplicate candidate matching.
+    pub failed_cache_tolerance_rel: f64,
 }
 
 impl LamarckConfig {
@@ -162,6 +182,11 @@ impl Default for LamarckConfig {
             graft_replay_budget: None,
             backprop_learning_rate: None,
             backprop_max_bias_adjustment_scale: None,
+            failed_cache: false,
+            failed_cache_max_entries: DEFAULT_FAILED_CACHE_MAX_ENTRIES,
+            failed_cache_max_age_seconds: DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
+            failed_cache_tolerance_abs: DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
+            failed_cache_tolerance_rel: DEFAULT_FAILED_CACHE_TOLERANCE_REL,
         }
     }
 }
@@ -288,6 +313,32 @@ mod tests {
                 "error should name the flag: {err}"
             );
         }
+    }
+
+    /// Issue #69: the cache must prove itself before it becomes the default, so
+    /// an untouched configuration has to leave it off.
+    #[test]
+    fn failed_cache_is_off_by_default() {
+        let config = LamarckConfig::default();
+        assert!(!config.failed_cache);
+        // The bounds are still populated, so turning the flag on needs no
+        // other knob and can never run unbounded.
+        assert_eq!(
+            config.failed_cache_max_entries,
+            DEFAULT_FAILED_CACHE_MAX_ENTRIES
+        );
+        assert_eq!(
+            config.failed_cache_max_age_seconds,
+            DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS
+        );
+        assert_eq!(
+            config.failed_cache_tolerance_abs,
+            DEFAULT_FAILED_CACHE_TOLERANCE_ABS
+        );
+        assert_eq!(
+            config.failed_cache_tolerance_rel,
+            DEFAULT_FAILED_CACHE_TOLERANCE_REL
+        );
     }
 
     #[test]
