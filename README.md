@@ -892,7 +892,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 | Issue | Gap |
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
-| [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Three economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
+| [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
 
 ## Repository layout
 
