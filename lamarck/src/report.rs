@@ -238,6 +238,28 @@ pub struct JournalReport {
     pub combo_acceptances_unattributed: u64,
     /// Phase-G graft-replay bucket; `None` when the journal has no replay line.
     pub graft_replay: Option<GraftReplayStats>,
+    /// Cross-experiment analysis-memo economics (issue #106).
+    pub analysis_memo: AnalysisMemoStats,
+}
+
+/// Cross-experiment analysis-memo economics summed over a journal (issue #106).
+///
+/// A journal written before the memo existed reports zeros: its experiments
+/// recomputed everything, which is exactly what zero hits and zero saved
+/// milliseconds mean.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisMemoStats {
+    /// Analysis lookups served from the memo.
+    pub hits: u64,
+    /// Analysis lookups that had to be recomputed.
+    pub misses: u64,
+    /// Training-scan milliseconds avoided by the hits.
+    pub ms_saved: u128,
+    /// `hits / (hits + misses)`; `0.0` when nothing was looked up.
+    pub hit_rate: f64,
+    /// Saved milliseconds as a share of analysis + saved time.
+    pub analysis_ms_saved_fraction: f64,
 }
 
 /// Consume `experiments.jsonl` and produce an economics report.
@@ -249,6 +271,9 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut scorer_failures = 0u64;
     let mut total_analysis_ms = 0u128;
     let mut total_scorer_ms = 0u128;
+    let mut memo_hits = 0u64;
+    let mut memo_misses = 0u64;
+    let mut memo_ms_saved = 0u128;
     let mut candidates_scored = 0u64;
     let mut screen_candidates_scored = 0u64;
     let mut time_to_first = None;
@@ -301,6 +326,9 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             JournalLine::Experiment(record) => *record,
         };
         experiments += 1;
+        memo_hits += record.memo_hits;
+        memo_misses += record.memo_misses;
+        memo_ms_saved = memo_ms_saved.saturating_add(record.memo_ms_saved);
         total_analysis_ms += record.analysis_ms;
         total_scorer_ms += record.scorer_ms;
         elapsed += record.analysis_ms + record.scorer_ms;
@@ -480,6 +508,24 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             None
         }
     });
+    let memo_lookups = memo_hits + memo_misses;
+    let analysis_memo = AnalysisMemoStats {
+        hits: memo_hits,
+        misses: memo_misses,
+        ms_saved: memo_ms_saved,
+        hit_rate: if memo_lookups > 0 {
+            memo_hits as f64 / memo_lookups as f64
+        } else {
+            0.0
+        },
+        // What the analysis phase would have cost without the memo is its
+        // measured cost plus what the memo saved.
+        analysis_ms_saved_fraction: if total_analysis_ms + memo_ms_saved > 0 {
+            memo_ms_saved as f64 / (total_analysis_ms + memo_ms_saved) as f64
+        } else {
+            0.0
+        },
+    };
     let mean_experiment_ms = if experiments > 0 {
         total_ms / experiments as f64
     } else {
@@ -521,6 +567,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         combo_acceptances_with_dampen,
         combo_acceptances_unattributed,
         graft_replay,
+        analysis_memo,
     })
 }
 
@@ -640,6 +687,17 @@ pub fn print_run_summary(result: &RunResult) {
             report.candidates_scored,
             report.projected_batches_per_45_min
         ));
+        let memo = &report.analysis_memo;
+        if memo.hits + memo.misses > 0 {
+            log::detail(&format!(
+                "analysis memo: {} hit / {} miss ({:.0}% hit rate)  saved {}  ({:.0}% of analysis)",
+                memo.hits,
+                memo.misses,
+                memo.hit_rate * 100.0,
+                format_ms(memo.ms_saved),
+                memo.analysis_ms_saved_fraction * 100.0
+            ));
+        }
         if let Some(ms) = report.time_to_first_acceptance_ms {
             log::detail(&format!("first accept:  {}", format_ms(ms)));
         }
@@ -786,6 +844,9 @@ mod tests {
             improvement: accepted.then_some(1e-6),
             accepted,
             analysis_ms: 1,
+            memo_hits: 0,
+            memo_misses: 0,
+            memo_ms_saved: 0,
             scorer_ms: 2,
             scorer_error: None,
             combo_members: None,
@@ -896,6 +957,9 @@ mod tests {
             improvement: None,
             accepted: false,
             analysis_ms: 1,
+            memo_hits: 0,
+            memo_misses: 0,
+            memo_ms_saved: 0,
             scorer_ms: 2,
             scorer_error: None,
             combo_members: None,
@@ -1200,6 +1264,9 @@ mod tests {
             improvement: Some(2e-6),
             accepted: true,
             analysis_ms: 10,
+            memo_hits: 2,
+            memo_misses: 0,
+            memo_ms_saved: 40,
             scorer_ms: 20,
             scorer_error: None,
             combo_members: None,
@@ -1228,6 +1295,9 @@ mod tests {
             improvement: None,
             accepted: false,
             analysis_ms: 5,
+            memo_hits: 0,
+            memo_misses: 2,
+            memo_ms_saved: 0,
             scorer_ms: 15,
             scorer_error: None,
             combo_members: None,
@@ -1263,5 +1333,45 @@ mod tests {
         assert_eq!(backprop.wins, 0);
         assert_eq!(backprop.appearances_total, 1);
         assert_eq!(backprop.appearances_in_accepted, 1);
+    }
+
+    /// Issue #106: the memo's value is auditable from the journal.
+    #[test]
+    fn report_totals_the_analysis_memo_economics() {
+        // 2 hits saving 40ms in experiment one, 2 misses in experiment two.
+        let mut hitting = experiment(1, false);
+        hitting.analysis_ms = 60;
+        hitting.memo_hits = 2;
+        hitting.memo_ms_saved = 40;
+        let mut missing = experiment(2, false);
+        missing.analysis_ms = 100;
+        missing.memo_misses = 2;
+        let file = journal_of(&[hitting, missing]);
+
+        let memo = report_from_journal(file.path()).unwrap().analysis_memo;
+        assert_eq!(memo.hits, 2);
+        assert_eq!(memo.misses, 2);
+        assert_eq!(memo.ms_saved, 40);
+        assert!((memo.hit_rate - 0.5).abs() < 1e-12);
+        // 40 saved against 160 measured + 40 saved.
+        assert!((memo.analysis_ms_saved_fraction - 0.2).abs() < 1e-12);
+    }
+
+    /// A journal written before the memo existed must report zeros, not fail.
+    #[test]
+    fn report_reads_a_pre_memo_journal_as_zero_savings() {
+        let mut line = serde_json::to_value(experiment(1, false)).unwrap();
+        let map = line.as_object_mut().unwrap();
+        map.remove("memoHits");
+        map.remove("memoMisses");
+        map.remove("memoMsSaved");
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{line}").unwrap();
+
+        let memo = report_from_journal(file.path()).unwrap().analysis_memo;
+        assert_eq!(memo.hits, 0);
+        assert_eq!(memo.misses, 0);
+        assert_eq!(memo.ms_saved, 0);
+        assert_eq!(memo.hit_rate, 0.0);
     }
 }
