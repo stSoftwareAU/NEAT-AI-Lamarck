@@ -112,6 +112,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     the run ends with one parseable summary line carrying entries, hit rate, ms
     saved, ms spent, net, peak memory bytes and disk bytes.
 
+- **`report` states the failed-candidate cache's economics from a journal alone
+  (Issue #93).** #69's go/no-go is decided from `experiments.jsonl`, so the
+  decision cannot depend on having watched the run that produced it. `report`
+  gains a `cache` section carrying the knobs the run header declared, the counts
+  and hit rate, the final and peak cache size, estimated scorer ms saved against
+  ms spent — lookups, maintenance *and* the startup rebuild — the net, and the
+  experiment at which the #92 guardrail stood the cache down. A journal that
+  never mentions a cache reports `null` rather than a row of zeroes that reads
+  like a cache which did nothing.
+  - *The gate metric.* `scoreImprovementPerWallHour` is what makes a cache-on and
+    a cache-off arm directly comparable. It is anchored on full-corpus scores
+    only, following #84, and is `null` when the journal cannot support it —
+    under `--skip-phase0` a sampled baseline swings by thousands of times the
+    accept threshold, so a rate derived from one would be authoritative-looking
+    and wrong, which is precisely how a go/no-go gets decided incorrectly.
+  - *Honest attribution.* Skips are now split by what actually suppressed them,
+    because #83 attacks the same waste and the two must not both claim it. A
+    cache hit is the cache's saving and the only input to the estimate.
+    Near-duplicates within one batch are counted separately as
+    `cacheDeduplicated`: real avoided work, but the generator repeating itself
+    rather than the cache remembering anything — previously these were folded
+    into `cacheSkipped`, which overstated what the cache had earned.
+    Generation-time gating (#83) suppresses candidates before they become
+    proposals at all, so it is invisible to this accounting by construction; the
+    report publishes the batch size it actually saw rather than assuming
+    `--candidates`, so the reconciliation holds.
+  - *Startup rebuild.* The rebuild is journalled as `cacheRebuildMs` on the first
+    experiment that ran with the cache on, because the run header is written
+    before the cache is loaded. Without it a report would omit the one cost most
+    likely to sink the cache's account.
+
 - **The three exclusive-box economics arms are wired up (Issue #96).**
   `scripts/run-followup-economics.sh` gains an `output-neuron` arm (pins
   `--focus-neuron output-0`, the slice `--focus-policy high-error` cannot reach

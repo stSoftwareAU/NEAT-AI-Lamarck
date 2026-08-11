@@ -11,8 +11,8 @@
 //! or differently-tuned snapshot falls back to a journal rebuild rather than
 //! failing the run.
 
-use super::fingerprint::{CandidateFingerprint, Tolerance};
-use super::store::{FailedCacheEntry, FailedCandidateCache};
+use super::fingerprint::CandidateFingerprint;
+use super::store::{CacheBounds, FailedCacheEntry, FailedCandidateCache};
 use crate::run::{ExperimentRecord, JournalLine};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -30,12 +30,8 @@ pub const FAILED_CACHE_SNAPSHOT_FILE: &str = "failed-candidates.cache.json";
 /// Snapshot format version, following the `observations.rs` pattern.
 ///
 /// Bump this whenever the on-disk shape changes; a mismatch falls back to a
-/// journal rebuild rather than misreading old bytes.
-///
-/// `1.1.0` added the per-entry `promoted` flag the economics ledger prices
-/// promote-phase savings from (issue #92). A `1.0.0` snapshot is discarded and
-/// replayed from the journal, which restores the flag rather than defaulting
-/// every entry to screen-cost only.
+/// journal rebuild rather than misreading old bytes. `1.1.0` added the
+/// per-entry promote cost and the byte ceiling (issue #92).
 pub const FAILED_CACHE_SNAPSHOT_FORMAT_VERSION: &str = "1.1.0";
 
 /// Where a loaded cache came from.
@@ -104,6 +100,9 @@ pub struct FailedCacheSnapshot {
     pub max_entries: usize,
     /// Age bound in force when the snapshot was written.
     pub max_age_seconds: u64,
+    /// Byte ceiling in force when the snapshot was written (issue #92).
+    #[serde(default)]
+    pub max_bytes: usize,
     /// Unix timestamp the snapshot was written at.
     pub written_unix: u64,
     /// The entries themselves, in insertion order.
@@ -140,6 +139,12 @@ pub fn candidate_index_from_stem(stem: &str) -> Option<usize> {
 ///
 /// A line that is not a recognised journal record — an unknown future record
 /// kind, or the truncated last line of a killed run — is skipped, never fatal.
+///
+/// Replayed entries carry **no** promote cost, even for candidates the journal
+/// shows reached the full corpus: `scorerMs` covers the whole experiment, so
+/// splitting it back out would over-attribute, and issue #92's accounting must
+/// only ever under-claim. A snapshot preserves the costs measured in the run
+/// that recorded them.
 pub fn rebuild_from_journal(
     path: &Path,
     cache: &mut FailedCandidateCache,
@@ -168,11 +173,7 @@ pub fn rebuild_from_journal(
         report.lines_read += 1;
         let record = match JournalLine::parse(&line) {
             Ok(JournalLine::Experiment(record)) => *record,
-            Ok(
-                JournalLine::Header(_)
-                | JournalLine::GraftReplay(_)
-                | JournalLine::CacheStandDown(_),
-            ) => continue,
+            Ok(JournalLine::Header(_) | JournalLine::GraftReplay(_)) => continue,
             Err(_) => {
                 report.lines_skipped += 1;
                 continue;
@@ -195,7 +196,6 @@ fn replay_experiment(record: &ExperimentRecord, cache: &mut FailedCandidateCache
     if record.scorer_error.is_some() || record.accepted {
         return 0;
     }
-    let promoted = promoted_candidate_indices(record);
     let mut offered = 0u64;
     for index in failed_candidate_indices(record) {
         let Some(provenance) = record.candidates.get(index) else {
@@ -206,7 +206,6 @@ fn replay_experiment(record: &ExperimentRecord, cache: &mut FailedCandidateCache
             CandidateFingerprint::from_provenance(&record.incumbent_id, provenance),
             record.timestamp_unix,
             now,
-            promoted.contains(&index),
         );
     }
     offered
@@ -224,24 +223,6 @@ fn failed_candidate_indices(record: &ExperimentRecord) -> BTreeSet<usize> {
         .collect()
 }
 
-/// Indices that reached the full-corpus promote phase in one record (#92).
-///
-/// Only a two-phase experiment has a promote phase to have reached: when the
-/// record has no `screen_scores`, its `scores` *are* the first and only scoring
-/// phase, and treating them as promoted would let a later run claim a saving
-/// that never existed.
-fn promoted_candidate_indices(record: &ExperimentRecord) -> BTreeSet<usize> {
-    if record.screen_scores.is_none() {
-        return BTreeSet::new();
-    }
-    record
-        .scores
-        .keys()
-        .filter(|stem| record.winner.as_ref() != Some(*stem))
-        .filter_map(|stem| candidate_index_from_stem(stem))
-        .collect()
-}
-
 /// Load the cache for a run: snapshot when usable, journal replay otherwise.
 ///
 /// Never fails. A snapshot that is absent, unreadable, malformed, of a
@@ -251,23 +232,16 @@ fn promoted_candidate_indices(record: &ExperimentRecord) -> BTreeSet<usize> {
 /// trusted.
 pub fn load_or_rebuild(
     output_dir: &Path,
-    tolerance: Tolerance,
-    max_entries: usize,
-    max_age_seconds: u64,
+    bounds: CacheBounds,
     now: u64,
 ) -> (FailedCandidateCache, RebuildReport) {
     let started = Instant::now();
-    let mut cache = FailedCandidateCache::new(tolerance, max_entries, max_age_seconds);
+    let mut cache = FailedCandidateCache::new(bounds);
 
-    match read_snapshot(
-        &output_dir.join(FAILED_CACHE_SNAPSHOT_FILE),
-        tolerance,
-        max_entries,
-        max_age_seconds,
-    ) {
+    match read_snapshot(&output_dir.join(FAILED_CACHE_SNAPSHOT_FILE), bounds) {
         Ok(Some(snapshot)) => {
             for entry in snapshot.entries {
-                cache.insert_aged(entry.fingerprint, entry.inserted_unix, now, entry.promoted);
+                cache.insert_entry(entry, now);
             }
             let report = RebuildReport {
                 source: RebuildSource::Snapshot,
@@ -295,12 +269,7 @@ pub fn load_or_rebuild(
 
 /// `Ok(None)` when there is no snapshot, `Err(reason)` when there is an
 /// unusable one.
-fn read_snapshot(
-    path: &Path,
-    tolerance: Tolerance,
-    max_entries: usize,
-    max_age_seconds: u64,
-) -> Result<Option<FailedCacheSnapshot>, String> {
+fn read_snapshot(path: &Path, bounds: CacheBounds) -> Result<Option<FailedCacheSnapshot>, String> {
     if !path.exists() {
         return Ok(None);
     }
@@ -313,16 +282,29 @@ fn read_snapshot(
             snapshot.format_version
         ));
     }
-    if snapshot.tolerance_abs != tolerance.abs || snapshot.tolerance_rel != tolerance.rel {
+    if snapshot.tolerance_abs != bounds.tolerance.abs
+        || snapshot.tolerance_rel != bounds.tolerance.rel
+    {
         return Err(format!(
             "snapshot tolerance ({}, {}) does not match the configured ({}, {})",
-            snapshot.tolerance_abs, snapshot.tolerance_rel, tolerance.abs, tolerance.rel
+            snapshot.tolerance_abs,
+            snapshot.tolerance_rel,
+            bounds.tolerance.abs,
+            bounds.tolerance.rel
         ));
     }
-    if snapshot.max_entries != max_entries || snapshot.max_age_seconds != max_age_seconds {
+    if snapshot.max_entries != bounds.max_entries
+        || snapshot.max_age_seconds != bounds.max_age_seconds
+        || snapshot.max_bytes != bounds.max_bytes
+    {
         return Err(format!(
-            "snapshot bounds (entries={}, age={}s) do not match the configured (entries={max_entries}, age={max_age_seconds}s)",
-            snapshot.max_entries, snapshot.max_age_seconds
+            "snapshot bounds (entries={}, age={}s, bytes={}) do not match the configured (entries={}, age={}s, bytes={})",
+            snapshot.max_entries,
+            snapshot.max_age_seconds,
+            snapshot.max_bytes,
+            bounds.max_entries,
+            bounds.max_age_seconds,
+            bounds.max_bytes
         ));
     }
     Ok(Some(snapshot))
@@ -343,6 +325,7 @@ pub fn write_snapshot(
         tolerance_rel: cache.tolerance().rel,
         max_entries: cache.max_entries(),
         max_age_seconds: cache.max_age_seconds(),
+        max_bytes: cache.max_bytes(),
         written_unix: now,
         entries: cache.snapshot_entries(),
     };
@@ -362,7 +345,7 @@ pub fn snapshot_path(output_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::candidates::{CandidateProvenance, CandidateStrategy};
-    use crate::failed_cache::fingerprint::CandidateFingerprint;
+    use crate::failed_cache::fingerprint::{CandidateFingerprint, Tolerance};
     use crate::run::{RunConfigRecord, RunHeaderRecord, SeedSource};
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -417,14 +400,15 @@ mod tests {
             combos_dampened: None,
             combo_dampen: None,
             cache_skipped: None,
+            cache_deduplicated: None,
             cache_backfilled: None,
             cache_size: None,
             cache_lookup_ms: None,
             cache_maintenance_ms: None,
             cache_saved_ms: None,
             cache_spent_ms: None,
-            cache_net_cumulative_ms: None,
-            cache_resident_bytes: None,
+            cache_stood_down: None,
+            cache_rebuild_ms: None,
         }
     }
 
@@ -439,7 +423,12 @@ mod tests {
     }
 
     fn fresh_cache() -> FailedCandidateCache {
-        FailedCandidateCache::new(Tolerance::default(), 1_000, 0)
+        FailedCandidateCache::new(CacheBounds {
+            tolerance: Tolerance::default(),
+            max_entries: 1_000,
+            max_age_seconds: 0,
+            max_bytes: 0,
+        })
     }
 
     #[test]
@@ -487,55 +476,6 @@ mod tests {
             );
         }
         assert_eq!(candidate_index_from_stem("baseline"), None);
-    }
-
-    /// Issue #92: a replayed rejection may only claim promote-phase savings
-    /// when the record shows it actually reached the promote phase. A run with
-    /// screening off has no promote phase for it to have reached, so its
-    /// `scores` must not be replayed as promoted.
-    #[test]
-    fn only_a_two_phase_record_replays_a_promoted_entry() {
-        let dir = tempdir().unwrap();
-
-        // Two-phase: candidate-000 was screened *and* fully scored (promoted),
-        // candidate-001 died at the screen.
-        let mut two_phase = experiment(1, 1_000, &["knob-a", "knob-b"]);
-        two_phase.scores = [("baseline".to_string(), 0.5), ("candidate-000".into(), 0.4)]
-            .into_iter()
-            .collect();
-        two_phase.screen_scores = Some(
-            [
-                ("baseline".to_string(), 0.5),
-                ("candidate-000".into(), 0.45),
-                ("candidate-001".into(), 0.4),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        let path = write_journal(dir.path(), &[journal_line(&two_phase)]);
-        let mut cache = fresh_cache();
-        rebuild_from_journal(&path, &mut cache, 1_000);
-        assert_eq!(
-            cache.hit(&fingerprint("knob-a", Some(0.0)), 1_000),
-            Some(super::super::store::CacheHit { promoted: true })
-        );
-        assert_eq!(
-            cache.hit(&fingerprint("knob-b", Some(1.0)), 1_000),
-            Some(super::super::store::CacheHit { promoted: false })
-        );
-
-        // Single-phase (screening off): `scores` is the only phase there was.
-        let single_phase = experiment(1, 1_000, &["knob-a"]);
-        assert!(single_phase.screen_scores.is_none());
-        let single_dir = tempdir().unwrap();
-        let path = write_journal(single_dir.path(), &[journal_line(&single_phase)]);
-        let mut cache = fresh_cache();
-        rebuild_from_journal(&path, &mut cache, 1_000);
-        assert_eq!(
-            cache.hit(&fingerprint("knob-a", Some(0.0)), 1_000),
-            Some(super::super::store::CacheHit { promoted: false }),
-            "a run without a screen phase has no promote saving to claim"
-        );
     }
 
     #[test]
@@ -722,7 +662,12 @@ mod tests {
                 journal_line(&experiment(2, 9_000, &["recent"])),
             ],
         );
-        let mut cache = FailedCandidateCache::new(Tolerance::default(), 1_000, 3_600);
+        let mut cache = FailedCandidateCache::new(CacheBounds {
+            tolerance: Tolerance::default(),
+            max_entries: 1_000,
+            max_age_seconds: 3_600,
+            max_bytes: 0,
+        });
         let report = rebuild_from_journal(&path, &mut cache, 10_000);
 
         assert_eq!(report.rejections_seen, 2, "both were offered");
@@ -737,7 +682,12 @@ mod tests {
         let refs: Vec<&str> = mutations.iter().map(String::as_str).collect();
         let path = write_journal(dir.path(), &[journal_line(&experiment(1, 1_000, &refs))]);
 
-        let mut cache = FailedCandidateCache::new(Tolerance::default(), 8, 0);
+        let mut cache = FailedCandidateCache::new(CacheBounds {
+            tolerance: Tolerance::default(),
+            max_entries: 8,
+            max_age_seconds: 0,
+            max_bytes: 0,
+        });
         rebuild_from_journal(&path, &mut cache, 1_000);
         assert_eq!(cache.len(), 8);
     }
@@ -749,7 +699,16 @@ mod tests {
             dir.path(),
             &[journal_line(&experiment(1, 1_000, &["knob-a"]))],
         );
-        let (cache, report) = load_or_rebuild(dir.path(), Tolerance::default(), 1_000, 0, 1_000);
+        let (cache, report) = load_or_rebuild(
+            dir.path(),
+            CacheBounds {
+                tolerance: Tolerance::default(),
+                max_entries: 1_000,
+                max_age_seconds: 0,
+                max_bytes: 0,
+            },
+            1_000,
+        );
         assert_eq!(report.source, RebuildSource::Journal);
         assert_eq!(cache.len(), 1);
         assert!(report.snapshot_rejected.is_none());
@@ -767,7 +726,16 @@ mod tests {
         let bytes = write_snapshot(dir.path(), &cache, 1_000).unwrap();
         assert!(bytes > 0, "the on-disk size is reported");
 
-        let (restored, report) = load_or_rebuild(dir.path(), Tolerance::default(), 1_000, 0, 1_000);
+        let (restored, report) = load_or_rebuild(
+            dir.path(),
+            CacheBounds {
+                tolerance: Tolerance::default(),
+                max_entries: 1_000,
+                max_age_seconds: 0,
+                max_bytes: 0,
+            },
+            1_000,
+        );
         assert_eq!(report.source, RebuildSource::Snapshot);
         assert!(restored.contains(&fingerprint("from-snapshot", Some(9.0)), 1_000));
         assert!(
@@ -785,7 +753,16 @@ mod tests {
         );
         fs::write(snapshot_path(dir.path()), "{ this is not json").unwrap();
 
-        let (cache, report) = load_or_rebuild(dir.path(), Tolerance::default(), 1_000, 0, 1_000);
+        let (cache, report) = load_or_rebuild(
+            dir.path(),
+            CacheBounds {
+                tolerance: Tolerance::default(),
+                max_entries: 1_000,
+                max_age_seconds: 0,
+                max_bytes: 0,
+            },
+            1_000,
+        );
         assert_eq!(report.source, RebuildSource::Journal);
         assert!(
             report
@@ -814,7 +791,16 @@ mod tests {
             .replace(FAILED_CACHE_SNAPSHOT_FORMAT_VERSION, "9.9.9");
         fs::write(&path, bumped).unwrap();
 
-        let (cache, report) = load_or_rebuild(dir.path(), Tolerance::default(), 1_000, 0, 1_000);
+        let (cache, report) = load_or_rebuild(
+            dir.path(),
+            CacheBounds {
+                tolerance: Tolerance::default(),
+                max_entries: 1_000,
+                max_age_seconds: 0,
+                max_bytes: 0,
+            },
+            1_000,
+        );
         assert_eq!(report.source, RebuildSource::Journal);
         assert!(
             report
@@ -840,8 +826,16 @@ mod tests {
         cache.insert(fingerprint("from-snapshot", Some(9.0)), 1_000);
         write_snapshot(dir.path(), &cache, 1_000).unwrap();
 
-        let (cache, report) =
-            load_or_rebuild(dir.path(), Tolerance::new(1e-3, 1e-2), 1_000, 0, 1_000);
+        let (cache, report) = load_or_rebuild(
+            dir.path(),
+            CacheBounds {
+                tolerance: Tolerance::new(1e-3, 1e-2),
+                max_entries: 1_000,
+                max_age_seconds: 0,
+                max_bytes: 0,
+            },
+            1_000,
+        );
         assert_eq!(report.source, RebuildSource::Journal);
         assert!(
             report
@@ -861,7 +855,16 @@ mod tests {
         cache.insert(fingerprint("from-snapshot", Some(9.0)), 1_000);
         write_snapshot(dir.path(), &cache, 1_000).unwrap();
 
-        let (_, report) = load_or_rebuild(dir.path(), Tolerance::default(), 17, 0, 1_000);
+        let (_, report) = load_or_rebuild(
+            dir.path(),
+            CacheBounds {
+                tolerance: Tolerance::default(),
+                max_entries: 17,
+                max_age_seconds: 0,
+                max_bytes: 0,
+            },
+            1_000,
+        );
         assert!(
             report
                 .snapshot_rejected
@@ -879,7 +882,16 @@ mod tests {
             dir.path(),
             &[journal_line(&experiment(1, 1_000, &["knob-a"]))],
         );
-        let (_, report) = load_or_rebuild(dir.path(), Tolerance::default(), 1_000, 0, 1_000);
+        let (_, report) = load_or_rebuild(
+            dir.path(),
+            CacheBounds {
+                tolerance: Tolerance::default(),
+                max_entries: 1_000,
+                max_age_seconds: 0,
+                max_bytes: 0,
+            },
+            1_000,
+        );
         // Nothing to assert about the magnitude on a two-line fixture; the
         // contract is that the field exists and the run can log it.
         assert!(report.elapsed_ms < 60_000);
