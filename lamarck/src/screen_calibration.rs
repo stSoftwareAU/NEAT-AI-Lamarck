@@ -557,6 +557,7 @@ mod tests {
             memo_misses: 0,
             memo_ms_saved: 0,
             scorer_ms: 2,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: None,

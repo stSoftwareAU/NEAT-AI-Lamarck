@@ -24,6 +24,7 @@ pub mod propagate_layout;
 pub mod report;
 pub mod run;
 pub mod scorer;
+pub mod scorer_cost;
 pub mod screen_calibration;
 pub mod structural;
 pub mod tags;
@@ -71,8 +72,13 @@ pub use run::{
     SeedSource, StopReason, run_optimisation, run_optimisation_cancellable,
 };
 pub use scorer::{
-    ExternalScorer, PromoteDecision, ScoreResult, ScoreSample, accepts_improvement,
-    log_scorer_batch_stats, screen_promote_decision, screen_promote_stems, write_promote_batch,
+    ExternalScorer, PromoteDecision, RecordingScorer, ScoreResult, ScoreSample,
+    accepts_improvement, log_scorer_batch_stats, screen_promote_decision, screen_promote_stems,
+    write_promote_batch,
+};
+pub use scorer_cost::{
+    CallCostFit, ScorerCallCost, ScorerCallCostAccumulator, ScorerCallPhase, ScorerCallRecord,
+    fit_calls,
 };
 pub use screen_calibration::{
     AcceptedScreenPoint, BaselineSampleGap, DeltaDistribution, ScreenCalibration,

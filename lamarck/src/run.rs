@@ -30,9 +30,10 @@ use crate::promote_gate::DEFAULT_SCREEN_PROMOTE_SIGMA_K;
 use crate::promote_gate::PromoteGateMode;
 use crate::scorer::improvement;
 use crate::scorer::{
-    DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
-    screen_promote_decision, write_promote_batch,
+    DirectoryScorer, RecordingScorer, ScoreResult, ScoreSample, accepts_improvement,
+    log_scorer_batch_stats_labeled, screen_promote_decision, write_promote_batch,
 };
+use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
 use crate::structural::{is_input_source, rank_unused_sources};
 use crate::tags::{CreatureMeta, LamarckProgress, serialize_creature_with_meta};
 use neat_core::{
@@ -124,6 +125,14 @@ pub struct ExperimentRecord {
     pub memo_ms_saved: u128,
     /// Scorer elapsed milliseconds (screen + promote when both ran).
     pub scorer_ms: u128,
+    /// Every scorer call this experiment made, with its creature count (#112).
+    ///
+    /// `scorerMs` alone cannot be regressed into a fixed per-call cost and a
+    /// marginal per-creature cost, because it sums calls of different sizes.
+    /// The per-call breakdown makes that decomposition reproducible from any
+    /// journal. Absent from journals written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer_calls: Option<Vec<ScorerCallRecord>>,
     /// Scorer error message when the batch failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scorer_error: Option<String>,
@@ -215,9 +224,39 @@ pub struct GraftReplayRecord {
     pub scorer_successes: u64,
     /// Scorer batches that failed during the phase.
     pub scorer_failures: u64,
+    /// Every scorer call the phase made, with its creature count (#112).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer_calls: Option<Vec<ScorerCallRecord>>,
     /// Failure message when the phase aborted instead of completing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_error: Option<String>,
+}
+
+/// Marks a journal line as scorer calls made outside any experiment (#112).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScorerCallsKind {
+    /// This line carries scorer calls, not an experiment.
+    ScorerCalls,
+}
+
+/// One journal line carrying scorer calls that belong to no experiment (#112).
+///
+/// The Phase-0 baseline call is the standing example: it runs before the first
+/// experiment, so it has no experiment record to live on. Journalling it on its
+/// own line is what lets the fixed-cost regression be fitted to *every* call a
+/// run made rather than to the subset the experiment loop happened to own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScorerCallsRecord {
+    /// Discriminates this line from an [`ExperimentRecord`].
+    pub record: ScorerCallsKind,
+    /// Unix timestamp when the line was written.
+    pub timestamp_unix: u64,
+    /// Which part of the run made these calls (`phase0` / `trailing`).
+    pub stage: String,
+    /// The calls themselves, in the order they were made.
+    pub calls: Vec<ScorerCallRecord>,
 }
 
 /// Where the effective RNG seed came from.
@@ -402,6 +441,8 @@ pub enum JournalLine {
     Header(Box<RunHeaderRecord>),
     /// Phase-G graft-replay outcome written once before the loop (issue #74).
     GraftReplay(Box<GraftReplayRecord>),
+    /// Scorer calls made outside any experiment (issue #112).
+    ScorerCalls(Box<ScorerCallsRecord>),
     /// One experiment outcome.
     Experiment(Box<ExperimentRecord>),
 }
@@ -426,6 +467,10 @@ impl JournalLine {
             Some("graftReplay") => {
                 let replay = serde_json::from_str(line).map_err(|e| e.to_string())?;
                 Ok(Self::GraftReplay(Box::new(replay)))
+            }
+            Some("scorerCalls") => {
+                let calls = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                Ok(Self::ScorerCalls(Box::new(calls)))
             }
             Some(other) => Err(format!("unknown journal record kind: {other}")),
             None => {
@@ -709,6 +754,11 @@ pub fn run_optimisation_cancellable(
     let analysis_threads = config.analysis_threads()?;
     let focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
+    // Measure every scorer call at the boundary (issue #112): the wrapper sees
+    // Phase-0, Phase-G, screen, promote and combo batches alike, so the journal
+    // can never be fitted to a subset of the calls a run actually made.
+    let recorder = RecordingScorer::new(scorer);
+    let scorer = &recorder;
     fs::create_dir_all(&config.output_dir).map_err(|e| e.to_string())?;
     let journal_path = config.output_dir.join("experiments.jsonl");
     let best_path = config.output_dir.join("best.json");
@@ -772,6 +822,7 @@ pub fn run_optimisation_cancellable(
     let mut opening_baseline_score = None;
     if config.phase0_parity {
         log::info("Phase-0: scoring incumbent baseline via authoritative scorer");
+        scorer.set_phase(ScorerCallPhase::Phase0);
         let phase0_dir = config.output_dir.join("phase0-baseline");
         match score_single_creature_dir(&incumbent, &config.training_data, scorer, &phase0_dir) {
             Ok(baseline) => {
@@ -810,6 +861,9 @@ pub fn run_optimisation_cancellable(
                 return Err(format!("Phase-0 parity gate failed (scorer): {e}"));
             }
         }
+        // The Phase-0 call belongs to no experiment, so it gets its own journal
+        // line — otherwise the fixed-cost regression misses it (issue #112).
+        journal_scorer_calls(&journal_path, "phase0", scorer.drain())?;
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
@@ -855,8 +909,6 @@ pub fn run_optimisation_cancellable(
     let deadline = Instant::now() + config.timeout;
     let mut experiments = 0u64;
     let mut acceptances = 0u64;
-    let mut scorer_failures = 0u64;
-    let mut scorer_successes = 0u64;
     let mut consecutive_scorer_failures = 0u32;
     let mut best_score = opening_baseline_score.unwrap_or(f64::NEG_INFINITY);
     // Last-accept details for the final run-summary stamp (Issue #35).
@@ -906,6 +958,7 @@ pub fn run_optimisation_cancellable(
         });
         let work = config.output_dir.join("graft-replay");
         let graft_start = Instant::now();
+        scorer.set_phase(ScorerCallPhase::GraftReplay);
         match replay_grafts(
             scorer,
             GraftReplayRequest {
@@ -919,8 +972,6 @@ pub fn run_optimisation_cancellable(
             },
         ) {
             Ok(replay) => {
-                scorer_successes += replay.scorer_successes;
-                scorer_failures += replay.scorer_failures;
                 let mut graft_accepted = false;
                 if replay.grafts_applied > 0 {
                     incumbent = replay.creature;
@@ -967,6 +1018,7 @@ pub fn run_optimisation_cancellable(
                         elapsed_ms: graft_start.elapsed().as_millis(),
                         scorer_successes: replay.scorer_successes,
                         scorer_failures: replay.scorer_failures,
+                        scorer_calls: journal_calls(scorer.drain()),
                         replay_error: None,
                     },
                 )?;
@@ -993,6 +1045,7 @@ pub fn run_optimisation_cancellable(
                         elapsed_ms: graft_start.elapsed().as_millis(),
                         scorer_successes: 0,
                         scorer_failures: 0,
+                        scorer_calls: journal_calls(scorer.drain()),
                         replay_error: Some(e.message.clone()),
                     },
                 )?;
@@ -1388,6 +1441,7 @@ pub fn run_optimisation_cancellable(
                 sample.phase,
                 config.scorer_path.display()
             ));
+            scorer.set_phase(ScorerCallPhase::Screen);
             let screen_scores = match scorer.score_directory_sampled(
                 &batch_dir,
                 &config.training_data,
@@ -1395,7 +1449,6 @@ pub fn run_optimisation_cancellable(
             ) {
                 Ok(s) => s,
                 Err(e) => {
-                    scorer_failures += 1;
                     consecutive_scorer_failures += 1;
                     log::warn(&format!("screen scorer failed: {e}"));
                     record_focus_failure(
@@ -1428,6 +1481,7 @@ pub fn run_optimisation_cancellable(
                             memo_misses: memo_delta.misses,
                             memo_ms_saved: memo_delta.ms_saved,
                             scorer_ms: scorer_start.elapsed().as_millis(),
+                            scorer_calls: journal_calls(scorer.drain()),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
                             combo_member_indices: None,
@@ -1454,7 +1508,6 @@ pub fn run_optimisation_cancellable(
             // so the ">threshold" count cannot disagree with what is promoted.
             log_scorer_batch_stats_labeled(&screen_scores, screen_ms, decision.threshold, "screen");
             consecutive_scorer_failures = 0;
-            scorer_successes += 1;
             screen_score_map = Some(
                 screen_scores
                     .iter()
@@ -1510,6 +1563,7 @@ pub fn run_optimisation_cancellable(
                         memo_misses: memo_delta.misses,
                         memo_ms_saved: memo_delta.ms_saved,
                         scorer_ms: screen_ms,
+                        scorer_calls: journal_calls(scorer.drain()),
                         scorer_error: None,
                         combo_members: None,
                         combo_member_indices: None,
@@ -1540,6 +1594,7 @@ pub fn run_optimisation_cancellable(
             promote_dir = Some(pdir.clone());
 
             let promote_start = Instant::now();
+            scorer.set_phase(ScorerCallPhase::Promote);
             match scorer.score_directory(&pdir, &config.training_data) {
                 Ok(s) => {
                     let promote_ms = promote_start.elapsed().as_millis();
@@ -1549,11 +1604,9 @@ pub fn run_optimisation_cancellable(
                         config.min_improvement,
                         "promote",
                     );
-                    scorer_successes += 1;
                     s
                 }
                 Err(e) => {
-                    scorer_failures += 1;
                     consecutive_scorer_failures += 1;
                     log::warn(&format!("promote scorer failed: {e}"));
                     record_focus_failure(
@@ -1586,6 +1639,7 @@ pub fn run_optimisation_cancellable(
                             memo_misses: memo_delta.misses,
                             memo_ms_saved: memo_delta.ms_saved,
                             scorer_ms: scorer_start.elapsed().as_millis(),
+                            scorer_calls: journal_calls(scorer.drain()),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
                             combo_member_indices: None,
@@ -1613,15 +1667,14 @@ pub fn run_optimisation_cancellable(
                 candidates.len(),
                 config.scorer_path.display()
             ));
+            scorer.set_phase(ScorerCallPhase::Promote);
             match scorer.score_directory(&batch_dir, &config.training_data) {
                 Ok(s) => {
-                    scorer_successes += 1;
                     let full_ms = scorer_start.elapsed().as_millis();
                     log_scorer_batch_stats_labeled(&s, full_ms, config.min_improvement, "scorer");
                     s
                 }
                 Err(e) => {
-                    scorer_failures += 1;
                     consecutive_scorer_failures += 1;
                     log::warn(&format!("scorer failed: {e}"));
                     record_focus_failure(
@@ -1654,6 +1707,7 @@ pub fn run_optimisation_cancellable(
                             memo_misses: memo_delta.misses,
                             memo_ms_saved: memo_delta.ms_saved,
                             scorer_ms: scorer_start.elapsed().as_millis(),
+                            scorer_calls: journal_calls(scorer.drain()),
                             scorer_error: Some(e.to_string()),
                             combo_members: None,
                             combo_member_indices: None,
@@ -1690,6 +1744,7 @@ pub fn run_optimisation_cancellable(
 
         let source_dir = promote_dir.as_ref().unwrap_or(&batch_dir);
         let combo_dir = config.output_dir.join(format!("combos-exp-{experiments}"));
+        scorer.set_phase(ScorerCallPhase::Combo);
         let selection = match select_best_with_combinations(
             scorer,
             ComboSelectRequest {
@@ -1906,6 +1961,7 @@ pub fn run_optimisation_cancellable(
                 memo_misses: memo_delta.misses,
                 memo_ms_saved: memo_delta.ms_saved,
                 scorer_ms,
+                scorer_calls: journal_calls(scorer.drain()),
                 scorer_error: None,
                 combo_members,
                 combo_member_indices: winner_member_indices,
@@ -1923,6 +1979,13 @@ pub fn run_optimisation_cancellable(
             let _ = fs::remove_dir_all(&combo_dir);
         }
     };
+
+    // Any call not already journalled on an experiment or replay line — a run
+    // cancelled mid-experiment leaves one behind — still has to reach the
+    // journal, or the fixed-cost regression is fitted to a subset (issue #112).
+    journal_scorer_calls(&journal_path, "trailing", scorer.drain())?;
+    let scorer_successes = scorer.successes();
+    let scorer_failures = scorer.failures();
 
     if experiments > 0 && scorer_successes == 0 {
         return Err(format!(
@@ -2092,6 +2155,37 @@ fn append_journal_line(path: &Path, line: &impl Serialize) -> Result<(), String>
     let encoded = serde_json::to_string(line).map_err(|e| e.to_string())?;
     writeln!(file, "{encoded}").map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Journal field for a drained set of scorer calls (issue #112).
+///
+/// An empty set is omitted rather than written as `[]`, so a journal line only
+/// carries the field when the phase it describes actually called the scorer.
+fn journal_calls(calls: Vec<ScorerCallRecord>) -> Option<Vec<ScorerCallRecord>> {
+    (!calls.is_empty()).then_some(calls)
+}
+
+/// Write scorer calls that belong to no experiment on their own line (#112).
+///
+/// A no-op when nothing was recorded; a blank line would say the run made calls
+/// it did not.
+fn journal_scorer_calls(
+    path: &Path,
+    stage: &str,
+    calls: Vec<ScorerCallRecord>,
+) -> Result<(), String> {
+    if calls.is_empty() {
+        return Ok(());
+    }
+    append_journal_line(
+        path,
+        &ScorerCallsRecord {
+            record: ScorerCallsKind::ScorerCalls,
+            timestamp_unix: unix_now(),
+            stage: stage.to_string(),
+            calls,
+        },
+    )
 }
 
 /// Score the supplied creature once for Phase-0 baseline recording.
@@ -2269,8 +2363,11 @@ mod tests {
         );
         let journal = fs::read_to_string(&result.journal_path).unwrap();
         let mut lines = journal.lines();
-        // Line 1 is the run header (issue #71); experiments follow.
+        // Line 1 is the run header (issue #71); line 2 carries the Phase-0
+        // scorer call, which belongs to no experiment (issue #112); experiments
+        // follow.
         assert!(lines.next().unwrap().contains("\"record\":\"runHeader\""));
+        assert!(lines.next().unwrap().contains("\"record\":\"scorerCalls\""));
         assert!(lines.next().unwrap().contains("experimentNumber"));
         if result.acceptances > 0 {
             let best = fs::read_to_string(&result.best_path).unwrap();
@@ -2384,7 +2481,9 @@ mod tests {
             .into_iter()
             .find_map(|l| match l {
                 JournalLine::Experiment(record) => Some(*record),
-                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                JournalLine::Header(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_) => None,
             })
             .expect("at least one experiment");
         assert!(first.screen_scores.is_some());
@@ -2481,12 +2580,117 @@ mod tests {
         (config, out)
     }
 
+    /// Every scorer call the journal recorded, whichever line kind carries it.
+    fn journalled_scorer_calls(path: &Path) -> Vec<ScorerCallRecord> {
+        journal_lines(path)
+            .into_iter()
+            .flat_map(|line| match line {
+                JournalLine::Experiment(record) => record.scorer_calls.unwrap_or_default(),
+                JournalLine::GraftReplay(replay) => replay.scorer_calls.unwrap_or_default(),
+                JournalLine::ScorerCalls(calls) => calls.calls,
+                JournalLine::Header(_) => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Issue #112: the journal accounts for **every** scorer invocation a run
+    /// made — Phase-0, screen, promote and combo alike. An intercept fitted to a
+    /// subset of the calls is the mis-measurement a go/no-go must not rest on,
+    /// so the count is pinned against the run's own success/failure totals.
+    #[test]
+    fn every_scorer_call_reaches_the_journal_with_its_creature_count() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out-call-cost");
+        let config = LamarckConfig {
+            creature: creature_path,
+            training_data: training,
+            timeout: Duration::from_millis(2000),
+            max_experiments: Some(2),
+            candidates: 6,
+            scale_candidate_quotas: false,
+            min_improvement: 1e-6,
+            seed: Some(1),
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir: out.clone(),
+            preserve_losers: true,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            // Phase-0 runs, so a call is made before the first experiment.
+            phase0_parity: true,
+            structural_only: false,
+            screen_sample_rate: Some(0.1),
+            screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            grafts_path: None,
+            graft_replay_budget: None,
+            backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+        };
+        let scorer = ScriptedScorer {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let result = run_optimisation(&config, &scorer).unwrap();
+
+        let calls = journalled_scorer_calls(&result.journal_path);
+        assert_eq!(
+            calls.len() as u64,
+            result.scorer_successes + result.scorer_failures,
+            "journalled calls must account for every scorer invocation: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|call| call.creatures >= 1),
+            "every call names the creatures it scored: {calls:?}"
+        );
+
+        let phases: std::collections::BTreeSet<ScorerCallPhase> =
+            calls.iter().map(|call| call.phase).collect();
+        assert!(
+            phases.contains(&ScorerCallPhase::Phase0),
+            "the Phase-0 baseline call is journalled on its own line: {phases:?}"
+        );
+        assert!(phases.contains(&ScorerCallPhase::Screen), "{phases:?}");
+        assert!(phases.contains(&ScorerCallPhase::Promote), "{phases:?}");
+
+        // A screen call is sampled and scores the whole batch; a promote call is
+        // full corpus over the survivors — the distinction the fit needs.
+        let screen = calls
+            .iter()
+            .find(|call| call.phase == ScorerCallPhase::Screen)
+            .expect("a screen call");
+        assert_eq!(screen.sample_rate, Some(0.1));
+        assert!(
+            screen.creatures > 1,
+            "the screen call scores baseline + candidates: {screen:?}"
+        );
+        let promote = calls
+            .iter()
+            .find(|call| call.phase == ScorerCallPhase::Promote)
+            .expect("a promote call");
+        assert_eq!(promote.sample_rate, None, "promote is full corpus");
+
+        // The same journal the run wrote is what `report` regresses (issue #112).
+        let report = crate::report::report_from_journal(&result.journal_path).unwrap();
+        assert_eq!(report.scorer_call_cost.calls as usize, calls.len());
+        assert!(report.scorer_call_cost.by_phase.contains_key("screen"));
+    }
+
     fn first_experiment(path: &Path) -> ExperimentRecord {
         journal_lines(path)
             .into_iter()
             .find_map(|l| match l {
                 JournalLine::Experiment(record) => Some(*record),
-                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                JournalLine::Header(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_) => None,
             })
             .expect("at least one experiment")
     }
@@ -2496,7 +2700,9 @@ mod tests {
             .into_iter()
             .find_map(|l| match l {
                 JournalLine::Header(header) => Some(*header),
-                JournalLine::Experiment(_) | JournalLine::GraftReplay(_) => None,
+                JournalLine::Experiment(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_) => None,
             })
             .expect("a run header")
     }
@@ -2859,7 +3065,9 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 JournalLine::Experiment(record) => Some(record.as_ref()),
-                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                JournalLine::Header(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -2887,7 +3095,9 @@ mod tests {
             .into_iter()
             .filter_map(|l| match l {
                 JournalLine::Experiment(record) => Some(*record),
-                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                JournalLine::Header(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -2933,7 +3143,9 @@ mod tests {
             .into_iter()
             .filter_map(|l| match l {
                 JournalLine::Experiment(record) => Some(*record),
-                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                JournalLine::Header(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -3057,7 +3269,9 @@ mod tests {
                 .into_iter()
                 .find_map(|l| match l {
                     JournalLine::Experiment(record) => Some(*record),
-                    JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                    JournalLine::Header(_)
+                    | JournalLine::GraftReplay(_)
+                    | JournalLine::ScorerCalls(_) => None,
                 })
                 .expect("at least one experiment");
             (
@@ -3144,7 +3358,9 @@ mod tests {
                 .into_iter()
                 .find_map(|l| match l {
                     JournalLine::Experiment(record) => Some(*record),
-                    JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                    JournalLine::Header(_)
+                    | JournalLine::GraftReplay(_)
+                    | JournalLine::ScorerCalls(_) => None,
                 })
                 .expect("at least one experiment")
         };
@@ -3204,7 +3420,9 @@ mod tests {
             .into_iter()
             .filter_map(|line| match line {
                 JournalLine::Experiment(record) => Some(*record),
-                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                JournalLine::Header(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_) => None,
             })
             .collect()
     }
@@ -3569,7 +3787,9 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 JournalLine::Experiment(record) => Some(record.as_ref()),
-                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+                JournalLine::Header(_)
+                | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_) => None,
             })
             .collect();
         assert_eq!(
