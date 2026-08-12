@@ -778,7 +778,20 @@ no candidate stem at all, so it needs its own line or `report` cannot see it:
 | `graftsApplied`, `accepted` | Grafts merged into the incumbent, and whether the incumbent improved. |
 | `baselineScore`, `score`, `improvement` | Score before, score after, and the accepted Δ. |
 | `scorerSuccesses`, `scorerFailures` | Scorer batches run during the phase. |
+| `scorerCalls[]` | Every scorer invocation the phase made, in the shape described for an experiment below (issue #112). |
 | `replayError` | Present when the phase aborted instead of completing. |
+
+Scorer calls that belong to no experiment get their own line, so the per-call
+cost model is fitted to **every** call a run made rather than to the subset the
+experiment loop owns (issue #112). The Phase-0 baseline call is the standing
+example — it runs before the first experiment:
+
+| Field | Meaning |
+|-------|---------|
+| `record` | Always `scorerCalls`. |
+| `timestampUnix` | When the line was written. |
+| `stage` | Which part of the run made them: `phase0`, or `trailing` for a call left over when a run stopped mid-experiment. |
+| `calls[]` | The calls themselves, in the shape described for an experiment below. |
 
 Every following line is one experiment:
 
@@ -797,6 +810,7 @@ Every following line is one experiment:
 | `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Absent when no screen phase ran, and from journals written before the field existed. |
 | `winner`, `improvement`, `accepted` | Outcome of the experiment. |
 | `analysisMs`, `scorerMs` | Where the time went. |
+| `scorerCalls[]` | Every scorer invocation this experiment made (issue #112): `phase` (`screen` / `promote` / `combo`), `creatures` handed over, `sampleRate` when the call sampled, `elapsedMs`, and `failed` on a call that did not complete. `scorerMs` sums calls of different sizes, so it cannot be regressed on its own; the per-call creature count is what recovers the fixed per-call and marginal per-creature cost. Absent from journals written before the field existed. |
 | `memoHits`, `memoMisses`, `memoMsSaved` | Analysis-memo accounting for this experiment (issue #106): lookups served from the memo, lookups recomputed, and the training-scan milliseconds the hits avoided. `memoMsSaved` counts whole scans skipped, measured on the miss that stored the entry — a cached output-MAE map saves only the residual accumulation inside a scan that still runs for the learning signal, so it is deliberately not counted. Journals written before the field existed read as `0`. |
 | `scorerError` | Present when the batch failed. |
 | `comboMembers`, `combosScored`, `combosDampened`, `comboDampen` | Combination-scoring detail. |
@@ -875,6 +889,20 @@ Run it over several journals with
 `scripts/summarise-screen-calibration.sh JOURNAL...`; the measured result for
 the journals in hand is
 [`docs/screen-calibration.md`](docs/screen-calibration.md).
+
+The `scorerCallCost` bucket decomposes scorer time into a **fixed** per-call cost
+and a **marginal** per-creature cost (issue #112), fitted by least squares from
+the journal's own `scorerCalls`: `calls`, `failedCalls`, `creaturesScored`, and a
+`byPhase` map whose rows carry `calls`, `distinctSizes`, `meanCreatures`,
+`meanMs`, `fixedMs` (the intercept), `marginalMsPerCreature` (the slope),
+`rSquared` and `fixedMsShareAtMean`. Phases are **never** pooled: a sampled
+screen call and a full-corpus promote call have different marginal costs, so one
+line through both would report neither. A phase whose calls were all the same
+size reports its means with a `null` decomposition rather than an intercept
+invented from one point, and a journal written before `scorerCalls` existed
+reports an empty bucket. The measured result on the production creature and
+corpus — and the go/no-go it decided — is
+[`docs/scorer-call-cost.md`](docs/scorer-call-cost.md).
 
 The `promoteGateReplay` bucket answers "what would the noise-aware gate have
 done to this journal?" without spending any box time (issue #111). It replays
@@ -955,6 +983,13 @@ champion, 75 experiments):
   full-corpus promotes are skipped when the sample shows nothing;
 - no strategy has earned removal — the sample is far too small to disable one.
 
+And from the per-call scorer measurement in
+[`docs/scorer-call-cost.md`](docs/scorer-call-cost.md) (issue #112): a scorer call
+costs ≈9.9 s **before it scores its first creature** on a 5% sample, against
+0.45 s per creature after that, so the fixed per-call cost is **24–29% of a
+45-minute run**. Sampled calls carry five times the fixed cost of a full-corpus
+call while doing a twentieth of the work.
+
 The open experimental questions the journal is designed to answer:
 
 1. Do statistically informed candidates beat ordinary random mutation often enough to justify their analysis cost?
@@ -983,6 +1018,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
+| [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | Every scorer call pays a fixed ≈9.9 s (sampled) / ≈2.0 s (full corpus) before it scores anything — 24–29% of a 45-minute run, measured in [`docs/scorer-call-cost.md`](docs/scorer-call-cost.md). Unfixed: either the scorer's sample-path setup or a persistent scoring session. |
 
 ## Repository layout
 
@@ -999,7 +1035,8 @@ NEAT-AI-Lamarck/
 ├── docs/
 │   ├── architecture.md
 │   ├── baseline-economics.md
-│   └── screen-calibration.md
+│   ├── screen-calibration.md
+│   └── scorer-call-cost.md
 └── lamarck/src/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
@@ -1016,6 +1053,7 @@ NEAT-AI-Lamarck/
     ├── combos.rs            # candidate merging and stacked-synapse dampening
     ├── grafts.rs            # structural graft store and phase-G replay
     ├── scorer.rs
+    ├── scorer_cost.rs      # fixed vs marginal per-call scorer cost (issue #112)
     ├── run.rs
     ├── report.rs
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)

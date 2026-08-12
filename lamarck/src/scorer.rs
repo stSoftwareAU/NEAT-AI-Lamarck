@@ -3,11 +3,14 @@
 use crate::config::DEFAULT_MIN_IMPROVEMENT;
 use crate::log;
 use crate::promote_gate::PromoteGate;
+use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
 use serde::Deserialize;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 /// Parsed fields from a scorer result object.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -129,6 +132,117 @@ impl DirectoryScorer for ExternalScorer {
             )));
         }
         parse_scorer_stdout(&output.stdout)
+    }
+}
+
+/// A [`DirectoryScorer`] that measures every call it forwards (issue #112).
+///
+/// The wrapper sits between the run and the real scorer, so **every**
+/// invocation is measured wherever it is made — Phase-0, Phase-G graft replay,
+/// screen, promote and combo scoring alike — without threading a recorder
+/// through each call site. Each call records the phase in force, the creature
+/// count of the directory handed over, the sample rate and the wall clock, which
+/// is what makes a run's `scorerMs` regressable into a fixed per-call cost and a
+/// marginal per-creature cost.
+pub struct RecordingScorer<'a, S: DirectoryScorer> {
+    inner: &'a S,
+    phase: Cell<ScorerCallPhase>,
+    calls: RefCell<Vec<ScorerCallRecord>>,
+    successes: Cell<u64>,
+    failures: Cell<u64>,
+}
+
+impl<'a, S: DirectoryScorer> RecordingScorer<'a, S> {
+    /// Wrap `inner`, attributing calls to Phase-0 until told otherwise.
+    pub fn new(inner: &'a S) -> Self {
+        Self {
+            inner,
+            phase: Cell::new(ScorerCallPhase::Phase0),
+            calls: RefCell::new(Vec::new()),
+            successes: Cell::new(0),
+            failures: Cell::new(0),
+        }
+    }
+
+    /// Attribute subsequent calls to `phase`.
+    pub fn set_phase(&self, phase: ScorerCallPhase) {
+        self.phase.set(phase);
+    }
+
+    /// Take the calls recorded since the last drain, ready to journal.
+    pub fn drain(&self) -> Vec<ScorerCallRecord> {
+        std::mem::take(&mut *self.calls.borrow_mut())
+    }
+
+    /// Calls recorded but not yet drained.
+    pub fn pending(&self) -> usize {
+        self.calls.borrow().len()
+    }
+
+    /// Scorer calls that succeeded, across every phase.
+    pub fn successes(&self) -> u64 {
+        self.successes.get()
+    }
+
+    /// Scorer calls that failed, across every phase.
+    pub fn failures(&self) -> u64 {
+        self.failures.get()
+    }
+}
+
+/// Creature files (`*.json`) a scorer call was handed.
+///
+/// An unreadable directory is an error rather than a zero: a call silently
+/// recorded as scoring nothing would drag the fitted fixed cost towards zero.
+fn count_creature_files(dir: &Path) -> Result<u64, ScorerError> {
+    let entries = fs::read_dir(dir).map_err(|e| {
+        ScorerError::Process(format!(
+            "failed to list scorer batch directory {}: {e}",
+            dir.display()
+        ))
+    })?;
+    let mut count = 0u64;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            ScorerError::Process(format!(
+                "failed to read scorer batch directory {}: {e}",
+                dir.display()
+            ))
+        })?;
+        if entry.path().extension().is_some_and(|ext| ext == "json") {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+impl<S: DirectoryScorer> DirectoryScorer for RecordingScorer<'_, S> {
+    fn score_directory_sampled(
+        &self,
+        candidates_dir: &Path,
+        training_data: &Path,
+        sample: ScoreSample,
+    ) -> Result<BTreeMap<String, ScoreResult>, ScorerError> {
+        let creatures = count_creature_files(candidates_dir)?;
+        let started = Instant::now();
+        let result = self
+            .inner
+            .score_directory_sampled(candidates_dir, training_data, sample);
+        let elapsed_ms = started.elapsed().as_millis();
+        let failed = result.is_err();
+        if failed {
+            self.failures.set(self.failures.get() + 1);
+        } else {
+            self.successes.set(self.successes.get() + 1);
+        }
+        self.calls.borrow_mut().push(ScorerCallRecord {
+            phase: self.phase.get(),
+            creatures,
+            sample_rate: sample.is_subsample().then_some(sample.rate),
+            elapsed_ms,
+            failed,
+        });
+        result
     }
 }
 
@@ -519,6 +633,112 @@ mod tests {
         )]);
         let err = screen_promote_decision(&map, &PromoteGate::noise_aware(1e-6, 3.0)).unwrap_err();
         assert!(matches!(err, ScorerError::Missing(_)));
+    }
+
+    /// A directory of `n` creatures is recorded as `n` creatures, under the
+    /// phase in force, with the sample rate the call used.
+    #[test]
+    fn the_recording_scorer_records_creature_count_phase_and_sample_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = dir.path().join("candidates-exp-1");
+        fs::create_dir_all(&batch).unwrap();
+        fs::write(batch.join("baseline.json"), b"{}").unwrap();
+        for i in 0..4 {
+            fs::write(batch.join(format!("candidate-{i:03}.json")), b"{}").unwrap();
+        }
+        // A non-creature file must not be counted as one.
+        fs::write(batch.join("notes.txt"), b"ignored").unwrap();
+
+        let mut payload = BTreeMap::new();
+        payload.insert(
+            "baseline".to_string(),
+            ScoreResult {
+                score: 0.5,
+                error: 0.5,
+                complexity_penalty: 0.0,
+            },
+        );
+        let inner = FakeScorer {
+            payload: Arc::new(Mutex::new(payload)),
+        };
+        let recorder = RecordingScorer::new(&inner);
+        recorder.set_phase(ScorerCallPhase::Screen);
+        recorder
+            .score_directory_sampled(
+                &batch,
+                Path::new("train"),
+                ScoreSample {
+                    rate: 0.05,
+                    phase: 3,
+                },
+            )
+            .unwrap();
+        recorder.set_phase(ScorerCallPhase::Promote);
+        recorder
+            .score_directory(&batch, Path::new("train"))
+            .unwrap();
+
+        let calls = recorder.drain();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].phase, ScorerCallPhase::Screen);
+        assert_eq!(calls[0].creatures, 5);
+        assert_eq!(calls[0].sample_rate, Some(0.05));
+        assert!(!calls[0].failed);
+        assert_eq!(calls[1].phase, ScorerCallPhase::Promote);
+        assert_eq!(calls[1].creatures, 5);
+        assert_eq!(calls[1].sample_rate, None, "a full-corpus call has no rate");
+        assert_eq!(recorder.successes(), 2);
+        assert_eq!(recorder.failures(), 0);
+        // Draining hands the calls over exactly once.
+        assert!(recorder.drain().is_empty());
+        assert_eq!(recorder.pending(), 0);
+    }
+
+    /// A failed call is still recorded — a call that vanished from the journal
+    /// would fit the cost model to a subset of the run (issue #112).
+    #[test]
+    fn the_recording_scorer_records_a_failed_call() {
+        struct FailingScorer;
+        impl DirectoryScorer for FailingScorer {
+            fn score_directory_sampled(
+                &self,
+                _candidates_dir: &Path,
+                _training_data: &Path,
+                _sample: ScoreSample,
+            ) -> Result<BTreeMap<String, ScoreResult>, ScorerError> {
+                Err(ScorerError::Process("boom".into()))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("baseline.json"), b"{}").unwrap();
+        let recorder = RecordingScorer::new(&FailingScorer);
+        recorder.set_phase(ScorerCallPhase::Promote);
+        assert!(
+            recorder
+                .score_directory(dir.path(), Path::new("train"))
+                .is_err()
+        );
+        let calls = recorder.drain();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].failed);
+        assert_eq!(calls[0].creatures, 1);
+        assert_eq!(recorder.failures(), 1);
+        assert_eq!(recorder.successes(), 0);
+    }
+
+    /// An unlistable batch directory fails loudly instead of recording a call
+    /// that scored zero creatures.
+    #[test]
+    fn a_missing_batch_directory_is_an_error_not_a_zero_creature_call() {
+        let inner = FakeScorer {
+            payload: Arc::new(Mutex::new(BTreeMap::new())),
+        };
+        let recorder = RecordingScorer::new(&inner);
+        let err = recorder
+            .score_directory(Path::new("/nonexistent-lamarck-batch"), Path::new("train"))
+            .unwrap_err();
+        assert!(matches!(err, ScorerError::Process(_)));
+        assert!(recorder.drain().is_empty());
     }
 
     #[test]

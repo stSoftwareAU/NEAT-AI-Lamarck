@@ -4,6 +4,7 @@ use crate::candidates::{BatchLimit, CandidateStrategy};
 use crate::log;
 use crate::promote_gate::{PromoteGateReplay, PromoteGateReplayAccumulator};
 use crate::run::{JournalLine, RunResult};
+use crate::scorer_cost::{ScorerCallCost, ScorerCallCostAccumulator};
 use crate::screen_calibration::{ScreenCalibration, ScreenCalibrationAccumulator};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -246,6 +247,12 @@ pub struct JournalReport {
     pub candidate_batch: CandidateBatchStats,
     /// How well the 5% screen predicted the full-corpus score (issue #110).
     pub screen_calibration: ScreenCalibration,
+    /// Fixed vs marginal scorer cost per call, fitted per phase (issue #112).
+    ///
+    /// The intercept of call time against creature count is what a persistent
+    /// scoring session could save; the slope is what it could not. Fitted from
+    /// the journal's own `scorerCalls`, so any run reproduces the measurement.
+    pub scorer_call_cost: ScorerCallCost,
     /// What the noise-aware promote gate would have done to this journal (#111).
     ///
     /// Replayed offline from the journal's own `screenScores`, at the default
@@ -337,6 +344,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut batch_requested_mixed = false;
     let mut batch_quota_ceiling = 0u64;
     let mut batch_exhausted = 0u64;
+    let mut scorer_call_cost = ScorerCallCostAccumulator::default();
     let mut screen_calibration = ScreenCalibrationAccumulator::default();
     let mut promote_gate_replay = PromoteGateReplayAccumulator::default();
     let mut focus_all = FocusStatsAccumulator::default();
@@ -356,7 +364,16 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
                 promote_gate_replay.push_header(&header.config);
                 continue;
             }
+            JournalLine::ScorerCalls(calls) => {
+                // Calls made outside any experiment — the Phase-0 baseline —
+                // are part of the cost model too (issue #112).
+                scorer_call_cost.push_all(&calls.calls);
+                continue;
+            }
             JournalLine::GraftReplay(replay) => {
+                if let Some(calls) = &replay.scorer_calls {
+                    scorer_call_cost.push_all(calls);
+                }
                 let bucket = graft_replay.get_or_insert_with(GraftReplayStats::default);
                 bucket.replays += 1;
                 bucket.scorer_failures += replay.scorer_failures;
@@ -380,6 +397,9 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         memo_ms_saved = memo_ms_saved.saturating_add(record.memo_ms_saved);
         total_analysis_ms += record.analysis_ms;
         total_scorer_ms += record.scorer_ms;
+        if let Some(calls) = &record.scorer_calls {
+            scorer_call_cost.push_all(calls);
+        }
         elapsed += record.analysis_ms + record.scorer_ms;
         first_ts = Some(first_ts.map_or(record.timestamp_unix, |t| t.min(record.timestamp_unix)));
         last_ts = Some(last_ts.map_or(record.timestamp_unix, |t| t.max(record.timestamp_unix)));
@@ -657,6 +677,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             exhausted_experiments: batch_exhausted,
         },
         screen_calibration: screen_calibration.finish(),
+        scorer_call_cost: scorer_call_cost.finish(),
         promote_gate_replay: promote_gate_replay.finish(),
     })
 }
@@ -824,6 +845,27 @@ pub fn print_run_summary(result: &RunResult) {
                 memo.analysis_ms_saved_fraction * 100.0
             ));
         }
+        let cost = &report.scorer_call_cost;
+        for (phase, fit) in &cost.by_phase {
+            match (fit.fixed_ms, fit.marginal_ms_per_creature) {
+                (Some(fixed), Some(marginal)) => log::detail(&format!(
+                    "scorer {phase:<8}{} call(s)  fixed {}/call  marginal {}/creature  ({:.0}% fixed at {:.1} creatures)",
+                    fit.calls,
+                    format_ms(fixed.max(0.0) as u128),
+                    format_ms(marginal.max(0.0) as u128),
+                    fit.fixed_ms_share_at_mean.unwrap_or(0.0) * 100.0,
+                    fit.mean_creatures
+                )),
+                // One batch size cannot separate fixed from marginal cost;
+                // report the means rather than invent an intercept (#112).
+                _ => log::detail(&format!(
+                    "scorer {phase:<8}{} call(s)  mean {} over {:.1} creatures  (one batch size — no split)",
+                    fit.calls,
+                    format_ms(fit.mean_ms as u128),
+                    fit.mean_creatures
+                )),
+            }
+        }
         let screen = &report.screen_calibration;
         if screen.paired_candidates > 0 {
             let rho = match screen.spearman {
@@ -935,6 +977,7 @@ mod tests {
     use super::*;
     use crate::candidates::CandidateProvenance;
     use crate::run::ExperimentRecord;
+    use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
     use std::collections::BTreeMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -994,6 +1037,7 @@ mod tests {
             memo_misses: 0,
             memo_ms_saved: 0,
             scorer_ms: 2,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: accepted.then(|| vec![0]),
@@ -1009,6 +1053,110 @@ mod tests {
             writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
         }
         file
+    }
+
+    /// One journalled scorer call (issue #112).
+    fn call(phase: ScorerCallPhase, creatures: u64, elapsed_ms: u128) -> ScorerCallRecord {
+        ScorerCallRecord {
+            phase,
+            creatures,
+            sample_rate: matches!(phase, ScorerCallPhase::Screen).then_some(0.05),
+            elapsed_ms,
+            failed: false,
+        }
+    }
+
+    /// Issue #112: the per-call creature counts a run journals recover the fixed
+    /// and marginal scorer cost exactly, and screen and promote are fitted apart
+    /// — pooling them would fit one line through two different populations.
+    #[test]
+    fn report_recovers_the_fixed_and_marginal_scorer_cost_per_phase() {
+        // Screen: 800 ms fixed + 40 ms/creature. Promote: 9000 + 11 000 ms.
+        let mut first = experiment(1, false);
+        first.scorer_calls = Some(vec![
+            call(ScorerCallPhase::Screen, 1, 840),
+            call(ScorerCallPhase::Promote, 2, 31_000),
+        ]);
+        let mut second = experiment(2, false);
+        second.scorer_calls = Some(vec![
+            call(ScorerCallPhase::Screen, 30, 2000),
+            call(ScorerCallPhase::Promote, 4, 53_000),
+        ]);
+        let file = journal_of(&[first, second]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        let cost = &report.scorer_call_cost;
+        assert_eq!(cost.calls, 4);
+        assert_eq!(cost.failed_calls, 0);
+        assert_eq!(cost.creatures_scored, 37);
+
+        let screen = &cost.by_phase["screen"];
+        assert_eq!(screen.calls, 2);
+        assert!((screen.fixed_ms.expect("screen fixed") - 800.0).abs() < 1e-6);
+        assert!((screen.marginal_ms_per_creature.expect("screen slope") - 40.0).abs() < 1e-9);
+
+        let promote = &cost.by_phase["promote"];
+        assert_eq!(promote.calls, 2);
+        assert!((promote.fixed_ms.expect("promote fixed") - 9000.0).abs() < 1e-6);
+        assert!((promote.marginal_ms_per_creature.expect("promote slope") - 11_000.0).abs() < 1e-9);
+    }
+
+    /// Issue #112: Phase-0 and Phase-G calls live on their own journal lines,
+    /// and both belong in the cost model — an intercept fitted to the experiment
+    /// loop alone is fitted to a subset of the run.
+    #[test]
+    fn report_folds_phase0_and_graft_replay_calls_into_the_cost_model() {
+        let mut file = NamedTempFile::new().unwrap();
+        let phase0 = crate::run::ScorerCallsRecord {
+            record: crate::run::ScorerCallsKind::ScorerCalls,
+            timestamp_unix: 900,
+            stage: "phase0".into(),
+            calls: vec![call(ScorerCallPhase::Phase0, 1, 10_000)],
+        };
+        writeln!(file, "{}", serde_json::to_string(&phase0).unwrap()).unwrap();
+        let replay = crate::run::GraftReplayRecord {
+            record: crate::run::GraftReplayKind::GraftReplay,
+            timestamp_unix: 950,
+            grafts_applied: 0,
+            accepted: false,
+            baseline_score: Some(0.4),
+            score: None,
+            improvement: None,
+            elapsed_ms: 5,
+            scorer_successes: 2,
+            scorer_failures: 0,
+            scorer_calls: Some(vec![
+                call(ScorerCallPhase::GraftReplay, 2, 12_000),
+                call(ScorerCallPhase::GraftReplay, 5, 15_000),
+            ]),
+            replay_error: None,
+        };
+        writeln!(file, "{}", serde_json::to_string(&replay).unwrap()).unwrap();
+        let mut experiment = experiment(1, false);
+        experiment.scorer_calls = Some(vec![call(ScorerCallPhase::Screen, 30, 2000)]);
+        writeln!(file, "{}", serde_json::to_string(&experiment).unwrap()).unwrap();
+
+        let report = report_from_journal(file.path()).unwrap();
+        let cost = &report.scorer_call_cost;
+        assert_eq!(cost.calls, 4, "every call in the journal is counted");
+        // One Phase-0 call is one batch size: reported, but not decomposed.
+        let phase0_fit = &cost.by_phase["phase0"];
+        assert_eq!(phase0_fit.calls, 1);
+        assert_eq!(phase0_fit.fixed_ms, None);
+        assert!((phase0_fit.mean_ms - 10_000.0).abs() < 1e-9);
+        let graft_fit = &cost.by_phase["graftReplay"];
+        assert!((graft_fit.fixed_ms.expect("graft fixed") - 10_000.0).abs() < 1e-6);
+        assert!((graft_fit.marginal_ms_per_creature.expect("graft slope") - 1000.0).abs() < 1e-9);
+    }
+
+    /// Issue #112: a journal written before per-call records existed reports no
+    /// cost model rather than a fabricated one.
+    #[test]
+    fn report_reports_no_call_cost_for_a_pre_change_journal() {
+        let file = journal_of(&[experiment(1, false), experiment(2, true)]);
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.scorer_call_cost, ScorerCallCost::default());
+        assert!(report.scorer_call_cost.by_phase.is_empty());
     }
 
     /// Provenance naming a specific focus (issue #109).
@@ -1218,6 +1366,7 @@ mod tests {
             memo_misses: 0,
             memo_ms_saved: 0,
             scorer_ms: 2,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: None,
@@ -1339,6 +1488,7 @@ mod tests {
             elapsed_ms: 120,
             scorer_successes: 2,
             scorer_failures: 1,
+            scorer_calls: None,
             replay_error: None,
         };
         let mut file = NamedTempFile::new().unwrap();
@@ -1377,6 +1527,7 @@ mod tests {
             elapsed_ms: 5,
             scorer_successes: 0,
             scorer_failures: 0,
+            scorer_calls: None,
             replay_error: Some("graft singles: baseline missing".into()),
         };
         let mut file = NamedTempFile::new().unwrap();
@@ -1529,6 +1680,7 @@ mod tests {
             memo_misses: 0,
             memo_ms_saved: 40,
             scorer_ms: 20,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: None,
@@ -1564,6 +1716,7 @@ mod tests {
             memo_misses: 2,
             memo_ms_saved: 0,
             scorer_ms: 15,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: None,
