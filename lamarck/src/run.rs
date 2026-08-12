@@ -1,7 +1,9 @@
 //! End-to-end Lamarck optimisation loop and experiment journal.
 
 use crate::analysis::{ScanBudget, scan_post_focus, scan_pre_focus};
-use crate::baseline::{BaselineKey, BaselineSource, RememberedBaseline, training_data_key};
+use crate::baseline::{
+    BaselineKey, BaselineSource, RememberedBaseline, estimate_corpus_records, training_data_key,
+};
 use crate::cancel::CancelToken;
 use crate::candidates::{
     BatchLimit, Candidate, CandidateBudget, CandidateGenContext, CandidateProvenance,
@@ -320,9 +322,12 @@ pub struct RunConfigRecord {
     /// reports — means every promote call carried the incumbent.
     #[serde(default)]
     pub baseline_reverify_interval: u64,
-    /// Baseline score drift that aborts the run (`--baseline-drift-epsilon`).
+    /// Baseline score drift that aborts the run (effective value after auto-tune).
     #[serde(default)]
     pub baseline_drift_epsilon: f64,
+    /// True when the drift epsilon was auto-tuned (flag omitted).
+    #[serde(default)]
+    pub baseline_drift_epsilon_auto: bool,
     /// Pinned focus neuron UUID when set.
     pub focus_neuron: Option<String>,
     /// Focus selection policy label.
@@ -371,7 +376,10 @@ pub struct RunConfigRecord {
 
 impl RunConfigRecord {
     /// Capture the reproducible knobs of a [`LamarckConfig`].
-    pub fn from_config(config: &LamarckConfig) -> Self {
+    ///
+    /// `drift_epsilon` is the effective tolerance after auto-tune (or the
+    /// explicit override). Journal readers always see the number the run used.
+    pub fn from_config(config: &LamarckConfig, drift_epsilon: f64) -> Self {
         Self {
             creature: config.creature.clone(),
             training_data: config.training_data.clone(),
@@ -390,7 +398,8 @@ impl RunConfigRecord {
                 PromoteGateMode::NoiseAware => Some(config.screen_promote_sigma_k),
             },
             baseline_reverify_interval: config.baseline_reverify_interval,
-            baseline_drift_epsilon: config.baseline_drift_epsilon,
+            baseline_drift_epsilon: drift_epsilon,
+            baseline_drift_epsilon_auto: config.baseline_drift_epsilon.is_none(),
             focus_neuron: config.focus_neuron.clone(),
             focus_policy: config.focus_policy.label().to_string(),
             focus_count: config.focus_count,
@@ -776,7 +785,6 @@ pub fn run_optimisation_cancellable(
     let analysis_threads = config.analysis_threads()?;
     let focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
-    let baseline_policy = config.baseline_reuse_policy()?;
     // Measure every scorer call at the boundary (issue #112): the wrapper sees
     // Phase-0, Phase-G, screen, promote and combo batches alike, so the journal
     // can never be fitted to a subset of the calls a run actually made.
@@ -799,15 +807,6 @@ pub fn run_optimisation_cancellable(
             "seed {seed} (drawn from OS entropy; replay this run with --seed {seed})"
         )),
     }
-    append_journal_line(
-        &journal_path,
-        &RunHeaderRecord::new(
-            seed,
-            seed_source,
-            RunConfigRecord::from_config(config),
-            unix_now(),
-        ),
-    )?;
 
     let original_text = fs::read_to_string(&config.creature).map_err(|e| e.to_string())?;
     let mut incumbent = parse_creature_json(&original_text).map_err(|e| e.to_string())?;
@@ -817,6 +816,31 @@ pub fn run_optimisation_cancellable(
     fs::write(&best_path, &original_text).map_err(|e| e.to_string())?;
 
     let train_cfg = TrainingDataConfig::new(incumbent.input, incumbent.output);
+    // Auto-tune the drift canary from the corpus before the journal header so
+    // the recorded epsilon is the one the run will use (refined after Phase-0).
+    let approx_records =
+        estimate_corpus_records(&config.training_data, train_cfg.bytes_per_record())?;
+    let mut baseline_policy = config.baseline_reuse_policy(approx_records, 1.0)?;
+    if config.baseline_drift_epsilon.is_none() {
+        log::info(&format!(
+            "baseline-drift-epsilon={:.6e} (auto from ~{approx_records} records; refined after Phase-0)",
+            baseline_policy.drift_epsilon
+        ));
+    } else {
+        log::info(&format!(
+            "baseline-drift-epsilon={:.6e} (explicit override)",
+            baseline_policy.drift_epsilon
+        ));
+    }
+    append_journal_line(
+        &journal_path,
+        &RunHeaderRecord::new(
+            seed,
+            seed_source,
+            RunConfigRecord::from_config(config, baseline_policy.drift_epsilon),
+            unix_now(),
+        ),
+    )?;
     log::info(&format!(
         "ensuring observations-{} (inputs={} outputs={})",
         config.stats_mode.label(),
@@ -879,9 +903,24 @@ pub fn run_optimisation_cancellable(
                 )?;
                 log::ok("Phase-0 Lamarck ↔ scorer parity within documented epsilon");
                 opening_baseline_score = Some(baseline.score);
+                // Refine the auto-tuned canary with the true record count and
+                // the scorer's error scale — still owned by Lamarck, never GRQ.
+                if config.baseline_drift_epsilon.is_none() {
+                    let refined = config.baseline_reuse_policy(local_count, baseline.error)?;
+                    if (refined.drift_epsilon - baseline_policy.drift_epsilon).abs() > 0.0 {
+                        log::info(&format!(
+                            "baseline-drift-epsilon={:.6e} (auto refined: {local_count} records, error={:.6})",
+                            refined.drift_epsilon, baseline.error
+                        ));
+                    }
+                    baseline_policy = refined;
+                }
                 // Phase-0 scored the incumbent on the full corpus, so the run
                 // starts already knowing the number every promote call would
-                // otherwise re-derive (issue #113).
+                // otherwise re-derive (issue #113). Only carry it when reuse is
+                // enabled — with the default interval=0 each promote is already
+                // self-paired, and retaining a canary across promotes false-
+                // aborted healthy GRQ runs on directory-scorer association noise.
                 if baseline_policy.is_enabled()
                     && let Some(key) = baseline_key(&incumbent, &config.training_data)
                 {
@@ -1806,23 +1845,31 @@ pub fn run_optimisation_cancellable(
         // the run rather than deciding anything.
         let (mut baseline, mut baseline_source) = match scores.get("baseline") {
             Some(fresh) => {
-                if let (Some(remembered), Some(scope)) = (&remembered_baseline, &baseline_scope)
-                    && remembered.is_valid_for(scope)
-                {
-                    let drift = remembered.drift(fresh);
-                    if drift > baseline_policy.drift_epsilon {
-                        return Err(baseline_drift_error(
-                            drift,
-                            remembered.result().score,
-                            fresh.score,
-                            baseline_policy.drift_epsilon,
-                            "promote re-verification",
-                        ));
+                // Drift canary + remembered update only when reuse is enabled.
+                // Default interval=0 scores the incumbent in every promote batch
+                // (self-verifying); carrying a cross-promote canary there is a
+                // footgun against directory-scorer f32 association noise.
+                if baseline_policy.is_enabled() {
+                    if let (Some(remembered), Some(scope)) = (&remembered_baseline, &baseline_scope)
+                        && remembered.is_valid_for(scope)
+                    {
+                        let drift = remembered.drift(fresh);
+                        if drift > baseline_policy.drift_epsilon {
+                            return Err(baseline_drift_error(
+                                drift,
+                                remembered.result().score,
+                                fresh.score,
+                                baseline_policy.drift_epsilon,
+                                "promote re-verification",
+                            ));
+                        }
                     }
+                    remembered_baseline = baseline_scope
+                        .clone()
+                        .map(|scope| RememberedBaseline::new(scope, fresh.clone()));
+                } else {
+                    remembered_baseline = None;
                 }
-                remembered_baseline = baseline_scope
-                    .clone()
-                    .map(|scope| RememberedBaseline::new(scope, fresh.clone()));
                 (fresh.clone(), BaselineSource::Fresh)
             }
             None => {
@@ -1949,9 +1996,13 @@ pub fn run_optimisation_cancellable(
                         selection = None;
                     }
                     baseline = pair.baseline.clone();
-                    remembered_baseline = baseline_scope
-                        .clone()
-                        .map(|scope| RememberedBaseline::new(scope, pair.baseline));
+                    remembered_baseline = if baseline_policy.is_enabled() {
+                        baseline_scope
+                            .clone()
+                            .map(|scope| RememberedBaseline::new(scope, pair.baseline))
+                    } else {
+                        None
+                    };
                     baseline_source = BaselineSource::RememberedVerified;
                 }
                 Err(e) => {
@@ -2427,7 +2478,8 @@ fn baseline_drift_error(
     format!(
         "baseline drift at {stage}: the incumbent scored {fresh:.12} now against the \
          remembered {remembered:.12} (|Δ| {drift:.6e} > --baseline-drift-epsilon {epsilon:.6e}). \
-         The training data, the scorer or the incumbent changed under the run — \
+         Beyond known directory-scorer association noise this usually means the \
+         training data, the scorer binary, or the incumbent changed under the run — \
          aborting rather than deciding an acceptance against a stale score."
     )
 }
@@ -2629,7 +2681,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2670,7 +2722,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2873,7 +2925,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2979,7 +3031,7 @@ mod tests {
             screen_promote_gate: gate,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -3039,7 +3091,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -3284,7 +3336,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: Some(grafts_path.clone()),
             // Explicit budget so phase-G is not starved by a sub-second run timeout.
             graft_replay_budget: Some(Duration::from_secs(5)),
@@ -3384,7 +3436,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -3440,7 +3492,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -3643,7 +3695,8 @@ mod tests {
             analysis_threads: 8,
             ..LamarckConfig::default()
         };
-        let record = RunConfigRecord::from_config(&config);
+        let record =
+            RunConfigRecord::from_config(&config, crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON);
         assert_eq!(record.analysis_threads, 8);
 
         // Without this field a parallel arm and a serial arm are
@@ -3721,7 +3774,8 @@ mod tests {
             backprop_max_bias_adjustment_scale: Some(1e-6),
             ..LamarckConfig::default()
         };
-        let record = RunConfigRecord::from_config(&config);
+        let record =
+            RunConfigRecord::from_config(&config, crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON);
         assert_eq!(record.backprop_max_bias_adjustment_scale, Some(1e-6));
         assert_eq!(record.backprop_learning_rate, Some(0.001));
 
@@ -4561,7 +4615,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: Some(crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -4719,7 +4773,7 @@ mod tests {
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             baseline_reverify_interval: interval,
-            baseline_drift_epsilon: epsilon,
+            baseline_drift_epsilon: Some(epsilon),
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,

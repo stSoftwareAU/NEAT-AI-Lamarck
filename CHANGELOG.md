@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Self-tune `--baseline-drift-epsilon` (and stop canarying when reuse is
+  off).** The old fixed `1e-9` assumed successive full-corpus scores of an
+  unchanged creature were bit-identical. Directory-mode scoring re-associates
+  `f32` activations across parallel / SIMD partitions; GRQ-10 observed
+  `|Δ| ≈ 2.1e-8` and aborted a healthy run — even though
+  `--baseline-reverify-interval` stayed at the default `0`. Two fixes, both
+  owned by Lamarck (no GRQ tuning knobs): (1) with reuse off, do not retain a
+  cross-promote drift canary — every promote already scores the incumbent in
+  the same batch; (2) when reuse is enabled and the flag is omitted, auto-tune
+  from corpus size and Phase-0 error
+  (`ε_f32 · error · log₂(N) · headroom`, clamped to `[1e-6, 1e-3]`). Accept
+  safety remains the paired re-score path, not this epsilon.
+
 - **Scorer-facing batch files are compact, and promote directories are
   hard-linked (Issue #114).** `write_candidate_batch` writes `baseline.json` and
   every `candidate-NNN.json` without pretty-printing — `rust_scorer` is their

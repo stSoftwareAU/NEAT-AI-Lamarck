@@ -18,17 +18,95 @@
 //!   a corpus that changed under the run (a documented event in
 //!   `docs/baseline-economics.md`) invalidates it.
 
+use crate::parity::PHASE0_ERROR_ABS_TOL;
 use crate::scorer::ScoreResult;
+use neat_core::find_bin_files;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-/// Default absolute score drift tolerated on a baseline re-verification.
+/// Floor for auto-tuned baseline drift tolerance.
 ///
-/// Three orders of magnitude below [`crate::config::DEFAULT_MIN_IMPROVEMENT`]:
-/// a drift large enough to flip an acceptance decision can never pass, while
-/// last-bit noise in an otherwise identical re-score does.
-pub const DEFAULT_BASELINE_DRIFT_EPSILON: f64 = 1e-9;
+/// Matches [`PHASE0_ERROR_ABS_TOL`]. Callers that pass an explicit
+/// `--baseline-drift-epsilon` bypass auto-tuning entirely.
+pub const DEFAULT_BASELINE_DRIFT_EPSILON: f64 = PHASE0_ERROR_ABS_TOL;
+
+/// Cap for auto-tuned baseline drift tolerance.
+///
+/// Well above directory-scorer association noise on production corpora, still
+/// small enough that a genuine mid-run corpus/scorer swap trips the canary.
+/// Accept safety does **not** rest on this value — accepts off a remembered
+/// baseline are always re-decided against a freshly scored pair.
+pub const MAX_AUTO_BASELINE_DRIFT_EPSILON: f64 = 1e-3;
+
+/// Headroom on the `f32` association noise model used by
+/// [`tuned_baseline_drift_epsilon`].
+///
+/// Directory-mode scoring re-associates `f32` activations across parallel /
+/// SIMD partitions between calls (NEAT-AI-scorer `multi_score.rs`). The raw
+/// model is `ε_f32 · error · log₂(N)`; this factor covers host-to-host
+/// variation. GRQ-10 (~2.26M records) observed `|Δ| ≈ 2.1e-8` under the old
+/// fixed `1e-9` default.
+const ASSOCIATION_HEADROOM: f64 = 64.0;
+
+/// Auto-tune the absolute score drift tolerated on a baseline re-verification.
+///
+/// Models directory-scorer `f32` association noise over a mean of `records`
+/// losses at typical magnitude `error_scale`, then clamps into
+/// [`DEFAULT_BASELINE_DRIFT_EPSILON`] … [`MAX_AUTO_BASELINE_DRIFT_EPSILON`].
+/// Lamarck owns this — hosts (e.g. GRQ) must not ship a competing override.
+pub fn tuned_baseline_drift_epsilon(records: u64, error_scale: f64) -> f64 {
+    let scale = if error_scale.is_finite() {
+        error_scale.abs().clamp(1e-6, 2.0)
+    } else {
+        1.0
+    };
+    let n = records.max(2) as f64;
+    let assoc = (f32::EPSILON as f64) * scale * n.log2() * ASSOCIATION_HEADROOM;
+    assoc.clamp(
+        DEFAULT_BASELINE_DRIFT_EPSILON,
+        MAX_AUTO_BASELINE_DRIFT_EPSILON,
+    )
+}
+
+/// Resolve the drift epsilon: an explicit configure wins; otherwise auto-tune.
+pub fn resolve_baseline_drift_epsilon(
+    configured: Option<f64>,
+    records: u64,
+    error_scale: f64,
+) -> Result<f64, String> {
+    match configured {
+        Some(epsilon) => {
+            if !epsilon.is_finite() || epsilon < 0.0 {
+                return Err(format!(
+                    "--baseline-drift-epsilon must be finite and at least 0 (got {epsilon})"
+                ));
+            }
+            Ok(epsilon)
+        }
+        None => Ok(tuned_baseline_drift_epsilon(records, error_scale)),
+    }
+}
+
+/// Estimate how many `f32` training records live under `training_data`.
+pub fn estimate_corpus_records(
+    training_data: &Path,
+    bytes_per_record: usize,
+) -> Result<u64, String> {
+    if bytes_per_record == 0 {
+        return Err("bytes_per_record must be > 0".to_string());
+    }
+    let files = find_bin_files(training_data).map_err(|e| e.to_string())?;
+    let mut total_bytes = 0u64;
+    for path in files {
+        total_bytes = total_bytes.saturating_add(
+            std::fs::metadata(&path)
+                .map_err(|e| format!("failed to stat {}: {e}", path.display()))?
+                .len(),
+        );
+    }
+    Ok(total_bytes / bytes_per_record as u64)
+}
 
 /// Which baseline decided one promote call (issue #113).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -266,6 +344,34 @@ mod tests {
         assert!(remembered.drift(&score(0.5)) < f64::EPSILON);
         assert!((remembered.drift(&score(0.5 + 3e-6)) - 3e-6).abs() < 1e-15);
         assert!((remembered.drift(&score(0.5 - 3e-6)) - 3e-6).abs() < 1e-15);
+    }
+
+    /// The auto floor must stay at the Phase-0 absolute error floor — not a
+    /// last-bit constant. GRQ-10 aborted on `|Δ| ≈ 2.1e-8` under `1e-9`.
+    #[test]
+    fn auto_drift_epsilon_covers_production_association_noise() {
+        assert_eq!(DEFAULT_BASELINE_DRIFT_EPSILON, PHASE0_ERROR_ABS_TOL);
+        // GRQ-10 shape: ~2.26M records, error ≈ 0.65, observed |Δ| ≈ 2.1e-8.
+        let tuned = tuned_baseline_drift_epsilon(2_262_277, 0.65);
+        assert!(
+            tuned > 2.1e-8 * 10.0,
+            "auto epsilon {tuned} must clear observed GRQ-10 noise with margin"
+        );
+        assert!(tuned <= MAX_AUTO_BASELINE_DRIFT_EPSILON);
+        // Tiny corpora still get at least the Phase-0 floor.
+        assert_eq!(
+            tuned_baseline_drift_epsilon(2, 0.1),
+            DEFAULT_BASELINE_DRIFT_EPSILON
+        );
+        // Explicit configure wins; auto is not mixed in.
+        assert_eq!(
+            resolve_baseline_drift_epsilon(Some(1e-9), 2_262_277, 0.65).unwrap(),
+            1e-9
+        );
+        assert_eq!(
+            resolve_baseline_drift_epsilon(None, 2_262_277, 0.65).unwrap(),
+            tuned
+        );
     }
 
     #[test]

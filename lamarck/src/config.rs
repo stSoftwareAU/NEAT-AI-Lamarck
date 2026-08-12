@@ -3,7 +3,7 @@
 use crate::backprop::BackpropConfig;
 #[cfg(test)]
 use crate::backprop::BiasSignal;
-use crate::baseline::{BaselineReusePolicy, DEFAULT_BASELINE_DRIFT_EPSILON};
+use crate::baseline::{BaselineReusePolicy, resolve_baseline_drift_epsilon};
 use crate::chunks::DEFAULT_ANALYSIS_THREADS;
 use crate::focus::FocusPolicy;
 use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
@@ -136,10 +136,12 @@ pub struct LamarckConfig {
     pub baseline_reverify_interval: u64,
     /// Absolute baseline-score drift that aborts the run (issue #113).
     ///
-    /// Checked whenever a fresh baseline arrives while a remembered one is
-    /// still held. Beyond this the two disagree about the same creature on the
-    /// same corpus, which is exactly the state that would land a false accept.
-    pub baseline_drift_epsilon: f64,
+    /// `None` (the default) auto-tunes from corpus size and Phase-0 error via
+    /// [`crate::baseline::tuned_baseline_drift_epsilon`] — Lamarck owns the
+    /// tolerance so hosts never need a competing override. `Some(ε)` forces an
+    /// absolute value (expert / A/B only). Accept safety is the paired re-score
+    /// path, not this epsilon.
+    pub baseline_drift_epsilon: Option<f64>,
     /// Local structural graft store path. `None` disables phase-G replay / recording.
     pub grafts_path: Option<PathBuf>,
     /// Wall-clock budget for phase-G graft replay. `None` → 10% of [`Self::timeout`].
@@ -213,20 +215,22 @@ impl LamarckConfig {
 
     /// Baseline-reuse policy for this run, validated (issue #113).
     ///
-    /// A drift epsilon that is not finite and non-negative is a configuration
-    /// fault, reported rather than silently replaced by the default: the
-    /// epsilon is the guard that keeps a remembered baseline from deciding an
-    /// accept it should not, so a run must never proceed on a value it ignored.
-    pub fn baseline_reuse_policy(&self) -> Result<BaselineReusePolicy, String> {
-        let epsilon = self.baseline_drift_epsilon;
-        if !epsilon.is_finite() || epsilon < 0.0 {
-            return Err(format!(
-                "--baseline-drift-epsilon must be finite and at least 0 (got {epsilon})"
-            ));
-        }
+    /// When [`Self::baseline_drift_epsilon`] is `None`, the epsilon is
+    /// auto-tuned from `records` and `error_scale` (pass the Phase-0 error when
+    /// known; otherwise a prior of `1.0`). An explicit non-finite or negative
+    /// override is a configuration fault — never silently replaced.
+    pub fn baseline_reuse_policy(
+        &self,
+        records: u64,
+        error_scale: f64,
+    ) -> Result<BaselineReusePolicy, String> {
         Ok(BaselineReusePolicy {
             interval: self.baseline_reverify_interval,
-            drift_epsilon: epsilon,
+            drift_epsilon: resolve_baseline_drift_epsilon(
+                self.baseline_drift_epsilon,
+                records,
+                error_scale,
+            )?,
         })
     }
 
@@ -290,7 +294,7 @@ impl Default for LamarckConfig {
             // Opt-in: the pre-#113 run pairs every promote call with a freshly
             // scored incumbent, and that pairing is a guard as well as a cost.
             baseline_reverify_interval: 0,
-            baseline_drift_epsilon: DEFAULT_BASELINE_DRIFT_EPSILON,
+            baseline_drift_epsilon: None,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -388,21 +392,27 @@ mod tests {
     fn baseline_reuse_is_off_by_default() {
         let config = LamarckConfig::default();
         assert_eq!(config.baseline_reverify_interval, 0);
+        assert!(config.baseline_drift_epsilon.is_none(), "default is auto");
         let policy = config
-            .baseline_reuse_policy()
+            .baseline_reuse_policy(2_262_277, 0.65)
             .expect("the default is valid");
         assert!(!policy.is_enabled());
-        assert_eq!(policy.drift_epsilon, DEFAULT_BASELINE_DRIFT_EPSILON);
+        assert!(
+            policy.drift_epsilon >= crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            "auto epsilon must clear the Phase-0 floor"
+        );
     }
 
     #[test]
     fn a_reverify_interval_enables_reuse_and_carries_the_epsilon() {
         let config = LamarckConfig {
             baseline_reverify_interval: 10,
-            baseline_drift_epsilon: 1e-8,
+            baseline_drift_epsilon: Some(1e-8),
             ..LamarckConfig::default()
         };
-        let policy = config.baseline_reuse_policy().expect("10 / 1e-8 is valid");
+        let policy = config
+            .baseline_reuse_policy(1_000, 0.5)
+            .expect("10 / 1e-8 is valid");
         assert!(policy.is_enabled());
         assert_eq!(policy.interval, 10);
         assert_eq!(policy.drift_epsilon, 1e-8);
@@ -413,11 +423,11 @@ mod tests {
         for bad in [-1e-9, f64::NAN, f64::INFINITY] {
             let config = LamarckConfig {
                 baseline_reverify_interval: 5,
-                baseline_drift_epsilon: bad,
+                baseline_drift_epsilon: Some(bad),
                 ..LamarckConfig::default()
             };
             let err = config
-                .baseline_reuse_policy()
+                .baseline_reuse_policy(1_000, 0.5)
                 .expect_err("invalid epsilon must not fall back to the default");
             assert!(
                 err.contains("--baseline-drift-epsilon"),

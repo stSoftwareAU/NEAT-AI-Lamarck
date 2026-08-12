@@ -37,7 +37,8 @@ pub use analysis::{
 pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
 pub use baseline::{
     BaselineKey, BaselineReusePolicy, BaselineSource, DEFAULT_BASELINE_DRIFT_EPSILON,
-    RememberedBaseline, training_data_key,
+    MAX_AUTO_BASELINE_DRIFT_EPSILON, RememberedBaseline, estimate_corpus_records,
+    resolve_baseline_drift_epsilon, training_data_key, tuned_baseline_drift_epsilon,
 };
 pub use cancel::CancelToken;
 pub use chunks::{ANALYSIS_CHUNK_RECORDS, DEFAULT_ANALYSIS_THREADS};

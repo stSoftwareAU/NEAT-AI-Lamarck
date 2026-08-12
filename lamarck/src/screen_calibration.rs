@@ -908,7 +908,10 @@ mod tests {
     #[test]
     fn disagreeing_run_headers_report_no_single_knob() {
         let mut acc = ScreenCalibrationAccumulator::default();
-        let mut config = RunConfigRecord::from_config(&crate::config::LamarckConfig::default());
+        let mut config = RunConfigRecord::from_config(
+            &crate::config::LamarckConfig::default(),
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+        );
         acc.push_header(&config);
         config.screen_promote_threshold = 5e-6;
         acc.push_header(&config);
@@ -930,7 +933,10 @@ mod tests {
     #[test]
     fn the_header_accept_bar_sets_the_near_zero_band() {
         let mut acc = ScreenCalibrationAccumulator::default();
-        let mut config = RunConfigRecord::from_config(&crate::config::LamarckConfig::default());
+        let mut config = RunConfigRecord::from_config(
+            &crate::config::LamarckConfig::default(),
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+        );
         config.min_improvement = 1e-5;
         acc.push_header(&config);
 
