@@ -555,6 +555,8 @@ Every following line is one experiment:
 | `comboMembers`, `combosScored`, `combosDampened`, `comboDampen` | Combination-scoring detail. |
 | `comboMemberIndices` | Indices into `candidates[]` of the accepted winner's members — one entry for a single, several for a merged `combo-NNN-kM`. Present only on an acceptance, and absent from journals written before issue #74. |
 | `cacheSkipped`, `cacheBackfilled` | Proposals dropped by a failed-candidate cache hit, and replacement proposals accepted to refill the batch. Omitted unless `--failed-cache` is on. |
+| `cacheDeduplicated` | Proposals dropped as near-duplicates of one already in the same batch. Counted apart from `cacheSkipped` because the cache is not what suppressed them, so the cache's savings cannot absorb them. |
+| `cacheRebuildMs` | What loading or rebuilding the cache cost at startup, recorded once on the first experiment that ran with the cache on. A run cost, not an experiment cost, but part of what the cache has to earn back. |
 | `cacheSize`, `cacheLookupMs`, `cacheMaintenanceMs` | Live cache entries after the experiment, time spent filtering and backfilling, and time spent in the cache's most recent age sweep. Omitted unless `--failed-cache` is on. |
 | `cacheSavedMs`, `cacheSpentMs`, `cacheNetCumulativeMs`, `cacheResidentBytes` | The experiment's cache ledger: estimated scorer time its skips avoided, measured lookup + maintenance overhead, the run's cumulative saved − spent, and the resident footprint afterwards. Omitted unless `--failed-cache` is on. |
 
@@ -588,6 +590,34 @@ for **every** member strategy and is also carried in that row's `comboWins`
 combos win. A combo win in a journal written before `comboMemberIndices` existed
 names no members, so it cannot be attributed at all — those are counted in
 `comboAcceptancesUnattributed` rather than silently dropped.
+
+`scoreImprovementPerWallHour` is the failed-candidate cache's go/no-go metric
+(issue #93): full-corpus score improvement divided by the run's wall-clock span,
+so a cache-on and a cache-off journal can be compared straight from `report`
+output. It follows the same anchoring rule as `openingBaselineScore` and is
+`null` whenever the journal cannot support it — no full-corpus anchor, or no
+wall-clock span — rather than reporting a rate derived from sampled scores.
+
+A cache-on run gets a `cache` section carrying the knobs the run header
+declared, the counts (`proposalsExamined`, `cacheHits`, `deduplicated`,
+`backfilled`, `batchCandidates`, `hitRate`), the footprint (`finalCacheSize`,
+`peakCacheSize`), the economics (`estimatedSavedMs`, `spentMs`, `rebuildMs`,
+`netMs`) and, if the #92 guardrail fired, `stoodDownAtExperiment` with its
+reason. The section is `null` for a journal that never mentions a cache, so
+historical journals report cleanly instead of growing a row of zeroes.
+
+Three different mechanisms keep a proposal out of a scorer batch, and the
+`cache` section credits the cache with exactly one of them. `cacheHits` counts
+proposals the cache recognised as known-failed — the cache's saving, and the
+only input to `estimatedSavedMs`. `deduplicated` counts near-duplicates within a
+single batch: real avoided work, but the generator's repetition rather than the
+cache's memory, so it is reported apart. Generation-time gating, such as
+`backprop` declining to propose on a focus with no accumulated blame
+(issue #83), suppresses candidates before they ever become proposals, so they
+are absent from `proposalsExamined` entirely and cannot be double-counted
+against a cache hit. What that gating does change is batch size, which is why
+`batchCandidates` reports the batch that was actually scored rather than
+assuming `--candidates`.
 
 Phase-G replay gets its own `graftReplay` bucket — `replays`, `accepts`,
 `graftsApplied`, `cumulativeImprovement`, `scorerFailures` and `replayErrors` —
@@ -744,7 +774,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
 | Issue | Gap |
 |-------|-----|
-| [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
+| [#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94) | Failed-candidate cache (#69) is implemented (`--failed-cache`, off by default) but the production go/no-go is **unmeasured**: `scripts/run-failed-cache-economics.sh` needs exclusive box time. See [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md). |
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Three economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
 
 ## Repository layout

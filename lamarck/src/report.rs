@@ -105,6 +105,135 @@ pub struct FocusStatsSummary {
     pub rejected: FocusStatsAggregate,
 }
 
+/// Streaming accumulator behind one [`CacheReport`] (issue #93).
+///
+/// Tracks whether the journal said anything about the cache at all, so a
+/// pre-cache journal ends with no section rather than an empty one.
+#[derive(Debug, Default)]
+struct CacheAccumulator {
+    header_seen: bool,
+    enabled: bool,
+    max_entries: Option<usize>,
+    max_age_seconds: Option<u64>,
+    tolerance_abs: Option<f64>,
+    tolerance_rel: Option<f64>,
+    max_bytes: Option<usize>,
+    standdown_window: Option<usize>,
+    standdown_margin: Option<f64>,
+    experiments_with_cache: u64,
+    proposals_examined: u64,
+    cache_hits: u64,
+    deduplicated: u64,
+    backfilled: u64,
+    batch_candidates: u64,
+    final_cache_size: Option<usize>,
+    peak_cache_size: Option<usize>,
+    estimated_saved_ms: f64,
+    experiment_spent_ms: f64,
+    rebuild_ms: u128,
+    stood_down_at_experiment: Option<u64>,
+    stood_down_reason: Option<String>,
+}
+
+impl CacheAccumulator {
+    /// Record the cache knobs the #71 run header declares.
+    fn push_header(&mut self, config: &crate::run::RunConfigRecord) {
+        self.header_seen = true;
+        self.enabled = config.failed_cache;
+        self.max_entries = config.failed_cache_max_entries;
+        self.max_age_seconds = config.failed_cache_max_age_seconds;
+        self.tolerance_abs = config.failed_cache_tolerance_abs;
+        self.tolerance_rel = config.failed_cache_tolerance_rel;
+        self.max_bytes = config.failed_cache_max_bytes;
+        self.standdown_window = config.failed_cache_stand_down_window;
+        self.standdown_margin = config.failed_cache_stand_down_margin_ms;
+    }
+
+    /// Fold in one experiment's cache activity.
+    ///
+    /// An experiment with no `cacheSkipped` never consulted the cache — either
+    /// the run had it off, or the #92 guardrail had already stood it down — so
+    /// it contributes nothing but is still counted out of
+    /// [`CacheReport::experiments_with_cache`].
+    fn push_experiment(&mut self, record: &crate::run::ExperimentRecord) {
+        self.rebuild_ms = self
+            .rebuild_ms
+            .saturating_add(record.cache_rebuild_ms.unwrap_or(0));
+
+        let Some(hits) = record.cache_skipped else {
+            return;
+        };
+        self.experiments_with_cache += 1;
+        self.cache_hits += hits as u64;
+        self.deduplicated += record.cache_deduplicated.unwrap_or(0) as u64;
+        self.backfilled += record.cache_backfilled.unwrap_or(0) as u64;
+        self.batch_candidates += record.candidates.len() as u64;
+        // Proposals are not journalled directly, and do not need to be: the
+        // filter examined everything it kept plus everything it rejected, and
+        // `candidates[]` is the batch it kept.
+        self.proposals_examined +=
+            (record.candidates.len() + hits + record.cache_deduplicated.unwrap_or(0)) as u64;
+        self.estimated_saved_ms += record.cache_saved_ms.unwrap_or(0.0);
+        self.experiment_spent_ms += record.cache_spent_ms.unwrap_or_else(|| {
+            // A journal from before #92 priced nothing, but still recorded
+            // the timings the price is made of.
+            (record.cache_lookup_ms.unwrap_or(0) + record.cache_maintenance_ms.unwrap_or(0)) as f64
+        });
+        if let Some(size) = record.cache_size {
+            self.final_cache_size = Some(size);
+            self.peak_cache_size = Some(self.peak_cache_size.map_or(size, |peak| peak.max(size)));
+        }
+    }
+
+    /// Record a #92 stand-down journal line.
+    fn push_stand_down(&mut self, record: &crate::run::CacheStandDownRecord) {
+        self.stood_down_at_experiment = Some(record.experiment_number);
+        self.stood_down_reason = Some(record.message.clone());
+    }
+
+    /// The finished section, or `None` when the journal says nothing about a
+    /// cache at all.
+    fn finish(self) -> Option<CacheReport> {
+        let mentioned = self.enabled
+            || self.experiments_with_cache > 0
+            || self.stood_down_at_experiment.is_some();
+        if !mentioned {
+            return None;
+        }
+        let spent_ms = self.experiment_spent_ms + self.rebuild_ms as f64;
+        let hit_rate = if self.proposals_examined > 0 {
+            self.cache_hits as f64 / self.proposals_examined as f64
+        } else {
+            0.0
+        };
+        Some(CacheReport {
+            enabled: self.enabled,
+            max_entries: self.max_entries,
+            max_age_seconds: self.max_age_seconds,
+            tolerance_abs: self.tolerance_abs,
+            tolerance_rel: self.tolerance_rel,
+            max_bytes: self.max_bytes,
+            standdown_window: self.standdown_window,
+            standdown_margin: self.standdown_margin,
+            experiments_with_cache: self.experiments_with_cache,
+            proposals_examined: self.proposals_examined,
+            cache_hits: self.cache_hits,
+            deduplicated: self.deduplicated,
+            backfilled: self.backfilled,
+            batch_candidates: self.batch_candidates,
+            hit_rate,
+            final_cache_size: self.final_cache_size,
+            peak_cache_size: self.peak_cache_size,
+            estimated_saved_ms: self.estimated_saved_ms,
+            spent_ms,
+            rebuild_ms: self.rebuild_ms,
+            net_ms: self.estimated_saved_ms - spent_ms,
+            stood_down_at_experiment: self.stood_down_at_experiment,
+            stood_down_reason: self.stood_down_reason,
+        })
+    }
+}
+
 /// Streaming accumulator behind one [`FocusStatsAggregate`].
 #[derive(Debug, Default)]
 struct FocusStatsAccumulator {
@@ -163,6 +292,89 @@ pub struct ImprovementPoint {
     pub accepted: bool,
 }
 
+/// Failed-candidate cache economics for one run journal (issue #93).
+///
+/// #69's go/no-go is decided from journals, so this states what the cache cost
+/// against what it saved, without needing the run that produced it.
+///
+/// # Attribution
+///
+/// Three mechanisms keep a proposal out of a scorer batch, and this section
+/// credits the cache with exactly one of them:
+///
+/// * [`Self::cache_hits`] — the cache recognised a known-failed candidate.
+///   This, and only this, is the cache's saving.
+/// * [`Self::deduplicated`] — the generator proposed the same mutation twice in
+///   one batch and the filter dropped the repeat. Real avoided work, reported
+///   separately so it cannot inflate the cache's account.
+/// * Generation-time gating, such as `backprop` declining to propose on a focus
+///   with no accumulated blame (issue #83). Those candidates never become
+///   proposals, so they are absent from [`Self::proposals_examined`] entirely
+///   and cannot be double-counted here. What they do change is batch size,
+///   which is why [`Self::batch_candidates`] is reported rather than assumed
+///   to be `--candidates`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheReport {
+    /// Whether the run header says the cache was on.
+    ///
+    /// `false` with cache activity present means the journal is inconsistent;
+    /// `false` with no activity is simply a cache-off arm.
+    pub enabled: bool,
+    /// Size cap in force, from the run header.
+    pub max_entries: Option<usize>,
+    /// Age bound in seconds, from the run header.
+    pub max_age_seconds: Option<u64>,
+    /// Near-duplicate absolute tolerance, from the run header.
+    pub tolerance_abs: Option<f64>,
+    /// Near-duplicate relative tolerance, from the run header.
+    pub tolerance_rel: Option<f64>,
+    /// Resident byte ceiling, from the run header (issue #92).
+    pub max_bytes: Option<usize>,
+    /// Stand-down window in experiments, from the run header (issue #92).
+    pub standdown_window: Option<usize>,
+    /// Stand-down margin, from the run header (issue #92).
+    pub standdown_margin: Option<f64>,
+    /// Experiments that ran with the cache in service.
+    ///
+    /// Below the run's experiment count when the cache stood down mid-run.
+    pub experiments_with_cache: u64,
+    /// Proposals the filter examined, kept and rejected alike.
+    pub proposals_examined: u64,
+    /// Proposals rejected because the cache knew they fail.
+    pub cache_hits: u64,
+    /// Proposals dropped as near-duplicates within one batch.
+    pub deduplicated: u64,
+    /// Replacement proposals accepted to refill a batch.
+    pub backfilled: u64,
+    /// Candidates that reached a scorer batch across cache-on experiments.
+    pub batch_candidates: u64,
+    /// `cache_hits / proposals_examined`, `0.0` when nothing was examined.
+    pub hit_rate: f64,
+    /// Live cache entries after the last cache-on experiment.
+    pub final_cache_size: Option<usize>,
+    /// Largest live entry count seen across the run.
+    pub peak_cache_size: Option<usize>,
+    /// Estimated scorer milliseconds the cache's hits avoided.
+    ///
+    /// Summed from the per-experiment `cacheSavedMs` the run itself computed;
+    /// see [`crate::failed_cache::economics`] for the estimator and its
+    /// deliberate conservatism.
+    pub estimated_saved_ms: f64,
+    /// Milliseconds the cache cost: lookups, maintenance and the one-off
+    /// startup rebuild.
+    pub spent_ms: f64,
+    /// Milliseconds of that spend attributable to the startup rebuild.
+    pub rebuild_ms: u128,
+    /// [`Self::estimated_saved_ms`] less [`Self::spent_ms`]; negative means the
+    /// cache lost the run time.
+    pub net_ms: f64,
+    /// Experiment number at which the #92 guardrail stood the cache down.
+    pub stood_down_at_experiment: Option<u64>,
+    /// Why the guardrail fired.
+    pub stood_down_reason: Option<String>,
+}
+
 /// Summary report for a Lamarck run journal.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,6 +419,14 @@ pub struct JournalReport {
     pub total_score_improvement: Option<f64>,
     /// Relative improvement `total / opening` when opening > 0.
     pub relative_score_improvement: Option<f64>,
+    /// #69's gate metric: full-corpus score improvement per wall-clock hour.
+    ///
+    /// `None` whenever the journal cannot support it — no full-corpus anchor
+    /// (issue #84), or no wall-clock span between the first and last
+    /// experiment. A cache-on and a cache-off journal are compared on this
+    /// number, so reporting `0.0` for "unknown" would decide the go/no-go on a
+    /// value nobody measured.
+    pub score_improvement_per_wall_hour: Option<f64>,
     /// Mean experiment duration (analysis+scorer ms).
     pub mean_experiment_ms: f64,
     /// Projected batches completable in a 45-minute budget from mean duration.
@@ -238,6 +458,14 @@ pub struct JournalReport {
     pub combo_acceptances_unattributed: u64,
     /// Phase-G graft-replay bucket; `None` when the journal has no replay line.
     pub graft_replay: Option<GraftReplayStats>,
+    /// Failed-candidate cache economics (issue #93).
+    ///
+    /// `None` for a journal that neither declares the cache in its run header
+    /// nor carries a single cache field — a pre-cache journal, or a cache-off
+    /// arm written before the header recorded the knob. `report` runs over
+    /// historical journals, so an absent section is reported as absent rather
+    /// than as a row of zeroes that reads like a cache that did nothing.
+    pub cache: Option<CacheReport>,
 }
 
 /// Consume `experiments.jsonl` and produce an economics report.
@@ -274,6 +502,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut focus_all = FocusStatsAccumulator::default();
     let mut focus_accepted = FocusStatsAccumulator::default();
     let mut focus_rejected = FocusStatsAccumulator::default();
+    let mut cache = CacheAccumulator::default();
 
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -283,9 +512,10 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         // The run header (issue #71) is run metadata, not an experiment; the
         // graft-replay line (issue #74) is its own bucket.
         let record = match JournalLine::parse(&line)? {
-            // The stand-down event (issue #92) is cache economics, not an
-            // experiment; aggregating it is the `report` sub-issue of #69.
-            JournalLine::Header(_) | JournalLine::CacheStandDown(_) => continue,
+            JournalLine::Header(header) => {
+                cache.push_header(&header.config);
+                continue;
+            }
             JournalLine::GraftReplay(replay) => {
                 let bucket = graft_replay.get_or_insert_with(GraftReplayStats::default);
                 bucket.replays += 1;
@@ -298,6 +528,10 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
                     bucket.grafts_applied += replay.grafts_applied as u64;
                     bucket.cumulative_improvement += replay.improvement.unwrap_or(0.0);
                 }
+                continue;
+            }
+            JournalLine::CacheStandDown(stand_down) => {
+                cache.push_stand_down(&stand_down);
                 continue;
             }
             JournalLine::Experiment(record) => *record,
@@ -323,6 +557,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             let key = strategy_name(prov.strategy);
             *appearances_total.entry(key).or_default() += 1;
         }
+        cache.push_experiment(&record);
 
         if record.scorer_error.is_some() {
             scorer_failures += 1;
@@ -492,6 +727,13 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     } else {
         0.0
     };
+    // #69's gate metric. Both anchors have to be real: the improvement is only
+    // computed from full-corpus scores (#84), and a journal with no wall-clock
+    // span cannot support a per-hour rate at all.
+    let score_improvement_per_wall_hour = match (total_score_improvement, wall_duration_ms) {
+        (Some(delta), Some(wall)) if wall > 0 => Some(delta / (wall as f64 / 3_600_000.0)),
+        _ => None,
+    };
 
     Ok(JournalReport {
         experiments,
@@ -510,6 +752,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         analysis_time_fraction,
         total_score_improvement,
         relative_score_improvement,
+        score_improvement_per_wall_hour,
         mean_experiment_ms,
         projected_batches_per_45_min,
         focus_counts,
@@ -523,6 +766,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         combo_acceptances_with_dampen,
         combo_acceptances_unattributed,
         graft_replay,
+        cache: cache.finish(),
     })
 }
 
@@ -653,6 +897,29 @@ pub fn print_run_summary(result: &RunResult) {
                 report.combo_acceptances,
                 report.combo_acceptances_with_dampen,
                 crate::combos::STACK_DAMPEN_EXPONENT
+            ));
+        }
+        if let Some(cache) = &report.cache {
+            log::detail(&format!(
+                "failed cache:  hits {}/{} ({:.1}%)  backfilled {}  dedup {}  entries {} (peak {})",
+                cache.cache_hits,
+                cache.proposals_examined,
+                cache.hit_rate * 100.0,
+                cache.backfilled,
+                cache.deduplicated,
+                cache.final_cache_size.unwrap_or(0),
+                cache.peak_cache_size.unwrap_or(0)
+            ));
+            log::detail(&format!(
+                "cache economy: saved ~{}  spent {} (rebuild {})  net {:+.0}ms{}",
+                format_ms(cache.estimated_saved_ms.round() as u128),
+                format_ms(cache.spent_ms.round() as u128),
+                format_ms(cache.rebuild_ms),
+                cache.net_ms,
+                match cache.stood_down_at_experiment {
+                    Some(n) => format!("  STOOD DOWN at experiment {n}"),
+                    None => String::new(),
+                }
             ));
         }
         if let Some(grafts) = &report.graft_replay {
@@ -796,6 +1063,7 @@ mod tests {
             combos_dampened: None,
             combo_dampen: None,
             cache_skipped: None,
+            cache_deduplicated: None,
             cache_backfilled: None,
             cache_size: None,
             cache_lookup_ms: None,
@@ -804,6 +1072,7 @@ mod tests {
             cache_spent_ms: None,
             cache_net_cumulative_ms: None,
             cache_resident_bytes: None,
+            cache_rebuild_ms: None,
         }
     }
 
@@ -813,6 +1082,71 @@ mod tests {
             writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
         }
         file
+    }
+
+    /// A #71 run header declaring whether the cache was on (issue #93).
+    fn header(failed_cache: bool) -> crate::run::RunHeaderRecord {
+        let config = crate::config::LamarckConfig {
+            failed_cache,
+            failed_cache_max_entries: 4096,
+            failed_cache_max_age_seconds: 3600,
+            ..Default::default()
+        };
+        crate::run::RunHeaderRecord::new(
+            7,
+            crate::run::SeedSource::Supplied,
+            crate::run::RunConfigRecord::from_config(&config),
+            900,
+        )
+    }
+
+    /// A journal that opens with a run header, as every post-#71 run does.
+    fn journal_with_header(
+        header: &crate::run::RunHeaderRecord,
+        records: &[ExperimentRecord],
+    ) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{}", serde_json::to_string(header).unwrap()).unwrap();
+        for record in records {
+            writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
+        }
+        file
+    }
+
+    /// An experiment that consulted the cache, with the batch it went on to
+    /// score and the filter counts behind it.
+    fn cache_experiment(
+        number: u64,
+        kept: usize,
+        hits: usize,
+        deduplicated: usize,
+        saved_ms: u128,
+        spent_ms: u128,
+    ) -> ExperimentRecord {
+        let mut record = experiment(number, false);
+        record.candidates = vec![prov(CandidateStrategy::Random); kept];
+        record.cache_skipped = Some(hits);
+        record.cache_deduplicated = Some(deduplicated);
+        record.cache_backfilled = Some(hits);
+        record.cache_size = Some(10 * number as usize);
+        record.cache_lookup_ms = Some(spent_ms);
+        record.cache_maintenance_ms = Some(0);
+        record.cache_saved_ms = Some(saved_ms as f64);
+        record.cache_spent_ms = Some(spent_ms as f64);
+        record
+    }
+
+    /// A promoting experiment, i.e. one that recorded a full-corpus baseline
+    /// the #84 anchor can trust.
+    fn full_corpus_experiment(number: u64, baseline: f64, best: Option<f64>) -> ExperimentRecord {
+        let mut record = experiment(number, best.is_some());
+        record.baseline_score = baseline;
+        record.scores.insert("baseline".into(), baseline);
+        if let Some(best) = best {
+            record.scores.insert("candidate-000".into(), best);
+            record.improvement = Some(best - baseline);
+        }
+        record
     }
 
     /// Issue #70: focus structure/statistics/blame aggregate, split by outcome.
@@ -915,6 +1249,7 @@ mod tests {
             combos_dampened: None,
             combo_dampen: None,
             cache_skipped: None,
+            cache_deduplicated: None,
             cache_backfilled: None,
             cache_size: None,
             cache_lookup_ms: None,
@@ -923,6 +1258,7 @@ mod tests {
             cache_spent_ms: None,
             cache_net_cumulative_ms: None,
             cache_resident_bytes: None,
+            cache_rebuild_ms: None,
         };
         writeln!(file, "{}", serde_json::to_string(&header).unwrap()).unwrap();
         writeln!(file, "{}", serde_json::to_string(&experiment).unwrap()).unwrap();
@@ -1228,6 +1564,7 @@ mod tests {
             combos_dampened: None,
             combo_dampen: None,
             cache_skipped: None,
+            cache_deduplicated: None,
             cache_backfilled: None,
             cache_size: None,
             cache_lookup_ms: None,
@@ -1236,6 +1573,7 @@ mod tests {
             cache_spent_ms: None,
             cache_net_cumulative_ms: None,
             cache_resident_bytes: None,
+            cache_rebuild_ms: None,
         };
         let rejected = ExperimentRecord {
             experiment_number: 2,
@@ -1265,6 +1603,7 @@ mod tests {
             combos_dampened: None,
             combo_dampen: None,
             cache_skipped: None,
+            cache_deduplicated: None,
             cache_backfilled: None,
             cache_size: None,
             cache_lookup_ms: None,
@@ -1273,6 +1612,7 @@ mod tests {
             cache_spent_ms: None,
             cache_net_cumulative_ms: None,
             cache_resident_bytes: None,
+            cache_rebuild_ms: None,
         };
         writeln!(file, "{}", serde_json::to_string(&accepted).unwrap()).unwrap();
         writeln!(file, "{}", serde_json::to_string(&rejected).unwrap()).unwrap();
@@ -1301,5 +1641,267 @@ mod tests {
         assert_eq!(backprop.wins, 0);
         assert_eq!(backprop.appearances_total, 1);
         assert_eq!(backprop.appearances_in_accepted, 1);
+    }
+
+    /// Issue #93: a cache-on journal reports its economics arithmetic exactly.
+    ///
+    /// The figures are hand-computed here rather than recomputed by the test,
+    /// because #69's go/no-go is read off them.
+    #[test]
+    fn report_cache_on_journal_states_the_economics() {
+        let head = header(true);
+        let file = journal_with_header(
+            &head,
+            &[
+                cache_experiment(1, 6, 2, 0, 400, 5),
+                cache_experiment(2, 5, 3, 0, 600, 7),
+            ],
+        );
+
+        let cache = report_from_journal(file.path())
+            .unwrap()
+            .cache
+            .expect("cache-on journal carries a cache section");
+
+        assert!(cache.enabled);
+        assert_eq!(cache.max_entries, Some(4096));
+        assert_eq!(cache.max_age_seconds, Some(3600));
+        assert_eq!(cache.experiments_with_cache, 2);
+        assert_eq!(cache.cache_hits, 5);
+        assert_eq!(cache.backfilled, 5);
+        assert_eq!(cache.batch_candidates, 11);
+        // 6 kept + 2 hits, then 5 kept + 3 hits.
+        assert_eq!(cache.proposals_examined, 16);
+        assert!((cache.hit_rate - 5.0 / 16.0).abs() < 1e-12);
+        assert_eq!(cache.final_cache_size, Some(20));
+        assert_eq!(cache.peak_cache_size, Some(20));
+        assert_eq!(cache.estimated_saved_ms, 1000.0);
+        assert_eq!(cache.spent_ms, 12.0);
+        assert_eq!(cache.net_ms, 988.0);
+        assert_eq!(cache.stood_down_at_experiment, None);
+    }
+
+    /// The startup rebuild is a cost the run paid, so it is in the spend.
+    #[test]
+    fn report_charges_the_startup_rebuild_to_the_cache() {
+        let head = header(true);
+        let mut first = cache_experiment(1, 4, 1, 0, 100, 5);
+        first.cache_rebuild_ms = Some(900);
+        let file = journal_with_header(&head, &[first, cache_experiment(2, 4, 1, 0, 100, 5)]);
+
+        let cache = report_from_journal(file.path()).unwrap().cache.unwrap();
+
+        assert_eq!(cache.rebuild_ms, 900);
+        assert_eq!(cache.spent_ms, 910.0);
+        // A rebuild this expensive turns a nominally winning cache into a loss,
+        // which is exactly the number the go/no-go needs to see.
+        assert_eq!(cache.net_ms, -710.0);
+    }
+
+    /// A cache-off arm reports the section as present but idle, so it can be
+    /// compared against a cache-on arm rather than looking like a broken run.
+    #[test]
+    fn report_cache_off_journal_reports_an_idle_cache() {
+        let head = header(false);
+        let file = journal_with_header(&head, &[experiment(1, false), experiment(2, true)]);
+
+        let report = report_from_journal(file.path()).unwrap();
+
+        assert!(
+            report.cache.is_none(),
+            "cache never ran and never journalled"
+        );
+        assert_eq!(report.experiments, 2);
+    }
+
+    /// A pre-cache journal has neither header nor cache fields, and must not
+    /// grow a fabricated section.
+    #[test]
+    fn report_pre_cache_journal_omits_cache_section() {
+        let file = journal_of(&[experiment(1, false), experiment(2, true)]);
+
+        let report = report_from_journal(file.path()).unwrap();
+
+        assert!(report.cache.is_none());
+        assert_eq!(report.experiments, 2);
+        assert_eq!(report.acceptances, 1);
+    }
+
+    /// A mixed journal: some experiments consulted the cache, some ran before
+    /// it was warm enough to be consulted at all.
+    #[test]
+    fn report_mixed_journal_counts_only_the_cache_on_experiments() {
+        let head = header(true);
+        let file = journal_with_header(
+            &head,
+            &[
+                experiment(1, false),
+                cache_experiment(2, 4, 2, 0, 250, 3),
+                experiment(3, false),
+                cache_experiment(4, 4, 1, 0, 125, 2),
+            ],
+        );
+
+        let report = report_from_journal(file.path()).unwrap();
+        let cache = report.cache.unwrap();
+
+        assert_eq!(report.experiments, 4);
+        assert_eq!(cache.experiments_with_cache, 2);
+        assert_eq!(cache.cache_hits, 3);
+        assert_eq!(cache.proposals_examined, 11);
+        assert_eq!(cache.estimated_saved_ms, 375.0);
+        assert_eq!(cache.spent_ms, 5.0);
+    }
+
+    /// Issue #93 / #83: a skip belongs to exactly one mechanism, and the
+    /// proposal count reconciles against the batch that was actually scored.
+    #[test]
+    fn report_attributes_each_suppressed_proposal_to_one_mechanism() {
+        let head = header(true);
+        // Experiment 2 also lost candidates to generation-time gating (#83):
+        // `backprop` proposed nothing, so the batch is short. Those candidates
+        // never reached the filter and must not appear anywhere in the cache's
+        // account.
+        let file = journal_with_header(
+            &head,
+            &[
+                cache_experiment(1, 6, 2, 1, 300, 4),
+                cache_experiment(2, 3, 1, 2, 150, 2),
+            ],
+        );
+
+        let cache = report_from_journal(file.path()).unwrap().cache.unwrap();
+
+        assert_eq!(cache.cache_hits, 3);
+        assert_eq!(cache.deduplicated, 3);
+        assert_eq!(cache.batch_candidates, 9);
+        // Everything the filter saw is either scored, a cache hit, or a
+        // duplicate — nothing is counted twice and nothing is unexplained.
+        assert_eq!(
+            cache.proposals_examined,
+            cache.batch_candidates + cache.cache_hits + cache.deduplicated
+        );
+        // The short batch in experiment 2 is #83's doing, so the cache is not
+        // credited with the three candidates that were never proposed.
+        assert_eq!(cache.proposals_examined, 15);
+    }
+
+    /// Issue #92/#93: the report names the experiment where the guardrail fired
+    /// and stops counting the cache after it.
+    #[test]
+    fn report_names_the_experiment_where_the_cache_stood_down() {
+        use crate::run::{CacheStandDownKind, CacheStandDownRecord};
+
+        let head = header(true);
+        let stand_down = CacheStandDownRecord {
+            record: CacheStandDownKind::CacheStandDown,
+            timestamp_unix: 1002,
+            experiment_number: 2,
+            saved_ms: 40.0,
+            spent_ms: 600.0,
+            net_ms: -560.0,
+            window_experiments: 2,
+            margin_ms: 1.5,
+            entries: 20,
+            message: "spend 600ms exceeds estimated saving 40ms by more than 1.5x".into(),
+        };
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{}", serde_json::to_string(&head).unwrap()).unwrap();
+        for record in [
+            cache_experiment(1, 4, 1, 0, 20, 300),
+            cache_experiment(2, 4, 1, 0, 20, 300),
+        ] {
+            writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
+        }
+        writeln!(file, "{}", serde_json::to_string(&stand_down).unwrap()).unwrap();
+        // After standing down the run journals no cache fields at all.
+        for record in [experiment(3, false), experiment(4, true)] {
+            writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
+        }
+
+        let report = report_from_journal(file.path()).unwrap();
+        let cache = report.cache.unwrap();
+
+        assert_eq!(cache.stood_down_at_experiment, Some(2));
+        assert!(cache.stood_down_reason.unwrap().contains("exceeds"));
+        assert_eq!(cache.experiments_with_cache, 2);
+        assert_eq!(report.experiments, 4);
+        assert_eq!(cache.net_ms, -560.0);
+    }
+
+    /// Issue #69's gate metric, from a journal that can support it.
+    #[test]
+    fn report_gate_metric_uses_full_corpus_scores() {
+        let mut opening = full_corpus_experiment(1, 0.40, None);
+        opening.timestamp_unix = 0;
+        let mut win = full_corpus_experiment(2, 0.40, Some(0.44));
+        // Half an hour apart, so the per-hour rate is twice the improvement.
+        win.timestamp_unix = 1800;
+        let file = journal_of(&[opening, win]);
+
+        let report = report_from_journal(file.path()).unwrap();
+
+        assert_eq!(report.opening_baseline_score, Some(0.40));
+        let rate = report
+            .score_improvement_per_wall_hour
+            .expect("full-corpus anchor and a wall-clock span");
+        assert!((rate - 0.08).abs() < 1e-9, "unexpected rate {rate}");
+    }
+
+    /// Issue #84: under `--skip-phase0` a journal whose batches all screened
+    /// empty has only sampled baselines, so the gate metric is unavailable
+    /// rather than a number that looks authoritative.
+    #[test]
+    fn report_gate_metric_unavailable_without_a_full_corpus_anchor() {
+        // No `scores.baseline`: every batch screened empty, so the only
+        // baseline recorded is the 5% sample.
+        let mut first = experiment(1, false);
+        first.baseline_score = 0.347_028_969_693;
+        first.timestamp_unix = 0;
+        let mut second = experiment(2, false);
+        second.baseline_score = 0.352_1;
+        second.timestamp_unix = 1800;
+        let file = journal_of(&[first, second]);
+
+        let report = report_from_journal(file.path()).unwrap();
+
+        assert_eq!(report.opening_baseline_score, None);
+        assert_eq!(report.total_score_improvement, None);
+        assert_eq!(report.score_improvement_per_wall_hour, None);
+    }
+
+    /// A journal with no wall-clock span cannot support a per-hour rate either.
+    #[test]
+    fn report_gate_metric_unavailable_without_a_wall_clock_span() {
+        let mut only = full_corpus_experiment(1, 0.40, Some(0.44));
+        only.timestamp_unix = 500;
+        let file = journal_of(&[only]);
+
+        let report = report_from_journal(file.path()).unwrap();
+
+        assert!((report.total_score_improvement.unwrap() - 0.04).abs() < 1e-12);
+        assert_eq!(report.wall_duration_ms, None);
+        assert_eq!(report.score_improvement_per_wall_hour, None);
+    }
+
+    /// A `--skip-phase0` cache-on run still reports its cache economics; only
+    /// the gate metric is withheld.
+    #[test]
+    fn report_skip_phase0_cache_run_reports_cache_without_the_gate_metric() {
+        let head = header(true);
+        let file = journal_with_header(
+            &head,
+            &[
+                cache_experiment(1, 4, 2, 0, 200, 3),
+                cache_experiment(2, 4, 2, 0, 200, 3),
+            ],
+        );
+
+        let report = report_from_journal(file.path()).unwrap();
+
+        assert_eq!(report.score_improvement_per_wall_hour, None);
+        let cache = report.cache.expect("cache economics do not need an anchor");
+        assert_eq!(cache.cache_hits, 4);
+        assert_eq!(cache.estimated_saved_ms, 400.0);
     }
 }

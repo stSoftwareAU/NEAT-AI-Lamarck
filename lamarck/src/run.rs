@@ -118,6 +118,13 @@ pub struct ExperimentRecord {
     /// off, and are absent from journals written before the cache existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_skipped: Option<usize>,
+    /// Proposals dropped as near-duplicates of one already in the batch (#93).
+    ///
+    /// Held apart from [`Self::cache_skipped`] because the cache is not what
+    /// suppressed these — the generator proposed the same mutation twice — and
+    /// crediting them to the cache would overstate what it saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_deduplicated: Option<usize>,
     /// Replacement proposals accepted into the batch to refill it (#91).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_backfilled: Option<usize>,
@@ -146,6 +153,15 @@ pub struct ExperimentRecord {
     /// Resident cache bytes after this experiment (#92).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_resident_bytes: Option<usize>,
+    /// Milliseconds the startup cache load or journal rebuild cost (#93).
+    ///
+    /// A one-off run cost rather than an experiment cost, recorded on the first
+    /// experiment that ran with the cache on because the run header is written
+    /// before the cache is loaded. It belongs in the run's spend total: a
+    /// rebuild the cache never earns back is the whole point of the #92
+    /// guardrail, so a report that omitted it would flatter the cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_rebuild_ms: Option<u128>,
 }
 
 /// Marks a journal line as the one-off run header (issue #71).
@@ -863,6 +879,10 @@ pub fn run_optimisation_cancellable(
     let mut cache_economics = config
         .failed_cache
         .then(|| CacheEconomics::new(config.cache_economics_config()));
+    // Held until the first cache-on experiment journals it (issue #93): the run
+    // header is written before the cache loads, so the rebuild cost has nowhere
+    // else to land.
+    let mut pending_cache_rebuild_ms = None;
     let mut failed_cache = if config.failed_cache {
         let (mut cache, report) = load_or_rebuild(
             &config.output_dir,
@@ -886,6 +906,7 @@ pub fn run_optimisation_cancellable(
         if let Some(economics) = cache_economics.as_mut() {
             economics.record_startup_rebuild(report.elapsed_ms);
         }
+        pending_cache_rebuild_ms = Some(report.elapsed_ms);
         // A rebuild can land above the ceiling — a snapshot written under a
         // larger one, say — so the bound is applied before the loop rather than
         // waiting for the first insert to notice (issue #92).
@@ -1172,6 +1193,7 @@ pub fn run_optimisation_cancellable(
         // proposed for (issue #91).
         let experiment_incumbent_id = incumbent_id(&incumbent);
         let mut cache_skipped = None;
+        let mut cache_deduplicated = None;
         let mut cache_backfilled = None;
         let mut cache_lookup_ms = None;
         let mut cache_cost = ExperimentCost::default();
@@ -1202,6 +1224,7 @@ pub fn run_optimisation_cancellable(
                 ));
             }
             cache_skipped = Some(filtered.skipped);
+            cache_deduplicated = Some(filtered.duplicates);
             cache_backfilled = Some(filtered.backfilled);
             cache_lookup_ms = Some(filtered.lookup_ms);
             cache_cost = ExperimentCost {
@@ -1299,6 +1322,7 @@ pub fn run_optimisation_cancellable(
                             // mutations, so nothing is cached — but the work
                             // the cache already saved this experiment is.
                             cache_skipped,
+                            cache_deduplicated,
                             cache_backfilled,
                             cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
                             cache_lookup_ms,
@@ -1309,6 +1333,7 @@ pub fn run_optimisation_cancellable(
                             cache_spent_ms: economics.map(|e| e.spent_ms),
                             cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
                             cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -1416,6 +1441,7 @@ pub fn run_optimisation_cancellable(
                         combos_dampened: None,
                         combo_dampen: None,
                         cache_skipped,
+                        cache_deduplicated,
                         cache_backfilled,
                         cache_size,
                         cache_lookup_ms,
@@ -1424,6 +1450,7 @@ pub fn run_optimisation_cancellable(
                         cache_spent_ms: economics.map(|e| e.spent_ms),
                         cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
                         cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                        cache_rebuild_ms: pending_cache_rebuild_ms.take(),
                     },
                 )?;
                 if !config.preserve_losers {
@@ -1499,6 +1526,7 @@ pub fn run_optimisation_cancellable(
                             combos_dampened: None,
                             combo_dampen: None,
                             cache_skipped,
+                            cache_deduplicated,
                             cache_backfilled,
                             cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
                             cache_lookup_ms,
@@ -1509,6 +1537,7 @@ pub fn run_optimisation_cancellable(
                             cache_spent_ms: economics.map(|e| e.spent_ms),
                             cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
                             cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -1589,6 +1618,7 @@ pub fn run_optimisation_cancellable(
                             // mutations, so nothing is cached — but the work
                             // the cache already saved this experiment is.
                             cache_skipped,
+                            cache_deduplicated,
                             cache_backfilled,
                             cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
                             cache_lookup_ms,
@@ -1599,6 +1629,7 @@ pub fn run_optimisation_cancellable(
                             cache_spent_ms: economics.map(|e| e.spent_ms),
                             cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
                             cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -1883,6 +1914,7 @@ pub fn run_optimisation_cancellable(
                 combos_dampened,
                 combo_dampen,
                 cache_skipped,
+                cache_deduplicated,
                 cache_backfilled,
                 cache_size,
                 cache_lookup_ms,
@@ -1891,6 +1923,7 @@ pub fn run_optimisation_cancellable(
                 cache_spent_ms: economics.map(|e| e.spent_ms),
                 cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
                 cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                cache_rebuild_ms: pending_cache_rebuild_ms.take(),
             },
         )?;
 

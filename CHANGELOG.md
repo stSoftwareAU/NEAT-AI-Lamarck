@@ -8,43 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **The failed-candidate cache now measures its own cost and stands down when it
-  stops paying (Issue #92).** The hard constraint on #69 — the cache must not
-  cost more time than it saves, or grow without bound — is enforced in
-  `lamarck/src/failed_cache/economics.rs` rather than asserted in a report:
-  - *Accounting.* Savings are **estimated** from this run's own measured screen
-    cost (`skipped × mean screen ms per scored creature`, the baseline included
-    in the divisor so it cannot inflate the figure), never from a constant. In a
-    run with screening off, the single full-corpus batch is that first phase.
-    Promote-phase time is claimed only for a skip whose cache entry records the
-    candidate as having actually been promoted — every other skip is priced at
-    screen cost only, so the estimate under-claims rather than over-claims — and
-    only a genuine cache hit counts as a skip. `savedMs` is *redundant scoring
-    avoided*, the quantity #69's constraint is stated in; because the batch is
-    backfilled to full width, the part that actually shortened the scorer's work
-    is reported separately as `wallClockSavedMs`. Spend is **measured**: lookup,
-    maintenance, the startup rebuild and the snapshot write, accumulated in
-    microseconds because a whole-millisecond timer truncates a small batch's
-    overhead to zero.
-  - *Stand-down.* The guardrail judges a rolling window of the most recent
-    `--failed-cache-stand-down-window` (default `20`) experiments: when the
-    spend inside it exceeds the savings inside it by
-    `--failed-cache-stand-down-margin-ms` (default `1000`), Lamarck warns,
-    writes a `cacheStandDown` journal line and disables the cache for the rest
-    of the run — which continues. One-off costs count in the run's cumulative
-    ledger but not in the window: they are sunk before it opens, and disabling a
-    currently-profitable cache cannot un-spend them. A cache that does not earn
-    its keep degrades to the cache-off behaviour instead of degrading the run.
-  - *Byte ceiling.* `--failed-cache-max-bytes` (default ~25 MiB) bounds the
-    resident footprint; past it the cache evicts oldest-first and logs the bite,
-    because a silently truncated cache reads as a working one.
-  - *Reporting.* Each experiment journals `cacheSavedMs`, `cacheSpentMs`,
-    `cacheNetCumulativeMs` and `cacheResidentBytes`, and every cache-on run ends
-    with one parseable summary line carrying entries, hit rate, ms saved, ms of
-    that which was wall clock, ms spent, net, peak memory bytes and disk bytes.
-    The snapshot format is now
-    `1.1.0` (per-entry `promoted` flag); a `1.0.0` snapshot is replayed from the
-    journal rather than misread.
+- **Failed-candidate cache production benchmark is wired but unrun (Issue #94).**
+  `scripts/run-failed-cache-economics.sh` drives paired cache-off / cache-on /
+  cold-start arms at the production knobs; `scripts/summarise-failed-cache-economics.sh`
+  folds their `report` JSON into a table. Method and open go/no-go live in
+  [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md).
+  Until exclusive box time fills that table, `--failed-cache` stays off by
+  default.
 
 - **Known-failed candidates are no longer re-scored (Issues #88–#91).** Lamarck
   re-proposes the same mutations across experiments and across runs, and
@@ -80,6 +50,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `cacheMaintenanceMs`, and the `runHeader` records the knobs in force.
     With the cache off nothing runs: no extra RNG draw, no new journal field,
     and the #71 replay contract for existing runs is untouched.
+
+- **The failed-candidate cache now measures its own cost and stands down when it
+  stops paying (Issue #92).** #69 made it a hard constraint that the cache must
+  not cost more than it saves; that is now enforced in the code rather than left
+  to a benchmark report. The new `lamarck/src/failed_cache/economics.rs` prices
+  every experiment:
+  - *Accounting.* Savings are estimated as `cacheSkipped ×` the **measured**
+    per-candidate cost of the phase the batch entered this run (the screen where
+    screening is on, the full-corpus batch where it is not), plus recorded
+    full-corpus time — but only for a skipped candidate that had actually been
+    promoted before, since promote-phase savings otherwise accrue only to
+    candidates that would have cleared the threshold. Both halves under-claim by
+    construction, which is the safe direction: it makes the guardrail quicker to
+    fire, never slower. Spend is every millisecond the cache costs — lookup,
+    backfill, age sweeps, the startup rebuild and the snapshot write — with
+    nothing excluded as warm-up.
+  - *Stand-down.* When cumulative spend exceeds estimated savings by a margin
+    (default `1.5×`) **and** the most recent window of experiments (default
+    `20`) is losing money too, the cache is disabled for the rest of the run: a
+    warning is logged, the reason is journalled as `cacheStoodDown`, and the run
+    continues with no cache fields at all — exactly the pre-cache behaviour. The
+    second condition is what makes it "sustained": a cache that paid a heavy
+    rebuild up front but has started earning is left alone. A stood-down cache
+    writes no snapshot.
+  - *Byte ceiling.* `--failed-cache-max-bytes` (default ~25 MiB, matching the
+    default entry cap) bounds the resident footprint by evicting oldest-first
+    rather than growing, and logs when it bites — a silently truncated cache
+    reads as a working cache.
+  - *Reporting.* Each experiment journals `cacheSavedMs` and `cacheSpentMs`, and
+    the run ends with one parseable summary line carrying entries, hit rate, ms
+    saved, ms spent, net, peak memory bytes and disk bytes.
+
+- **`report` states the failed-candidate cache's economics from a journal alone
+  (Issue #93).** #69's go/no-go is decided from `experiments.jsonl`, so the
+  decision cannot depend on having watched the run that produced it. `report`
+  gains a `cache` section carrying the knobs the run header declared, the counts
+  and hit rate, the final and peak cache size, estimated scorer ms saved against
+  ms spent — lookups, maintenance *and* the startup rebuild — the net, and the
+  experiment at which the #92 guardrail stood the cache down. A journal that
+  never mentions a cache reports `null` rather than a row of zeroes that reads
+  like a cache which did nothing.
+  - *The gate metric.* `scoreImprovementPerWallHour` is what makes a cache-on and
+    a cache-off arm directly comparable. It is anchored on full-corpus scores
+    only, following #84, and is `null` when the journal cannot support it —
+    under `--skip-phase0` a sampled baseline swings by thousands of times the
+    accept threshold, so a rate derived from one would be authoritative-looking
+    and wrong, which is precisely how a go/no-go gets decided incorrectly.
+  - *Honest attribution.* Skips are now split by what actually suppressed them,
+    because #83 attacks the same waste and the two must not both claim it. A
+    cache hit is the cache's saving and the only input to the estimate.
+    Near-duplicates within one batch are counted separately as
+    `cacheDeduplicated`: real avoided work, but the generator repeating itself
+    rather than the cache remembering anything — previously these were folded
+    into `cacheSkipped`, which overstated what the cache had earned.
+    Generation-time gating (#83) suppresses candidates before they become
+    proposals at all, so it is invisible to this accounting by construction; the
+    report publishes the batch size it actually saw rather than assuming
+    `--candidates`, so the reconciliation holds.
+  - *Startup rebuild.* The rebuild is journalled as `cacheRebuildMs` on the first
+    experiment that ran with the cache on, because the run header is written
+    before the cache is loaded. Without it a report would omit the one cost most
+    likely to sink the cache's account.
 
 - **The three exclusive-box economics arms are wired up (Issue #96).**
   `scripts/run-followup-economics.sh` gains an `output-neuron` arm (pins

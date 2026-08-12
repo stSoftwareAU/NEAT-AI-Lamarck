@@ -417,6 +417,7 @@ mod tests {
             combos_dampened: None,
             combo_dampen: None,
             cache_skipped: None,
+            cache_deduplicated: None,
             cache_backfilled: None,
             cache_size: None,
             cache_lookup_ms: None,
@@ -425,6 +426,7 @@ mod tests {
             cache_spent_ms: None,
             cache_net_cumulative_ms: None,
             cache_resident_bytes: None,
+            cache_rebuild_ms: None,
         }
     }
 
