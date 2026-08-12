@@ -96,7 +96,7 @@ pub fn training_data_key(training_data: &Path) -> Result<u64, String> {
             )
         })?;
         let path = entry.path();
-        if !path.extension().is_some_and(|ext| ext == "bin") {
+        if path.extension().is_none_or(|ext| ext != "bin") {
             continue;
         }
         let meta = entry

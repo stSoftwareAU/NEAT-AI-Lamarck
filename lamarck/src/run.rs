@@ -4459,6 +4459,10 @@ mod tests {
     // Issue #113 — remembered full-corpus baseline
     // ---------------------------------------------------------------------
 
+    /// One batch a probe scorer was handed: its stems, and whether the call
+    /// sampled (screen) or scored the full corpus (Phase-0 / promote / verify).
+    type ProbedBatch = (Vec<String>, bool);
+
     /// Scores tiny_setup batches while recording exactly which creatures each
     /// call was handed, so a test can assert what the promote directory held.
     ///
@@ -4466,7 +4470,7 @@ mod tests {
     /// parity gate passes; the second and later full-corpus calls can report a
     /// moved baseline, which is the drift these tests exist to catch.
     struct BaselineProbeScorer {
-        batches: Arc<Mutex<Vec<(Vec<String>, bool)>>>,
+        batches: Arc<Mutex<Vec<ProbedBatch>>>,
         /// Baseline score for the first full-corpus call (Phase-0).
         baseline_first: f64,
         /// Baseline score for every full-corpus call after it.

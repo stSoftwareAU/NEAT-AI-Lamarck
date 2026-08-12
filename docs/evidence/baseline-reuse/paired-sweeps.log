@@ -1,0 +1,7 @@
+records=20000 (screen tier 1000) inputs=128 hidden=24 budget=45s min_improvement=1e0 seed=7 (same both arms)
+sweep 1      baseline paired: 369 experiments  promote 369 call(s)  5.86 creature-score(s)/call  29.1ms/call  4.96ms/creature-score  remembered 0/369  net saved 0  (45.1s wall)
+sweep 1  baseline remembered: 385 experiments  promote 385 call(s)  4.91 creature-score(s)/call  24.2ms/call  4.92ms/creature-score  remembered 370/15  net saved 370  (45.0s wall)
+sweep 2      baseline paired: 369 experiments  promote 369 call(s)  5.86 creature-score(s)/call  28.8ms/call  4.92ms/creature-score  remembered 0/369  net saved 0  (45.1s wall)
+sweep 2  baseline remembered: 389 experiments  promote 389 call(s)  4.91 creature-score(s)/call  24.1ms/call  4.90ms/creature-score  remembered 374/15  net saved 374  (45.1s wall)
+sweep 3      baseline paired: 371 experiments  promote 371 call(s)  5.87 creature-score(s)/call  28.8ms/call  4.91ms/creature-score  remembered 0/371  net saved 0  (45.1s wall)
+sweep 3  baseline remembered: 387 experiments  promote 387 call(s)  4.91 creature-score(s)/call  24.2ms/call  4.94ms/creature-score  remembered 372/15  net saved 372  (45.1s wall)

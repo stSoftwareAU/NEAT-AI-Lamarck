@@ -741,6 +741,13 @@ The screen phase is deliberately untouched: its sample phase rotates per
 experiment, so each screen scores the incumbent on a different stratum and that
 sampled score is genuinely new information.
 
+[`docs/baseline-reuse.md`](docs/baseline-reuse.md) measures what this is worth:
+in the paired benchmark a promote call drops from 5.86 to 4.91 creature-scores
+(**-16%**) and from 28.8 to 24.2 ms (**-16%**) at an unchanged cost per
+creature-score, for **+4.9%** experiments completed in a fixed budget.
+Projected onto a production run with the per-call costs #112 fitted, that is
+≈6% of scorer time.
+
 An accepted winner becomes the incumbent immediately: `best.json` is rewritten
 with the creature's `uuid`/`tags` re-attached and a run-summary `lamarck` tag,
 a copy is kept under `winners/`, structural accepts are recorded into the graft
