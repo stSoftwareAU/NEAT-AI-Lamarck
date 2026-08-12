@@ -167,6 +167,16 @@ impl BiasSignal {
         self.no_change |= outcome.no_change;
     }
 
+    /// Fold another accumulator's totals into this one.
+    ///
+    /// Used to merge per-chunk partials of a parallel scan (issue #107). The
+    /// caller merges in chunk order, so the sum stays reproducible.
+    pub fn merge(&mut self, other: &Self) {
+        self.count += other.count;
+        self.total_adjusted_bias += other.total_adjusted_bias;
+        self.no_change |= other.no_change;
+    }
+
     /// Propose a new bias without mutating the creature.
     pub fn propose(&self, current_bias: f64, config: &BackpropConfig, learning_rate: f64) -> f64 {
         if config.disable_bias_adjustment {
@@ -217,6 +227,17 @@ impl WeightSignal {
         self.count_negative += f64::from(delta.count_negative);
         self.total_positive_adjusted_value += f64::from(delta.total_positive_adjusted_value);
         self.total_negative_adjusted_value += f64::from(delta.total_negative_adjusted_value);
+    }
+
+    /// Fold another accumulator's totals into this one (issue #107).
+    pub fn merge(&mut self, other: &Self) {
+        self.count += other.count;
+        self.total_positive_activation += other.total_positive_activation;
+        self.total_negative_activation += other.total_negative_activation;
+        self.count_positive += other.count_positive;
+        self.count_negative += other.count_negative;
+        self.total_positive_adjusted_value += other.total_positive_adjusted_value;
+        self.total_negative_adjusted_value += other.total_negative_adjusted_value;
     }
 
     /// Propose a new weight without mutating the creature.
@@ -284,6 +305,36 @@ impl LearningSignal {
                 signal.accumulate_delta(delta);
             }
         }
+    }
+}
+
+impl LearningSignal {
+    /// Fold another signal's accumulators into this one, index for index.
+    ///
+    /// The parallel pre-focus scan accumulates one signal per record chunk and
+    /// merges them in **chunk order** (issue #107) — never in completion order,
+    /// which would move the low-order bits from run to run.
+    ///
+    /// A signal of a different shape is a bug in the caller, not something to
+    /// paper over: merging stops at the shorter side and the mismatch is
+    /// reported.
+    pub fn merge(&mut self, other: &Self) -> Result<(), String> {
+        if self.biases.len() != other.biases.len() || self.weights.len() != other.weights.len() {
+            return Err(format!(
+                "cannot merge learning signals of different shapes: {}×{} vs {}×{}",
+                self.biases.len(),
+                self.weights.len(),
+                other.biases.len(),
+                other.weights.len()
+            ));
+        }
+        for (mine, theirs) in self.biases.iter_mut().zip(&other.biases) {
+            mine.merge(theirs);
+        }
+        for (mine, theirs) in self.weights.iter_mut().zip(&other.weights) {
+            mine.merge(theirs);
+        }
+        Ok(())
     }
 }
 
@@ -442,6 +493,67 @@ mod tests {
         signal.accumulate_propagate_output(&output, 1);
         assert!(nearly_equal(signal.biases[0].count, 1.0));
         assert!(nearly_equal(signal.weights[0].count, 1.0));
+    }
+
+    #[test]
+    fn merging_two_signals_totals_both_sides() {
+        let outcome = |bias: f32| PropagateOutput {
+            neurons: vec![
+                PropagateOutcome::Skipped,
+                PropagateOutcome::Standard(StandardOutcome {
+                    bias_count_delta: 1,
+                    total_adjusted_bias_delta: bias,
+                    no_change: bias == 0.0,
+                    ..StandardOutcome::default()
+                }),
+            ],
+            synapses: vec![SynapseDelta {
+                count: 1.0,
+                total_positive_activation: f64::from(bias) as f32,
+                count_positive: 1.0,
+                total_positive_adjusted_value: 0.5,
+                ..SynapseDelta::default()
+            }],
+        };
+
+        // One signal over both records must equal two signals merged.
+        let mut serial = LearningSignal::new(1, 1);
+        serial.accumulate_propagate_output(&outcome(0.25), 1);
+        serial.accumulate_propagate_output(&outcome(0.0), 1);
+
+        let mut first = LearningSignal::new(1, 1);
+        first.accumulate_propagate_output(&outcome(0.25), 1);
+        let mut second = LearningSignal::new(1, 1);
+        second.accumulate_propagate_output(&outcome(0.0), 1);
+        first.merge(&second).unwrap();
+
+        assert_eq!(format!("{serial:?}"), format!("{first:?}"));
+        assert!(
+            first.biases[0].no_change,
+            "a no-change flag on either side must survive the merge"
+        );
+    }
+
+    #[test]
+    fn merging_an_empty_signal_changes_nothing() {
+        let mut signal = LearningSignal::new(2, 2);
+        signal.biases[0] = BiasSignal {
+            count: 3.0,
+            total_adjusted_bias: 1.5,
+            no_change: false,
+        };
+        let before = format!("{signal:?}");
+        signal.merge(&LearningSignal::new(2, 2)).unwrap();
+        assert_eq!(before, format!("{signal:?}"));
+    }
+
+    #[test]
+    fn merging_a_differently_shaped_signal_fails_loudly() {
+        let mut signal = LearningSignal::new(2, 2);
+        let err = signal
+            .merge(&LearningSignal::new(3, 2))
+            .expect_err("a shape mismatch must not merge silently");
+        assert!(err.contains("different shapes"), "{err}");
     }
 
     #[test]

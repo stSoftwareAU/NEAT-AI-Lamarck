@@ -1,0 +1,39 @@
+# sample-rate: 1
+# sizes: 0,1,29  repeats: 2
+# creature: /Users/nigelleck/src/GRQ-cluster/network.json
+# trainingData: /Users/nigelleck/src/NEAT-AI-Lamarck/.lamarck-baseline-45/train-data
+# scorer: /Users/nigelleck/src/NEAT-AI-scorer/target/release/rust_scorer
+# loadBefore: 8.80
+# startedUtc: 2026-08-12T01:03:39Z
+creature /Users/nigelleck/src/GRQ-cluster/network.json : inputs=2511 outputs=1 neurons=1605 synapses=22016
+corpus /Users/nigelleck/src/NEAT-AI-Lamarck/.lamarck-baseline-45/train-data : sample-rate=1 repeats=2 sizes=[0, 1, 29] (candidates; +1 baseline)
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 1: 1 creature(s) scored, baseline=0.347667683167
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 1: 2 creature(s) scored, baseline=0.347667605784
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 1: 30 creature(s) scored, baseline=0.347667614331
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 2: 1 creature(s) scored, baseline=0.347667683167
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 2: 2 creature(s) scored, baseline=0.347667605784
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 2: 30 creature(s) scored, baseline=0.347667614331
+
+phase,creatures,ms,sampleRate,failed
+promote,1,8089,1,false
+promote,2,11709,1,false
+promote,30,145515,1,false
+promote,1,8150,1,false
+promote,2,12858,1,false
+promote,30,187912,1,false
+
+fit over 6 call(s) at sample-rate=1
+  mean creatures : 11.00
+  mean ms        : 62372
+  fixed ms/call  : 1977
+  marginal ms/cr : 5490
+  r^2            : 0.9732
+  fixed share    : 3.2%
+# loadAfter: 25.68
+# finishedUtc: 2026-08-12T01:09:54Z

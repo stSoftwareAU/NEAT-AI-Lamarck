@@ -6,112 +6,118 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Self-tune `--baseline-drift-epsilon` (and stop canarying when reuse is
+  off).** The old fixed `1e-9` assumed successive full-corpus scores of an
+  unchanged creature were bit-identical. Directory-mode scoring re-associates
+  `f32` activations across parallel / SIMD partitions; GRQ-10 observed
+  `|Δ| ≈ 2.1e-8` and aborted a healthy run — even though
+  `--baseline-reverify-interval` stayed at the default `0`. Two fixes, both
+  owned by Lamarck (no GRQ tuning knobs): (1) with reuse off, do not retain a
+  cross-promote drift canary — every promote already scores the incumbent in
+  the same batch; (2) when reuse is enabled and the flag is omitted, auto-tune
+  from corpus size and Phase-0 error
+  (`ε_f32 · error · log₂(N) · headroom`, clamped to `[1e-6, 1e-3]`). Accept
+  safety remains the paired re-score path, not this epsilon.
+
+- **Scorer-facing batch files are compact, and promote directories are
+  hard-linked (Issue #114).** `write_candidate_batch` writes `baseline.json` and
+  every `candidate-NNN.json` without pretty-printing — `rust_scorer` is their
+  only reader — and `write_promote_batch` presents the promoted files as hard
+  links into the screen directory instead of copying them, falling back to a
+  copy when the link cannot be made (existing destination, different filesystem,
+  no link support). A missing source still fails loudly. Human-facing artefacts
+  are untouched: `best.json` and `winners/` stay pretty. Measured on a
+  production-shaped batch (baseline + 29 candidates, 2511 inputs, 23 479
+  synapses): **87.0 MB → 61.1 MB written per experiment (-29.8%)**, ≈25 ms less
+  serialisation and ≈15 ms less scorer-side read-plus-parse, plus 8.1 MB of
+  promote copies no longer written. The wall-clock effect is **well under 0.2%
+  of a 36–65 s experiment** — far below the 1%–4% the issue projected, and
+  recorded as a null timing result in
+  [`docs/compact-batch-io.md`](docs/compact-batch-io.md) rather than dressed up.
+
 ### Added
 
-- **Failed-candidate cache production benchmark is wired but unrun (Issue #94).**
-  `scripts/run-failed-cache-economics.sh` drives paired cache-off / cache-on /
-  cold-start arms at the production knobs; `scripts/summarise-failed-cache-economics.sh`
-  folds their `report` JSON into a table. Method and open go/no-go live in
-  [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md).
-  Until exclusive box time fills that table, `--failed-cache` stays off by
-  default.
+- **An opt-in noise-aware promote gate (Issue #111).**
+  `--screen-promote-gate noise-aware` prices each screened batch's own spread
+  before deciding what earns an ~11 s full-corpus score: it promotes on
+  `Δ > max(k · σ̂, --screen-promote-threshold)`, with `k` set by
+  `--screen-promote-sigma-k` (default `3`) and σ̂ the lower quartile of the
+  batch's absolute screen deltas rescaled from a half-normal — a low quantile
+  because a candidate batch is bimodal, so the standard deviation and the MAD
+  measure proposal dispersion rather than the screen's resolution floor. Taking
+  the `max` with the existing threshold means the gate can only ever promote a
+  **subset** of what the absolute gate promotes; acceptance is untouched and
+  stays on the full corpus at `--min-improvement`. A degenerate batch (fewer
+  than four candidates, a non-finite delta, a zero lower quartile) yields no
+  estimate and falls back to the absolute floor instead of dividing by zero or
+  promoting everything. **The default is unchanged** — `absolute` is the
+  pre-#111 run, pinned by tests. The gate and its `k` are recorded in the
+  journal `runHeader` (`screenPromoteGate` / `screenPromoteSigmaK`) and each
+  experiment records its tier admissions (`screenTiers`: gate, screened,
+  promoted, threshold, σ̂). `report` gains a `promoteGateReplay` bucket that
+  replays the gate offline over any journal, so it can be priced — and its
+  effect on the accepts actually earned checked — without box time. Replayed
+  over the journals in hand (6805 screened candidates, 244 promotions, **2**
+  accepts): **161 of 244 promotions avoided (66%) with both accepts kept**, at
+  every `k` from 1 to 5, asserted as a hard `cargo test` failure in
+  `lamarck/tests/promote_gate_replay.rs`. Written up with its limits in
+  `docs/promote-gate.md`, reproducible via `scripts/summarise-promote-gate.sh`
+  and the `promote-gate` arm of `scripts/run-followup-economics.sh`.
 
-- **Known-failed candidates are no longer re-scored (Issues #88–#91).** Lamarck
-  re-proposes the same mutations across experiments and across runs, and
-  re-scoring one that already failed costs full scorer time for nothing. The new
-  `lamarck/src/failed_cache/` module remembers rejections and keeps them out of
-  the batch, behind `--failed-cache` (**off by default** until the benchmark
-  sub-issue of #69 says it pays for itself):
-  - *Identity (#88).* A candidate is fingerprinted from its provenance —
-    incumbent, strategy, focus neuron, mutation — never from its creature JSON.
-    The changed scalar matches within a relative-**or**-absolute tolerance
-    (`--failed-cache-tolerance-abs` / `-rel`), because production deltas pass
-    through zero *and* span orders of magnitude. Non-finite values never match,
-    not even themselves. The discrete part is the hash key, so a lookup only
-    compares scalars inside one bucket.
-  - *Bounded store (#89).* The cache is bounded by both a size cap
-    (`--failed-cache-max-entries`, default `50000` ≈ 25 MiB worst case) and an
-    age bound (`--failed-cache-max-age-seconds`, default 7 days), with an
-    amortised sweep so lookups never scan. Entries age from insertion rather
-    than last use, and survive an incumbent acceptance.
-  - *Persistence (#90).* The cache is rebuilt at startup from
-    `experiments.jsonl`, so it can never disagree with the run history, and
-    snapshotted to `failed-candidates.cache.json` to avoid re-reading a long
-    journal. A missing, corrupt, version-mismatched or differently-tuned
-    snapshot falls back to a journal rebuild instead of failing the run.
-    Experiments with a `scorerError` contribute nothing (a scorer crash is not
-    evidence about the mutation), and neither do accepted experiments (their
-    journalled `incumbentId` is post-accept).
-  - *Run loop (#91).* Cache hits are dropped before the batch is written and the
-    batch is **backfilled** back up to `--candidates`, because the scorer batch
-    is the unit of cost and a short batch just wastes the box. The retry is
-    bounded and a short batch is logged loudly. Each experiment journals
-    `cacheSkipped`, `cacheBackfilled`, `cacheSize`, `cacheLookupMs` and
-    `cacheMaintenanceMs`, and the `runHeader` records the knobs in force.
-    With the cache off nothing runs: no extra RNG draw, no new journal field,
-    and the #71 replay contract for existing runs is untouched.
+- **`report` measures the screen against the full corpus (Issue #110).** A new
+  `screenCalibration` section pairs every candidate that carries **both** a
+  `screenScores` and a `scores` entry into a (screen Δ, full Δ) point and
+  reports the Spearman rank correlation, the promote gate's precision, the
+  full-corpus spread of what it promoted, the screen's empirical noise floor,
+  the subsample-versus-corpus baseline gap and the screen Δ of every accepted
+  candidate. Only the intersection of the two stem sets is paired — the
+  remainder is counted (`screenOnlyCandidates` / `fullOnlyCandidates`), never
+  dropped — `baseline` is excluded from both sides, a journal with no screen
+  phase reports `screenEnabled: false` instead of a fabricated correlation, and
+  a score map missing its `baseline` anchor fails loudly. `distinctPairs` and
+  `spearmanDistinct` expose repeated proposals so a sample size cannot be
+  overstated. Measured over the journals in hand (222 experiments, 6805 screened
+  candidates, 244 promotions, 136 distinct points, **2** accepts): rank
+  correlation **-0.55**, promote precision **15.2%**, and a `1e-6` threshold
+  sitting at ~1σ of the screen's own noise — written up with its limits in
+  `docs/screen-calibration.md`, reproducible via
+  `scripts/summarise-screen-calibration.sh`. No default flag changes; the
+  promote gate itself is issue #111.
 
-- **The failed-candidate cache now measures its own cost and stands down when it
-  stops paying (Issue #92).** #69 made it a hard constraint that the cache must
-  not cost more than it saves; that is now enforced in the code rather than left
-  to a benchmark report. The new `lamarck/src/failed_cache/economics.rs` prices
-  every experiment:
-  - *Accounting.* Savings are estimated as `cacheSkipped ×` the **measured**
-    per-candidate cost of the phase the batch entered this run (the screen where
-    screening is on, the full-corpus batch where it is not), plus recorded
-    full-corpus time — but only for a skipped candidate that had actually been
-    promoted before, since promote-phase savings otherwise accrue only to
-    candidates that would have cleared the threshold. Both halves under-claim by
-    construction, which is the safe direction: it makes the guardrail quicker to
-    fire, never slower. Spend is every millisecond the cache costs — lookup,
-    backfill, age sweeps, the startup rebuild and the snapshot write — with
-    nothing excluded as warm-up.
-  - *Stand-down.* When cumulative spend exceeds estimated savings by a margin
-    (default `1.5×`) **and** the most recent window of experiments (default
-    `20`) is losing money too, the cache is disabled for the rest of the run: a
-    warning is logged, the reason is journalled as `cacheStoodDown`, and the run
-    continues with no cache fields at all — exactly the pre-cache behaviour. The
-    second condition is what makes it "sustained": a cache that paid a heavy
-    rebuild up front but has started earning is left alone. A stood-down cache
-    writes no snapshot.
-  - *Byte ceiling.* `--failed-cache-max-bytes` (default ~25 MiB, matching the
-    default entry cap) bounds the resident footprint by evicting oldest-first
-    rather than growing, and logs when it bites — a silently truncated cache
-    reads as a working cache.
-  - *Reporting.* Each experiment journals `cacheSavedMs` and `cacheSpentMs`, and
-    the run ends with one parseable summary line carrying entries, hit rate, ms
-    saved, ms spent, net, peak memory bytes and disk bytes.
+- **The candidate generator's per-phase quotas can scale with the budget (Issue
+  #108).** `--scale-candidate-quotas` keeps generating after the fixed opening
+  quotas are spent, sweeping the ranked-source × weight-scale and
+  ranked-source × squash grids a slice of every strategy family per round, so
+  `--candidates N` binds until the generator is genuinely exhausted instead of
+  topping out at ~29. Duplicate proposals are rejected rather than counted, and
+  each batch reports whether the **budget**, the **fixed quota ceiling** or
+  genuine **exhaustion** bound it — logged per experiment and journalled as
+  `candidatesRequested` / `batchLimit`, with `report` summarising the achieved
+  size in a `candidateBatch` bucket. On a production-shaped creature (2511
+  inputs) the budget now binds at every count measured up to 240, at ~0.08 ms
+  per candidate (`cargo run --release --example candidate_quota_bench`); the
+  fixed quotas stop at 27, of which only 22 are distinct. The flag is
+  **opt-in**: no default changes until the paired `candidate-quotas` arm of
+  `scripts/run-followup-economics.sh` prices a bigger batch in promote-scores
+  per scorer-minute — see `docs/followup-economics.md` Arm 5.
 
-- **`report` states the failed-candidate cache's economics from a journal alone
-  (Issue #93).** #69's go/no-go is decided from `experiments.jsonl`, so the
-  decision cannot depend on having watched the run that produced it. `report`
-  gains a `cache` section carrying the knobs the run header declared, the counts
-  and hit rate, the final and peak cache size, estimated scorer ms saved against
-  ms spent — lookups, maintenance *and* the startup rebuild — the net, and the
-  experiment at which the #92 guardrail stood the cache down. A journal that
-  never mentions a cache reports `null` rather than a row of zeroes that reads
-  like a cache which did nothing.
-  - *The gate metric.* `scoreImprovementPerWallHour` is what makes a cache-on and
-    a cache-off arm directly comparable. It is anchored on full-corpus scores
-    only, following #84, and is `null` when the journal cannot support it —
-    under `--skip-phase0` a sampled baseline swings by thousands of times the
-    accept threshold, so a rate derived from one would be authoritative-looking
-    and wrong, which is precisely how a go/no-go gets decided incorrectly.
-  - *Honest attribution.* Skips are now split by what actually suppressed them,
-    because #83 attacks the same waste and the two must not both claim it. A
-    cache hit is the cache's saving and the only input to the estimate.
-    Near-duplicates within one batch are counted separately as
-    `cacheDeduplicated`: real avoided work, but the generator repeating itself
-    rather than the cache remembering anything — previously these were folded
-    into `cacheSkipped`, which overstated what the cache had earned.
-    Generation-time gating (#83) suppresses candidates before they become
-    proposals at all, so it is invisible to this accounting by construction; the
-    report publishes the batch size it actually saw rather than assuming
-    `--candidates`, so the reconciliation holds.
-  - *Startup rebuild.* The rebuild is journalled as `cacheRebuildMs` on the first
-    experiment that ran with the cache on, because the run header is written
-    before the cache is loaded. Without it a report would omit the one cost most
-    likely to sink the cache's account.
+- **The per-experiment analysis scans fold record chunks across cores (Issue
+  #107).** Both scans are read-only reductions, so they now run on
+  `--analysis-threads` workers (default `4`, `0` aborts the run). Determinism
+  comes from the partition rather than the schedule: the sample is cut into
+  fixed 2048-record chunks — a function of the sample alone, never of the thread
+  count or the host — and the per-chunk partials are merged in ascending chunk
+  order, so 1, 2 and 8 threads produce **bit-identical** accumulators and
+  `--seed` replay is unaffected. Every RNG draw (`select_sparse`) stays on the
+  calling thread, ahead of the parallel region, and a creature that is not
+  `forwardOnly` is folded as a single chunk because its activations carry state
+  between records. Measured on the 10-core M4 host at production sample shape:
+  the analysis phase is **1.9× faster at 2 threads, 3.1× at the default 4 and
+  4.1× at 8** (`cargo run --release --example analysis_threads_bench`). The
+  thread count in force is recorded in the journal `runHeader` as
+  `analysisThreads`.
 
 - **The three exclusive-box economics arms are wired up (Issue #96).**
   `scripts/run-followup-economics.sh` gains an `output-neuron` arm (pins

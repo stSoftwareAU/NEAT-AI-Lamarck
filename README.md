@@ -31,7 +31,7 @@ This document describes what the code does today. Known gaps are listed under
 
 ```mermaid
 flowchart TD
-    FIT(["current fittest creature"]) --> FOCUS["analyse one selected neuron"]
+    FIT(["current fittest creature"]) --> FOCUS["analyse the selected neuron(s)<br/>(--focus-count, default 1)"]
 
     FOCUS --> STAT["statistical<br/>candidates"]
     FOCUS --> BACK["backprop<br/>candidates"]
@@ -164,9 +164,16 @@ The run always uses these; the flag only overrides the value.
 | `--timeout-seconds` | `2700` | Wall-clock budget (45 minutes). |
 | `--min-improvement` | `1e-6` | Absolute score delta required to accept, strict `>`. |
 | `--screen-sample-rate` | `0.05` | Scorer subsample for the screen phase. `1` (or `>= 1`) disables screening. |
-| `--screen-promote-threshold` | `1e-6` | Minimum sample-score Δ before a candidate earns a full-corpus score. |
+| `--screen-promote-threshold` | `1e-6` | Minimum sample-score Δ before a candidate earns a full-corpus score. Stays in force under `--screen-promote-gate noise-aware` as that gate's absolute floor. |
+| `--screen-promote-gate` | `absolute` | Promote gate (issue #111). `absolute` is the pre-#111 run: promote on a bare `--screen-promote-threshold`. `noise-aware` prices the batch's own screen-Δ spread first and promotes on `Δ > max(k · σ̂, --screen-promote-threshold)`, so it can only ever promote a **subset** of what `absolute` does. Opt-in until a paired benchmark on accepts per wall-clock hour justifies moving the default — see [The promote gate](#the-promote-gate). Any other value aborts the run. |
+| `--screen-promote-sigma-k` | `3` | σ̂ multiplier `k` for `--screen-promote-gate noise-aware`; ignored under `absolute`. Must be `> 0` — a non-positive or non-finite value aborts the run instead of reverting to the default. Recorded in the journal `runHeader` so an A/B arm is identifiable. |
 | `--focus-policy` | `weighted` | `weighted` \| `high-error` \| `random` \| `unsaturated`. |
+| `--baseline-reverify-interval` | `0` | Promote calls served from the run's **remembered** full-corpus baseline before one scores the incumbent again (issue #113). `0` is the pre-#113 run: every promote call carries the incumbent. A value `N >= 1` omits it from up to `N` consecutive promote calls — ≈20% of a promote call's creature-scores — then re-scores it and checks it against `--baseline-drift-epsilon`. Any accept off a remembered baseline is re-decided against a freshly scored pair before the incumbent is swapped. Recorded in the journal `runHeader`. See [The remembered baseline](#the-remembered-baseline). |
+| `--baseline-drift-epsilon` | *auto* | Absolute baseline-score drift that **aborts the run** when baseline reuse is enabled (issue #113). **Omitted by default** — Lamarck auto-tunes from corpus size and Phase-0 error (`ε_f32 · error · log₂(N) · headroom`, clamped to `[1e-6, 1e-3]`). Pass an absolute value only for expert / A/B overrides; hosts (e.g. GRQ) must not ship a competing default. With the default `--baseline-reverify-interval 0` the canary is inactive (every promote is already self-paired). Accept safety is the paired re-score, not this epsilon. |
+| `--focus-count` | `1` | Focus neurons an experiment proposes against (issue #109). The creature-wide learning and output-residual passes run **once per experiment** whatever this is, so `K > 1` amortises them over `K` focuses and splits `--candidates` between them. `0` aborts the run; `--focus-neuron` pins the focus and caps this at 1. See [Phase 2](#phase-2--select-the-focus-neurons). |
 | `--quick-sample-records` | `25000` | Record cap for `--quick` observations / focus / learning scans. |
+| `--analysis-memo-entries` | `16` | Focus-dependent entries the cross-experiment analysis memo may hold. `0` disables memoisation; every entry is dropped whenever the incumbent changes. See [Memoised analysis across experiments](#memoised-analysis-across-experiments). |
+| `--analysis-threads` | `4` | Worker threads folding record chunks in the two analysis scans. The analysis is **bit-identical at every thread count** — only the wall clock moves. `0` aborts the run. Not `num_cpus` on purpose: the scorer owns the box whenever it runs. See [Parallel analysis scans](#parallel-analysis-scans). |
 
 ### Genuinely optional
 
@@ -178,6 +185,7 @@ Leaving these unset changes behaviour.
 | `--max-experiments` | Stop after this many experiments, whichever of it and `--timeout-seconds` comes first. Unset = wall-clock bounded only. |
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
+| `--scale-candidate-quotas` | Scale the generator's per-phase quotas with `--candidates` so the budget binds until the generator is genuinely exhausted (issue #108). Unset, the fixed quotas cap a batch at ~29 on the production creature whatever `--candidates` says. Opt-in until the paired batch-economics benchmark in [`docs/followup-economics.md`](docs/followup-economics.md) justifies making it the default. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
 | `--compute-correlations` | Compute the expensive input×input correlation matrix in observations. |
 | `--skip-phase0` | Skip the Phase-0 parity gate. |
@@ -292,18 +300,64 @@ grafts are retired. New structural accepts are recorded back into the store —
 for a combo accept, each structural member is recorded at its **solo** weights,
 never the dampened merge, so replay cannot double-dampen.
 
-### Phase 2 — select a focus neuron
+### Phase 2 — select the focus neurons
 
-Each iteration focuses on one non-input neuron. The default policy
-(`--focus-policy weighted`) draws weighted-random by **error influence**: output
-residual L1 mass, or hidden `|total blame|` decayed by distance to the nearest
-output, so deep diluted neurons rarely win. Outputs are usually strongest but
-are not chosen every time, and zero-signal neurons are never selected. The
-selector also folds in each neuron's own accept history.
+Each iteration focuses on `--focus-count` non-input neurons (default 1). The
+default policy (`--focus-policy weighted`) draws weighted-random by **error
+influence**: output residual L1 mass, or hidden `|total blame|` decayed by
+distance to the nearest output, so deep diluted neurons rarely win. Outputs are
+usually strongest but are not chosen every time, and zero-signal neurons are
+never selected. The selector also folds in each neuron's own accept history.
 
 `high-error` always picks the single strongest neuron and sticks there — avoid
 it in production. `random` and `unsaturated` remain available for A/B work, and
 `--focus-neuron` pins a UUID for debug and smoke runs.
+
+#### Several focuses per experiment (`--focus-count`)
+
+Most of the analysis phase is not focus-specific: the backprop learning signal
+and the output-residual scan describe the **whole creature**, and the
+improvement-signal ranking scores every eligible neuron. Spending all of that on
+one focus amortises it over a single neuron — and if that neuron is saturated
+with a dead gradient, over nothing at all.
+
+`--focus-count K` draws `K` distinct focuses from the same ranking, runs the
+focus-specific work (focus stats, incoming sources, residual refine) once per
+focus, and merges the per-focus batches into one scored population.
+`--candidates` is split between the focuses, largest share first.
+
+```mermaid
+flowchart TD
+    S1["scan 1 — pre-focus (once per experiment)<br/>learning signal + output MAE"] --> RANK(["rank every eligible neuron"])
+    RANK --> F1["focus 1<br/>focus scan + candidates"]
+    RANK --> F2["focus 2<br/>focus scan + candidates"]
+    RANK --> FK["focus K<br/>focus scan + candidates"]
+    F1 --> POP[["one merged candidate batch"]]
+    F2 --> POP
+    FK --> POP
+    POP --> SCORE{"screen / promote scoring"}
+    SCORE --> WIN(["winner names its own focus"])
+    WIN --> HIST["boost that focus;<br/>dampen the sterile ones"]
+
+    classDef shared fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef focus fill:#cffafe,stroke:#0e7490,stroke-width:2px,color:#083344
+    classDef pool fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    classDef outcome fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+
+    class S1,RANK shared
+    class F1,F2,FK focus
+    class POP,SCORE pool
+    class WIN,HIST outcome
+```
+
+`K = 1` is the default and reproduces the pre-#109 run exactly, down to the
+candidate stream for a given seed: the extra focuses are drawn only when they
+are asked for, so the rng stream is untouched at `K = 1`.
+
+Attribution follows the issue #74 member rule. Each candidate's provenance names
+the focus it was proposed for, so an accepted winner boosts only **that**
+focus's history in the weighted selector, and every other focus in the set is
+dampened as sterile on its own candidates' full-corpus Δ.
 
 ### Phase 3 — creature-specific analysis
 
@@ -315,6 +369,123 @@ fractions) plus, for each incoming connection, source statistics and the
 source's relationship with the neuron's learning/error signal. Raw observation
 sources reuse `observations.statistics` where mathematically equivalent; hidden
 sources are measured from the current creature.
+
+#### Two scans per experiment
+
+The analysis work is grouped by what it depends on, so an experiment walks the
+training sample **twice**, not once per measurement (`lamarck/src/analysis.rs`):
+
+```mermaid
+flowchart LR
+    A["scan 1 — pre-focus<br/>learning signal + output MAE"] --> F(["choose focus neuron"])
+    F --> B["scan 2 — post-focus<br/>focus stats + incoming sources<br/>+ residual source ranking"]
+    B --> GEN(["candidate generation"])
+
+    classDef scan fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef step fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    class A,B scan
+    class F,GEN step
+```
+
+Scan 1 is focus-independent; scan 2 needs the focus that the first scan's
+signals select — everything in a group shares one activation per record. Each
+measurement
+keeps its own streaming accumulator, and the standalone `collect_*` / `refine_*`
+functions drive those same accumulators, so a fused result is bit-identical to
+the per-pass one. The residual ranking streams the sample rather than
+materialising it as activation probes.
+
+#### Parallel analysis scans
+
+Both scans are read-only reductions: each record contributes independently to a
+set of accumulators. They therefore fold record chunks on `--analysis-threads`
+workers (default 4, `lamarck/src/chunks.rs`).
+
+Determinism comes from the **partition**, not the schedule. The sample is cut
+into fixed 2048-record chunks — a function of the sample alone, never of the
+thread count, the core count or the host — and the per-chunk partials are merged
+in ascending **chunk order**, whichever worker finished first. One thread and
+eight threads therefore fold the same partials in the same order and produce
+bit-identical accumulators; `--seed` replay is unaffected. Every RNG draw
+(`select_sparse`) happens on the calling thread before the workers start.
+
+```mermaid
+flowchart LR
+    S["sample<br/>N records"] --> C1["chunk 0"] & C2["chunk 1"] & C3["chunk k"]
+    C1 --> W["workers<br/>(--analysis-threads)"]
+    C2 --> W
+    C3 --> W
+    W --> M["merge in chunk order<br/>0 → 1 → … → k"]
+    M --> R(["one accumulator set<br/>identical at 1, 2, 8 threads"])
+
+    classDef scan fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef step fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    classDef out fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    class C1,C2,C3,W scan
+    class S,M step
+    class R out
+```
+
+A creature that is not `forwardOnly` carries activation state from one record to
+the next, so it is folded as a **single chunk** — correctness before speed.
+
+Measured on the 10-core M4 host with a production-shaped sample (25 000 records
+× 2 511 inputs, `cargo run --release --example analysis_threads_bench`): the
+analysis phase runs 1.9× faster at 2 threads, 3.1× at the default 4, and 4.1× at
+8. The thread count in force is recorded in the journal `runHeader` as
+`analysisThreads`, so a parallel arm that turned out *slower* than a serial one
+is identifiable from its journal alone.
+
+#### Memoised analysis across experiments
+
+The incumbent only changes when an experiment is **accepted**, and accepts are
+rare — `docs/followup-economics.md` records 0 accepts in 118 experiments. So for
+almost every experiment the creature that scan 2 describes is byte-identical to
+the one the previous experiment described, and a repeated focus makes the whole
+scan redundant. Lamarck memoises the two incumbent-invariant results
+(`lamarck/src/memo.rs`):
+
+| Cached | Key | Effect on a hit |
+|--------|-----|-----------------|
+| Focus stats + incoming sources + ranked sources | `(incumbent, focus, sample)` | Scan 2 is skipped entirely. |
+| Per-output MAE | `(incumbent, sample)` | Scan 1 still runs for the learning signal; only the residual accumulation is skipped. |
+
+The learning signal is **never** cached: it is driven by a per-experiment seeded
+RNG (`select_sparse`) and is deliberately different every experiment.
+
+```mermaid
+flowchart TD
+    START(["experiment N"]) --> KEY["scope = content hash of incumbent<br/>+ analysis sample config"]
+    KEY --> CHECK{"same scope as<br/>the held entries?"}
+    CHECK -- no --> DROP["drop every entry"] --> MISS
+    CHECK -- yes --> LOOK{"focus cached?"}
+    LOOK -- no --> MISS["scan 2 runs, result stored<br/>with its measured ms"]
+    LOOK -- yes --> HIT["memo hit — no training scan"]
+    MISS --> J["journal memoHits / memoMisses / memoMsSaved"]
+    HIT --> J
+
+    classDef scan fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef step fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+    classDef drop fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+    class MISS,HIT scan
+    class START,KEY,J step
+    class DROP drop
+```
+
+The scope is a **content** hash of the creature, not the journal's coarse
+`incumbentId` (which counts neurons and synapses only): a weight-only accept
+leaves that id unchanged, so keying on it would serve stale analysis to the very
+experiment after an accept. Any incumbent change — an accepted candidate, a
+Phase-G graft, a changed `--quick-sample-records` — is a changed scope, and a
+changed scope drops every entry before the next lookup is answered. Debug builds
+additionally assert the held scope still matches the incumbent at use time.
+
+Memory is bounded by `--analysis-memo-entries` (default 16), evicted
+least-recently-used; each entry holds one focus's statistics, incoming rows and
+ranked sources, so the bound is the focus fan-in, never the creature's neuron
+count. `memoHits`, `memoMisses` and `memoMsSaved` are journalled per experiment
+and totalled by `report`, so the memo's value is auditable — and a hit rate that
+stays at 100% across an accept is the signature of a stale cache.
 
 ### Backpropagation
 
@@ -374,6 +545,34 @@ sized to keep a ~10-core scorer box saturated. The generator front-loads
 structural probes, then round-robins the remaining budget across the strategies
 below; `--structural-only` restricts it to growth candidates.
 
+Those opening phases carry **fixed** quotas, so the batch tops out at ~29 on the
+production creature whatever `--candidates` says.
+`--scale-candidate-quotas` (issue #108) keeps going after them, sweeping the
+ranked-source × weight-scale and ranked-source × squash grids a slice of every
+family at a time, until the budget is met or the generator is genuinely
+exhausted. Duplicate proposals are dropped rather than counted, and every
+experiment logs — and journals, as `candidatesRequested` / `batchLimit` — which
+of the three limits bound it:
+
+```mermaid
+flowchart LR
+    OPEN["fixed opening quotas"] --> FULL{"budget met?"}
+    FULL -- yes --> BUDGET(["budget reached"])
+    FULL -- "no, flag unset" --> CEIL(["fixed quota ceiling"])
+    FULL -- "no, --scale-candidate-quotas" --> ROUND["round: adds x scales,<br/>growths x squashes,<br/>one of each weight strategy"]
+    ROUND --> NEW{"anything new,<br/>or grid left?"}
+    NEW -- yes --> FULL
+    NEW -- no --> DRY(["generator exhausted"])
+
+    classDef stage fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef stop fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef warn fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+
+    class OPEN,ROUND stage
+    class BUDGET stop
+    class CEIL,DRY warn
+```
+
 | Journal tag | What it proposes |
 |-------------|------------------|
 | `backprop` | Bias, or the strongest incoming weight, stepped by the accumulated learning signal (absolute weight delta capped at `0.01`). Skipped entirely when no blame reached the focus — the batch slot goes to a strategy that can clear `--min-improvement` (issue #83). |
@@ -407,14 +606,24 @@ candidates-exp-7/
     ...
 ```
 
+Those files are **compact** JSON: `rust_scorer` is their only reader, and on the
+production creature the pretty-printer's indentation is ≈30% of the ~87 MB a
+batch writes and the scorer then parses. The promote directory hard-links the
+promoted files from the screen directory rather than copying them, falling back
+to a copy when the link cannot be made. `best.json`, `winners/` and every other
+human-facing artefact stay pretty-printed. What that was worth — including the
+wall-clock null result — is measured in
+[`docs/compact-batch-io.md`](docs/compact-batch-io.md).
+
 Scoring runs in three steps:
 
 1. **Screen** the full candidate directory with
    `rust_scorer --sample-rate 0.05 --sample-phase <n> …` (≈0.7–1s/creature on
    GRQ against ≈11s full). The sample phase rotates per experiment.
-2. **Promote** only stems with sample Δ `> --screen-promote-threshold` into a
-   full-corpus batch, so full-corpus time is not spent on sample noise. An empty
-   screen ends the experiment without a full-corpus call.
+2. **Promote** only stems the promote gate admits into a full-corpus batch, so
+   full-corpus time is not spent on sample noise. An empty screen ends the
+   experiment without a full-corpus call. Which gate is in force is
+   `--screen-promote-gate` — see [The promote gate](#the-promote-gate).
 3. **Combine** — when two or more promoted candidates each beat the baseline,
    their mutation deltas are merged into combination creatures (all pairs, then
    triples, budget-capped) and scored in one further full-corpus batch.
@@ -422,12 +631,67 @@ Scoring runs in three steps:
    `k^-0.5` so a merge is not louder than the sum of its evidence. Conflicting
    edits to the same neuron or edge are skipped.
 
+How well that screen predicts the full-corpus verdict is measured, from the
+journals already in hand, in
+[`docs/screen-calibration.md`](docs/screen-calibration.md): over 244 promotions
+the rank correlation between screen Δ and full-corpus Δ is **-0.55**, and the
+`1e-6` threshold sits at about **one** standard deviation of the screen's own
+sampling noise.
+
+#### The promote gate
+
+`--screen-promote-gate` chooses how step 2 decides. **The default is unchanged
+by issue #111** — `absolute` is exactly the pre-#111 run:
+
+```mermaid
+flowchart LR
+    SCREEN[["screen Δ per candidate"]] --> GATE{"--screen-promote-gate"}
+    GATE -->|"absolute (default)"| ABS["Δ > --screen-promote-threshold"]
+    GATE -->|"noise-aware"| SIGMA["σ̂ = q25(|Δ|) / 0.3186"]
+    SIGMA --> NA["Δ > max(k · σ̂, --screen-promote-threshold)"]
+    ABS --> FULL[["full-corpus promote batch"]]
+    NA --> FULL
+    ABS -.->|"below the bar"| DROP["dropped — no full-corpus score"]
+    NA -.->|"below the bar"| DROP
+```
+
+σ̂ is the **lower quartile of the batch's own absolute screen deltas**, rescaled
+as if that quartile came from a half-normal. A low quantile is used on purpose:
+a candidate batch is bimodal — structural proposals routinely move the score by
+`5e-2` while weight/bias nudges move it by `~1e-8` — so the median or the
+standard deviation would measure *proposal dispersion* rather than the
+resolution floor the gate cares about. The `--screen-sample-rate` is **not**
+applied a second time: σ̂ is measured on scores the run produced at its own rate,
+so the rate is already inside the estimate.
+
+Two properties hold whatever the batch looks like, both pinned by tests in
+`lamarck/src/promote_gate.rs`:
+
+- **Never weaker than `absolute`.** The threshold is a `max` with the floor, so
+  the noise-aware gate promotes a subset of what the absolute gate promotes.
+  Nothing here can make a candidate acceptable on sampled evidence — acceptance
+  stays on the full corpus at `--min-improvement`.
+- **A degenerate batch falls back rather than misfiring.** Fewer than four
+  candidates, a non-finite delta, or a batch whose lower quartile is exactly
+  zero yields no estimate, and the gate reverts to the absolute floor instead of
+  dividing by zero or promoting everything.
+
+Because a lost accept is invisible in production — nothing journals the
+acceptance that never happened — the gate is replayed **offline** against the
+journals in `docs/screen-calibration.md` before it can cost a run anything.
+`lamarck/tests/promote_gate_replay.rs` asserts that both of the accepts issue #8
+ever earned (`+1.11e-6` and `+1.00e-6`, each barely over the bar) would still
+have been promoted, at every `k` from 1 to 5. A gate that drops either fails
+`cargo test`.
+
 Scorer argv is the locked two-argument form plus the screen sampling flags only;
 Lamarck never passes `--gpu` or `--cost`, so scorer defaults decide backend and
 loss. Pass `--screen-sample-rate 1` to disable screening.
 
-The incumbent is included in every scored batch, so a candidate is never
-compared against a stale score. Acceptance uses the scorer JSON **`score`**
+The incumbent is included in every scored batch by default, so a candidate is
+never compared against a stale score. `--baseline-reverify-interval` trades part
+of that pairing for throughput under an explicit guard — see
+[The remembered baseline](#the-remembered-baseline). Acceptance uses the scorer JSON **`score`**
 field (**larger-is-better**) from the **full-corpus** score only — never `error`
 alone:
 
@@ -437,6 +701,71 @@ candidate.score - baseline.score > 1e-6
 
 (default absolute threshold, strict greater-than). GRQ `costOfGrowth` is `1e-7`,
 so `1e-6` sits deliberately above growth noise.
+
+#### The remembered baseline
+
+Between accepts the incumbent does not change, so its full-corpus score is a
+constant the run already holds — established by the Phase-0 gate and by the last
+accept. Scoring it again in every promote call is ≈20% of that call's
+creature-scores, on the expensive tier. `--baseline-reverify-interval N` lets
+the run reuse the number it knows (issue #113):
+
+```mermaid
+flowchart TD
+    START[["promote batch to score"]] --> VALID{"remembered score valid?<br/>same creature, same corpus,<br/>fewer than N calls since fresh"}
+    VALID -->|no| PAIRED["score baseline + candidates"]
+    VALID -->|yes| SOLO["score candidates only<br/>(baseline omitted)"]
+    PAIRED --> DRIFT{"|fresh - remembered|<br/>> --baseline-drift-epsilon?"}
+    DRIFT -->|yes| ABORT(["abort the run"])
+    DRIFT -->|no| DECIDE
+    SOLO --> ACCEPTS{"a candidate clears<br/>--min-improvement?"}
+    ACCEPTS -->|no| DECIDE["reject — no incumbent change"]
+    ACCEPTS -->|yes| VERIFY["re-score winner + incumbent<br/>together, full corpus"]
+    VERIFY --> DRIFT
+    DECIDE --> SWAP(["accept: swap the incumbent,<br/>forget the remembered score"])
+
+    classDef gate fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef work fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0c1e4e
+    classDef out fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef bad fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+    class VALID,DRIFT,ACCEPTS gate
+    class START,PAIRED,SOLO,VERIFY,DECIDE work
+    class SWAP out
+    class ABORT bad
+```
+
+The pairing a promote call gives up is a guard as well as a cost — candidate and
+baseline are otherwise scored by the same binary, on the same corpus, in the
+same process, at the same moment — so three rules hold, each pinned by tests in
+`lamarck/src/run.rs`:
+
+- **The remembered score is keyed to what could invalidate it.** The creature's
+  coarse `incumbentId` *and* its content fingerprint (a weight-only accept
+  leaves the shape id untouched), plus a fingerprint of every `*.bin` in the
+  training directory with its size and mtime. `docs/baseline-economics.md`
+  records the corpus being deleted mid-run by GRQ `node.sh`, so "the data
+  changed under the run" is history here, not a hypothetical.
+- **Any accept is verified before the swap.** A winner proposed against a
+  remembered baseline is re-scored *beside the incumbent* in one full-corpus
+  call, and only that fresh pair can change `best.json`. A margin that exists
+  only against the remembered number is withdrawn.
+- **Drift aborts the run.** Whenever a fresh baseline lands while a remembered
+  one is held — on the re-verification interval or on the accept path — the two
+  are compared, and a disagreement beyond the (auto-tuned)
+  `--baseline-drift-epsilon` stops the run rather than deciding anything. With
+  `--baseline-reverify-interval 0` no score is remembered between promotes, so
+  the canary is inactive; every promote is already self-paired.
+
+The screen phase is deliberately untouched: its sample phase rotates per
+experiment, so each screen scores the incumbent on a different stratum and that
+sampled score is genuinely new information.
+
+[`docs/baseline-reuse.md`](docs/baseline-reuse.md) measures what this is worth:
+in the paired benchmark a promote call drops from 5.86 to 4.91 creature-scores
+(**-16%**) and from 28.8 to 24.2 ms (**-16%**) at an unchanged cost per
+creature-score, for **+4.9%** experiments completed in a fixed budget.
+Projected onto a production run with the per-call costs #112 fitted, that is
+≈6% of scorer time.
 
 An accepted winner becomes the incumbent immediately: `best.json` is rewritten
 with the creature's `uuid`/`tags` re-attached and a run-summary `lamarck` tag,
@@ -522,7 +851,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`. A cache-on run additionally records `failedCache`, `failedCacheMaxEntries`, `failedCacheMaxAgeSeconds`, `failedCacheToleranceAbs` and `failedCacheToleranceRel`; these are omitted entirely when the cache is off, which is how a paired benchmark tells the two arms apart. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -535,7 +864,20 @@ no candidate stem at all, so it needs its own line or `report` cannot see it:
 | `graftsApplied`, `accepted` | Grafts merged into the incumbent, and whether the incumbent improved. |
 | `baselineScore`, `score`, `improvement` | Score before, score after, and the accepted Δ. |
 | `scorerSuccesses`, `scorerFailures` | Scorer batches run during the phase. |
+| `scorerCalls[]` | Every scorer invocation the phase made, in the shape described for an experiment below (issue #112). |
 | `replayError` | Present when the phase aborted instead of completing. |
+
+Scorer calls that belong to no experiment get their own line, so the per-call
+cost model is fitted to **every** call a run made rather than to the subset the
+experiment loop owns (issue #112). The Phase-0 baseline call is the standing
+example — it runs before the first experiment:
+
+| Field | Meaning |
+|-------|---------|
+| `record` | Always `scorerCalls`. |
+| `timestampUnix` | When the line was written. |
+| `stage` | Which part of the run made them: `phase0`, or `trailing` for a call left over when a run stopped mid-experiment. |
+| `calls[]` | The calls themselves, in the shape described for an experiment below. |
 
 Every following line is one experiment:
 
@@ -545,12 +887,18 @@ Every following line is one experiment:
 | `seed` | Effective run seed (matches the header). |
 | `incumbentId` | Incumbent shape identity (`in…-out…-n…-s…`). |
 | `baselineScore` | Authoritative baseline for this experiment. |
-| `focusNeuron` | Selected neuron UUID. |
-| `focusStats` | The focus scan that drove the experiment (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
+| `focusNeuron` | Primary focus neuron UUID (the first of `focusNeurons`). |
+| `focusNeurons` | Every focus this experiment proposed against (issue #109). Omitted for a single-focus experiment — `focusNeuron` already says it — and absent from journals written before the field existed. Each entry of `candidates[]` names its own `focusNeuron`, so a winner is attributable to one member of this set. |
+| `focusStats` | The focus scan of the **primary** focus (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`. |
+| `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — pass `--scale-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
+| `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Absent when no screen phase ran, and from journals written before the field existed. |
+| `baselineSource` | Which baseline decided this experiment's promote call (issue #113): `fresh` (the call carried the incumbent and scored it), `remembered` (it reused the run's carried full-corpus score) or `rememberedVerified` (it reused it *and* proposed an accept, so the winner and the incumbent were re-scored together before the swap). Omitted when no promote call ran, and absent from journals written before the field existed — so any accept is traceable to the baseline that decided it. |
 | `winner`, `improvement`, `accepted` | Outcome of the experiment. |
 | `analysisMs`, `scorerMs` | Where the time went. |
+| `scorerCalls[]` | Every scorer invocation this experiment made (issue #112): `phase` (`screen` / `promote` / `combo`), `creatures` handed over, `sampleRate` when the call sampled, `elapsedMs`, and `failed` on a call that did not complete. `scorerMs` sums calls of different sizes, so it cannot be regressed on its own; the per-call creature count is what recovers the fixed per-call and marginal per-creature cost. Absent from journals written before the field existed. |
+| `memoHits`, `memoMisses`, `memoMsSaved` | Analysis-memo accounting for this experiment (issue #106): lookups served from the memo, lookups recomputed, and the training-scan milliseconds the hits avoided. `memoMsSaved` counts whole scans skipped, measured on the miss that stored the entry — a cached output-MAE map saves only the residual accumulation inside a scan that still runs for the learning signal, so it is deliberately not counted. Journals written before the field existed read as `0`. |
 | `scorerError` | Present when the batch failed. |
 | `comboMembers`, `combosScored`, `combosDampened`, `comboDampen` | Combination-scoring detail. |
 | `comboMemberIndices` | Indices into `candidates[]` of the accepted winner's members — one entry for a single, several for a merged `combo-NNN-kM`. Present only on an acceptance, and absent from journals written before issue #74. |
@@ -574,6 +922,12 @@ It emits per-strategy appearances/wins/acceptance rate, focus history,
 improvement series, candidates per scorer-minute and per screen-minute,
 analysis-time fraction, projected batches per 45 minutes, and combo totals.
 
+The `candidateBatch` bucket reports the achieved batch size (issue #108):
+`meanGenerated`, `minGenerated`, `maxGenerated`, the `requested` budget when
+every experiment agreed on one, and how many experiments stopped at the
+`quotaCeiling` or ran the generator `exhausted`. A journal written before those
+fields existed still reports the sizes, with `requested` `null`.
+
 `openingBaselineScore` is anchored on a **full-corpus** score only (issue #84):
 the `scores.baseline` of the first experiment that actually promoted, which is
 the score Phase-0 measured when it ran, because the incumbent cannot change
@@ -584,6 +938,14 @@ thousands of times the accept threshold, so it is never used as the anchor. Both
 `relativeScoreImprovement`) are `null` until a full-corpus baseline exists,
 rather than reporting a difference between two different quantities.
 
+`focusHistory[]` counts every focus an experiment served, so at
+`--focus-count K` one experiment contributes to `K` rows. Accepts and
+`cumulativeImprovement` are credited to the focus the **winner** was proposed
+against, read from `comboMemberIndices` → `candidates[].focusNeuron`; a win
+spanning several focuses splits its Δ evenly between them. A journal with no
+focus set, or one whose members cannot be resolved, falls back to `focusNeuron`
+— so pre-#109 journals report exactly what they always did.
+
 Wins are attributed from `comboMemberIndices`, so a merged combo win counts once
 for **every** member strategy and is also carried in that row's `comboWins`
 (issue #74). The `wins` column therefore sums to more than `acceptances` whenever
@@ -591,37 +953,71 @@ combos win. A combo win in a journal written before `comboMemberIndices` existed
 names no members, so it cannot be attributed at all — those are counted in
 `comboAcceptancesUnattributed` rather than silently dropped.
 
-`scoreImprovementPerWallHour` is the failed-candidate cache's go/no-go metric
-(issue #93): full-corpus score improvement divided by the run's wall-clock span,
-so a cache-on and a cache-off journal can be compared straight from `report`
-output. It follows the same anchoring rule as `openingBaselineScore` and is
-`null` whenever the journal cannot support it — no full-corpus anchor, or no
-wall-clock span — rather than reporting a rate derived from sampled scores.
+The `baselineReuse` bucket prices the remembered baseline (issue #113):
+`freshPromoteCalls`, `rememberedPromoteCalls`, `verifiedAccepts`,
+`baselineScoresSaved` (one full-corpus creature-score per omitted baseline),
+`verificationCreatureScores` (two per verified accept — the pair) and
+`netCreatureScoresSaved`, which subtracts the second from the first so the
+saving is never over-claimed. A pre-#113 journal, or a run left at
+`--baseline-reverify-interval 0`, reports every promote call as `fresh`.
 
-A cache-on run gets a `cache` section carrying the knobs the run header
-declared, the counts (`proposalsExamined`, `cacheHits`, `deduplicated`,
-`backfilled`, `batchCandidates`, `hitRate`), the footprint (`finalCacheSize`,
-`peakCacheSize`), the economics (`estimatedSavedMs`, `spentMs`, `rebuildMs`,
-`netMs`) and, if the #92 guardrail fired, `stoodDownAtExperiment` with its
-reason. The section is `null` for a journal that never mentions a cache, so
-historical journals report cleanly instead of growing a row of zeroes.
-
-Three different mechanisms keep a proposal out of a scorer batch, and the
-`cache` section credits the cache with exactly one of them. `cacheHits` counts
-proposals the cache recognised as known-failed — the cache's saving, and the
-only input to `estimatedSavedMs`. `deduplicated` counts near-duplicates within a
-single batch: real avoided work, but the generator's repetition rather than the
-cache's memory, so it is reported apart. Generation-time gating, such as
-`backprop` declining to propose on a focus with no accumulated blame
-(issue #83), suppresses candidates before they ever become proposals, so they
-are absent from `proposalsExamined` entirely and cannot be double-counted
-against a cache hit. What that gating does change is batch size, which is why
-`batchCandidates` reports the batch that was actually scored rather than
-assuming `--candidates`.
+The `analysisMemo` report bucket totals the memo columns — `hits`, `misses`,
+`msSaved`, `hitRate` and `analysisMsSavedFraction` (saved milliseconds as a share
+of analysis + saved time). A pre-memo journal, or a run started with
+`--analysis-memo-entries 0`, reports zeros. Keep this accounting separate from
+the candidate-level economics: the memo caches *incumbent analysis*, never a
+candidate outcome, so no saving is counted twice.
 
 Phase-G replay gets its own `graftReplay` bucket — `replays`, `accepts`,
 `graftsApplied`, `cumulativeImprovement`, `scorerFailures` and `replayErrors` —
 which is `null` for a journal with no replay line.
+
+The `screenCalibration` bucket measures the screen against the full corpus from
+the two score maps the journal already holds (issue #110). Every candidate
+scored on **both** sides becomes a paired (screen Δ, full Δ) point, from which it
+reports the Spearman rank correlation (`spearman`, plus `spearmanDistinct` over
+`distinctPairs` — the same mutation re-proposed against the same focus is one
+hypothesis, not several), the promote gate's precision (`promotionPrecision`,
+`promotedImproved` / `promotedWorse` / `promotedClearingAcceptBar` /
+`promotedMateriallyWorse`), the `fullDelta` spread of what was promoted, the
+`screenNoise` floor (screen Δ among candidates the full corpus scored flat), the
+`baselineSampleGap` (the same creature scored on the subsample and the corpus),
+and the screen Δ of every `acceptedCandidates` entry. Only the intersection of
+the two stem sets is paired: the remainder is counted in `screenOnlyCandidates`
+(screened, never promoted) and `fullOnlyCandidates`, never dropped silently, and
+`baseline` is excluded from both sides because it is the anchor the deltas are
+measured against. A journal with screening disabled reports
+`screenEnabled: false` and a `null` correlation rather than a fabricated one.
+Run it over several journals with
+`scripts/summarise-screen-calibration.sh JOURNAL...`; the measured result for
+the journals in hand is
+[`docs/screen-calibration.md`](docs/screen-calibration.md).
+
+The `scorerCallCost` bucket decomposes scorer time into a **fixed** per-call cost
+and a **marginal** per-creature cost (issue #112), fitted by least squares from
+the journal's own `scorerCalls`: `calls`, `failedCalls`, `creaturesScored`, and a
+`byPhase` map whose rows carry `calls`, `distinctSizes`, `meanCreatures`,
+`meanMs`, `fixedMs` (the intercept), `marginalMsPerCreature` (the slope),
+`rSquared` and `fixedMsShareAtMean`. Phases are **never** pooled: a sampled
+screen call and a full-corpus promote call have different marginal costs, so one
+line through both would report neither. A phase whose calls were all the same
+size reports its means with a `null` decomposition rather than an intercept
+invented from one point, and a journal written before `scorerCalls` existed
+reports an empty bucket. The measured result on the production creature and
+corpus — and the go/no-go it decided — is
+[`docs/scorer-call-cost.md`](docs/scorer-call-cost.md).
+
+The `promoteGateReplay` bucket answers "what would the noise-aware gate have
+done to this journal?" without spending any box time (issue #111). It replays
+`--screen-promote-gate noise-aware` at the default `k` over the journal's own
+`screenScores`, reporting the gate the run actually used (`gateAsRun`, `null`
+for a pre-#111 journal or a concatenation of arms that disagree), the
+`replaySigmaK` and `replayFloor` it replayed with, `screened`, `promotedAsRun`
+against `promotedUnderGate`, the `promotionsAvoided` between them, and — the
+number that decides whether the gate is safe — `acceptsKept` against
+`acceptsDropped`, with every accepted winner listed in `accepts[]` beside the Δ
+it had and the Δ the gate demanded. The measured result for the journals in hand
+is [`docs/promote-gate.md`](docs/promote-gate.md).
 
 `focusStats` is aggregated into a `focusStats` report object with three buckets —
 `all`, `accepted` and `rejected` — each carrying `experiments`,
@@ -735,6 +1131,15 @@ derived from the experiment index, so a differently timed replay may run a
 different number of experiments and reach a different point in that identical
 stream.
 
+`--analysis-threads` is deliberately **outside** that contract's inputs: the
+analysis scans partition the sample into fixed record chunks and merge the
+partials in chunk order, so the accumulators — and every candidate derived from
+them — are bit-identical at any thread count (see
+[Parallel analysis scans](#parallel-analysis-scans)). A replay may use a
+different thread count than the run it replays. The value in force is recorded
+in `runHeader.config.analysisThreads` anyway, because the wall clock is not
+identical and a slow arm must be diagnosable after the fact.
+
 ## What we have learnt so far
 
 From the 45-minute production-budget baseline in
@@ -748,6 +1153,13 @@ champion, 75 experiments):
 - screening empties most batches (49/75), which is the point: expensive
   full-corpus promotes are skipped when the sample shows nothing;
 - no strategy has earned removal — the sample is far too small to disable one.
+
+And from the per-call scorer measurement in
+[`docs/scorer-call-cost.md`](docs/scorer-call-cost.md) (issue #112): a scorer call
+costs ≈9.9 s **before it scores its first creature** on a 5% sample, against
+0.45 s per creature after that, so the fixed per-call cost is **24–29% of a
+45-minute run**. Sampled calls carry five times the fixed cost of a full-corpus
+call while doing a twentieth of the work.
 
 The open experimental questions the journal is designed to answer:
 
@@ -764,9 +1176,10 @@ Questions 1–3 and 8 have a first single-seed answer. The follow-up campaign
 for #75 — an output-focus slice, a backprop step A/B and a batch-size A/B,
 118 further experiments — is written up in
 [`docs/followup-economics.md`](docs/followup-economics.md). Its headline: **no
-strategy has earned removal**, `--candidates` above ~29 buys nothing on this
-creature, and `backprop` fails on a saturated step cap rather than on its
-learning rate. Questions 4–7 need the arms wired up by
+strategy has earned removal**, `--candidates` above ~29 bought nothing on this
+creature under the fixed quotas (`--scale-candidate-quotas` lifts that ceiling —
+its own paired benchmark is still to run), and `backprop` fails on a saturated
+step cap rather than on its learning rate. Questions 4–7 need the arms wired up by
 [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) and still to be
 run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
@@ -774,8 +1187,9 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
 | Issue | Gap |
 |-------|-----|
-| [#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94) | Failed-candidate cache (#69) is implemented (`--failed-cache`, off by default) but the production go/no-go is **unmeasured**: `scripts/run-failed-cache-economics.sh` needs exclusive box time. See [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md). |
-| [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Three economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
+| [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
+| [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
+| [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | Every scorer call pays a fixed ≈9.9 s (sampled) / ≈2.0 s (full corpus) before it scores anything — 24–29% of a 45-minute run, measured in [`docs/scorer-call-cost.md`](docs/scorer-call-cost.md). Unfixed: either the scorer's sample-path setup or a persistent scoring session. |
 
 ## Repository layout
 
@@ -791,11 +1205,14 @@ NEAT-AI-Lamarck/
 ├── scripts/
 ├── docs/
 │   ├── architecture.md
-│   └── baseline-economics.md
+│   ├── baseline-economics.md
+│   ├── screen-calibration.md
+│   └── scorer-call-cost.md
 └── lamarck/src/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
     ├── config.rs            # defaults and run options
+    ├── analysis.rs          # the two fused per-experiment training scans
     ├── parity.rs            # Phase-0 scorer parity gate
     ├── observations.rs      # observations.statistics cache
     ├── focus.rs             # focus-neuron selection policies
@@ -807,8 +1224,10 @@ NEAT-AI-Lamarck/
     ├── combos.rs            # candidate merging and stacked-synapse dampening
     ├── grafts.rs            # structural graft store and phase-G replay
     ├── scorer.rs
+    ├── scorer_cost.rs      # fixed vs marginal per-call scorer cost (issue #112)
     ├── run.rs
     ├── report.rs
+    ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
     └── log.rs
 ```

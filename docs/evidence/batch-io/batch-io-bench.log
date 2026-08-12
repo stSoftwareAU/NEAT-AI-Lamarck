@@ -1,0 +1,48 @@
+# issue #114 — batch I/O benchmark, 10-core M4 (APFS)
+# cargo run --release --example batch_io_bench -- 29 10
+
+Batch I/O benchmark (issue #114)
+creature: 2511 inputs, 1591 neurons, 23479 synapses; batch: baseline + 29 candidates
+
+Serialisation — whole batch written, then parsed back (best of 10)
+  arm      bytes written   write ms   read ms   parse ms
+  pretty        87044472      145.2      10.2      241.0
+  compact       61090302      130.4       7.3      200.1
+  delta           -29.8%     -10.2%    -28.3%     -17.0%
+
+Promote directory — 4 file(s) presented again (best of 10)
+  arm      bytes written   ms
+  copy           8145386      0.5
+  link                 0      1.4
+  delta          -100.0%   158.0%
+
+Batch I/O benchmark (issue #114)
+creature: 2511 inputs, 1591 neurons, 23479 synapses; batch: baseline + 29 candidates
+
+Serialisation — whole batch written, then parsed back (best of 10)
+  arm      bytes written   write ms   read ms   parse ms
+  pretty        87044472      141.5      10.1      167.3
+  compact       61090302      101.0       7.2      152.2
+  delta           -29.8%     -28.6%    -28.0%      -9.0%
+
+Promote directory — 4 file(s) presented again (best of 10)
+  arm      bytes written   ms
+  copy           8145386      0.6
+  link                 0      1.4
+  delta          -100.0%   147.5%
+
+Batch I/O benchmark (issue #114)
+creature: 2511 inputs, 1591 neurons, 23479 synapses; batch: baseline + 29 candidates
+
+Serialisation — whole batch written, then parsed back (best of 10)
+  arm      bytes written   write ms   read ms   parse ms
+  pretty        87044472      141.0      10.0      201.3
+  compact       61090302      129.2       7.3      167.4
+  delta           -29.8%      -8.3%    -27.1%     -16.8%
+
+Promote directory — 4 file(s) presented again (best of 10)
+  arm      bytes written   ms
+  copy           8145386      0.6
+  link                 0      1.4
+  delta          -100.0%   138.3%
+

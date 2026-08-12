@@ -1,8 +1,12 @@
 //! Benchmark / strategy economics reporting from `experiments.jsonl`.
 
-use crate::candidates::CandidateStrategy;
+use crate::baseline::BaselineSource;
+use crate::candidates::{BatchLimit, CandidateStrategy};
 use crate::log;
+use crate::promote_gate::{PromoteGateReplay, PromoteGateReplayAccumulator};
 use crate::run::{JournalLine, RunResult};
+use crate::scorer_cost::{ScorerCallCost, ScorerCallCostAccumulator};
+use crate::screen_calibration::{ScreenCalibration, ScreenCalibrationAccumulator};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -458,14 +462,95 @@ pub struct JournalReport {
     pub combo_acceptances_unattributed: u64,
     /// Phase-G graft-replay bucket; `None` when the journal has no replay line.
     pub graft_replay: Option<GraftReplayStats>,
-    /// Failed-candidate cache economics (issue #93).
+    /// Cross-experiment analysis-memo economics (issue #106).
+    pub analysis_memo: AnalysisMemoStats,
+    /// Achieved candidate batch size per experiment (issue #108).
+    pub candidate_batch: CandidateBatchStats,
+    /// How well the 5% screen predicted the full-corpus score (issue #110).
+    pub screen_calibration: ScreenCalibration,
+    /// Promote-call baseline economics (issue #113).
     ///
-    /// `None` for a journal that neither declares the cache in its run header
-    /// nor carries a single cache field — a pre-cache journal, or a cache-off
-    /// arm written before the header recorded the knob. `report` runs over
-    /// historical journals, so an absent section is reported as absent rather
-    /// than as a row of zeroes that reads like a cache that did nothing.
-    pub cache: Option<CacheReport>,
+    /// How many promote calls reused the run's remembered full-corpus baseline
+    /// instead of re-scoring the incumbent, what that saved in creature-scores,
+    /// and how many accepts were re-decided against a freshly scored pair.
+    pub baseline_reuse: BaselineReuseStats,
+    /// Fixed vs marginal scorer cost per call, fitted per phase (issue #112).
+    ///
+    /// The intercept of call time against creature count is what a persistent
+    /// scoring session could save; the slope is what it could not. Fitted from
+    /// the journal's own `scorerCalls`, so any run reproduces the measurement.
+    pub scorer_call_cost: ScorerCallCost,
+    /// What the noise-aware promote gate would have done to this journal (#111).
+    ///
+    /// Replayed offline from the journal's own `screenScores`, at the default
+    /// σ̂ multiplier, so a gate change can be priced — and its effect on the
+    /// accepts that were actually earned checked — without any box time.
+    pub promote_gate_replay: PromoteGateReplay,
+}
+
+/// Achieved candidate batch size across a journal (issue #108).
+///
+/// A journal written before the generator recorded its budget reports the
+/// achieved sizes with `requested` `None`: the batches are real, only the
+/// budget they were measured against is unknown.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateBatchStats {
+    /// Mean candidates actually generated per experiment.
+    pub mean_generated: f64,
+    /// Smallest batch generated.
+    pub min_generated: usize,
+    /// Largest batch generated.
+    pub max_generated: usize,
+    /// `--candidates` recorded by the experiments, when they agree on one value.
+    pub requested: Option<usize>,
+    /// Experiments whose batch stopped at the fixed pre-#108 quota ceiling.
+    pub quota_ceiling_experiments: u64,
+    /// Experiments whose generator ran genuinely dry.
+    pub exhausted_experiments: u64,
+}
+
+/// Promote-call baseline economics summed over a journal (issue #113).
+///
+/// A journal written before the field existed — or a run with reuse off —
+/// reports every promote call as `fresh`, which is exactly what it was.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaselineReuseStats {
+    /// Promote calls that carried the incumbent and scored it.
+    pub fresh_promote_calls: u64,
+    /// Promote calls that omitted the incumbent and reused a known score.
+    pub remembered_promote_calls: u64,
+    /// Accepts re-decided against a freshly scored baseline + winner pair.
+    pub verified_accepts: u64,
+    /// Full-corpus creature-scores the omitted baselines saved (one each).
+    pub baseline_scores_saved: u64,
+    /// Creature-scores the accept verifications cost (baseline + winner each).
+    pub verification_creature_scores: u64,
+    /// Saved minus verification cost — never an over-claim.
+    pub net_creature_scores_saved: i64,
+    /// Share of promote calls that reused a remembered baseline.
+    pub remembered_fraction: f64,
+}
+
+/// Cross-experiment analysis-memo economics summed over a journal (issue #106).
+///
+/// A journal written before the memo existed reports zeros: its experiments
+/// recomputed everything, which is exactly what zero hits and zero saved
+/// milliseconds mean.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisMemoStats {
+    /// Analysis lookups served from the memo.
+    pub hits: u64,
+    /// Analysis lookups that had to be recomputed.
+    pub misses: u64,
+    /// Training-scan milliseconds avoided by the hits.
+    pub ms_saved: u128,
+    /// `hits / (hits + misses)`; `0.0` when nothing was looked up.
+    pub hit_rate: f64,
+    /// Saved milliseconds as a share of analysis + saved time.
+    pub analysis_ms_saved_fraction: f64,
 }
 
 /// Consume `experiments.jsonl` and produce an economics report.
@@ -477,6 +562,9 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut scorer_failures = 0u64;
     let mut total_analysis_ms = 0u128;
     let mut total_scorer_ms = 0u128;
+    let mut memo_hits = 0u64;
+    let mut memo_misses = 0u64;
+    let mut memo_ms_saved = 0u128;
     let mut candidates_scored = 0u64;
     let mut screen_candidates_scored = 0u64;
     let mut time_to_first = None;
@@ -499,6 +587,17 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut combo_acceptances_with_dampen = 0u64;
     let mut combo_acceptances_unattributed = 0u64;
     let mut graft_replay: Option<GraftReplayStats> = None;
+    let mut batch_generated_total = 0u64;
+    let mut batch_min: Option<usize> = None;
+    let mut batch_max = 0usize;
+    let mut batch_requested: Option<usize> = None;
+    let mut batch_requested_mixed = false;
+    let mut batch_quota_ceiling = 0u64;
+    let mut batch_exhausted = 0u64;
+    let mut baseline_reuse = BaselineReuseStats::default();
+    let mut scorer_call_cost = ScorerCallCostAccumulator::default();
+    let mut screen_calibration = ScreenCalibrationAccumulator::default();
+    let mut promote_gate_replay = PromoteGateReplayAccumulator::default();
     let mut focus_all = FocusStatsAccumulator::default();
     let mut focus_accepted = FocusStatsAccumulator::default();
     let mut focus_rejected = FocusStatsAccumulator::default();
@@ -513,10 +612,20 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         // graft-replay line (issue #74) is its own bucket.
         let record = match JournalLine::parse(&line)? {
             JournalLine::Header(header) => {
-                cache.push_header(&header.config);
+                screen_calibration.push_header(&header.config);
+                promote_gate_replay.push_header(&header.config);
+                continue;
+            }
+            JournalLine::ScorerCalls(calls) => {
+                // Calls made outside any experiment — the Phase-0 baseline —
+                // are part of the cost model too (issue #112).
+                scorer_call_cost.push_all(&calls.calls);
                 continue;
             }
             JournalLine::GraftReplay(replay) => {
+                if let Some(calls) = &replay.scorer_calls {
+                    scorer_call_cost.push_all(calls);
+                }
                 let bucket = graft_replay.get_or_insert_with(GraftReplayStats::default);
                 bucket.replays += 1;
                 bucket.scorer_failures += replay.scorer_failures;
@@ -537,12 +646,35 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             JournalLine::Experiment(record) => *record,
         };
         experiments += 1;
+        screen_calibration.push_experiment(&record)?;
+        promote_gate_replay.push_experiment(&record)?;
+        memo_hits += record.memo_hits;
+        memo_misses += record.memo_misses;
+        memo_ms_saved = memo_ms_saved.saturating_add(record.memo_ms_saved);
         total_analysis_ms += record.analysis_ms;
         total_scorer_ms += record.scorer_ms;
+        if let Some(calls) = &record.scorer_calls {
+            scorer_call_cost.push_all(calls);
+        }
+        match record.baseline_source {
+            Some(BaselineSource::Fresh) => baseline_reuse.fresh_promote_calls += 1,
+            Some(source) => {
+                baseline_reuse.remembered_promote_calls += 1;
+                if source == BaselineSource::RememberedVerified {
+                    baseline_reuse.verified_accepts += 1;
+                }
+            }
+            // No promote call ran (the screen was empty, or the batch failed).
+            None => {}
+        }
         elapsed += record.analysis_ms + record.scorer_ms;
         first_ts = Some(first_ts.map_or(record.timestamp_unix, |t| t.min(record.timestamp_unix)));
         last_ts = Some(last_ts.map_or(record.timestamp_unix, |t| t.max(record.timestamp_unix)));
-        *focus_counts.entry(record.focus_neuron.clone()).or_default() += 1;
+        // An experiment serves every focus in its set (issue #109); a
+        // pre-#109 journal has no set and names exactly one focus.
+        for focus in record_focus_set(&record) {
+            *focus_counts.entry(focus).or_default() += 1;
+        }
 
         if let Some(stats) = &record.focus_stats {
             focus_all.push(stats);
@@ -558,6 +690,25 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             *appearances_total.entry(key).or_default() += 1;
         }
         cache.push_experiment(&record);
+
+        batch_generated_total += record.candidates.len() as u64;
+        batch_min = Some(batch_min.map_or(record.candidates.len(), |n: usize| {
+            n.min(record.candidates.len())
+        }));
+        batch_max = batch_max.max(record.candidates.len());
+        if let Some(requested) = record.candidates_requested {
+            match batch_requested {
+                None => batch_requested = Some(requested),
+                // Journals from an A/B with several budgets have no single one.
+                Some(seen) if seen != requested => batch_requested_mixed = true,
+                Some(_) => {}
+            }
+        }
+        match record.batch_limit {
+            Some(BatchLimit::QuotaCeiling) => batch_quota_ceiling += 1,
+            Some(BatchLimit::Exhausted) => batch_exhausted += 1,
+            Some(BatchLimit::Budget) | None => {}
+        }
 
         if record.scorer_error.is_some() {
             scorer_failures += 1;
@@ -607,10 +758,14 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             if let Some(delta) = record.improvement {
                 let base = last_best.unwrap_or(record.baseline_score);
                 last_best = Some(base + delta);
-                *focus_accepts
-                    .entry(record.focus_neuron.clone())
-                    .or_default() += 1;
-                *focus_delta.entry(record.focus_neuron.clone()).or_default() += delta;
+                // Credit the focus the winner was actually proposed against,
+                // not whichever focus the experiment drew first (issue #109).
+                let credited = accepted_focuses(&record);
+                let share = delta / credited.len() as f64;
+                for focus in credited {
+                    *focus_accepts.entry(focus.clone()).or_default() += 1;
+                    *focus_delta.entry(focus).or_default() += share;
+                }
             }
             for prov in &record.candidates {
                 let key = strategy_name(prov.strategy);
@@ -717,6 +872,24 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             None
         }
     });
+    let memo_lookups = memo_hits + memo_misses;
+    let analysis_memo = AnalysisMemoStats {
+        hits: memo_hits,
+        misses: memo_misses,
+        ms_saved: memo_ms_saved,
+        hit_rate: if memo_lookups > 0 {
+            memo_hits as f64 / memo_lookups as f64
+        } else {
+            0.0
+        },
+        // What the analysis phase would have cost without the memo is its
+        // measured cost plus what the memo saved.
+        analysis_ms_saved_fraction: if total_analysis_ms + memo_ms_saved > 0 {
+            memo_ms_saved as f64 / (total_analysis_ms + memo_ms_saved) as f64
+        } else {
+            0.0
+        },
+    };
     let mean_experiment_ms = if experiments > 0 {
         total_ms / experiments as f64
     } else {
@@ -766,7 +939,36 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         combo_acceptances_with_dampen,
         combo_acceptances_unattributed,
         graft_replay,
-        cache: cache.finish(),
+        analysis_memo,
+        candidate_batch: CandidateBatchStats {
+            mean_generated: if experiments > 0 {
+                batch_generated_total as f64 / experiments as f64
+            } else {
+                0.0
+            },
+            min_generated: batch_min.unwrap_or(0),
+            max_generated: batch_max,
+            requested: batch_requested.filter(|_| !batch_requested_mixed),
+            quota_ceiling_experiments: batch_quota_ceiling,
+            exhausted_experiments: batch_exhausted,
+        },
+        baseline_reuse: {
+            let promote_calls =
+                baseline_reuse.fresh_promote_calls + baseline_reuse.remembered_promote_calls;
+            baseline_reuse.baseline_scores_saved = baseline_reuse.remembered_promote_calls;
+            baseline_reuse.verification_creature_scores = baseline_reuse.verified_accepts * 2;
+            baseline_reuse.net_creature_scores_saved = baseline_reuse.baseline_scores_saved as i64
+                - baseline_reuse.verification_creature_scores as i64;
+            baseline_reuse.remembered_fraction = if promote_calls > 0 {
+                baseline_reuse.remembered_promote_calls as f64 / promote_calls as f64
+            } else {
+                0.0
+            };
+            baseline_reuse
+        },
+        screen_calibration: screen_calibration.finish(),
+        scorer_call_cost: scorer_call_cost.finish(),
+        promote_gate_replay: promote_gate_replay.finish(),
     })
 }
 
@@ -791,18 +993,38 @@ fn winner_member_indices(record: &crate::run::ExperimentRecord) -> Vec<usize> {
         .unwrap_or_default()
 }
 
-fn strategy_name(strategy: CandidateStrategy) -> String {
-    match strategy {
-        CandidateStrategy::Backprop => "backprop".into(),
-        CandidateStrategy::MeanErrorBias => "mean_error_bias".into(),
-        CandidateStrategy::StatsWeight => "stats_weight".into(),
-        CandidateStrategy::StatsBias => "stats_bias".into(),
-        CandidateStrategy::StatsSkewBias => "stats_skew_bias".into(),
-        CandidateStrategy::StructuralAdd => "structural_add".into(),
-        CandidateStrategy::StructuralAddNeuron => "structural_add_neuron".into(),
-        CandidateStrategy::StructuralWeaken => "structural_weaken".into(),
-        CandidateStrategy::Random => "random".into(),
+/// Every focus neuron an experiment proposed against (issue #109).
+///
+/// A journal written before the focus set existed names one focus, which is
+/// exactly the set it served.
+fn record_focus_set(record: &crate::run::ExperimentRecord) -> Vec<String> {
+    match &record.focus_neurons {
+        Some(set) if !set.is_empty() => set.clone(),
+        _ => vec![record.focus_neuron.clone()],
     }
+}
+
+/// Focuses credited with an acceptance (issue #109).
+///
+/// Derived from the winner's members, each of which names the focus it was
+/// proposed for. Falls back to the record's primary focus when the members
+/// cannot be resolved — a pre-#74 journal names only a merged combo stem.
+fn accepted_focuses(record: &crate::run::ExperimentRecord) -> Vec<String> {
+    let mut focuses: Vec<String> = winner_member_indices(record)
+        .into_iter()
+        .filter_map(|idx| record.candidates.get(idx))
+        .map(|prov| prov.focus_neuron.clone())
+        .collect();
+    focuses.sort();
+    focuses.dedup();
+    if focuses.is_empty() {
+        focuses.push(record.focus_neuron.clone());
+    }
+    focuses
+}
+
+fn strategy_name(strategy: CandidateStrategy) -> String {
+    strategy.label().to_string()
 }
 
 fn format_ms(ms: u128) -> String {
@@ -886,6 +1108,82 @@ pub fn print_run_summary(result: &RunResult) {
             report.candidates_scored,
             report.projected_batches_per_45_min
         ));
+        let batch = &report.candidate_batch;
+        if report.experiments > 0 {
+            let requested = match batch.requested {
+                Some(n) => format!("{n} requested"),
+                None => "budget unrecorded".to_string(),
+            };
+            log::detail(&format!(
+                "batch size:    mean {:.1} generated ({}–{} range, {requested}); \
+                 quota-ceiling {}  exhausted {}",
+                batch.mean_generated,
+                batch.min_generated,
+                batch.max_generated,
+                batch.quota_ceiling_experiments,
+                batch.exhausted_experiments
+            ));
+        }
+        let memo = &report.analysis_memo;
+        if memo.hits + memo.misses > 0 {
+            log::detail(&format!(
+                "analysis memo: {} hit / {} miss ({:.0}% hit rate)  saved {}  ({:.0}% of analysis)",
+                memo.hits,
+                memo.misses,
+                memo.hit_rate * 100.0,
+                format_ms(memo.ms_saved),
+                memo.analysis_ms_saved_fraction * 100.0
+            ));
+        }
+        let reuse = &report.baseline_reuse;
+        if reuse.remembered_promote_calls > 0 {
+            log::detail(&format!(
+                "baseline:      {} remembered / {} fresh promote call(s) ({:.0}%); \
+                 {} creature-score(s) saved net, {} accept(s) verified",
+                reuse.remembered_promote_calls,
+                reuse.fresh_promote_calls,
+                reuse.remembered_fraction * 100.0,
+                reuse.net_creature_scores_saved,
+                reuse.verified_accepts
+            ));
+        }
+        let cost = &report.scorer_call_cost;
+        for (phase, fit) in &cost.by_phase {
+            match (fit.fixed_ms, fit.marginal_ms_per_creature) {
+                (Some(fixed), Some(marginal)) => log::detail(&format!(
+                    "scorer {phase:<8}{} call(s)  fixed {}/call  marginal {}/creature  ({:.0}% fixed at {:.1} creatures)",
+                    fit.calls,
+                    format_ms(fixed.max(0.0) as u128),
+                    format_ms(marginal.max(0.0) as u128),
+                    fit.fixed_ms_share_at_mean.unwrap_or(0.0) * 100.0,
+                    fit.mean_creatures
+                )),
+                // One batch size cannot separate fixed from marginal cost;
+                // report the means rather than invent an intercept (#112).
+                _ => log::detail(&format!(
+                    "scorer {phase:<8}{} call(s)  mean {} over {:.1} creatures  (one batch size — no split)",
+                    fit.calls,
+                    format_ms(fit.mean_ms as u128),
+                    fit.mean_creatures
+                )),
+            }
+        }
+        let screen = &report.screen_calibration;
+        if screen.paired_candidates > 0 {
+            let rho = match screen.spearman {
+                Some(rho) => format!("{rho:+.2}"),
+                None => "n/a".to_string(),
+            };
+            log::detail(&format!(
+                "screen gate:   {} paired (of {} screened)  rank ρ {rho}  precision {}",
+                screen.paired_candidates,
+                screen.paired_candidates + screen.screen_only_candidates,
+                match screen.promotion_precision {
+                    Some(p) => format!("{:.0}%", p * 100.0),
+                    None => "n/a".to_string(),
+                }
+            ));
+        }
         if let Some(ms) = report.time_to_first_acceptance_ms {
             log::detail(&format!("first accept:  {}", format_ms(ms)));
         }
@@ -1004,6 +1302,7 @@ mod tests {
     use super::*;
     use crate::candidates::CandidateProvenance;
     use crate::run::ExperimentRecord;
+    use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
     use std::collections::BTreeMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -1047,15 +1346,24 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.4,
             focus_neuron: "h1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
+            candidates_requested: None,
+            batch_limit: None,
             scores: BTreeMap::new(),
             screen_scores: None,
+            screen_tiers: None,
+            baseline_source: None,
             winner: accepted.then(|| "candidate-000".to_string()),
             improvement: accepted.then_some(1e-6),
             accepted,
             analysis_ms: 1,
+            memo_hits: 0,
+            memo_misses: 0,
+            memo_ms_saved: 0,
             scorer_ms: 2,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: accepted.then(|| vec![0]),
@@ -1084,69 +1392,215 @@ mod tests {
         file
     }
 
-    /// A #71 run header declaring whether the cache was on (issue #93).
-    fn header(failed_cache: bool) -> crate::run::RunHeaderRecord {
-        let config = crate::config::LamarckConfig {
-            failed_cache,
-            failed_cache_max_entries: 4096,
-            failed_cache_max_age_seconds: 3600,
-            ..Default::default()
-        };
-        crate::run::RunHeaderRecord::new(
-            7,
-            crate::run::SeedSource::Supplied,
-            crate::run::RunConfigRecord::from_config(&config),
-            900,
-        )
+    /// One journalled scorer call (issue #112).
+    fn call(phase: ScorerCallPhase, creatures: u64, elapsed_ms: u128) -> ScorerCallRecord {
+        ScorerCallRecord {
+            phase,
+            creatures,
+            sample_rate: matches!(phase, ScorerCallPhase::Screen).then_some(0.05),
+            elapsed_ms,
+            failed: false,
+        }
     }
 
-    /// A journal that opens with a run header, as every post-#71 run does.
-    fn journal_with_header(
-        header: &crate::run::RunHeaderRecord,
-        records: &[ExperimentRecord],
-    ) -> NamedTempFile {
+    /// Issue #112: the per-call creature counts a run journals recover the fixed
+    /// and marginal scorer cost exactly, and screen and promote are fitted apart
+    /// — pooling them would fit one line through two different populations.
+    #[test]
+    fn report_recovers_the_fixed_and_marginal_scorer_cost_per_phase() {
+        // Screen: 800 ms fixed + 40 ms/creature. Promote: 9000 + 11 000 ms.
+        let mut first = experiment(1, false);
+        first.scorer_calls = Some(vec![
+            call(ScorerCallPhase::Screen, 1, 840),
+            call(ScorerCallPhase::Promote, 2, 31_000),
+        ]);
+        let mut second = experiment(2, false);
+        second.scorer_calls = Some(vec![
+            call(ScorerCallPhase::Screen, 30, 2000),
+            call(ScorerCallPhase::Promote, 4, 53_000),
+        ]);
+        let file = journal_of(&[first, second]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        let cost = &report.scorer_call_cost;
+        assert_eq!(cost.calls, 4);
+        assert_eq!(cost.failed_calls, 0);
+        assert_eq!(cost.creatures_scored, 37);
+
+        let screen = &cost.by_phase["screen"];
+        assert_eq!(screen.calls, 2);
+        assert!((screen.fixed_ms.expect("screen fixed") - 800.0).abs() < 1e-6);
+        assert!((screen.marginal_ms_per_creature.expect("screen slope") - 40.0).abs() < 1e-9);
+
+        let promote = &cost.by_phase["promote"];
+        assert_eq!(promote.calls, 2);
+        assert!((promote.fixed_ms.expect("promote fixed") - 9000.0).abs() < 1e-6);
+        assert!((promote.marginal_ms_per_creature.expect("promote slope") - 11_000.0).abs() < 1e-9);
+    }
+
+    /// Issue #112: Phase-0 and Phase-G calls live on their own journal lines,
+    /// and both belong in the cost model — an intercept fitted to the experiment
+    /// loop alone is fitted to a subset of the run.
+    #[test]
+    fn report_folds_phase0_and_graft_replay_calls_into_the_cost_model() {
         let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, "{}", serde_json::to_string(header).unwrap()).unwrap();
-        for record in records {
-            writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
-        }
-        file
+        let phase0 = crate::run::ScorerCallsRecord {
+            record: crate::run::ScorerCallsKind::ScorerCalls,
+            timestamp_unix: 900,
+            stage: "phase0".into(),
+            calls: vec![call(ScorerCallPhase::Phase0, 1, 10_000)],
+        };
+        writeln!(file, "{}", serde_json::to_string(&phase0).unwrap()).unwrap();
+        let replay = crate::run::GraftReplayRecord {
+            record: crate::run::GraftReplayKind::GraftReplay,
+            timestamp_unix: 950,
+            grafts_applied: 0,
+            accepted: false,
+            baseline_score: Some(0.4),
+            score: None,
+            improvement: None,
+            elapsed_ms: 5,
+            scorer_successes: 2,
+            scorer_failures: 0,
+            scorer_calls: Some(vec![
+                call(ScorerCallPhase::GraftReplay, 2, 12_000),
+                call(ScorerCallPhase::GraftReplay, 5, 15_000),
+            ]),
+            replay_error: None,
+        };
+        writeln!(file, "{}", serde_json::to_string(&replay).unwrap()).unwrap();
+        let mut experiment = experiment(1, false);
+        experiment.scorer_calls = Some(vec![call(ScorerCallPhase::Screen, 30, 2000)]);
+        writeln!(file, "{}", serde_json::to_string(&experiment).unwrap()).unwrap();
+
+        let report = report_from_journal(file.path()).unwrap();
+        let cost = &report.scorer_call_cost;
+        assert_eq!(cost.calls, 4, "every call in the journal is counted");
+        // One Phase-0 call is one batch size: reported, but not decomposed.
+        let phase0_fit = &cost.by_phase["phase0"];
+        assert_eq!(phase0_fit.calls, 1);
+        assert_eq!(phase0_fit.fixed_ms, None);
+        assert!((phase0_fit.mean_ms - 10_000.0).abs() < 1e-9);
+        let graft_fit = &cost.by_phase["graftReplay"];
+        assert!((graft_fit.fixed_ms.expect("graft fixed") - 10_000.0).abs() < 1e-6);
+        assert!((graft_fit.marginal_ms_per_creature.expect("graft slope") - 1000.0).abs() < 1e-9);
     }
 
-    /// An experiment that consulted the cache, with the batch it went on to
-    /// score and the filter counts behind it.
-    fn cache_experiment(
-        number: u64,
-        kept: usize,
-        hits: usize,
-        deduplicated: usize,
-        saved_ms: u128,
-        spent_ms: u128,
-    ) -> ExperimentRecord {
-        let mut record = experiment(number, false);
-        record.candidates = vec![prov(CandidateStrategy::Random); kept];
-        record.cache_skipped = Some(hits);
-        record.cache_deduplicated = Some(deduplicated);
-        record.cache_backfilled = Some(hits);
-        record.cache_size = Some(10 * number as usize);
-        record.cache_lookup_ms = Some(spent_ms);
-        record.cache_maintenance_ms = Some(0);
-        record.cache_saved_ms = Some(saved_ms as f64);
-        record.cache_spent_ms = Some(spent_ms as f64);
-        record
+    /// Issue #112: a journal written before per-call records existed reports no
+    /// cost model rather than a fabricated one.
+    #[test]
+    fn report_reports_no_call_cost_for_a_pre_change_journal() {
+        let file = journal_of(&[experiment(1, false), experiment(2, true)]);
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.scorer_call_cost, ScorerCallCost::default());
+        assert!(report.scorer_call_cost.by_phase.is_empty());
     }
 
-    /// A promoting experiment, i.e. one that recorded a full-corpus baseline
-    /// the #84 anchor can trust.
-    fn full_corpus_experiment(number: u64, baseline: f64, best: Option<f64>) -> ExperimentRecord {
-        let mut record = experiment(number, best.is_some());
-        record.baseline_score = baseline;
-        record.scores.insert("baseline".into(), baseline);
-        if let Some(best) = best {
-            record.scores.insert("candidate-000".into(), best);
-            record.improvement = Some(best - baseline);
+    /// Provenance naming a specific focus (issue #109).
+    fn prov_for(focus: &str) -> CandidateProvenance {
+        CandidateProvenance {
+            focus_neuron: focus.into(),
+            ..prov(CandidateStrategy::Random)
         }
-        record
+    }
+
+    /// Issue #109: `focusHistory` counts every focus an experiment served, and
+    /// credits the accept to the focus the winner was proposed against.
+    #[test]
+    fn report_renders_focus_history_for_a_multi_focus_journal() {
+        let mut record = experiment(1, true);
+        record.focus_neuron = "a".into();
+        record.focus_neurons = Some(vec!["a".into(), "b".into(), "c".into()]);
+        record.candidates = vec![prov_for("a"), prov_for("b"), prov_for("c")];
+        // The winner is candidate 1 — focus `b`, not the primary.
+        record.winner = Some("candidate-001".into());
+        record.combo_member_indices = Some(vec![1]);
+        record.improvement = Some(2e-6);
+        let file = journal_of(&[record]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.focus_counts.get("a"), Some(&1));
+        assert_eq!(report.focus_counts.get("b"), Some(&1));
+        assert_eq!(report.focus_counts.get("c"), Some(&1));
+        let credited: Vec<&str> = report
+            .focus_history
+            .iter()
+            .filter(|h| h.accepts > 0)
+            .map(|h| h.focus_neuron.as_str())
+            .collect();
+        assert_eq!(credited, vec!["b"], "only the winner's focus is credited");
+        let b = report
+            .focus_history
+            .iter()
+            .find(|h| h.focus_neuron == "b")
+            .expect("focus b in history");
+        assert!((b.cumulative_improvement - 2e-6).abs() < 1e-15);
+    }
+
+    /// Issue #109: a single-focus journal reports exactly what it always did.
+    #[test]
+    fn report_renders_focus_history_for_a_single_focus_journal() {
+        let file = journal_of(&[experiment(1, true), experiment(2, false)]);
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.focus_counts, [("h1".to_string(), 2)].into());
+        assert_eq!(report.focus_history.len(), 1);
+        assert_eq!(report.focus_history[0].focus_neuron, "h1");
+        assert_eq!(report.focus_history[0].accepts, 1);
+    }
+
+    /// Issue #109: a journal written before the focus set existed — and before
+    /// `comboMemberIndices` did — still attributes to the one focus it names.
+    #[test]
+    fn report_reads_a_pre_change_journal_with_no_focus_set() {
+        let mut record = experiment(1, true);
+        record.focus_neurons = None;
+        // Pre-#74: a merged combo stem with no member indices.
+        record.winner = Some("combo-001-k2".into());
+        record.combo_member_indices = None;
+        let file = journal_of(&[record]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.focus_counts, [("h1".to_string(), 1)].into());
+        assert_eq!(report.focus_history[0].focus_neuron, "h1");
+        assert_eq!(
+            report.focus_history[0].accepts, 1,
+            "an unattributable winner still credits the experiment's focus"
+        );
+    }
+
+    /// Issue #108: the achieved batch size per experiment is reportable, and
+    /// an under-filled batch says which limit bound it.
+    #[test]
+    fn report_summarises_the_achieved_candidate_batch_size() {
+        let mut small = experiment(1, false);
+        small.candidates = vec![prov(CandidateStrategy::Random); 29];
+        small.candidates_requested = Some(100);
+        small.batch_limit = Some(BatchLimit::QuotaCeiling);
+        let mut large = experiment(2, false);
+        large.candidates = vec![prov(CandidateStrategy::Random); 61];
+        large.candidates_requested = Some(100);
+        large.batch_limit = Some(BatchLimit::Exhausted);
+        let file = journal_of(&[small, large]);
+
+        let batch = report_from_journal(file.path()).unwrap().candidate_batch;
+        assert!((batch.mean_generated - 45.0).abs() < 1e-12);
+        assert_eq!(batch.min_generated, 29);
+        assert_eq!(batch.max_generated, 61);
+        assert_eq!(batch.requested, Some(100));
+        assert_eq!(batch.quota_ceiling_experiments, 1);
+        assert_eq!(batch.exhausted_experiments, 1);
+    }
+
+    /// A journal written before the generator recorded its budget still reports
+    /// the achieved sizes — only the budget behind them is unknown.
+    #[test]
+    fn a_journal_without_batch_fields_still_reports_the_sizes() {
+        let file = journal_of(&[experiment(1, false), experiment(2, false)]);
+        let batch = report_from_journal(file.path()).unwrap().candidate_batch;
+        assert!((batch.mean_generated - 1.0).abs() < 1e-12);
+        assert_eq!(batch.requested, None);
+        assert_eq!(batch.quota_ceiling_experiments, 0);
+        assert_eq!(batch.exhausted_experiments, 0);
     }
 
     /// Issue #70: focus structure/statistics/blame aggregate, split by outcome.
@@ -1223,7 +1677,10 @@ mod tests {
         let header = RunHeaderRecord::new(
             42,
             SeedSource::Drawn,
-            RunConfigRecord::from_config(&crate::config::LamarckConfig::default()),
+            RunConfigRecord::from_config(
+                &crate::config::LamarckConfig::default(),
+                crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            ),
             1000,
         );
         let experiment = ExperimentRecord {
@@ -1233,15 +1690,24 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.4,
             focus_neuron: "h1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
+            candidates_requested: None,
+            batch_limit: None,
             scores: BTreeMap::new(),
             screen_scores: None,
+            screen_tiers: None,
+            baseline_source: None,
             winner: None,
             improvement: None,
             accepted: false,
             analysis_ms: 1,
+            memo_hits: 0,
+            memo_misses: 0,
+            memo_ms_saved: 0,
             scorer_ms: 2,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: None,
@@ -1374,6 +1840,7 @@ mod tests {
             elapsed_ms: 120,
             scorer_successes: 2,
             scorer_failures: 1,
+            scorer_calls: None,
             replay_error: None,
         };
         let mut file = NamedTempFile::new().unwrap();
@@ -1412,6 +1879,7 @@ mod tests {
             elapsed_ms: 5,
             scorer_successes: 0,
             scorer_failures: 0,
+            scorer_calls: None,
             replay_error: Some("graft singles: baseline missing".into()),
         };
         let mut file = NamedTempFile::new().unwrap();
@@ -1462,6 +1930,41 @@ mod tests {
             m
         };
         record
+    }
+
+    /// Issue #113: the report counts which baseline decided each promote call
+    /// and never over-claims the saving — the verification call is subtracted.
+    #[test]
+    fn report_counts_remembered_promote_calls_and_nets_off_verification() {
+        let mut fresh = promoted(1, 0.3470, None);
+        fresh.baseline_source = Some(BaselineSource::Fresh);
+        let mut remembered = promoted(2, 0.3470, None);
+        remembered.baseline_source = Some(BaselineSource::Remembered);
+        let mut verified = promoted(3, 0.3470, Some(2e-6));
+        verified.baseline_source = Some(BaselineSource::RememberedVerified);
+        // An experiment whose screen was empty made no promote call at all.
+        let empty = screened_empty(4, 0.3475);
+        let file = journal_of(&[fresh, remembered, verified, empty]);
+
+        let reuse = report_from_journal(file.path()).unwrap().baseline_reuse;
+        assert_eq!(reuse.fresh_promote_calls, 1);
+        assert_eq!(reuse.remembered_promote_calls, 2);
+        assert_eq!(reuse.verified_accepts, 1);
+        assert_eq!(reuse.baseline_scores_saved, 2);
+        assert_eq!(reuse.verification_creature_scores, 2);
+        assert_eq!(reuse.net_creature_scores_saved, 0);
+        assert!((reuse.remembered_fraction - 2.0 / 3.0).abs() < 1e-12);
+    }
+
+    /// A journal written before the field existed reports every promote call as
+    /// what it was: paired with a freshly scored baseline.
+    #[test]
+    fn a_pre_113_journal_reports_no_remembered_baselines() {
+        let file = journal_of(&[promoted(1, 0.3470, None), promoted(2, 0.3470, None)]);
+        let reuse = report_from_journal(file.path()).unwrap().baseline_reuse;
+        assert_eq!(reuse.remembered_promote_calls, 0);
+        assert_eq!(reuse.net_creature_scores_saved, 0);
+        assert_eq!(reuse.remembered_fraction, 0.0);
     }
 
     /// Issue #84: the opening anchor must never be a 5% screen-sample baseline.
@@ -1534,11 +2037,14 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.4,
             focus_neuron: "h1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: vec![
                 prov(CandidateStrategy::Random),
                 prov(CandidateStrategy::Backprop),
             ],
+            candidates_requested: None,
+            batch_limit: None,
             scores: {
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.4);
@@ -1552,11 +2058,17 @@ mod tests {
                 m.insert("candidate-001".into(), 0.39);
                 m
             }),
+            screen_tiers: None,
+            baseline_source: None,
             winner: Some("candidate-000".into()),
             improvement: Some(2e-6),
             accepted: true,
             analysis_ms: 10,
+            memo_hits: 2,
+            memo_misses: 0,
+            memo_ms_saved: 40,
             scorer_ms: 20,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: None,
@@ -1582,8 +2094,11 @@ mod tests {
             incumbent_id: "x".into(),
             baseline_score: 0.400002,
             focus_neuron: "h1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: vec![prov(CandidateStrategy::Random)],
+            candidates_requested: None,
+            batch_limit: None,
             scores: {
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.400002);
@@ -1591,11 +2106,17 @@ mod tests {
                 m
             },
             screen_scores: None,
+            screen_tiers: None,
+            baseline_source: None,
             winner: None,
             improvement: None,
             accepted: false,
             analysis_ms: 5,
+            memo_hits: 0,
+            memo_misses: 2,
+            memo_ms_saved: 0,
             scorer_ms: 15,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: None,
@@ -1643,265 +2164,138 @@ mod tests {
         assert_eq!(backprop.appearances_in_accepted, 1);
     }
 
-    /// Issue #93: a cache-on journal reports its economics arithmetic exactly.
-    ///
-    /// The figures are hand-computed here rather than recomputed by the test,
-    /// because #69's go/no-go is read off them.
+    /// Issue #110: `report` carries the screen-versus-full-corpus calibration,
+    /// paired from the two score maps the journal already holds.
     #[test]
-    fn report_cache_on_journal_states_the_economics() {
-        let head = header(true);
-        let file = journal_with_header(
-            &head,
-            &[
-                cache_experiment(1, 6, 2, 0, 400, 5),
-                cache_experiment(2, 5, 3, 0, 600, 7),
-            ],
-        );
-
-        let cache = report_from_journal(file.path())
-            .unwrap()
-            .cache
-            .expect("cache-on journal carries a cache section");
-
-        assert!(cache.enabled);
-        assert_eq!(cache.max_entries, Some(4096));
-        assert_eq!(cache.max_age_seconds, Some(3600));
-        assert_eq!(cache.experiments_with_cache, 2);
-        assert_eq!(cache.cache_hits, 5);
-        assert_eq!(cache.backfilled, 5);
-        assert_eq!(cache.batch_candidates, 11);
-        // 6 kept + 2 hits, then 5 kept + 3 hits.
-        assert_eq!(cache.proposals_examined, 16);
-        assert!((cache.hit_rate - 5.0 / 16.0).abs() < 1e-12);
-        assert_eq!(cache.final_cache_size, Some(20));
-        assert_eq!(cache.peak_cache_size, Some(20));
-        assert_eq!(cache.estimated_saved_ms, 1000.0);
-        assert_eq!(cache.spent_ms, 12.0);
-        assert_eq!(cache.net_ms, 988.0);
-        assert_eq!(cache.stood_down_at_experiment, None);
-    }
-
-    /// The startup rebuild is a cost the run paid, so it is in the spend.
-    #[test]
-    fn report_charges_the_startup_rebuild_to_the_cache() {
-        let head = header(true);
-        let mut first = cache_experiment(1, 4, 1, 0, 100, 5);
-        first.cache_rebuild_ms = Some(900);
-        let file = journal_with_header(&head, &[first, cache_experiment(2, 4, 1, 0, 100, 5)]);
-
-        let cache = report_from_journal(file.path()).unwrap().cache.unwrap();
-
-        assert_eq!(cache.rebuild_ms, 900);
-        assert_eq!(cache.spent_ms, 910.0);
-        // A rebuild this expensive turns a nominally winning cache into a loss,
-        // which is exactly the number the go/no-go needs to see.
-        assert_eq!(cache.net_ms, -710.0);
-    }
-
-    /// A cache-off arm reports the section as present but idle, so it can be
-    /// compared against a cache-on arm rather than looking like a broken run.
-    #[test]
-    fn report_cache_off_journal_reports_an_idle_cache() {
-        let head = header(false);
-        let file = journal_with_header(&head, &[experiment(1, false), experiment(2, true)]);
-
-        let report = report_from_journal(file.path()).unwrap();
-
-        assert!(
-            report.cache.is_none(),
-            "cache never ran and never journalled"
-        );
-        assert_eq!(report.experiments, 2);
-    }
-
-    /// A pre-cache journal has neither header nor cache fields, and must not
-    /// grow a fabricated section.
-    #[test]
-    fn report_pre_cache_journal_omits_cache_section() {
-        let file = journal_of(&[experiment(1, false), experiment(2, true)]);
-
-        let report = report_from_journal(file.path()).unwrap();
-
-        assert!(report.cache.is_none());
-        assert_eq!(report.experiments, 2);
-        assert_eq!(report.acceptances, 1);
-    }
-
-    /// A mixed journal: some experiments consulted the cache, some ran before
-    /// it was warm enough to be consulted at all.
-    #[test]
-    fn report_mixed_journal_counts_only_the_cache_on_experiments() {
-        let head = header(true);
-        let file = journal_with_header(
-            &head,
-            &[
-                experiment(1, false),
-                cache_experiment(2, 4, 2, 0, 250, 3),
-                experiment(3, false),
-                cache_experiment(4, 4, 1, 0, 125, 2),
-            ],
-        );
-
-        let report = report_from_journal(file.path()).unwrap();
-        let cache = report.cache.unwrap();
-
-        assert_eq!(report.experiments, 4);
-        assert_eq!(cache.experiments_with_cache, 2);
-        assert_eq!(cache.cache_hits, 3);
-        assert_eq!(cache.proposals_examined, 11);
-        assert_eq!(cache.estimated_saved_ms, 375.0);
-        assert_eq!(cache.spent_ms, 5.0);
-    }
-
-    /// Issue #93 / #83: a skip belongs to exactly one mechanism, and the
-    /// proposal count reconciles against the batch that was actually scored.
-    #[test]
-    fn report_attributes_each_suppressed_proposal_to_one_mechanism() {
-        let head = header(true);
-        // Experiment 2 also lost candidates to generation-time gating (#83):
-        // `backprop` proposed nothing, so the batch is short. Those candidates
-        // never reached the filter and must not appear anywhere in the cache's
-        // account.
-        let file = journal_with_header(
-            &head,
-            &[
-                cache_experiment(1, 6, 2, 1, 300, 4),
-                cache_experiment(2, 3, 1, 2, 150, 2),
-            ],
-        );
-
-        let cache = report_from_journal(file.path()).unwrap().cache.unwrap();
-
-        assert_eq!(cache.cache_hits, 3);
-        assert_eq!(cache.deduplicated, 3);
-        assert_eq!(cache.batch_candidates, 9);
-        // Everything the filter saw is either scored, a cache hit, or a
-        // duplicate — nothing is counted twice and nothing is unexplained.
-        assert_eq!(
-            cache.proposals_examined,
-            cache.batch_candidates + cache.cache_hits + cache.deduplicated
-        );
-        // The short batch in experiment 2 is #83's doing, so the cache is not
-        // credited with the three candidates that were never proposed.
-        assert_eq!(cache.proposals_examined, 15);
-    }
-
-    /// Issue #92/#93: the report names the experiment where the guardrail fired
-    /// and stops counting the cache after it.
-    #[test]
-    fn report_names_the_experiment_where_the_cache_stood_down() {
-        use crate::run::{CacheStandDownKind, CacheStandDownRecord};
-
-        let head = header(true);
-        let stand_down = CacheStandDownRecord {
-            record: CacheStandDownKind::CacheStandDown,
-            timestamp_unix: 1002,
-            experiment_number: 2,
-            saved_ms: 40.0,
-            spent_ms: 600.0,
-            net_ms: -560.0,
-            window_experiments: 2,
-            margin_ms: 1.5,
-            entries: 20,
-            message: "spend 600ms exceeds estimated saving 40ms by more than 1.5x".into(),
+    fn report_calibrates_the_screen_against_the_full_corpus() {
+        let mut promoted = experiment(1, false);
+        promoted.screen_scores = Some({
+            let mut m = BTreeMap::new();
+            m.insert("baseline".into(), 0.40);
+            m.insert("candidate-000".into(), 0.40 + 1e-5);
+            m.insert("candidate-001".into(), 0.40 + 2e-5);
+            // Screened, never promoted: no full score to pair with.
+            m.insert("candidate-002".into(), 0.40 - 1e-5);
+            m
+        });
+        promoted.scores = {
+            let mut m = BTreeMap::new();
+            m.insert("baseline".into(), 0.50);
+            m.insert("candidate-000".into(), 0.50 + 2e-6);
+            m.insert("candidate-001".into(), 0.50 - 3e-6);
+            m
         };
+        let file = journal_of(&[promoted, screened_empty(2, 0.3475)]);
+
+        let calibration = report_from_journal(file.path()).unwrap().screen_calibration;
+        assert!(calibration.screen_enabled);
+        assert_eq!(calibration.experiments_screened, 2);
+        assert_eq!(calibration.paired_candidates, 2);
+        // candidate-002 plus the screen-empty experiment's own candidate.
+        assert_eq!(calibration.screen_only_candidates, 2);
+        assert_eq!(calibration.full_only_candidates, 0);
+        assert_eq!(calibration.promoted_improved, 1);
+        assert_eq!(calibration.promoted_worse, 1);
+        assert!((calibration.promotion_precision.unwrap() - 0.5).abs() < 1e-12);
+        // Two pairs is below the three the coefficient needs.
+        assert_eq!(calibration.spearman, None);
+        assert_eq!(calibration.pairs.len(), 2);
+        assert!((calibration.pairs[0].screen_delta - 1e-5).abs() < 1e-15);
+        assert!((calibration.pairs[0].full_delta - 2e-6).abs() < 1e-15);
+    }
+
+    /// A journal with screening disabled reports "not applicable", not a
+    /// fabricated correlation — and `report` still produces every other field.
+    #[test]
+    fn report_reads_a_journal_with_no_screen_phase() {
+        let file = journal_of(&[promoted(1, 0.3470, Some(2e-6))]);
+
+        let report = report_from_journal(file.path()).unwrap();
+        assert_eq!(report.experiments, 1);
+        let calibration = report.screen_calibration;
+        assert!(!calibration.screen_enabled);
+        assert_eq!(calibration.experiments_without_screen, 1);
+        assert_eq!(calibration.spearman, None);
+        assert_eq!(calibration.promotion_precision, None);
+        assert!(calibration.pairs.is_empty());
+    }
+
+    /// Issue #110: the run header's knobs are quoted beside the calibration, so
+    /// a threshold recommendation names the gate it was measured under.
+    #[test]
+    fn report_quotes_the_screen_knobs_from_the_run_header() {
+        use crate::run::{RunConfigRecord, RunHeaderRecord, SeedSource};
+
         let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, "{}", serde_json::to_string(&head).unwrap()).unwrap();
-        for record in [
-            cache_experiment(1, 4, 1, 0, 20, 300),
-            cache_experiment(2, 4, 1, 0, 20, 300),
-        ] {
-            writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
-        }
-        writeln!(file, "{}", serde_json::to_string(&stand_down).unwrap()).unwrap();
-        // After standing down the run journals no cache fields at all.
-        for record in [experiment(3, false), experiment(4, true)] {
-            writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
-        }
-
-        let report = report_from_journal(file.path()).unwrap();
-        let cache = report.cache.unwrap();
-
-        assert_eq!(cache.stood_down_at_experiment, Some(2));
-        assert!(cache.stood_down_reason.unwrap().contains("exceeds"));
-        assert_eq!(cache.experiments_with_cache, 2);
-        assert_eq!(report.experiments, 4);
-        assert_eq!(cache.net_ms, -560.0);
-    }
-
-    /// Issue #69's gate metric, from a journal that can support it.
-    #[test]
-    fn report_gate_metric_uses_full_corpus_scores() {
-        let mut opening = full_corpus_experiment(1, 0.40, None);
-        opening.timestamp_unix = 0;
-        let mut win = full_corpus_experiment(2, 0.40, Some(0.44));
-        // Half an hour apart, so the per-hour rate is twice the improvement.
-        win.timestamp_unix = 1800;
-        let file = journal_of(&[opening, win]);
-
-        let report = report_from_journal(file.path()).unwrap();
-
-        assert_eq!(report.opening_baseline_score, Some(0.40));
-        let rate = report
-            .score_improvement_per_wall_hour
-            .expect("full-corpus anchor and a wall-clock span");
-        assert!((rate - 0.08).abs() < 1e-9, "unexpected rate {rate}");
-    }
-
-    /// Issue #84: under `--skip-phase0` a journal whose batches all screened
-    /// empty has only sampled baselines, so the gate metric is unavailable
-    /// rather than a number that looks authoritative.
-    #[test]
-    fn report_gate_metric_unavailable_without_a_full_corpus_anchor() {
-        // No `scores.baseline`: every batch screened empty, so the only
-        // baseline recorded is the 5% sample.
-        let mut first = experiment(1, false);
-        first.baseline_score = 0.347_028_969_693;
-        first.timestamp_unix = 0;
-        let mut second = experiment(2, false);
-        second.baseline_score = 0.352_1;
-        second.timestamp_unix = 1800;
-        let file = journal_of(&[first, second]);
-
-        let report = report_from_journal(file.path()).unwrap();
-
-        assert_eq!(report.opening_baseline_score, None);
-        assert_eq!(report.total_score_improvement, None);
-        assert_eq!(report.score_improvement_per_wall_hour, None);
-    }
-
-    /// A journal with no wall-clock span cannot support a per-hour rate either.
-    #[test]
-    fn report_gate_metric_unavailable_without_a_wall_clock_span() {
-        let mut only = full_corpus_experiment(1, 0.40, Some(0.44));
-        only.timestamp_unix = 500;
-        let file = journal_of(&[only]);
-
-        let report = report_from_journal(file.path()).unwrap();
-
-        assert!((report.total_score_improvement.unwrap() - 0.04).abs() < 1e-12);
-        assert_eq!(report.wall_duration_ms, None);
-        assert_eq!(report.score_improvement_per_wall_hour, None);
-    }
-
-    /// A `--skip-phase0` cache-on run still reports its cache economics; only
-    /// the gate metric is withheld.
-    #[test]
-    fn report_skip_phase0_cache_run_reports_cache_without_the_gate_metric() {
-        let head = header(true);
-        let file = journal_with_header(
-            &head,
-            &[
-                cache_experiment(1, 4, 2, 0, 200, 3),
-                cache_experiment(2, 4, 2, 0, 200, 3),
-            ],
+        let header = RunHeaderRecord::new(
+            42,
+            SeedSource::Drawn,
+            RunConfigRecord::from_config(
+                &crate::config::LamarckConfig::default(),
+                crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            ),
+            1000,
         );
+        writeln!(file, "{}", serde_json::to_string(&header).unwrap()).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&experiment(1, false)).unwrap()
+        )
+        .unwrap();
 
-        let report = report_from_journal(file.path()).unwrap();
+        let calibration = report_from_journal(file.path()).unwrap().screen_calibration;
+        assert_eq!(
+            calibration.screen_sample_rate,
+            Some(crate::config::DEFAULT_SCREEN_SAMPLE_RATE)
+        );
+        assert_eq!(
+            calibration.promote_threshold,
+            Some(crate::config::DEFAULT_SCREEN_PROMOTE_THRESHOLD)
+        );
+        assert_eq!(
+            calibration.accept_bar,
+            Some(crate::config::DEFAULT_MIN_IMPROVEMENT)
+        );
+    }
 
-        assert_eq!(report.score_improvement_per_wall_hour, None);
-        let cache = report.cache.expect("cache economics do not need an anchor");
-        assert_eq!(cache.cache_hits, 4);
-        assert_eq!(cache.estimated_saved_ms, 400.0);
+    /// Issue #106: the memo's value is auditable from the journal.
+    #[test]
+    fn report_totals_the_analysis_memo_economics() {
+        // 2 hits saving 40ms in experiment one, 2 misses in experiment two.
+        let mut hitting = experiment(1, false);
+        hitting.analysis_ms = 60;
+        hitting.memo_hits = 2;
+        hitting.memo_ms_saved = 40;
+        let mut missing = experiment(2, false);
+        missing.analysis_ms = 100;
+        missing.memo_misses = 2;
+        let file = journal_of(&[hitting, missing]);
+
+        let memo = report_from_journal(file.path()).unwrap().analysis_memo;
+        assert_eq!(memo.hits, 2);
+        assert_eq!(memo.misses, 2);
+        assert_eq!(memo.ms_saved, 40);
+        assert!((memo.hit_rate - 0.5).abs() < 1e-12);
+        // 40 saved against 160 measured + 40 saved.
+        assert!((memo.analysis_ms_saved_fraction - 0.2).abs() < 1e-12);
+    }
+
+    /// A journal written before the memo existed must report zeros, not fail.
+    #[test]
+    fn report_reads_a_pre_memo_journal_as_zero_savings() {
+        let mut line = serde_json::to_value(experiment(1, false)).unwrap();
+        let map = line.as_object_mut().unwrap();
+        map.remove("memoHits");
+        map.remove("memoMisses");
+        map.remove("memoMsSaved");
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{line}").unwrap();
+
+        let memo = report_from_journal(file.path()).unwrap().analysis_memo;
+        assert_eq!(memo.hits, 0);
+        assert_eq!(memo.misses, 0);
+        assert_eq!(memo.ms_saved, 0);
+        assert_eq!(memo.hit_rate, 0.0);
     }
 }

@@ -12,11 +12,14 @@
 #   ARM_SECONDS=900 scripts/run-followup-economics.sh batch-size
 #
 # Arms: output-focus | backprop-step | batch-size | multi-seed
-#       output-neuron | backprop-cap
+#       output-neuron | backprop-cap | candidate-quotas | focus-count
+#       promote-gate
 #
-# `output-neuron` and `backprop-cap` are #96 arms and are **not** in the default
-# set: like `multi-seed` they need the production creature and exclusive use of
-# the scorer, so name them explicitly and run them one at a time.
+# `output-neuron` and `backprop-cap` are #96 arms, `candidate-quotas` is the
+# #108 arm, `focus-count` is the #109 arm, `promote-gate` is the #111 arm, and
+# none of the five is in the default set: like `multi-seed` they need the production creature and
+# exclusive use of the scorer, so name them explicitly and run them one at a
+# time.
 set -euo pipefail
 
 LAMARCK="${LAMARCK:-./target/release/neat_ai_lamarck}"
@@ -47,6 +50,22 @@ BACKPROP_RATES="${BACKPROP_RATES:-0.01 0.001}"
 BACKPROP_CAPS="${BACKPROP_CAPS:-10 0.01 0.000001}"
 # Per-cap budget: three caps at 400s is the ~20 minutes #96 allows this arm.
 CAP_SECONDS="${CAP_SECONDS:-400}"
+# #108 candidate-quota A/B: the same budget on both sides, so the only variable
+# is whether the generator's quotas scale with `--candidates`.
+QUOTA_CANDIDATES="${QUOTA_CANDIDATES:-100}"
+QUOTA_SECONDS="${QUOTA_SECONDS:-900}"
+# #109 multi-focus A/B: the same per-focus budget on both sides, so the shared
+# learning pass is amortised over K focuses instead of one. `--candidates` is
+# split between the focuses, so the K=3 side asks for 3x the K=1 budget to keep
+# each focus's share the same.
+FOCUS_COUNTS="${FOCUS_COUNTS:-1 3}"
+FOCUS_COUNT_CANDIDATES="${FOCUS_COUNT_CANDIDATES:-40}"
+FOCUS_COUNT_SECONDS="${FOCUS_COUNT_SECONDS:-900}"
+# #111 promote-gate A/B: the same seed, budget and batch on both sides, so the
+# only variable is which gate decides what earns a full-corpus score.
+PROMOTE_GATE_CANDIDATES="${PROMOTE_GATE_CANDIDATES:-100}"
+PROMOTE_GATE_SECONDS="${PROMOTE_GATE_SECONDS:-900}"
+PROMOTE_GATE_SIGMA_K="${PROMOTE_GATE_SIGMA_K:-3}"
 # Neuron pinned by the #96 output slice. NEAT-AI names output neurons
 # `output-<index>`; a UUID that does not exist aborts the run rather than
 # quietly falling back to policy selection.
@@ -129,6 +148,22 @@ arm_batch_size() {
   done
 }
 
+arm_candidate_quotas() {
+  # #108 — the paired batch-economics benchmark the raised ceiling needs before
+  # it can become the default. Both runs share the seed, the wall budget and
+  # `--candidates`, so the only difference is whether the generator's per-phase
+  # quotas scale: the control tops out at the fixed ceiling (~29), the scaled
+  # run fills the budget. Compare experiments, screen scores, full-corpus
+  # promotions, promote-scores per scorer-minute and score improvement per hour.
+  run_arm "candidate-quotas-ceiling" \
+    --timeout-seconds "$QUOTA_SECONDS" --candidates "$QUOTA_CANDIDATES" --seed 61 \
+    --focus-policy weighted
+  run_arm "candidate-quotas-scaled" \
+    --timeout-seconds "$QUOTA_SECONDS" --candidates "$QUOTA_CANDIDATES" --seed 61 \
+    --focus-policy weighted \
+    --scale-candidate-quotas
+}
+
 arm_multi_seed() {
   # #75.4 — repeat the production config on fresh seeds before deprioritising
   # any non-random strategy on the strength of the single #8 sample.
@@ -163,6 +198,40 @@ arm_backprop_cap() {
   done
 }
 
+arm_focus_count() {
+  # #109 — the paired multi-focus benchmark. Every side shares the seed, the
+  # wall budget and the per-focus candidate share; only the number of focus
+  # neurons an experiment serves moves. Compare candidates per analysis-minute,
+  # promote-scores per scorer-minute, accepts and improvement per wall-clock
+  # hour: a K that spreads proposals so thin that the structural quotas stop
+  # firing shows up as a fall in the promote rate.
+  for k in $FOCUS_COUNTS; do
+    run_arm "focus-count-$k" \
+      --timeout-seconds "$FOCUS_COUNT_SECONDS" \
+      --candidates "$((FOCUS_COUNT_CANDIDATES * k))" --seed 71 \
+      --focus-policy weighted \
+      --focus-count "$k"
+  done
+}
+
+arm_promote_gate() {
+  # #111 — the paired benchmark the noise-aware gate needs before its default
+  # can move. Both runs share the seed, the wall budget and `--candidates`, so
+  # the only difference is the promote gate. The metric that decides it is
+  # **accepts per wall-clock hour**, not promotions avoided: a gate that buys
+  # fewer full-corpus scores and finds fewer accepts is a loss.
+  run_arm "promote-gate-absolute" \
+    --timeout-seconds "$PROMOTE_GATE_SECONDS" \
+    --candidates "$PROMOTE_GATE_CANDIDATES" --seed 81 \
+    --focus-policy weighted
+  run_arm "promote-gate-noise-aware" \
+    --timeout-seconds "$PROMOTE_GATE_SECONDS" \
+    --candidates "$PROMOTE_GATE_CANDIDATES" --seed 81 \
+    --focus-policy weighted \
+    --screen-promote-gate noise-aware \
+    --screen-promote-sigma-k "$PROMOTE_GATE_SIGMA_K"
+}
+
 arms=("$@")
 if [[ ${#arms[@]} -eq 0 ]]; then
   arms=(output-focus backprop-step batch-size multi-seed)
@@ -176,7 +245,10 @@ for arm in "${arms[@]}"; do
   multi-seed) arm_multi_seed ;;
   output-neuron) arm_output_neuron ;;
   backprop-cap) arm_backprop_cap ;;
-  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap)" ;;
+  candidate-quotas) arm_candidate_quotas ;;
+  focus-count) arm_focus_count ;;
+  promote-gate) arm_promote_gate ;;
+  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap | candidate-quotas | focus-count | promote-gate)" ;;
   esac
 done
 

@@ -6,7 +6,7 @@
 //! summary for GRQ check-in (`worker/Lamarck/run.sh` reads the tag as-is).
 
 use crate::candidates::CandidateStrategy;
-use neat_core::{CreatureExport, creature_to_json_pretty};
+use neat_core::{CreatureExport, creature_to_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -197,12 +197,12 @@ fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
     }
 }
 
-/// Pretty-print a creature with `uuid` / `tags` re-attached for check-in.
-pub fn serialize_creature_with_meta(
+/// Creature JSON with `uuid` / `tags` re-attached, before it is printed.
+fn creature_value_with_meta(
     creature: &CreatureExport,
     meta: &CreatureMeta,
-) -> Result<String, String> {
-    let body = creature_to_json_pretty(creature).map_err(|e| e.to_string())?;
+) -> Result<Value, String> {
+    let body = creature_to_json(creature).map_err(|e| e.to_string())?;
     let mut value: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if let Some(uuid) = &meta.uuid {
         value["uuid"] = json!(uuid);
@@ -210,12 +210,39 @@ pub fn serialize_creature_with_meta(
     if !meta.tags.is_empty() {
         value["tags"] = serde_json::to_value(&meta.tags).map_err(|e| e.to_string())?;
     }
+    Ok(value)
+}
+
+/// Pretty-print a creature with `uuid` / `tags` re-attached for check-in.
+///
+/// This is the **human-facing** form — `best.json` and `winners/`. Scorer-facing
+/// batch files use [`serialize_creature_with_meta_compact`] (issue #114).
+pub fn serialize_creature_with_meta(
+    creature: &CreatureExport,
+    meta: &CreatureMeta,
+) -> Result<String, String> {
+    let value = creature_value_with_meta(creature, meta)?;
     // Match typical NEAT export: trailing newline after pretty JSON.
     let mut out = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     if !out.ends_with('\n') {
         out.push('\n');
     }
     Ok(out)
+}
+
+/// Compact-print a creature with `uuid` / `tags` re-attached (issue #114).
+///
+/// Same document as [`serialize_creature_with_meta`] — same fields, same
+/// values, same tags — with the indentation and newlines dropped. Only
+/// scorer-facing batch files use it: on the production creature the whitespace
+/// is about a third of the bytes written, parsed and thrown away on every
+/// experiment, and `rust_scorer` is the file's only reader.
+pub fn serialize_creature_with_meta_compact(
+    creature: &CreatureExport,
+    meta: &CreatureMeta,
+) -> Result<String, String> {
+    let value = creature_value_with_meta(creature, meta)?;
+    serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -274,6 +301,57 @@ mod tests {
         assert!(msg.contains("score: 0.2 improved by 0.1"));
         assert!(!msg.contains("🏆"));
         assert!(!msg.contains("accept #"));
+    }
+
+    /// Issue #114: the compact form is the same document, not a lesser one.
+    #[test]
+    fn compact_round_trips_to_the_same_creature_and_tags_as_pretty() {
+        let creature = parse_creature_json(TINY_TAGGED).unwrap();
+        let mut meta = CreatureMeta::from_creature_json(TINY_TAGGED);
+        meta.stamp_acceptance(&LamarckProgress {
+            acceptances: 1,
+            score: 0.2,
+            error: 0.8,
+            opening_score: 0.1,
+            focus_neuron: "o1",
+            strategy: CandidateStrategy::Backprop,
+            experiments: 3,
+        });
+        let pretty = serialize_creature_with_meta(&creature, &meta).unwrap();
+        let compact = serialize_creature_with_meta_compact(&creature, &meta).unwrap();
+
+        assert!(
+            !compact.contains('\n'),
+            "compact output must be one line: {compact}"
+        );
+        assert!(
+            compact.len() < pretty.len(),
+            "compact ({}) must be smaller than pretty ({})",
+            compact.len(),
+            pretty.len()
+        );
+
+        // Same creature after parsing — formatting never changes a value.
+        assert_eq!(
+            parse_creature_json(&compact).unwrap(),
+            parse_creature_json(&pretty).unwrap()
+        );
+        // Same meta: uuid and every tag, including the score/error/lamarck
+        // stamps `stamp_acceptance` attaches.
+        let compact_value: Value = serde_json::from_str(&compact).unwrap();
+        let pretty_value: Value = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(compact_value, pretty_value);
+        assert_eq!(compact_value["uuid"], "creature-1");
+        for tag in ["name", "version", "score", "error", "lamarck"] {
+            assert!(
+                compact_value["tags"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t["name"] == tag),
+                "compact output dropped the {tag} tag"
+            );
+        }
     }
 
     const TINY_ID_TAGGED: &str = r#"{

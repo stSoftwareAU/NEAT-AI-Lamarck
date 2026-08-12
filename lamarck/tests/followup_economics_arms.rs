@@ -157,6 +157,69 @@ fn the_backprop_cap_arm_varies_the_cap_and_nothing_else() {
     }
 }
 
+/// Issue #108: the paired batch-economics benchmark varies only whether the
+/// generator's quotas scale — same seed, same budget, same `--candidates`.
+#[test]
+fn the_candidate_quotas_arm_varies_only_the_quota_scaling() {
+    let campaign = Campaign::new();
+    let runs = campaign
+        .run_arm(
+            "candidate-quotas",
+            &[("QUOTA_SECONDS", "1"), ("QUOTA_CANDIDATES", "100")],
+        )
+        .expect("candidate-quotas arm completes");
+    assert_eq!(runs.len(), 2, "the A/B is a pair of runs: {runs:?}");
+    assert!(
+        !runs[0].contains("--scale-candidate-quotas"),
+        "the control must run at the fixed ceiling: {}",
+        runs[0]
+    );
+    assert!(
+        runs[1].contains("--scale-candidate-quotas"),
+        "the treatment must scale the quotas: {}",
+        runs[1]
+    );
+    for argv in &runs {
+        assert!(
+            argv.contains("--candidates 100") && argv.contains("--seed 61"),
+            "both sides share the budget and the seed: {argv}"
+        );
+    }
+}
+
+/// Issue #109: the paired multi-focus benchmark varies only the focus count,
+/// keeping each focus's share of `--candidates` the same on both sides.
+#[test]
+fn the_focus_count_arm_varies_only_the_focus_count() {
+    let campaign = Campaign::new();
+    let runs = campaign
+        .run_arm(
+            "focus-count",
+            &[
+                ("FOCUS_COUNT_SECONDS", "1"),
+                ("FOCUS_COUNT_CANDIDATES", "40"),
+            ],
+        )
+        .expect("focus-count arm completes");
+    assert_eq!(runs.len(), 2, "the A/B is a pair of runs: {runs:?}");
+    assert!(
+        runs[0].contains("--focus-count 1") && runs[0].contains("--candidates 40"),
+        "the control serves one focus with the whole budget: {}",
+        runs[0]
+    );
+    assert!(
+        runs[1].contains("--focus-count 3") && runs[1].contains("--candidates 120"),
+        "the treatment serves three focuses at the same share each: {}",
+        runs[1]
+    );
+    for argv in &runs {
+        assert!(
+            argv.contains("--seed 71") && argv.contains("--focus-policy weighted"),
+            "both sides share the seed and the policy: {argv}"
+        );
+    }
+}
+
 #[test]
 fn an_unknown_arm_fails_loudly() {
     let campaign = Campaign::new();
@@ -180,6 +243,8 @@ fn the_binary_accepts_the_flags_the_campaign_arms_pass() {
         "--focus-neuron",
         "--backprop-learning-rate",
         "--backprop-max-bias-adjustment-scale",
+        "--scale-candidate-quotas",
+        "--focus-count",
     ] {
         assert!(help.contains(flag), "the binary has no `{flag}`");
     }

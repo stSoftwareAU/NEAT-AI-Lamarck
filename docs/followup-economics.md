@@ -22,6 +22,7 @@ flowchart TD
     B --> A2["Arm 2: backprop step A/B<br/>--backprop-learning-rate 0.01 vs 0.001"]
     B --> A3["Arm 3: batch-size A/B<br/>12 vs 40 candidates, fixed wall"]
     B --> A4["Arm 4: multi-seed repeat<br/>seeds 2-5, production config"]
+    A3 --> A5["Arm 5: candidate-quota A/B<br/>fixed ceiling vs --scale-candidate-quotas"]
     A1 --> V["Verdict: keep or disable each strategy"]
     A2 --> V
     A3 --> V
@@ -157,6 +158,12 @@ The arm as specified — 40 vs 100 vs 150 candidates under a fixed 15 minutes �
 
 ### `--candidates` above ~29 is inert
 
+> **Superseded for opted-in runs (#108).** The quotas below are still the
+> default, but `--scale-candidate-quotas` now scales them with `--candidates`,
+> so a run that passes the flag fills the budget until the generator is
+> genuinely exhausted. The flag stays opt-in until the paired benchmark under
+> [Arm 5](#arm-5--candidate-quota-scaling-108) justifies changing the default.
+
 `generate_candidates` fills a batch through fixed per-phase quotas (one scaled
 `structural_add` per ranked source, at most three growth squashes, two hidden
 squashes, four scaled adds, then a round-robin fill of at most `8 x 3` further
@@ -223,6 +230,114 @@ accepts**, and the strategies that came closest were `stats_weight` and
 in `docs/baseline-economics.md` is therefore not stable, which is exactly why no
 strategy is disabled below.
 
+## Arm 5 — Candidate-quota scaling (#108)
+
+**Not run.** Arm 3's conclusion — that raising `--candidates` is pointless
+until the generator's quotas change — is now actionable: `--scale-candidate-quotas`
+scales the per-phase quotas with the budget, so the batch keeps filling until
+every ranked source and squash has been proposed. What that buys in *economic*
+terms is unmeasured, because the arm needs the production creature, exclusive
+use of the scorer and the 21 GiB corpus.
+
+The generator itself is measured, on a production-shaped synthetic creature
+(2511 inputs, 12 hiddens, one output — the #8 creature's shape) by
+`cargo run --release --example candidate_quota_bench`:
+
+| `--candidates` | Fixed quotas | Distinct | Scaled quotas | Distinct | Generation (scaled) |
+|----------------|--------------|----------|---------------|----------|---------------------|
+| 12 | 12 (budget) | 11 | 12 (budget) | 12 | 1.2 ms |
+| 29 | 27 (ceiling) | 22 | 29 (budget) | 29 | 3.4 ms |
+| 40 | 27 (ceiling) | 22 | 40 (budget) | 40 | 4.5 ms |
+| 60 | 27 (ceiling) | 22 | 60 (budget) | 60 | 5.9 ms |
+| 100 | 27 (ceiling) | 22 | 100 (budget) | 100 | 9.1 ms |
+| 120 | 27 (ceiling) | 22 | 120 (budget) | 120 | 10.1 ms |
+| 240 | 27 (ceiling) | 22 | 240 (budget) | 240 | 19.7 ms |
+
+Two things to read off it. Generation costs ~0.08 ms per candidate — four
+orders of magnitude below the ~11 s per-experiment learning pass, so the extra
+batch costs **screen time**, not generation time, and that is exactly what the
+paired arm has to price. And the *distinct* columns show the fixed quotas
+propose 27 candidates of which only **22 are distinct**: five creatures per
+experiment are scored twice. The scaled path rejects duplicates rather than
+counting them, so a filled budget is 240 distinct hypotheses, not 240 slots.
+
+Strategy mix at `--candidates 120` on that creature, fixed → scaled:
+
+| Strategy | Fixed | Scaled |
+|----------|-------|--------|
+| `structural_add` | 8 | 52 |
+| `structural_add_neuron` | 6 | 30 |
+| `stats_weight` | 3 | 12 |
+| `stats_bias` | 3 | 12 |
+| `random` | 3 | 12 |
+| `structural_weaken` | 3 | 1 |
+| `mean_error_bias` | 1 | 1 |
+
+No family disappears. Two shifts are expected and recorded: the mix tilts
+towards the structural families, whose hypothesis space (ranked sources ×
+weight scales, ranked sources × squashes) is what the extra budget sweeps; and
+`structural_weaken` falls to 1 because it proposes one deterministic mutation,
+so its repeats are duplicates and are dropped rather than counted. (`backprop`
+appears in neither column: the benchmark supplies no learning signal, so it
+proposes nothing on either side — see Arm 2 for its own economics.)
+
+Run the paired benchmark with:
+
+```bash
+QUOTA_SECONDS=900 QUOTA_CANDIDATES=100 \
+  scripts/run-followup-economics.sh candidate-quotas
+```
+
+Both sides share seed 61, the wall budget and `--candidates`; only the flag
+moves. Report experiments, screen scores, full-corpus promotions,
+promote-scores per scorer-minute and score improvement per wall-clock hour. The
+default only changes if the scaled side wins on **promote rate and
+accepts-per-hour**, not on batch size.
+
+## Arm 6 — Multi-focus experiments (#109)
+
+**Not run on the production creature.** Like Arm 5 it needs exclusive use of
+the scorer and the 21 GiB corpus. The loop itself is measured, on the same
+synthetic shape the memo arm used (128 inputs, 24 TANH hiddens, one output;
+20 000 records; 60 s wall budget; seed 7; accept-free `min_improvement 1`), by
+`cargo run --release --example focus_fanout_bench`. Best of three interleaved
+repeats:
+
+| `--focus-count` | `--candidates` | Experiments | Candidates | Candidates/analysis-min | Promote scores/scorer-min |
+|---|---|---|---|---|---|
+| 1 | 12 | 380 | 4560 | 8955 | 9844 |
+| 3 | 12 | 324 | 3888 | 7507 | 8537 |
+| 3 | 36 | 180 | 6480 | **23 194** | 9392 |
+
+Two things to read off it. Holding the *total* batch at 12 makes K = 3 slightly
+**worse** on throughput (0.84×): the batch size did not move, but the experiment
+now pays three focus scans instead of one. The amortisation only pays when each
+focus keeps its own share of the budget — at 12 candidates *per focus* the same
+shared learning pass produces **2.6× the candidates per analysis-minute**, which
+is inside the 1.5×–3× the issue estimated, while the promote rate holds at 0.95×
+(9392 vs 9844), so the batch is not spread so thin that the structural quotas
+stop firing.
+
+In an accept-rich regime (`min_improvement 1e-6`, 45 s, best of two) the
+throughput result repeats (17 591 vs 5699 candidates/analysis-min, 3.1×) but
+K = 1 still won on improvement per wall-clock hour (1.73e-1 vs 1.64e-1): more
+focuses means each accept is followed by a memo invalidation covering work spent
+on focuses that did not win. That is the question the production arm has to
+settle, so `--focus-count` ships **opt-in at 1**, exactly as
+`--scale-candidate-quotas` did.
+
+Run the paired benchmark with:
+
+```bash
+FOCUS_COUNT_SECONDS=900 FOCUS_COUNT_CANDIDATES=40 \
+  scripts/run-followup-economics.sh focus-count
+```
+
+Both sides share seed 71, the wall budget and the per-focus candidate share
+(the K = 3 side asks for 3× the budget, because `--candidates` is split between
+the focuses); only `--focus-count` moves. The default only changes if the
+multi-focus side wins on **accepts-per-hour**, not on candidates per minute.
+
 ## Verdict — what to disable
 
 **Nothing is disabled.** Every strategy stays enabled. Across all five arms —
@@ -254,6 +369,8 @@ stays the default; nothing about it is changed here.
 | 2. Backprop step A/B | **Run** — and it showed the learning rate is the wrong knob; the cap A/B is unrun |
 | 3. Batch-size A/B | **Run** — see the ceiling result above |
 | 4. Multi-seed repeat | **Unrun** — 3 hours of exclusive box time |
+| #108. Candidate-quota scaling | **Unrun** — the generator change has landed behind `--scale-candidate-quotas`; the paired economics arm needs the same exclusive box time |
+| #109. Multi-focus experiments | **Unrun** — the loop change has landed behind `--focus-count`; the paired economics arm needs the same exclusive box time |
 
 The unrun work is one follow-up, not three: it is all "arms that need exclusive
 box time on the production creature". [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96)
@@ -272,6 +389,7 @@ figure they exist to produce. Run them one at a time, on an otherwise idle box:
 | Multi-seed repeat | `SEEDS="2 3 4 5" scripts/run-followup-economics.sh multi-seed` | 4 × 45 min | Whether the strategy ordering is stable across seeds — the gate on deprioritising any strategy |
 | Output slice | `scripts/run-followup-economics.sh output-neuron` | ~20 min | `mean_error_bias` / `stats_skew_bias`, which have **zero** appearances in 118 experiments because no arm reached an output focus |
 | Backprop cap A/B | `scripts/run-followup-economics.sh backprop-cap` | ~20 min | Whether a bias step sized near the `1e-6` accept bar is worth anything, now that the ±10 default is known to be cap-bound |
+| Candidate-quota A/B (#108) | `scripts/run-followup-economics.sh candidate-quotas` | 2 × 15 min | Whether a budget-filling batch beats the fixed ceiling on promote rate and accepts-per-hour — the gate on making `--scale-candidate-quotas` the default |
 
 Two enablers were added for them:
 
