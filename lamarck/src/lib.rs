@@ -90,4 +90,7 @@ pub use screen_calibration::{
     AcceptedScreenPoint, BaselineSampleGap, DeltaDistribution, ScreenCalibration,
     ScreenCalibrationAccumulator, ScreenNoise, ScreenPair, spearman_rank_correlation,
 };
-pub use tags::{CreatureMeta, CreatureTag, LamarckProgress, serialize_creature_with_meta};
+pub use tags::{
+    CreatureMeta, CreatureTag, LamarckProgress, serialize_creature_with_meta,
+    serialize_creature_with_meta_compact,
+};

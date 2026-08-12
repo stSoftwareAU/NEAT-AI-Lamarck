@@ -598,6 +598,15 @@ candidates-exp-7/
     ...
 ```
 
+Those files are **compact** JSON: `rust_scorer` is their only reader, and on the
+production creature the pretty-printer's indentation is ≈30% of the ~87 MB a
+batch writes and the scorer then parses. The promote directory hard-links the
+promoted files from the screen directory rather than copying them, falling back
+to a copy when the link cannot be made. `best.json`, `winners/` and every other
+human-facing artefact stay pretty-printed. What that was worth — including the
+wall-clock null result — is measured in
+[`docs/compact-batch-io.md`](docs/compact-batch-io.md).
+
 Scoring runs in three steps:
 
 1. **Screen** the full candidate directory with

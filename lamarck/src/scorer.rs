@@ -408,7 +408,30 @@ pub fn screen_promote_decision_against(
     }
 }
 
-/// Copy `baseline.json` + promoted candidate JSON into a fresh promote directory.
+/// Present `src` at `dst` without copying its bytes, falling back to a copy
+/// (issue #114).
+///
+/// A promote directory exists only to show the scorer a smaller set of the
+/// files the screen directory already holds, so a hard link is enough: same
+/// inode, same bytes, no second write. Nothing mutates a batch file in place —
+/// they are written once and the directory is deleted whole — so the shared
+/// inode is safe.
+///
+/// Linking fails for reasons that are not the run's fault: a destination that
+/// already exists, a `src` and `dst` on different filesystems (`EXDEV`), a
+/// filesystem with no hard links at all. None of those is worth aborting an
+/// experiment over, so the copy stands in and the caller cannot tell.
+fn link_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    if fs::hard_link(src, dst).is_ok() {
+        return Ok(());
+    }
+    fs::copy(src, dst)
+        .map(|_| ())
+        .map_err(|e| format!("copy {} to {} failed: {e}", src.display(), dst.display()))
+}
+
+/// Link (or copy) `baseline.json` + promoted candidate JSON into a fresh
+/// promote directory.
 pub fn write_promote_batch(
     promote_dir: &Path,
     source_batch: &Path,
@@ -443,14 +466,14 @@ fn write_promote_batch_with(
     fs::create_dir_all(promote_dir).map_err(|e| e.to_string())?;
     if include_baseline {
         let baseline_src = source_batch.join("baseline.json");
-        fs::copy(&baseline_src, promote_dir.join("baseline.json"))
-            .map_err(|e| format!("copy baseline from {} failed: {e}", baseline_src.display()))?;
+        link_or_copy(&baseline_src, &promote_dir.join("baseline.json"))
+            .map_err(|e| format!("baseline from {}: {e}", baseline_src.display()))?;
     }
     for stem in promote_stems {
         let name = format!("{stem}.json");
         let src = source_batch.join(&name);
-        fs::copy(&src, promote_dir.join(&name))
-            .map_err(|e| format!("copy {stem} from {} failed: {e}", src.display()))?;
+        link_or_copy(&src, &promote_dir.join(&name))
+            .map_err(|e| format!("{stem} from {}: {e}", src.display()))?;
     }
     Ok(())
 }
@@ -880,5 +903,73 @@ mod tests {
         assert!(!promote.join("baseline.json").exists());
         assert!(promote.join("candidate-000.json").is_file());
         assert_eq!(count_creature_files(&promote).unwrap(), 1);
+    }
+
+    /// Issue #114: a promote file is the screen file's bytes at a second path,
+    /// so it is hard-linked — one inode, no second write.
+    #[cfg(unix)]
+    #[test]
+    fn write_promote_batch_hard_links_rather_than_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("baseline.json"), b"{\"baseline\":true}").unwrap();
+        fs::write(src.join("candidate-000.json"), b"{\"a\":1}").unwrap();
+        let promote = dir.path().join("promote");
+        write_promote_batch(&promote, &src, &["candidate-000".into()]).unwrap();
+
+        for name in ["baseline.json", "candidate-000.json"] {
+            let source = fs::metadata(src.join(name)).unwrap();
+            let linked = fs::metadata(promote.join(name)).unwrap();
+            assert!(
+                same_file(&source, &linked),
+                "{name} must be hard-linked to the screen batch, not copied"
+            );
+            assert_eq!(
+                fs::read(src.join(name)).unwrap(),
+                fs::read(promote.join(name)).unwrap()
+            );
+        }
+    }
+
+    /// …and a link that cannot be made falls back to a copy rather than
+    /// aborting the experiment (issue #114).
+    #[cfg(unix)]
+    #[test]
+    fn link_or_copy_falls_back_to_a_copy_when_linking_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("candidate-000.json");
+        let dst = dir.path().join("promote-candidate-000.json");
+        fs::write(&src, b"{\"a\":1}").unwrap();
+        // An existing destination makes `hard_link` fail with AlreadyExists —
+        // the same shape as EXDEV or a filesystem with no links.
+        fs::write(&dst, b"stale").unwrap();
+
+        link_or_copy(&src, &dst).expect("a failed link must fall back to a copy");
+
+        assert_eq!(fs::read(&dst).unwrap(), b"{\"a\":1}");
+        assert!(
+            !same_file(&fs::metadata(&src).unwrap(), &fs::metadata(&dst).unwrap()),
+            "the fallback is a copy, so the two files are separate inodes"
+        );
+    }
+
+    /// A missing source still fails loudly — the fallback covers link failures,
+    /// never a batch file that was never written.
+    #[test]
+    fn link_or_copy_fails_loudly_when_the_source_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = link_or_copy(
+            &dir.path().join("absent.json"),
+            &dir.path().join("promote.json"),
+        )
+        .unwrap_err();
+        assert!(err.contains("absent.json"), "unhelpful error: {err}");
+    }
+
+    #[cfg(unix)]
+    fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        a.dev() == b.dev() && a.ino() == b.ino()
     }
 }

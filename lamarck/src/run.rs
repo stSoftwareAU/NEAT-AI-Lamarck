@@ -2597,6 +2597,48 @@ mod tests {
         (creature_path, training)
     }
 
+    /// Default run config over `tiny_setup`, for tests that only vary a knob.
+    fn base_config(
+        creature: PathBuf,
+        training_data: PathBuf,
+        output_dir: PathBuf,
+    ) -> LamarckConfig {
+        LamarckConfig {
+            creature,
+            training_data,
+            timeout: Duration::from_millis(500),
+            max_experiments: None,
+            candidates: 4,
+            scale_candidate_quotas: false,
+            min_improvement: 1e-6,
+            seed: Some(1),
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir,
+            preserve_losers: true,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            phase0_parity: true,
+            structural_only: false,
+            screen_sample_rate: None,
+            screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            grafts_path: None,
+            graft_replay_budget: None,
+            backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+        }
+    }
+
     #[test]
     fn loop_accepts_winner_and_writes_journal() {
         let dir = tempdir().unwrap();
@@ -2675,6 +2717,82 @@ mod tests {
                 !lamarck.contains("accept #") && !lamarck.contains("🏆"),
                 "tag should not use legacy last-accept wording: {lamarck}"
             );
+        }
+    }
+
+    /// Issue #114: the scorer's files are compact, the human's stay pretty, and
+    /// a promote file is a hard link to the screen file rather than a copy.
+    #[test]
+    fn batch_files_are_compact_while_best_and_winners_stay_pretty() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            max_experiments: Some(1),
+            // Screen then promote, so the promote directory is written from the
+            // screen batch — the copy this issue replaces with a link.
+            screen_sample_rate: Some(0.5),
+            phase0_parity: false,
+            ..base_config(creature_path, training, out.clone())
+        };
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.acceptances, 1,
+            "the scripted winner must be accepted"
+        );
+
+        // Scorer-facing batch files: one line each, no indentation.
+        let batch = out.join("candidates-exp-1");
+        for name in ["baseline.json", "candidate-000.json"] {
+            let text = fs::read_to_string(batch.join(name)).unwrap();
+            assert!(
+                !text.contains('\n'),
+                "{name} must be compact for the scorer, got:\n{text}"
+            );
+            // Still a creature the scorer can parse.
+            neat_core::parse_creature_json(&text).unwrap();
+        }
+
+        // Human-facing artefacts: still pretty-printed.
+        for path in [
+            out.join("best.json"),
+            out.join("winners").join("winner-0001.json"),
+        ] {
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(
+                text.contains("\n  \""),
+                "{} must stay pretty-printed for a human reader",
+                path.display()
+            );
+        }
+
+        // Promote directory: the same bytes at a second path, not a second copy.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let promote = out.join("promote-exp-1");
+            let promoted = fs::read_dir(&promote)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.ends_with(".json"))
+                .collect::<Vec<_>>();
+            assert!(!promoted.is_empty(), "expected a promote batch");
+            for name in promoted {
+                let source = fs::metadata(batch.join(&name)).unwrap();
+                let linked = fs::metadata(promote.join(&name)).unwrap();
+                assert_eq!(
+                    (source.dev(), source.ino()),
+                    (linked.dev(), linked.ino()),
+                    "{name} must be hard-linked from the screen batch"
+                );
+            }
         }
     }
 
