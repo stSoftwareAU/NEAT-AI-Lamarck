@@ -113,10 +113,12 @@ at every `k` from 1 to 5, which
 asserts as a hard `cargo test` failure over committed journal fixtures.
 
 The seven #75 arms are the other half of the picture: **129 full-corpus scores,
-zero accepts**, and the gate declines every one of them. Those arms ran a
-different (production) creature whose batches are dominated by catastrophic
-structural proposals, so the estimated noise floor sits above every positive
-screen Δ the arm produced.
+zero accepts**, and the gate declines every one of them. They ran the production
+creature — not the #8 baseline's — under Lamarck `0.1.7`, and their batches are
+dominated by catastrophic structural proposals, so the estimated noise floor
+sits above every positive screen Δ those arms produced. The paired benchmark
+below shows that this no longer holds for the generator in this release, which
+is the single most important caveat on the 66% figure.
 
 ### What this replay cannot support
 
@@ -141,8 +143,82 @@ CREATURE=... TRAIN_DATA=... SCORER=... OUT_DIR=... \
   scripts/run-followup-economics.sh promote-gate
 ```
 
-<!-- BENCHMARK TABLE -->
+Both arms ran the production creature (2511 inputs, 1 output, 1593 neurons)
+against the 2 262 277-record GRQ corpus, seed 81, `--candidates 100`, a 900 s
+budget and `--screen-sample-rate 0.05`, one after the other on a box that also
+runs GRQ. Lamarck `0.1.12`, `k = 3`.
+
+| Metric | `absolute` (control) | `noise-aware` (k = 3) |
+|--------|----------------------|-----------------------|
+| Experiments completed | 23 | 24 |
+| Wall duration | 864 s | 891 s |
+| Experiments / hour | 95.8 | 97.0 |
+| Candidates screened | 667 | 696 |
+| Full-corpus promotions | 46 | 48 |
+| Promotions / experiment | 2.00 | 2.00 |
+| Promote scores / scorer-minute | 3.25 | 3.26 |
+| **Accepts** | **0** | **0** |
+| **Accepts / hour** | **0** | **0** |
+| Score improvement / hour | none (no accept) | none (no accept) |
+| Load average before → after | 8.4 → 15.6 | 15.6 → 21.5 |
+
+**The two arms made the same decision in every experiment they share.** Of the
+23 experiments both ran, all 23 promoted an identical number of candidates; in
+18 the gate's threshold *was* the `1e-6` floor, and in the other 5 it rose
+(to `1.22e-6`–`3.75e-6`) without changing which candidates cleared it. The extra
+experiment in the noise-aware arm is one more fitting inside the same budget,
+not a promotion the gate avoided.
+
+The reason is visible in the journal: σ̂ across the 24 screened batches ran
+**2.69e-9 to 1.25e-6, median 2.98e-8** — so `3σ̂` is ~`9e-8`, two orders of
+magnitude *below* the `1e-6` floor, and `max(3σ̂, 1e-6)` collapses to the floor.
+**On this creature, with today's candidate generator, the noise-aware gate at
+`k = 3` is inert.**
+
+That is not what the archived journals showed, and the difference matters. The
+seven #75 arms above were written by Lamarck `0.1.7`, before the generator changes of
+issues #105–#109; their batches carried a much wider near-zero core (lower
+quartile of |Δ| ~`1.2e-6`, so σ̂ ~`3.9e-6`). The saving the replay measures is
+real for those journals and does **not** transfer to the current generator.
+
+What `k` would it take to bite today? Replaying the control arm's own journal:
+
+| `k` | Promotions kept (of 46) |
+|-----|-------------------------|
+| 3 (default) | 46 |
+| 10 | 43 |
+| 30 | 22 |
+| 50 | 21 |
+| 100 | 14 |
+
+Neither arm accepted anything in 15 minutes, so this benchmark **cannot** price
+accepts per wall-clock hour — the metric that is supposed to decide the default.
+Both arms measured `0`. It also ran on a box whose load rose from 8 to 21 across
+the two arms, which is why the near-identical per-minute figures should not be
+read as a precise equality.
 
 ## Decision
 
-<!-- DECISION -->
+**The default stays `absolute`.** The benchmark did not support moving it, and
+on the evidence it could not have:
+
+- The metric that decides is accepts per wall-clock hour, and both arms produced
+  **0 accepts** in 900 s. There is nothing to compare.
+- At the default `k = 3` the gate is **inert** on the current production creature
+  — the same promotions, experiment for experiment. Making it the default would
+  change nothing there while risking the invisible false negative on a
+  differently shaped run.
+- The 66% promotion saving in the replay is real for the archived journals, but
+  those were written by a generator two releases old. A saving measured on a
+  batch shape the code no longer produces is not grounds for a default change.
+
+What the gate is good for, and what it still needs:
+
+- It ships as a flag so a `k` can be calibrated **per creature** without a code
+  change; the per-experiment `screenTiers` record and the `promoteGateReplay`
+  bucket make an over- or under-promoting `k` visible within a few experiments
+  of a real run.
+- Moving the default needs an arm long enough to produce accepts on both sides —
+  the #8 baseline took 75 experiments to find 2 — and a `k` calibrated on the
+  current generator's σ̂ (tens, not 3, on the evidence above). That is box time
+  this issue did not have, and it is deliberately not smuggled into a default.
