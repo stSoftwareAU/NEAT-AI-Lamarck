@@ -72,9 +72,12 @@ flowchart TD
    issue's risk section names as its worst outcome.
 3. **Drift aborts the run.** Whenever a fresh baseline lands while a remembered
    one is held — on the interval or on the accept path — the two are compared,
-   and disagreement beyond `--baseline-drift-epsilon` (default `1e-9`, three
-   orders below `--min-improvement`) stops the run rather than deciding
-   anything.
+   and disagreement beyond `--baseline-drift-epsilon` stops the run rather than
+   deciding anything. The flag is **omitted by default**: Lamarck auto-tunes
+   from corpus size and Phase-0 error (`ε_f32 · error · log₂(N) · headroom`,
+   clamped to `[1e-6, 1e-3]`), so hosts never need a competing override.
+   Directory scoring over multi-million-record corpora is not bit-identical
+   across calls; the old fixed `1e-9` default aborted healthy GRQ runs.
 
 Each promote call journals `baselineSource` (`fresh` / `remembered` /
 `rememberedVerified`), so any accept in any run is traceable, after the fact, to

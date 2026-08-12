@@ -1409,7 +1409,10 @@ mod tests {
         let header = RunHeaderRecord::new(
             42,
             SeedSource::Drawn,
-            RunConfigRecord::from_config(&crate::config::LamarckConfig::default()),
+            RunConfigRecord::from_config(
+                &crate::config::LamarckConfig::default(),
+                crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            ),
             1000,
         );
         let experiment = ExperimentRecord {
@@ -1926,7 +1929,10 @@ mod tests {
         let header = RunHeaderRecord::new(
             42,
             SeedSource::Drawn,
-            RunConfigRecord::from_config(&crate::config::LamarckConfig::default()),
+            RunConfigRecord::from_config(
+                &crate::config::LamarckConfig::default(),
+                crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            ),
             1000,
         );
         writeln!(file, "{}", serde_json::to_string(&header).unwrap()).unwrap();

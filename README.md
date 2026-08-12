@@ -169,7 +169,7 @@ The run always uses these; the flag only overrides the value.
 | `--screen-promote-sigma-k` | `3` | σ̂ multiplier `k` for `--screen-promote-gate noise-aware`; ignored under `absolute`. Must be `> 0` — a non-positive or non-finite value aborts the run instead of reverting to the default. Recorded in the journal `runHeader` so an A/B arm is identifiable. |
 | `--focus-policy` | `weighted` | `weighted` \| `high-error` \| `random` \| `unsaturated`. |
 | `--baseline-reverify-interval` | `0` | Promote calls served from the run's **remembered** full-corpus baseline before one scores the incumbent again (issue #113). `0` is the pre-#113 run: every promote call carries the incumbent. A value `N >= 1` omits it from up to `N` consecutive promote calls — ≈20% of a promote call's creature-scores — then re-scores it and checks it against `--baseline-drift-epsilon`. Any accept off a remembered baseline is re-decided against a freshly scored pair before the incumbent is swapped. Recorded in the journal `runHeader`. See [The remembered baseline](#the-remembered-baseline). |
-| `--baseline-drift-epsilon` | `1e-9` | Absolute baseline-score drift that **aborts the run** (issue #113), checked whenever a fresh baseline arrives while a remembered one is held. Three orders below `--min-improvement`, so a drift big enough to flip an acceptance can never pass. Must be finite and `>= 0`; anything else aborts the run instead of reverting to the default. |
+| `--baseline-drift-epsilon` | *auto* | Absolute baseline-score drift that **aborts the run** when baseline reuse is enabled (issue #113). **Omitted by default** — Lamarck auto-tunes from corpus size and Phase-0 error (`ε_f32 · error · log₂(N) · headroom`, clamped to `[1e-6, 1e-3]`). Pass an absolute value only for expert / A/B overrides; hosts (e.g. GRQ) must not ship a competing default. With the default `--baseline-reverify-interval 0` the canary is inactive (every promote is already self-paired). Accept safety is the paired re-score, not this epsilon. |
 | `--focus-count` | `1` | Focus neurons an experiment proposes against (issue #109). The creature-wide learning and output-residual passes run **once per experiment** whatever this is, so `K > 1` amortises them over `K` focuses and splits `--candidates` between them. `0` aborts the run; `--focus-neuron` pins the focus and caps this at 1. See [Phase 2](#phase-2--select-the-focus-neurons). |
 | `--quick-sample-records` | `25000` | Record cap for `--quick` observations / focus / learning scans. |
 | `--analysis-memo-entries` | `16` | Focus-dependent entries the cross-experiment analysis memo may hold. `0` disables memoisation; every entry is dropped whenever the incumbent changes. See [Memoised analysis across experiments](#memoised-analysis-across-experiments). |
@@ -743,8 +743,10 @@ same process, at the same moment — so three rules hold, each pinned by tests i
   only against the remembered number is withdrawn.
 - **Drift aborts the run.** Whenever a fresh baseline lands while a remembered
   one is held — on the re-verification interval or on the accept path — the two
-  are compared, and a disagreement beyond `--baseline-drift-epsilon` stops the
-  run rather than deciding anything.
+  are compared, and a disagreement beyond the (auto-tuned)
+  `--baseline-drift-epsilon` stops the run rather than deciding anything. With
+  `--baseline-reverify-interval 0` no score is remembered between promotes, so
+  the canary is inactive; every promote is already self-paired.
 
 The screen phase is deliberately untouched: its sample phase rotates per
 experiment, so each screen scores the incumbent on a different stratum and that

@@ -4,11 +4,11 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS,
-    DEFAULT_BASELINE_DRIFT_EPSILON, DEFAULT_CANDIDATE_COUNT, DEFAULT_FOCUS_COUNT,
-    DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
-    DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
-    PromoteGateMode, print_run_summary, report_from_journal, run_optimisation_cancellable,
+    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS, DEFAULT_CANDIDATE_COUNT,
+    DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
+    ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary, report_from_journal,
+    run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -157,11 +157,12 @@ struct Cli {
 
     /// Absolute baseline-score drift that aborts the run (issue #113).
     ///
-    /// Checked whenever a fresh baseline arrives while a remembered one is held.
-    /// Beyond it the two disagree about the same creature on the same corpus —
-    /// the state that lands a false accept — so the run stops.
-    #[arg(long, default_value_t = DEFAULT_BASELINE_DRIFT_EPSILON)]
-    baseline_drift_epsilon: f64,
+    /// Omit to auto-tune from corpus size and Phase-0 error (directory-scorer
+    /// `f32` association model). Pass an absolute value only for expert / A/B
+    /// overrides — hosts should not ship a competing default. Accept safety is
+    /// the paired re-score, not this epsilon.
+    #[arg(long)]
+    baseline_drift_epsilon: Option<f64>,
 
     /// Local JSON store for structural graft memory (phase-G replay).
     ///
@@ -325,7 +326,9 @@ fn main() -> ExitCode {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
-    if let Err(e) = config.baseline_reuse_policy() {
+    // Validate an explicit override early; auto-tune is resolved once the
+    // corpus size is known inside the optimisation loop.
+    if let Err(e) = config.baseline_reuse_policy(2, 1.0) {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
