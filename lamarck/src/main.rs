@@ -4,10 +4,11 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    CancelToken, DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_IMPROVEMENT,
-    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
-    ExternalScorer, LamarckConfig, print_run_summary, report_from_journal,
-    run_optimisation_cancellable,
+    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS,
+    DEFAULT_BASELINE_DRIFT_EPSILON, DEFAULT_CANDIDATE_COUNT, DEFAULT_FOCUS_COUNT,
+    DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
+    DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
+    PromoteGateMode, print_run_summary, report_from_journal, run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -40,6 +41,13 @@ struct Cli {
     /// Candidate creatures generated per experiment.
     #[arg(long, default_value_t = DEFAULT_CANDIDATE_COUNT)]
     candidates: usize,
+
+    /// Scale the generator's per-phase quotas with `--candidates` (issue #108).
+    ///
+    /// Without it the fixed quotas cap the batch at ~29 on the production
+    /// creature whatever `--candidates` says.
+    #[arg(long, default_value_t = false)]
+    scale_candidate_quotas: bool,
 
     /// Minimum absolute score improvement (strict `>`).
     #[arg(long, default_value_t = DEFAULT_MIN_IMPROVEMENT)]
@@ -84,6 +92,15 @@ struct Cli {
     #[arg(long, default_value = "weighted")]
     focus_policy: String,
 
+    /// Focus neurons proposed against per experiment (issue #109). Must be >= 1.
+    ///
+    /// The creature-wide learning and output-residual passes run once per
+    /// experiment whatever this is, so `K > 1` amortises them over `K` focuses
+    /// and splits `--candidates` between them. `--focus-neuron` pins the focus
+    /// and caps this at 1.
+    #[arg(long, default_value_t = DEFAULT_FOCUS_COUNT)]
+    focus_count: usize,
+
     /// Compute expensive input×input correlations in observations.
     #[arg(long, default_value_t = false)]
     compute_correlations: bool,
@@ -103,8 +120,48 @@ struct Cli {
     screen_sample_rate: f64,
 
     /// Minimum sample-score Δ to promote a candidate to full-corpus scoring.
+    ///
+    /// Stays in force under `--screen-promote-gate noise-aware` as that gate's
+    /// absolute floor, so the noise-aware gate is never the weaker of the two.
     #[arg(long, default_value_t = DEFAULT_SCREEN_PROMOTE_THRESHOLD)]
     screen_promote_threshold: f64,
+
+    /// Promote gate: absolute (default) | noise-aware (issue #111).
+    ///
+    /// `absolute` is the pre-#111 run: promote on a bare
+    /// `--screen-promote-threshold`. `noise-aware` prices the batch's own
+    /// screen-Δ spread first and promotes on
+    /// `Δ > max(k · σ̂, --screen-promote-threshold)`. Opt-in until a paired
+    /// benchmark on accepts per wall-clock hour justifies moving the default.
+    #[arg(long, default_value = "absolute")]
+    screen_promote_gate: String,
+
+    /// σ̂ multiplier `k` for `--screen-promote-gate noise-aware`. Must be > 0.
+    ///
+    /// Ignored under the absolute gate. `docs/screen-calibration.md` measured
+    /// the screen's noise floor and recommended 3σ.
+    #[arg(long, default_value_t = DEFAULT_SCREEN_PROMOTE_SIGMA_K)]
+    screen_promote_sigma_k: f64,
+
+    /// Promote calls served from the remembered full-corpus baseline before one
+    /// scores it fresh again (issue #113). `0` (default) disables reuse.
+    ///
+    /// Between accepts the incumbent's full-corpus score is a constant the run
+    /// already knows, so a promote call that reuses it drops ≈20% of its
+    /// creature-scores. That also drops the pairing that makes a promote call
+    /// self-verifying, so every Nth call re-scores the incumbent and checks it
+    /// against `--baseline-drift-epsilon`, and any accept is re-decided against
+    /// a freshly scored pair before the incumbent is swapped.
+    #[arg(long, default_value_t = 0)]
+    baseline_reverify_interval: u64,
+
+    /// Absolute baseline-score drift that aborts the run (issue #113).
+    ///
+    /// Checked whenever a fresh baseline arrives while a remembered one is held.
+    /// Beyond it the two disagree about the same creature on the same corpus —
+    /// the state that lands a false accept — so the run stops.
+    #[arg(long, default_value_t = DEFAULT_BASELINE_DRIFT_EPSILON)]
+    baseline_drift_epsilon: f64,
 
     /// Local JSON store for structural graft memory (phase-G replay).
     ///
@@ -122,6 +179,27 @@ struct Cli {
     /// (default: 0.01, the NEAT-AI port value). Must be > 0.
     #[arg(long)]
     backprop_learning_rate: Option<f64>,
+
+    /// Focus-dependent entries the cross-experiment analysis memo may hold
+    /// (issue #106).
+    ///
+    /// While the incumbent is unchanged, the focus stats / incoming-source /
+    /// residual-ranking scan is a pure function of `(incumbent, focus, sample)`,
+    /// so a repeated focus is served from the memo and skips a whole training
+    /// scan. `0` disables memoisation. Every entry is dropped whenever the
+    /// incumbent changes.
+    #[arg(long, default_value_t = DEFAULT_ANALYSIS_MEMO_ENTRIES)]
+    analysis_memo_entries: usize,
+
+    /// Worker threads folding record chunks in the two per-experiment analysis
+    /// scans (issue #107). Must be >= 1.
+    ///
+    /// The sample is cut into fixed-size record chunks and the per-chunk
+    /// partials are merged in chunk order, so the analysis is bit-identical at
+    /// every thread count — only the wall clock moves. Deliberately not "all
+    /// cores": the scorer owns the box whenever it runs.
+    #[arg(long, default_value_t = DEFAULT_ANALYSIS_THREADS)]
+    analysis_threads: usize,
 
     /// Cap on one `backprop` bias step, overriding
     /// `BackpropConfig::maximum_bias_adjustment_scale` (default: 10). Must be > 0.
@@ -178,12 +256,22 @@ fn main() -> ExitCode {
         std::process::exit(2);
     });
 
+    let screen_promote_gate =
+        PromoteGateMode::parse(&cli.screen_promote_gate).unwrap_or_else(|| {
+            eprintln!(
+                "unknown --screen-promote-gate '{}'; expected absolute|noise-aware",
+                cli.screen_promote_gate
+            );
+            std::process::exit(2);
+        });
+
     let config = LamarckConfig {
         creature,
         training_data,
         timeout: Duration::from_secs(cli.timeout_seconds),
         max_experiments: cli.max_experiments,
         candidates: cli.candidates,
+        scale_candidate_quotas: cli.scale_candidate_quotas,
         min_improvement: cli.min_improvement,
         seed: cli.seed,
         scorer_path: cli.scorer.clone(),
@@ -197,6 +285,7 @@ fn main() -> ExitCode {
         quick_sample_records: cli.quick_sample_records,
         focus_neuron: cli.focus_neuron,
         focus_policy,
+        focus_count: cli.focus_count,
         compute_correlations: cli.compute_correlations,
         max_consecutive_scorer_failures: neat_ai_lamarck::DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
         phase0_parity: !cli.skip_phase0,
@@ -207,14 +296,36 @@ fn main() -> ExitCode {
             None
         },
         screen_promote_threshold: cli.screen_promote_threshold,
+        screen_promote_gate,
+        screen_promote_sigma_k: cli.screen_promote_sigma_k,
+        baseline_reverify_interval: cli.baseline_reverify_interval,
+        baseline_drift_epsilon: cli.baseline_drift_epsilon,
         grafts_path: cli.grafts_path,
         graft_replay_budget: cli.graft_replay_budget_seconds.map(Duration::from_secs),
         backprop_learning_rate: cli.backprop_learning_rate,
+        analysis_memo_entries: cli.analysis_memo_entries,
         backprop_max_bias_adjustment_scale: cli.backprop_max_bias_adjustment_scale,
+        analysis_threads: cli.analysis_threads,
     };
 
     // Fail before spawning the scorer rather than deep inside the run.
     if let Err(e) = config.backprop_config() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.analysis_threads() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.focus_count() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.promote_gate() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.baseline_reuse_policy() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }

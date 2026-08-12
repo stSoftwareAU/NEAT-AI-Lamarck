@@ -9,15 +9,16 @@ use crate::structural::{
     rank_unused_sources, split_incoming_synapse, suggested_outbound_weight, suggested_weight,
     suggested_weight_scaled, with_previous_hidden_first,
 };
-use crate::tags::{CreatureMeta, serialize_creature_with_meta};
-use neat_core::{CreatureExport, creature_to_json_pretty};
+use crate::tags::{CreatureMeta, serialize_creature_with_meta_compact};
+use neat_core::{CreatureExport, creature_to_json};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 /// Strategy label recorded in the experiment journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateStrategy {
     /// Conventional backprop-derived bias/weight change.
@@ -38,6 +39,23 @@ pub enum CandidateStrategy {
     StructuralWeaken,
     /// Random exploratory mutation.
     Random,
+}
+
+impl CandidateStrategy {
+    /// Journal / log name of the strategy (the `serde` snake-case spelling).
+    pub fn label(self) -> &'static str {
+        match self {
+            CandidateStrategy::Backprop => "backprop",
+            CandidateStrategy::MeanErrorBias => "mean_error_bias",
+            CandidateStrategy::StatsWeight => "stats_weight",
+            CandidateStrategy::StatsBias => "stats_bias",
+            CandidateStrategy::StatsSkewBias => "stats_skew_bias",
+            CandidateStrategy::StructuralAdd => "structural_add",
+            CandidateStrategy::StructuralAddNeuron => "structural_add_neuron",
+            CandidateStrategy::StructuralWeaken => "structural_weaken",
+            CandidateStrategy::Random => "random",
+        }
+    }
 }
 
 /// Provenance for one candidate creature.
@@ -79,6 +97,109 @@ const SKEW_BIAS_STEP_FRACTION: f64 = 0.25;
 /// sampled median gap noisy, so trust it less).
 const SKEW_BIAS_KURTOSIS_REFERENCE: f64 = 3.0;
 
+/// Weight/bias strategies swept round-robin once the structural phases are done.
+const FILL_STRATEGIES: [CandidateStrategy; 8] = [
+    CandidateStrategy::Backprop,
+    CandidateStrategy::StatsWeight,
+    CandidateStrategy::StructuralAdd,
+    CandidateStrategy::StructuralAddNeuron,
+    CandidateStrategy::StatsBias,
+    CandidateStrategy::StatsSkewBias,
+    CandidateStrategy::StructuralWeaken,
+    CandidateStrategy::Random,
+];
+
+/// Scaled-quota per-round quota: synapse adds swept from the ranked grid.
+const ADDS_PER_ROUND: usize = 4;
+/// Scaled-quota per-round quota: neuron growths swept from the ranked × squash grid.
+const NEURONS_PER_ROUND: usize = 3;
+/// Scaled-quota per-round quota: neuron growths from the hidden-first ordering.
+const HIDDEN_NEURONS_PER_ROUND: usize = 2;
+/// Weight scales (× [`OLS_WEIGHT_FRACTION`]) swept per ranked source.
+///
+/// The grid of ranked sources × these scales is what makes a scaled batch
+/// finite: once it is consumed there is no further synapse add to propose.
+const ADD_SCALE_STEPS: [f64; 4] = [1.0, 2.0, 0.5, 4.0];
+
+/// Requested size of one candidate batch (issue #108).
+#[derive(Debug, Clone, Copy)]
+pub struct CandidateBudget {
+    /// Requested candidate count.
+    pub count: usize,
+    /// When true the per-phase quotas scale with `count`, so the budget binds
+    /// until the generator genuinely runs out of proposals.
+    ///
+    /// When false the pre-#108 fixed quotas apply and the batch tops out at
+    /// their ceiling (~29 on the production creature) whatever `count` says.
+    pub scale_quotas: bool,
+}
+
+/// Why a candidate batch stopped growing (issue #108).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchLimit {
+    /// The requested candidate count was reached.
+    Budget,
+    /// Every ranked source and squash was consumed and no strategy proposed
+    /// anything new — the generator has genuinely run out.
+    Exhausted,
+    /// The fixed pre-#108 per-phase quotas ran out below the budget.
+    QuotaCeiling,
+}
+
+impl BatchLimit {
+    /// Short label for the run log.
+    pub fn label(self) -> &'static str {
+        match self {
+            BatchLimit::Budget => "budget reached",
+            BatchLimit::Exhausted => "generator exhausted",
+            BatchLimit::QuotaCeiling => "fixed quota ceiling",
+        }
+    }
+}
+
+/// One generated batch plus why it stopped.
+#[derive(Debug, Clone)]
+pub struct CandidateBatch {
+    /// Generated candidates, in proposal order.
+    pub candidates: Vec<Candidate>,
+    /// Why generation stopped.
+    pub limit: BatchLimit,
+}
+
+impl CandidateBatch {
+    /// Strategy mix of the batch — how many candidates each family contributed.
+    pub fn strategy_mix(&self) -> BTreeMap<CandidateStrategy, usize> {
+        strategy_mix(&self.candidates)
+    }
+
+    /// Strategy mix rendered for the run log, e.g. `structural_add=6 random=3`.
+    pub fn strategy_mix_summary(&self) -> String {
+        strategy_mix_summary(&self.candidates)
+    }
+}
+
+/// Strategy mix of any candidate slice — how many each family contributed.
+///
+/// Takes a slice rather than a batch so a run that merged several per-focus
+/// batches into one population can still report its mix (issue #109).
+pub fn strategy_mix(candidates: &[Candidate]) -> BTreeMap<CandidateStrategy, usize> {
+    let mut mix = BTreeMap::new();
+    for candidate in candidates {
+        *mix.entry(candidate.provenance.strategy).or_insert(0) += 1;
+    }
+    mix
+}
+
+/// Strategy mix rendered for the run log, e.g. `structural_add=6 random=3`.
+pub fn strategy_mix_summary(candidates: &[Candidate]) -> String {
+    strategy_mix(candidates)
+        .into_iter()
+        .map(|(strategy, n)| format!("{}={n}", strategy.label()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Inputs shared by candidate generation for one focus-neuron experiment.
 pub struct CandidateGenContext<'a> {
     /// Incumbent creature (never mutated).
@@ -101,73 +222,165 @@ pub struct CandidateGenContext<'a> {
     pub structural_only: bool,
 }
 
-/// Generate a candidate population without mutating the incumbent.
+/// Generate a candidate population under the pre-#108 fixed quotas.
+///
+/// Kept as the legacy entry point: the batch tops out at the fixed per-phase
+/// ceiling whatever `count` says. Use [`generate_candidate_batch`] with
+/// [`CandidateBudget::scale_quotas`] to let the budget bind.
 pub fn generate_candidates(
     ctx: &CandidateGenContext<'_>,
     count: usize,
     rng: &mut impl Rng,
 ) -> Vec<Candidate> {
-    let mut out = Vec::with_capacity(count);
-    if count == 0 {
-        return out;
+    generate_candidate_batch(
+        ctx,
+        CandidateBudget {
+            count,
+            scale_quotas: false,
+        },
+        rng,
+    )
+    .candidates
+}
+
+/// Generate a candidate population without mutating the incumbent.
+///
+/// The opening phases are the pre-#108 fixed quotas, so a small batch is
+/// unchanged. When [`CandidateBudget::scale_quotas`] is set, generation then
+/// keeps sweeping the ranked-source × weight-scale and ranked-source × squash
+/// grids — a slice of every family per round, so the strategy mix stays
+/// proportional — until the budget is met or nothing new can be proposed.
+pub fn generate_candidate_batch(
+    ctx: &CandidateGenContext<'_>,
+    budget: CandidateBudget,
+    rng: &mut impl Rng,
+) -> CandidateBatch {
+    let mut batch = Batch::new(ctx.incumbent, budget.count, budget.scale_quotas);
+    if budget.count == 0 {
+        return batch.finish(BatchLimit::Budget);
     }
 
     let ranked = ranked_for(ctx);
     let hidden_first = with_previous_hidden_first(&ranked);
+    let growth_squashes = growth_squashes_for(ctx.focus_stats, Some(ctx.observations));
+    let hidden_growth = hidden_first.as_ref().filter(|hid_ranked| {
+        // Also grow via a previous hidden when the top residual source is an input.
+        hid_ranked
+            .first()
+            .is_some_and(|s| !crate::structural::is_input_source(&s.from_uuid))
+            && ranked
+                .first()
+                .is_some_and(|s| crate::structural::is_input_source(&s.from_uuid))
+    });
 
+    fill_opening(
+        ctx,
+        &mut batch,
+        &ranked,
+        hidden_growth,
+        &growth_squashes,
+        rng,
+    );
+
+    if !budget.scale_quotas {
+        let limit = if batch.is_full() {
+            BatchLimit::Budget
+        } else {
+            BatchLimit::QuotaCeiling
+        };
+        return batch.finish(limit);
+    }
+
+    // --- Scaled quotas (issue #108) ---
+    let mut cursors = GridCursors {
+        add: 0,
+        neuron: 0,
+        hidden: 0,
+        add_grid: ranked.len() * ADD_SCALE_STEPS.len(),
+        neuron_grid: ranked.len() * growth_squashes.len(),
+        hidden_grid: hidden_growth.map_or(0, |h| h.len() * growth_squashes.len()),
+    };
+    let limit = loop {
+        if batch.is_full() {
+            break BatchLimit::Budget;
+        }
+        let productive = fill_round(
+            ctx,
+            &mut batch,
+            &mut cursors,
+            &ranked,
+            hidden_growth,
+            &growth_squashes,
+            rng,
+        );
+        // A barren round is only exhaustion once every grid is consumed too:
+        // a round can propose nothing but duplicates while sources remain.
+        if !productive && !cursors.structural_remaining() {
+            break BatchLimit::Exhausted;
+        }
+    };
+    batch.finish(limit)
+}
+
+/// Fixed opening phases — identical to the pre-#108 generator.
+fn fill_opening(
+    ctx: &CandidateGenContext<'_>,
+    batch: &mut Batch,
+    ranked: &[RankedSource],
+    hidden_growth: Option<&Vec<RankedSource>>,
+    growth_squashes: &[&str],
+    rng: &mut impl Rng,
+) {
     // Synapse add, then one neuron per squash (order follows residual shape),
     // then additional synapse scales to fill the budget.
-    if let Some(cand) = build_structural_add_scaled(ctx, &ranked, 0, OLS_WEIGHT_FRACTION) {
-        out.push(cand);
-    }
+    batch.push(build_structural_add_scaled(
+        ctx,
+        ranked,
+        0,
+        OLS_WEIGHT_FRACTION,
+    ));
     // Explicitly try hooking an unused previous hidden into the focus even when
     // its probe score is still zero (unmeasured prior).
-    if let Some(hid_i) = first_previous_hidden_index(&ranked)
-        && out.len() < count
+    if let Some(hid_i) = first_previous_hidden_index(ranked)
+        && !batch.is_full()
     {
-        let already_added = out.iter().any(|c| {
+        let already_added = batch.candidates().iter().any(|c| {
             c.provenance.strategy == CandidateStrategy::StructuralAdd
                 && c.provenance.mutation.contains(&ranked[hid_i].from_uuid)
         });
-        if !already_added
-            && let Some(cand) =
-                build_structural_add_scaled_gated(ctx, &ranked, hid_i, OLS_WEIGHT_FRACTION, false)
-        {
-            out.push(cand);
+        if !already_added {
+            batch.push(build_structural_add_scaled_gated(
+                ctx,
+                ranked,
+                hid_i,
+                OLS_WEIGHT_FRACTION,
+                false,
+            ));
         }
     }
-    let growth_squashes = growth_squashes_for(ctx.focus_stats, Some(ctx.observations));
     for (squash_i, &squash) in growth_squashes.iter().enumerate() {
-        if out.len() >= count {
+        if batch.is_full() {
             break;
         }
         // Under mixed mode, only emit a few squashes so weight strategies still fit.
         if !ctx.structural_only && squash_i >= 3 {
             break;
         }
-        if let Some(cand) = build_structural_add_neuron_combo(ctx, &ranked, rng, squash) {
-            out.push(cand);
-        }
+        batch.push(build_structural_add_neuron_combo(
+            ctx, ranked, rng, squash, 0,
+        ));
     }
-    // Also grow via a previous hidden when the top residual source is an input.
-    if let Some(ref hid_ranked) = hidden_first
-        && hid_ranked
-            .first()
-            .is_some_and(|s| !crate::structural::is_input_source(&s.from_uuid))
-        && ranked
-            .first()
-            .is_some_and(|s| crate::structural::is_input_source(&s.from_uuid))
-    {
+    if let Some(hid_ranked) = hidden_growth {
         for (squash_i, &squash) in growth_squashes.iter().enumerate() {
-            if out.len() >= count {
+            if batch.is_full() {
                 break;
             }
             if !ctx.structural_only && squash_i >= 2 {
                 break;
             }
-            if let Some(cand) = build_structural_add_neuron_combo(ctx, hid_ranked, rng, squash) {
-                out.push(cand);
-            }
+            batch.push(build_structural_add_neuron_combo(
+                ctx, hid_ranked, rng, squash, 0,
+            ));
         }
     }
     for (idx, scale) in [
@@ -176,65 +389,221 @@ pub fn generate_candidates(
         (2, OLS_WEIGHT_FRACTION),
         (3, OLS_WEIGHT_FRACTION),
     ] {
-        if out.len() >= count {
+        if batch.is_full() {
             break;
         }
-        if let Some(cand) = build_structural_add_scaled(ctx, &ranked, idx, scale) {
-            out.push(cand);
-        }
+        batch.push(build_structural_add_scaled(ctx, ranked, idx, scale));
     }
     if ctx.structural_only {
         // Keep filling with remaining residual-ordered squashes / synapse adds.
         let mut squash_i = 0usize;
         let mut syn_i = 0usize;
         let n_squash = growth_squashes.len().max(1);
-        while out.len() < count && squash_i + syn_i < n_squash * 3 {
+        while !batch.is_full() && squash_i + syn_i < n_squash * 3 {
             if squash_i <= syn_i {
                 let squash = growth_squashes[squash_i % n_squash];
                 squash_i += 1;
-                if let Some(cand) = build_structural_add_neuron_combo(ctx, &ranked, rng, squash) {
-                    out.push(cand);
-                }
+                batch.push(build_structural_add_neuron_combo(
+                    ctx, ranked, rng, squash, 0,
+                ));
             } else {
                 syn_i += 1;
-                if let Some(cand) =
-                    build_structural_add_scaled(ctx, &ranked, syn_i, OLS_WEIGHT_FRACTION)
-                {
-                    out.push(cand);
-                }
+                batch.push(build_structural_add_scaled(
+                    ctx,
+                    ranked,
+                    syn_i,
+                    OLS_WEIGHT_FRACTION,
+                ));
             }
         }
-        return out;
+        return;
     }
 
     let has_error =
         ctx.focus_stats.mean_adjusted_error.is_some() || ctx.focus_stats.mean_error.is_some();
-    if has_error
-        && out.len() < count
-        && let Some(candidate) = build_candidate(ctx, CandidateStrategy::MeanErrorBias, rng)
-    {
-        out.push(candidate);
+    if has_error && !batch.is_full() {
+        batch.push(build_candidate(ctx, CandidateStrategy::MeanErrorBias, rng));
     }
 
-    let fill = [
-        CandidateStrategy::Backprop,
-        CandidateStrategy::StatsWeight,
-        CandidateStrategy::StructuralAdd,
-        CandidateStrategy::StructuralAddNeuron,
-        CandidateStrategy::StatsBias,
-        CandidateStrategy::StatsSkewBias,
-        CandidateStrategy::StructuralWeaken,
-        CandidateStrategy::Random,
-    ];
     let mut strategy_i = 0usize;
-    while out.len() < count && strategy_i < fill.len() * 3 {
-        let strategy = fill[strategy_i % fill.len()];
+    while !batch.is_full() && strategy_i < FILL_STRATEGIES.len() * 3 {
+        let strategy = FILL_STRATEGIES[strategy_i % FILL_STRATEGIES.len()];
         strategy_i += 1;
-        if let Some(candidate) = build_candidate(ctx, strategy, rng) {
-            out.push(candidate);
+        batch.push(build_candidate(ctx, strategy, rng));
+    }
+}
+
+/// How far each scaled-quota grid has been swept.
+struct GridCursors {
+    add: usize,
+    neuron: usize,
+    hidden: usize,
+    add_grid: usize,
+    neuron_grid: usize,
+    hidden_grid: usize,
+}
+
+impl GridCursors {
+    /// True while a ranked source / squash pairing is still unproposed.
+    fn structural_remaining(&self) -> bool {
+        self.add < self.add_grid || self.neuron < self.neuron_grid || self.hidden < self.hidden_grid
+    }
+}
+
+/// One scaled-quota round: a slice of every family, so no strategy monopolises
+/// the extra budget. Returns whether the round added anything new.
+fn fill_round(
+    ctx: &CandidateGenContext<'_>,
+    batch: &mut Batch,
+    cursors: &mut GridCursors,
+    ranked: &[RankedSource],
+    hidden_growth: Option<&Vec<RankedSource>>,
+    growth_squashes: &[&str],
+    rng: &mut impl Rng,
+) -> bool {
+    let mut productive = false;
+    for _ in 0..ADDS_PER_ROUND {
+        if batch.is_full() || cursors.add >= cursors.add_grid {
+            break;
+        }
+        let slot = cursors.add;
+        cursors.add += 1;
+        let source_index = slot % ranked.len();
+        let scale = ADD_SCALE_STEPS[slot / ranked.len()] * OLS_WEIGHT_FRACTION;
+        productive |= batch.push(build_structural_add_scaled(
+            ctx,
+            ranked,
+            source_index,
+            scale,
+        ));
+    }
+    for _ in 0..NEURONS_PER_ROUND {
+        if batch.is_full() || cursors.neuron >= cursors.neuron_grid {
+            break;
+        }
+        let slot = cursors.neuron;
+        cursors.neuron += 1;
+        let squash = growth_squashes[slot / ranked.len()];
+        productive |= batch.push(build_structural_add_neuron_combo(
+            ctx,
+            ranked,
+            rng,
+            squash,
+            slot % ranked.len(),
+        ));
+    }
+    if let Some(hid_ranked) = hidden_growth {
+        for _ in 0..HIDDEN_NEURONS_PER_ROUND {
+            if batch.is_full() || cursors.hidden >= cursors.hidden_grid {
+                break;
+            }
+            let slot = cursors.hidden;
+            cursors.hidden += 1;
+            let squash = growth_squashes[slot / hid_ranked.len()];
+            productive |= batch.push(build_structural_add_neuron_combo(
+                ctx,
+                hid_ranked,
+                rng,
+                squash,
+                slot % hid_ranked.len(),
+            ));
         }
     }
-    out
+    if !ctx.structural_only {
+        for strategy in FILL_STRATEGIES {
+            if batch.is_full() {
+                break;
+            }
+            productive |= batch.push(build_candidate(ctx, strategy, rng));
+        }
+    }
+    productive
+}
+
+/// Accumulator that enforces the budget and (under scaled quotas) rejects
+/// duplicate proposals, so a "filled" batch is never padded with repeats.
+struct Batch {
+    out: Vec<Candidate>,
+    seen: HashSet<u64>,
+    incumbent_uuids: HashSet<String>,
+    count: usize,
+    dedup: bool,
+}
+
+impl Batch {
+    fn new(incumbent: &CreatureExport, count: usize, dedup: bool) -> Self {
+        Self {
+            out: Vec::with_capacity(count.min(1024)),
+            seen: HashSet::new(),
+            incumbent_uuids: incumbent.neurons.iter().map(|n| n.uuid.clone()).collect(),
+            count,
+            dedup,
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.out.len() >= self.count
+    }
+
+    fn candidates(&self) -> &[Candidate] {
+        &self.out
+    }
+
+    /// Accept a proposal; returns whether it joined the batch.
+    fn push(&mut self, candidate: Option<Candidate>) -> bool {
+        let Some(candidate) = candidate else {
+            return false;
+        };
+        if self.is_full() {
+            return false;
+        }
+        if self.dedup && !self.seen.insert(self.fingerprint(&candidate.creature)) {
+            return false;
+        }
+        self.out.push(candidate);
+        true
+    }
+
+    /// Structural fingerprint of a candidate creature.
+    ///
+    /// Neurons a mutation grew carry a fresh random UUID, so they are keyed by
+    /// position instead: two identical bridges must collide rather than pass as
+    /// distinct proposals.
+    fn fingerprint(&self, creature: &CreatureExport) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut grown: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, neuron) in creature.neurons.iter().enumerate() {
+            if !self.incumbent_uuids.contains(&neuron.uuid) {
+                grown.insert(neuron.uuid.as_str(), i);
+            }
+        }
+        let mut hasher = DefaultHasher::new();
+        let hash_uuid = |uuid: &str, hasher: &mut DefaultHasher| match grown.get(uuid) {
+            Some(position) => ("grown", position).hash(hasher),
+            None => ("existing", uuid).hash(hasher),
+        };
+        for neuron in &creature.neurons {
+            hash_uuid(&neuron.uuid, &mut hasher);
+            neuron.neuron_type.hash(&mut hasher);
+            neuron.squash.hash(&mut hasher);
+            neuron.bias.to_bits().hash(&mut hasher);
+        }
+        for synapse in &creature.synapses {
+            hash_uuid(&synapse.from_uuid, &mut hasher);
+            hash_uuid(&synapse.to_uuid, &mut hasher);
+            synapse.weight.to_bits().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn finish(self, limit: BatchLimit) -> CandidateBatch {
+        CandidateBatch {
+            candidates: self.out,
+            limit,
+        }
+    }
 }
 
 fn ranked_for(ctx: &CandidateGenContext<'_>) -> Vec<RankedSource> {
@@ -299,15 +668,19 @@ fn build_structural_add_scaled_gated(
     })
 }
 
-/// Grow a hidden that combines the top two residual sources into the focus.
+/// Grow a hidden that combines two adjacent residual sources into the focus.
+///
+/// `source_index` selects the leading source: `0` is the top-ranked pair, and
+/// scaled quotas (#108) sweep further down the ranking for extra proposals.
 fn build_structural_add_neuron_combo(
     ctx: &CandidateGenContext<'_>,
     ranked: &[RankedSource],
     rng: &mut impl Rng,
     squash: &str,
+    source_index: usize,
 ) -> Option<Candidate> {
     let focus_uuid = ctx.focus_uuid;
-    let a = ranked.first()?;
+    let a = ranked.get(source_index)?;
     if a.score < MIN_NEURON_BRIDGE_SCORE {
         return None;
     }
@@ -333,11 +706,9 @@ fn build_structural_add_neuron_combo(
     .ok()?;
 
     // Optional second residual source into the new neuron.
+    let next = ranked.get(source_index + 1);
     let mut second = None;
-    if let Some(b) = ranked
-        .get(1)
-        .filter(|b| b.score >= MIN_NEURON_BRIDGE_SCORE * 0.5)
-    {
+    if let Some(b) = next.filter(|b| b.score >= MIN_NEURON_BRIDGE_SCORE * 0.5) {
         let w_b = suggested_weight_scaled(b, ctx.focus_stats, OLS_WEIGHT_FRACTION * 0.5);
         if crate::structural::is_forward_edge(&creature, &b.from_uuid, &uuid) {
             add_synapse(&mut creature, b.from_uuid.clone(), &uuid, w_b);
@@ -350,7 +721,7 @@ fn build_structural_add_neuron_combo(
             "structural add-neuron {a_from}+{from_b} -> {uuid} -> {focus_uuid} \
              squash={squash} wa={w_a} wb={w_b} wout={w_out} (scores={:.4}/{:.4})",
             a.score,
-            ranked.get(1).map(|s| s.score).unwrap_or(0.0),
+            next.map(|s| s.score).unwrap_or(0.0),
             a_from = a.from_uuid,
         ),
         None => format!(
@@ -650,12 +1021,13 @@ fn build_candidate(
             let squashes = growth_squashes_for(ctx.focus_stats, Some(ctx.observations));
             // Prefer the residual-fronted squash (e.g. ABSOLUTE on negative mean error).
             let squash = squashes.first().copied().unwrap_or("LeakyReLU");
-            if let Some(cand) = build_structural_add_neuron_combo(ctx, &ranked, rng, squash) {
+            if let Some(cand) = build_structural_add_neuron_combo(ctx, &ranked, rng, squash, 0) {
                 return Some(cand);
             }
             // Prefer reusing a previous hidden when the top residual source is an input.
             if let Some(hid_ranked) = with_previous_hidden_first(&ranked)
-                && let Some(cand) = build_structural_add_neuron_combo(ctx, &hid_ranked, rng, squash)
+                && let Some(cand) =
+                    build_structural_add_neuron_combo(ctx, &hid_ranked, rng, squash, 0)
             {
                 return Some(cand);
             }
@@ -754,6 +1126,11 @@ fn pick_best_incoming<'a>(
 ///
 /// When `meta` is provided, `baseline.json` keeps original `uuid` / `tags`
 /// (candidates stay untagged — acceptance stamps the winner on write).
+///
+/// Every file here is **compact** JSON (issue #114): `rust_scorer` is its only
+/// consumer, and on the production creature the pretty-printer's indentation is
+/// about a third of the ~90 MB a batch writes and the scorer then parses.
+/// Human-facing artefacts — `best.json`, `winners/` — stay pretty.
 pub fn write_candidate_batch(
     dir: &Path,
     incumbent: &CreatureExport,
@@ -765,16 +1142,16 @@ pub fn write_candidate_batch(
     }
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let baseline = if let Some(meta) = meta {
-        serialize_creature_with_meta(incumbent, meta)?
+        serialize_creature_with_meta_compact(incumbent, meta)?
     } else {
-        creature_to_json_pretty(incumbent).map_err(|e| e.to_string())?
+        creature_to_json(incumbent).map_err(|e| e.to_string())?
     };
     fs::write(dir.join("baseline.json"), baseline).map_err(|e| e.to_string())?;
 
     let mut stems = vec!["baseline".to_string()];
     for (i, candidate) in candidates.iter().enumerate() {
         let stem = format!("candidate-{i:03}");
-        let json = creature_to_json_pretty(&candidate.creature).map_err(|e| e.to_string())?;
+        let json = creature_to_json(&candidate.creature).map_err(|e| e.to_string())?;
         fs::write(dir.join(format!("{stem}.json")), json).map_err(|e| e.to_string())?;
         stems.push(stem);
     }
@@ -786,7 +1163,7 @@ mod tests {
     use super::*;
     use crate::backprop::BiasSignal;
     use crate::structural::{refine_sources_from_probes, synthetic_observation_probes};
-    use neat_core::parse_creature_json;
+    use neat_core::{creature_to_json_pretty, parse_creature_json};
     use rand::{SeedableRng, rngs::StdRng};
 
     const TINY: &str = r#"{
@@ -1151,6 +1528,10 @@ mod tests {
 
     /// Issue #75 arm 3: candidate generation has a fixed per-phase ceiling, so
     /// `--candidates` only binds below it. Raising it buys no extra proposals.
+    ///
+    /// Issue #108 kept this as the **default** path: the scaled quotas that let
+    /// the budget bind are opt-in until the paired production benchmark runs,
+    /// so an unchanged production config still tops out here.
     #[test]
     fn raising_the_candidate_budget_above_the_generator_ceiling_adds_nothing() {
         let incumbent = parse_creature_json(TINY).unwrap();
@@ -1181,6 +1562,328 @@ mod tests {
         // Below the ceiling the budget does bind.
         let small = generated(2);
         assert_eq!(small, 2, "a budget under the ceiling must cap the batch");
+
+        // The under-filled batch names the fixed quotas, not exhaustion.
+        let mut rng = StdRng::seed_from_u64(5);
+        let batch = generate_candidate_batch(
+            &ctx,
+            CandidateBudget {
+                count: 100,
+                scale_quotas: false,
+            },
+            &mut rng,
+        );
+        assert_eq!(batch.limit, BatchLimit::QuotaCeiling);
+    }
+
+    /// Creature with `inputs` inputs, of which only `input-0` is wired — the
+    /// rest are unused ranked sources for the generator to propose from.
+    fn wide_creature(inputs: usize) -> CreatureExport {
+        let json = format!(
+            r#"{{
+              "semanticVersion": "4.0.0",
+              "forwardOnly": true,
+              "input": {inputs},
+              "output": 1,
+              "neurons": [
+                {{"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY"}},
+                {{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}}
+              ],
+              "synapses": [
+                {{"fromUUID":"input-0","toUUID":"h1","weight":1.0}},
+                {{"fromUUID":"h1","toUUID":"o1","weight":1.0}}
+              ]
+            }}"#
+        );
+        parse_creature_json(&json).unwrap()
+    }
+
+    /// Observations for [`wide_creature`]: every input carries a distinct,
+    /// comfortably-scoring correlation with the single target.
+    fn wide_obs(inputs: usize) -> ObservationsStatistics {
+        let scalar = |mean: f64| crate::observations::ScalarStats {
+            count: 100,
+            mean,
+            variance: 1.0,
+            std_dev: 1.0,
+            min: -1.0,
+            max: 1.0,
+            zero_count: 0,
+            non_zero_count: 100,
+            non_finite_count: 0,
+            mean_abs: mean.abs(),
+            rms: 1.0,
+            skewness: 0.0,
+            excess_kurtosis: 0.0,
+            quantiles: [0.0; 7],
+        };
+        let mut obs = empty_obs();
+        obs.input_count = inputs;
+        obs.output_count = 1;
+        obs.inputs = (0..inputs).map(|_| scalar(0.0)).collect();
+        obs.outputs = vec![scalar(0.0)];
+        obs.input_target_correlations = (0..inputs)
+            .map(|i| 0.9 - (i as f64) * 0.005)
+            .collect::<Vec<_>>();
+        obs
+    }
+
+    fn wide_incoming() -> IncomingSourceStats {
+        IncomingSourceStats {
+            synapse_index: 1,
+            from_uuid: "h1".into(),
+            weight: 1.0,
+            is_input: false,
+            input_index: None,
+            mean: 0.0,
+            variance: 1.0,
+            std_dev: 1.0,
+            correlation_with_error: Some(0.4),
+            weight_signal_count: None,
+            proposed_weight_delta: None,
+            mean_weight_sensitivity: None,
+        }
+    }
+
+    fn wide_focus() -> FocusNeuronStats {
+        FocusNeuronStats {
+            neuron_uuid: "o1".into(),
+            mean_error: Some(0.1),
+            mean_abs_error: Some(0.1),
+            mean_adjusted_error: Some(0.1),
+            mean_derivative: Some(1.0),
+            ..FocusNeuronStats::default()
+        }
+    }
+
+    fn scaled_batch(
+        ctx: &CandidateGenContext<'_>,
+        count: usize,
+        seed: u64,
+    ) -> super::CandidateBatch {
+        let mut rng = StdRng::seed_from_u64(seed);
+        generate_candidate_batch(
+            ctx,
+            CandidateBudget {
+                count,
+                scale_quotas: true,
+            },
+            &mut rng,
+        )
+    }
+
+    /// Issue #108: with the quotas scaled, `--candidates N` binds at every N a
+    /// creature with ample ranked sources can support — not just below ~29.
+    #[test]
+    fn the_candidate_budget_binds_until_genuine_exhaustion() {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        for count in [12usize, 29, 60, 120] {
+            let batch = scaled_batch(&ctx, count, 5);
+            assert_eq!(
+                batch.candidates.len(),
+                count,
+                "budget {count} did not bind (limit {:?})",
+                batch.limit
+            );
+            assert_eq!(batch.limit, BatchLimit::Budget);
+        }
+    }
+
+    /// A budget past what the creature can support reports exhaustion — the
+    /// true ceiling is named, not silently returned.
+    #[test]
+    fn an_exhausted_generator_reports_exhaustion_rather_than_the_budget() {
+        let incumbent = parse_creature_json(TWO_INPUT).unwrap();
+        let focus = wide_focus();
+        let observations = obs_two_input(0.2, 0.8);
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &[],
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: true,
+        };
+        let batch = scaled_batch(&ctx, 500, 5);
+        assert_eq!(batch.limit, BatchLimit::Exhausted);
+        assert!(
+            !batch.candidates.is_empty() && batch.candidates.len() < 500,
+            "expected a partial batch, got {}",
+            batch.candidates.len()
+        );
+        // Two ranked sources across four weight scales and ten squashes is a
+        // small but real hypothesis space — well above the old two-source floor.
+        assert!(
+            batch.candidates.len() > 8,
+            "exhaustion should come after the whole grid, got {}",
+            batch.candidates.len()
+        );
+    }
+
+    /// Scaling must not let one family eat the extra budget: every strategy
+    /// present at the old ceiling is still present in a much larger batch.
+    #[test]
+    fn a_scaled_batch_starves_no_strategy_family() {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let small = scaled_batch(&ctx, 29, 5).strategy_mix();
+        let large = scaled_batch(&ctx, 120, 5).strategy_mix();
+        for (strategy, n) in &small {
+            assert!(
+                large.contains_key(strategy),
+                "{} vanished from the larger batch (had {n}); mix={large:?}",
+                strategy.label()
+            );
+        }
+        assert!(
+            large.len() >= small.len(),
+            "the larger batch narrowed the mix: {small:?} -> {large:?}"
+        );
+    }
+
+    /// Mutation identity of a candidate, with any generated neuron UUID removed
+    /// so two identical bridges collide instead of looking distinct.
+    fn mutation_identity(candidate: &Candidate) -> String {
+        let is_uuid =
+            |token: &str| token.len() == 36 && token.chars().filter(|c| *c == '-').count() == 4;
+        let body = candidate
+            .provenance
+            .mutation
+            .split_whitespace()
+            .filter(|token| !is_uuid(token))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{}|{body}", candidate.provenance.strategy.label())
+    }
+
+    /// Filling a big budget must propose distinct mutations — a batch padded
+    /// with repeats would bill screen time for candidates already scored.
+    #[test]
+    fn a_scaled_batch_contains_no_duplicate_candidates() {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let batch = scaled_batch(&ctx, 120, 5);
+        let mut seen = std::collections::BTreeSet::new();
+        for candidate in &batch.candidates {
+            let identity = mutation_identity(candidate);
+            assert!(
+                seen.insert(identity.clone()),
+                "duplicate candidate in the batch: {identity}"
+            );
+        }
+        assert_eq!(seen.len(), 120);
+    }
+
+    /// A production-width creature has hundreds of ranked sources, so the
+    /// budget binds well past the old ~29 ceiling without running dry.
+    #[test]
+    fn a_wide_creature_fills_a_far_larger_budget() {
+        let incumbent = wide_creature(512);
+        let focus = wide_focus();
+        let observations = wide_obs(512);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let batch = scaled_batch(&ctx, 240, 5);
+        assert_eq!(batch.candidates.len(), 240);
+        assert_eq!(batch.limit, BatchLimit::Budget);
+        // The old fixed quotas top out well below it on the same creature.
+        let mut rng = StdRng::seed_from_u64(5);
+        let legacy = generate_candidates(&ctx, 240, &mut rng);
+        assert!(
+            legacy.len() < 40,
+            "the fixed quotas should still cap the legacy batch, got {}",
+            legacy.len()
+        );
+    }
+
+    /// The opening phases are untouched, so a batch under the old ceiling is
+    /// identical with or without the scaled quotas.
+    #[test]
+    fn scaling_the_quotas_leaves_a_small_batch_unchanged() {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let mut rng = StdRng::seed_from_u64(5);
+        let legacy = generate_candidates(&ctx, 8, &mut rng);
+        let scaled = scaled_batch(&ctx, 8, 5);
+        let mutations = |candidates: &[Candidate]| {
+            candidates
+                .iter()
+                .map(|c| c.provenance.mutation.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(mutations(&legacy), mutations(&scaled.candidates));
     }
 
     /// Observations whose single target has the given shape and mean→median gap.
@@ -1697,5 +2400,90 @@ mod tests {
             "mutation={}",
             first_neuron.provenance.mutation
         );
+    }
+
+    fn one_candidate(incumbent: &CreatureExport) -> Vec<Candidate> {
+        let mut creature = incumbent.clone();
+        creature.neurons[0].bias += 0.25;
+        vec![Candidate {
+            creature,
+            provenance: CandidateProvenance {
+                strategy: CandidateStrategy::Random,
+                focus_neuron: "h1".into(),
+                mutation: "test bias nudge".into(),
+                old_value: Some(0.1),
+                new_value: Some(0.35),
+            },
+        }]
+    }
+
+    /// Issue #114: the scorer is the only reader of a batch file, so it carries
+    /// no pretty-printing.
+    #[test]
+    fn batch_files_are_compact_and_parse_back_to_the_same_creatures() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let candidates = one_candidate(&incumbent);
+        let dir = tempfile::tempdir().unwrap();
+        let batch = dir.path().join("candidates-exp-1");
+        let stems = write_candidate_batch(&batch, &incumbent, &candidates, None).unwrap();
+        assert_eq!(stems, ["baseline", "candidate-000"]);
+
+        for stem in &stems {
+            let text = fs::read_to_string(batch.join(format!("{stem}.json"))).unwrap();
+            assert!(
+                !text.contains('\n'),
+                "{stem}.json must be compact, got:\n{text}"
+            );
+        }
+        // Formatting never changes a parsed value.
+        let baseline = fs::read_to_string(batch.join("baseline.json")).unwrap();
+        assert_eq!(parse_creature_json(&baseline).unwrap(), incumbent);
+        let written = fs::read_to_string(batch.join("candidate-000.json")).unwrap();
+        assert_eq!(
+            parse_creature_json(&written).unwrap(),
+            candidates[0].creature
+        );
+        // …and it is genuinely smaller than the pretty form it replaced.
+        assert!(
+            written.len()
+                < creature_to_json_pretty(&candidates[0].creature)
+                    .unwrap()
+                    .len()
+        );
+    }
+
+    /// The compact baseline still carries the `uuid` / `tags` the scorer and the
+    /// check-in path read (issue #114).
+    #[test]
+    fn compact_baseline_keeps_uuid_and_tags() {
+        let tagged = r#"{
+          "uuid": "creature-9",
+          "semanticVersion": "4.0.0",
+          "forwardOnly": true,
+          "input": 1,
+          "output": 1,
+          "neurons": [
+            {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY"},
+            {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+          ],
+          "synapses": [
+            {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+            {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+          ],
+          "tags": [{"name":"score","value":"0.1"}]
+        }"#;
+        let incumbent = parse_creature_json(tagged).unwrap();
+        let meta = CreatureMeta::from_creature_json(tagged);
+        let dir = tempfile::tempdir().unwrap();
+        let batch = dir.path().join("candidates-exp-2");
+        write_candidate_batch(&batch, &incumbent, &[], Some(&meta)).unwrap();
+
+        let text = fs::read_to_string(batch.join("baseline.json")).unwrap();
+        assert!(!text.contains('\n'), "baseline.json must be compact");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["uuid"], "creature-9");
+        assert_eq!(value["tags"][0]["name"], "score");
+        assert_eq!(value["tags"][0]["value"], "0.1");
+        assert_eq!(parse_creature_json(&text).unwrap(), incumbent);
     }
 }

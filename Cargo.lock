@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "neat_ai_lamarck"
-version = "0.1.11"
+version = "0.1.14"
 dependencies = [
  "clap",
  "neat-core",

@@ -2,7 +2,7 @@
 
 use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::learning::squash_derivative;
-use neat_core::{CompiledNetwork, CreatureExport, TrainingDataConfig, TrainingDataIterator};
+use neat_core::{CompiledNetwork, CreatureExport, TrainingDataConfig};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,18 +20,32 @@ pub struct RandomFocusSelector;
 
 impl FocusSelector for RandomFocusSelector {
     fn select(&mut self, creature: &CreatureExport, rng: &mut impl Rng) -> Option<String> {
-        let candidates: Vec<&str> = creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type != "input")
-            .map(|n| n.uuid.as_str())
-            .collect();
-        if candidates.is_empty() {
-            return None;
-        }
-        let idx = rng.random_range(0..candidates.len());
-        Some(candidates[idx].to_string())
+        select_random_excluding(creature, &[], rng)
     }
+}
+
+/// Draw a random non-input neuron that is not already in `excluded` (issue #109).
+///
+/// With an empty exclusion list this is exactly [`RandomFocusSelector::select`]
+/// — one `random_range` draw — so a single-focus experiment keeps its rng
+/// stream.
+pub fn select_random_excluding(
+    creature: &CreatureExport,
+    excluded: &[String],
+    rng: &mut impl Rng,
+) -> Option<String> {
+    let candidates: Vec<&str> = creature
+        .neurons
+        .iter()
+        .filter(|n| n.neuron_type != "input")
+        .map(|n| n.uuid.as_str())
+        .filter(|uuid| !excluded.iter().any(|e| e == uuid))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let idx = rng.random_range(0..candidates.len());
+    Some(candidates[idx].to_string())
 }
 
 /// Always select a caller-specified non-input neuron UUID (for tests / smoke runs).
@@ -57,18 +71,28 @@ pub struct UnsaturatedFocusSelector;
 
 impl FocusSelector for UnsaturatedFocusSelector {
     fn select(&mut self, creature: &CreatureExport, rng: &mut impl Rng) -> Option<String> {
-        let outputs: Vec<&str> = creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type == "output")
-            .map(|n| n.uuid.as_str())
-            .collect();
-        if !outputs.is_empty() {
-            let idx = rng.random_range(0..outputs.len());
-            return Some(outputs[idx].to_string());
-        }
-        RandomFocusSelector.select(creature, rng)
+        select_unsaturated_excluding(creature, &[], rng)
     }
+}
+
+/// Prefer an unselected output, else any unselected non-input (issue #109).
+pub fn select_unsaturated_excluding(
+    creature: &CreatureExport,
+    excluded: &[String],
+    rng: &mut impl Rng,
+) -> Option<String> {
+    let outputs: Vec<&str> = creature
+        .neurons
+        .iter()
+        .filter(|n| n.neuron_type == "output")
+        .map(|n| n.uuid.as_str())
+        .filter(|uuid| !excluded.iter().any(|e| e == uuid))
+        .collect();
+    if !outputs.is_empty() {
+        let idx = rng.random_range(0..outputs.len());
+        return Some(outputs[idx].to_string());
+    }
+    select_random_excluding(creature, excluded, rng)
 }
 
 /// Prefer the first output neuron when present (fallback when no signals yet).
@@ -86,8 +110,17 @@ impl FocusSelector for HighErrorFocusSelector {
 
 /// Pick the neuron with the largest improvement signal (high-error policy).
 pub fn select_highest_signal(signals: &HashMap<String, f64>) -> Option<FocusChoice> {
+    select_highest_signal_excluding(signals, &[])
+}
+
+/// Highest-signal neuron that is not already in `excluded` (issue #109).
+pub fn select_highest_signal_excluding(
+    signals: &HashMap<String, f64>,
+    excluded: &[String],
+) -> Option<FocusChoice> {
     signals
         .iter()
+        .filter(|(uuid, _)| !excluded.iter().any(|e| e == *uuid))
         .filter(|(_, s)| **s > FOCUS_SIGNAL_EPS)
         .max_by(|a, b| {
             a.1.partial_cmp(b.1)
@@ -226,7 +259,22 @@ impl WeightedFocusSelector {
         signals: &HashMap<String, f64>,
         rng: &mut impl Rng,
     ) -> Option<FocusChoice> {
-        let ranked = self.rank_candidates(creature, signals);
+        self.select_weighted_excluding(creature, signals, &[], rng)
+    }
+
+    /// Draw a focus neuron ∝ improvement signal, skipping `excluded` (#109).
+    ///
+    /// With an empty exclusion list this is exactly [`Self::select_weighted`],
+    /// so a single-focus experiment keeps its rng stream unchanged.
+    pub fn select_weighted_excluding(
+        &self,
+        creature: &CreatureExport,
+        signals: &HashMap<String, f64>,
+        excluded: &[String],
+        rng: &mut impl Rng,
+    ) -> Option<FocusChoice> {
+        let mut ranked = self.rank_candidates(creature, signals);
+        ranked.retain(|(uuid, _, _)| !excluded.iter().any(|e| e == uuid));
         if ranked.is_empty() {
             return None;
         }
@@ -325,6 +373,83 @@ pub struct OutputErrorInfluence {
     pub record_count: u64,
 }
 
+/// Streaming accumulator behind [`collect_output_mean_abs_errors`].
+///
+/// Fed one already-predicted record at a time so the fused pre-focus scan can
+/// share an activation with the learning pass (issue #105).
+pub(crate) struct OutputErrorScan {
+    outputs: Vec<(usize, String)>,
+    abs_sums: Vec<f64>,
+    count: u64,
+}
+
+impl OutputErrorScan {
+    /// Build the accumulator for a creature's output neurons.
+    pub(crate) fn new(creature: &CreatureExport) -> Self {
+        let outputs: Vec<(usize, String)> = creature
+            .neurons
+            .iter()
+            .filter(|n| n.neuron_type == "output")
+            .enumerate()
+            .map(|(i, n)| (i, n.uuid.clone()))
+            .collect();
+        let abs_sums = vec![0.0f64; outputs.len()];
+        Self {
+            outputs,
+            abs_sums,
+            count: 0,
+        }
+    }
+
+    /// Whether the creature has any output neurons to measure.
+    pub(crate) fn has_outputs(&self) -> bool {
+        !self.outputs.is_empty()
+    }
+
+    /// Fold one record's predictions against its targets.
+    pub(crate) fn observe(&mut self, preds: &[f32], targets: &[f32]) {
+        self.count += 1;
+        for (out_i, _) in &self.outputs {
+            if *out_i >= targets.len() || *out_i >= preds.len() {
+                continue;
+            }
+            let pred = f64::from(preds[*out_i]);
+            let target = f64::from(targets[*out_i]);
+            self.abs_sums[*out_i] += (target - pred).abs();
+        }
+    }
+
+    /// Fold another chunk's accumulator into this one (issue #107).
+    ///
+    /// Both sides describe the same creature, so the residual sums simply add.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.count += other.count;
+        for (mine, theirs) in self.abs_sums.iter_mut().zip(&other.abs_sums) {
+            *mine += *theirs;
+        }
+    }
+
+    /// Consume the accumulator and hand back per-output residual summaries.
+    pub(crate) fn finish(self) -> HashMap<String, OutputErrorInfluence> {
+        let mut map = HashMap::with_capacity(self.outputs.len());
+        if self.count == 0 {
+            return map;
+        }
+        for (out_i, uuid) in self.outputs {
+            let mass = self.abs_sums[out_i];
+            map.insert(
+                uuid,
+                OutputErrorInfluence {
+                    mean_abs_error: mass / self.count as f64,
+                    abs_error_mass: mass,
+                    record_count: self.count,
+                },
+            );
+        }
+        map
+    }
+}
+
 /// Collect per-output MAE and total L1 residual mass over a training sample.
 pub fn collect_output_mean_abs_errors(
     creature: &CreatureExport,
@@ -332,20 +457,13 @@ pub fn collect_output_mean_abs_errors(
     training_data: &Path,
     max_records: Option<u64>,
 ) -> Result<HashMap<String, OutputErrorInfluence>, String> {
-    let outputs: Vec<(usize, String)> = creature
-        .neurons
-        .iter()
-        .filter(|n| n.neuron_type == "output")
-        .enumerate()
-        .map(|(i, n)| (i, n.uuid.clone()))
-        .collect();
-    if outputs.is_empty() {
+    let mut scan = OutputErrorScan::new(creature);
+    if !scan.has_outputs() {
         return Ok(HashMap::new());
     }
 
     let config = TrainingDataConfig::new(creature.input, creature.output);
-    let mut iter = TrainingDataIterator::new(training_data, config).map_err(|e| e.to_string())?;
-    let mut abs_sums = vec![0.0f64; outputs.len()];
+    let mut iter = crate::analysis::open_training_scan(training_data, config)?;
     let mut count = 0u64;
 
     while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
@@ -356,32 +474,10 @@ pub fn collect_output_mean_abs_errors(
         }
         let preds = network.activate(&record.inputs, creature.output);
         count += 1;
-        for (out_i, _) in &outputs {
-            if *out_i >= record.outputs.len() || *out_i >= preds.len() {
-                continue;
-            }
-            let pred = f64::from(preds[*out_i]);
-            let target = f64::from(record.outputs[*out_i]);
-            abs_sums[*out_i] += (target - pred).abs();
-        }
+        scan.observe(&preds, &record.outputs);
     }
 
-    let mut map = HashMap::with_capacity(outputs.len());
-    if count == 0 {
-        return Ok(map);
-    }
-    for (out_i, uuid) in outputs {
-        let mass = abs_sums[out_i];
-        map.insert(
-            uuid,
-            OutputErrorInfluence {
-                mean_abs_error: mass / count as f64,
-                abs_error_mass: mass,
-                record_count: count,
-            },
-        );
-    }
-    Ok(map)
+    Ok(scan.finish())
 }
 
 /// Shortest synapse-path length from each non-input neuron to any output.
@@ -571,6 +667,226 @@ pub fn neuron_index(creature: &CreatureExport, uuid: &str) -> Option<usize> {
         .map(|i| creature.input + i)
 }
 
+/// Streaming accumulator behind [`collect_focus_stats`].
+///
+/// Fed one already-traced record at a time so the fused post-focus scan can
+/// share its activation with the incoming-source and residual passes (#105).
+pub(crate) struct FocusStatsScan {
+    focus_uuid: String,
+    squash: Option<String>,
+    incoming_count: usize,
+    output_index: Option<usize>,
+    relative_idx: usize,
+    post_offset: usize,
+    pre_offset: usize,
+    pre_mean: f64,
+    pre_m2: f64,
+    post_mean: f64,
+    post_m2: f64,
+    pre_min: f64,
+    pre_max: f64,
+    near_zero: u64,
+    saturated: u64,
+    count: u64,
+    err_sum: f64,
+    abs_err_sum: f64,
+    adj_err_sum: f64,
+    deriv_sum: f64,
+    err_count: u64,
+}
+
+impl FocusStatsScan {
+    /// Resolve the focus neuron and size the trace offsets.
+    pub(crate) fn new(
+        creature: &CreatureExport,
+        network: &CompiledNetwork,
+        focus_uuid: &str,
+    ) -> Result<Self, String> {
+        let neuron = creature
+            .neurons
+            .iter()
+            .find(|n| n.uuid == focus_uuid)
+            .ok_or_else(|| format!("focus neuron {focus_uuid} not found"))?;
+        let compiled_idx = neuron_index(creature, focus_uuid)
+            .ok_or_else(|| format!("focus neuron {focus_uuid} missing compiled index"))?;
+        let relative_idx = compiled_idx
+            .checked_sub(creature.input)
+            .ok_or("focus neuron index below input count")?;
+
+        let incoming_count = creature
+            .synapses
+            .iter()
+            .filter(|s| s.to_uuid == focus_uuid)
+            .count();
+
+        let output_index = if neuron.neuron_type == "output" {
+            creature
+                .neurons
+                .iter()
+                .filter(|n| n.neuron_type == "output")
+                .position(|n| n.uuid == focus_uuid)
+        } else {
+            None
+        };
+
+        let num_non_inputs = network.num_neurons.saturating_sub(creature.input);
+        Ok(Self {
+            focus_uuid: focus_uuid.to_string(),
+            squash: neuron.squash.clone(),
+            incoming_count,
+            output_index,
+            relative_idx,
+            post_offset: creature.output,
+            pre_offset: creature.output + num_non_inputs,
+            pre_mean: 0.0,
+            pre_m2: 0.0,
+            post_mean: 0.0,
+            post_m2: 0.0,
+            pre_min: f64::INFINITY,
+            pre_max: f64::NEG_INFINITY,
+            near_zero: 0,
+            saturated: 0,
+            count: 0,
+            err_sum: 0.0,
+            abs_err_sum: 0.0,
+            adj_err_sum: 0.0,
+            deriv_sum: 0.0,
+            err_count: 0,
+        })
+    }
+
+    /// Fold one traced record (`activate_and_trace` output) plus its targets.
+    pub(crate) fn observe(&mut self, traced: &[f32], targets: &[f32]) {
+        if self.pre_offset + self.relative_idx >= traced.len()
+            || self.post_offset + self.relative_idx >= traced.len()
+        {
+            return;
+        }
+        let pre = f64::from(traced[self.pre_offset + self.relative_idx]);
+        let post = f64::from(traced[self.post_offset + self.relative_idx]);
+        self.count += 1;
+        let d1 = pre - self.pre_mean;
+        self.pre_mean += d1 / self.count as f64;
+        self.pre_m2 += d1 * (pre - self.pre_mean);
+        let d2 = post - self.post_mean;
+        self.post_mean += d2 / self.count as f64;
+        self.post_m2 += d2 * (post - self.post_mean);
+        self.pre_min = self.pre_min.min(pre);
+        self.pre_max = self.pre_max.max(pre);
+        if post.abs() < 1e-6 {
+            self.near_zero += 1;
+        }
+        if is_saturated(self.squash.as_deref(), post) {
+            self.saturated += 1;
+        }
+        if let Some(out_i) = self.output_index
+            && out_i < targets.len()
+        {
+            let target = f64::from(targets[out_i]);
+            let err = target - post;
+            let deriv = squash_derivative(self.squash.as_deref(), post);
+            self.err_sum += err;
+            self.abs_err_sum += err.abs();
+            self.adj_err_sum += err * deriv;
+            self.deriv_sum += deriv;
+            self.err_count += 1;
+        }
+    }
+
+    /// Fold another chunk's accumulator into this one (issue #107).
+    ///
+    /// The pre/post activation moments are Welford accumulators, so they merge
+    /// by Chan's parallel formula rather than by adding means; every other
+    /// field is a plain count or sum. Callers merge in chunk order, which is
+    /// what keeps the result independent of how the chunks were scheduled.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        if other.count == 0 {
+            return;
+        }
+        if self.count == 0 {
+            self.pre_mean = other.pre_mean;
+            self.pre_m2 = other.pre_m2;
+            self.post_mean = other.post_mean;
+            self.post_m2 = other.post_m2;
+        } else {
+            let na = self.count as f64;
+            let nb = other.count as f64;
+            let n = na + nb;
+            let pre_delta = other.pre_mean - self.pre_mean;
+            self.pre_mean += pre_delta * nb / n;
+            self.pre_m2 += other.pre_m2 + pre_delta * pre_delta * na * nb / n;
+            let post_delta = other.post_mean - self.post_mean;
+            self.post_mean += post_delta * nb / n;
+            self.post_m2 += other.post_m2 + post_delta * post_delta * na * nb / n;
+        }
+        self.count += other.count;
+        self.pre_min = self.pre_min.min(other.pre_min);
+        self.pre_max = self.pre_max.max(other.pre_max);
+        self.near_zero += other.near_zero;
+        self.saturated += other.saturated;
+        self.err_sum += other.err_sum;
+        self.abs_err_sum += other.abs_err_sum;
+        self.adj_err_sum += other.adj_err_sum;
+        self.deriv_sum += other.deriv_sum;
+        self.err_count += other.err_count;
+    }
+
+    /// Consume the accumulator and hand back the focus statistics.
+    pub(crate) fn finish(self) -> FocusNeuronStats {
+        let count = self.count;
+        let (mean_error, mean_abs_error, mean_adjusted_error, mean_derivative) =
+            if self.err_count > 0 {
+                (
+                    Some(self.err_sum / self.err_count as f64),
+                    Some(self.abs_err_sum / self.err_count as f64),
+                    Some(self.adj_err_sum / self.err_count as f64),
+                    Some(self.deriv_sum / self.err_count as f64),
+                )
+            } else {
+                (None, None, None, None)
+            };
+
+        FocusNeuronStats {
+            neuron_uuid: self.focus_uuid,
+            squash: self.squash,
+            incoming_count: self.incoming_count,
+            pre_mean: self.pre_mean,
+            pre_variance: if count > 0 {
+                self.pre_m2 / count as f64
+            } else {
+                0.0
+            },
+            pre_min: if count > 0 { self.pre_min } else { 0.0 },
+            pre_max: if count > 0 { self.pre_max } else { 0.0 },
+            post_mean: self.post_mean,
+            post_variance: if count > 0 {
+                self.post_m2 / count as f64
+            } else {
+                0.0
+            },
+            near_zero_fraction: if count > 0 {
+                self.near_zero as f64 / count as f64
+            } else {
+                0.0
+            },
+            saturation_fraction: if count > 0 {
+                self.saturated as f64 / count as f64
+            } else {
+                0.0
+            },
+            mean_error,
+            mean_abs_error,
+            mean_adjusted_error,
+            mean_derivative,
+            mean_blame: None,
+            blame_count: None,
+            mean_abs_blame: None,
+            blame_no_change: None,
+            record_count: count,
+        }
+    }
+}
+
 /// Collect focused statistics by scanning the incumbent over training data.
 ///
 /// When `max_records` is `Some(n)`, stop after `n` records (used with `--quick`).
@@ -581,145 +897,249 @@ pub fn collect_focus_stats(
     focus_uuid: &str,
     max_records: Option<u64>,
 ) -> Result<FocusNeuronStats, String> {
-    let neuron = creature
-        .neurons
-        .iter()
-        .find(|n| n.uuid == focus_uuid)
-        .ok_or_else(|| format!("focus neuron {focus_uuid} not found"))?;
-    let compiled_idx = neuron_index(creature, focus_uuid)
-        .ok_or_else(|| format!("focus neuron {focus_uuid} missing compiled index"))?;
-    let relative_idx = compiled_idx
-        .checked_sub(creature.input)
-        .ok_or("focus neuron index below input count")?;
-
-    let incoming_count = creature
-        .synapses
-        .iter()
-        .filter(|s| s.to_uuid == focus_uuid)
-        .count();
-
-    let output_index = if neuron.neuron_type == "output" {
-        creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type == "output")
-            .position(|n| n.uuid == focus_uuid)
-    } else {
-        None
-    };
+    let mut scan = FocusStatsScan::new(creature, network, focus_uuid)?;
 
     let config = TrainingDataConfig::new(creature.input, creature.output);
-    let mut iter = TrainingDataIterator::new(training_data, config).map_err(|e| e.to_string())?;
+    let mut iter = crate::analysis::open_training_scan(training_data, config)?;
 
-    let mut pre_mean = 0.0;
-    let mut pre_m2 = 0.0;
-    let mut post_mean = 0.0;
-    let mut post_m2 = 0.0;
-    let mut pre_min = f64::INFINITY;
-    let mut pre_max = f64::NEG_INFINITY;
-    let mut near_zero = 0u64;
-    let mut saturated = 0u64;
-    let mut count = 0u64;
-    let mut err_sum = 0.0;
-    let mut abs_err_sum = 0.0;
-    let mut adj_err_sum = 0.0;
-    let mut deriv_sum = 0.0;
-    let mut err_count = 0u64;
-
-    let squash = neuron.squash.clone();
     while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
         if let Some(limit) = max_records
-            && count >= limit
+            && scan.count >= limit
         {
             break;
         }
         let traced = network.activate_and_trace(&record.inputs, creature.output);
-        let num_non_inputs = network.num_neurons.saturating_sub(creature.input);
-        let post_offset = creature.output;
-        let pre_offset = creature.output + num_non_inputs;
-        if pre_offset + relative_idx >= traced.len() || post_offset + relative_idx >= traced.len() {
-            continue;
+        scan.observe(&traced, &record.outputs);
+    }
+
+    Ok(scan.finish())
+}
+
+/// Where one incoming source's per-record activation comes from.
+#[derive(Debug, Clone, Copy)]
+enum SourceActivation {
+    /// Raw training-record input at this index.
+    Input(usize),
+    /// Post-activation of the creature neuron at this position.
+    Neuron(usize),
+    /// Source not resolvable in the creature — contributes zero.
+    Missing,
+}
+
+/// Streaming accumulator behind [`collect_incoming_source_stats`].
+///
+/// Fed one already-traced record at a time so the fused post-focus scan can
+/// share its activation with the focus-stats and residual passes (issue #105).
+pub(crate) struct IncomingSourceScan {
+    out: Vec<IncomingSourceStats>,
+    sources: Vec<SourceActivation>,
+    needs_scan: bool,
+    output_index: Option<usize>,
+    relative_idx: usize,
+    post_offset: usize,
+    sums: Vec<f64>,
+    sq: Vec<f64>,
+    cross: Vec<f64>,
+    err_sum: f64,
+    err_sq: f64,
+    count: u64,
+}
+
+impl IncomingSourceScan {
+    /// Resolve the focus neuron's incoming sources, seeding input stats from
+    /// `observations` where available.
+    pub(crate) fn new(
+        creature: &CreatureExport,
+        focus_uuid: &str,
+        observations: Option<&crate::observations::ObservationsStatistics>,
+    ) -> Result<Self, String> {
+        let neuron = creature
+            .neurons
+            .iter()
+            .find(|n| n.uuid == focus_uuid)
+            .ok_or_else(|| format!("focus neuron {focus_uuid} not found"))?;
+        let compiled_idx = neuron_index(creature, focus_uuid)
+            .ok_or_else(|| format!("focus neuron {focus_uuid} missing compiled index"))?;
+        let relative_idx = compiled_idx
+            .checked_sub(creature.input)
+            .ok_or("focus neuron index below input count")?;
+        let output_index = if neuron.neuron_type == "output" {
+            creature
+                .neurons
+                .iter()
+                .filter(|n| n.neuron_type == "output")
+                .position(|n| n.uuid == focus_uuid)
+        } else {
+            None
+        };
+
+        let incoming: Vec<(usize, String, f64)> = creature
+            .synapses
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.to_uuid == focus_uuid)
+            .map(|(i, s)| (i, s.from_uuid.clone(), s.weight))
+            .collect();
+
+        // Reuse observations for raw inputs when available.
+        let out: Vec<IncomingSourceStats> = incoming
+            .iter()
+            .map(|(syn_idx, from, weight)| {
+                let input_index = from
+                    .strip_prefix("input-")
+                    .and_then(|s| s.parse::<usize>().ok());
+                let (mean, variance, std_dev) = if let (Some(idx), Some(obs)) =
+                    (input_index, observations)
+                    && let Some(stats) = obs.inputs.get(idx)
+                {
+                    (stats.mean, stats.variance, stats.std_dev)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+                IncomingSourceStats {
+                    synapse_index: *syn_idx,
+                    from_uuid: from.clone(),
+                    weight: *weight,
+                    is_input: input_index.is_some(),
+                    input_index,
+                    mean,
+                    variance,
+                    std_dev,
+                    correlation_with_error: None,
+                    weight_signal_count: None,
+                    proposed_weight_delta: None,
+                    mean_weight_sensitivity: None,
+                }
+            })
+            .collect();
+
+        // Per-record source lookup, resolved once instead of per record.
+        let sources: Vec<SourceActivation> = out
+            .iter()
+            .map(|src| {
+                if let Some(idx) = src.input_index {
+                    SourceActivation::Input(idx)
+                } else if let Some(pos) = creature
+                    .neurons
+                    .iter()
+                    .position(|n| n.uuid == src.from_uuid)
+                {
+                    SourceActivation::Neuron(pos)
+                } else {
+                    SourceActivation::Missing
+                }
+            })
+            .collect();
+
+        let n = out.len();
+        // No incoming synapses, or nothing a live scan could refine.
+        let needs_scan =
+            !out.is_empty() && (out.iter().any(|s| !s.is_input) || output_index.is_some());
+        Ok(Self {
+            out,
+            sources,
+            needs_scan,
+            output_index,
+            relative_idx,
+            post_offset: creature.output,
+            sums: vec![0.0f64; n],
+            sq: vec![0.0f64; n],
+            cross: vec![0.0f64; n],
+            err_sum: 0.0,
+            err_sq: 0.0,
+            count: 0,
+        })
+    }
+
+    /// Whether folding records in can change the result at all.
+    pub(crate) fn needs_scan(&self) -> bool {
+        self.needs_scan
+    }
+
+    /// Fold one traced record (`activate_and_trace` output) plus its inputs and targets.
+    pub(crate) fn observe(&mut self, inputs: &[f32], targets: &[f32], traced: &[f32]) {
+        if self.post_offset + self.relative_idx >= traced.len() {
+            return;
         }
-        let pre = f64::from(traced[pre_offset + relative_idx]);
-        let post = f64::from(traced[post_offset + relative_idx]);
-        count += 1;
-        let d1 = pre - pre_mean;
-        pre_mean += d1 / count as f64;
-        pre_m2 += d1 * (pre - pre_mean);
-        let d2 = post - post_mean;
-        post_mean += d2 / count as f64;
-        post_m2 += d2 * (post - post_mean);
-        pre_min = pre_min.min(pre);
-        pre_max = pre_max.max(pre);
-        if post.abs() < 1e-6 {
-            near_zero += 1;
-        }
-        if is_saturated(squash.as_deref(), post) {
-            saturated += 1;
-        }
-        if let Some(out_i) = output_index
-            && out_i < record.outputs.len()
+        let post = f64::from(traced[self.post_offset + self.relative_idx]);
+        let err = if let Some(out_i) = self.output_index
+            && out_i < targets.len()
         {
-            let target = f64::from(record.outputs[out_i]);
-            let err = target - post;
-            let deriv = squash_derivative(squash.as_deref(), post);
-            err_sum += err;
-            abs_err_sum += err.abs();
-            adj_err_sum += err * deriv;
-            deriv_sum += deriv;
-            err_count += 1;
+            f64::from(targets[out_i]) - post
+        } else {
+            0.0
+        };
+        self.count += 1;
+        self.err_sum += err;
+        self.err_sq += err * err;
+        for (i, source) in self.sources.iter().enumerate() {
+            let act = match *source {
+                SourceActivation::Input(idx) => f64::from(*inputs.get(idx).unwrap_or(&0.0)),
+                SourceActivation::Neuron(pos) => {
+                    let idx = self.post_offset + pos;
+                    if idx < traced.len() {
+                        f64::from(traced[idx])
+                    } else {
+                        0.0
+                    }
+                }
+                SourceActivation::Missing => 0.0,
+            };
+            self.sums[i] += act;
+            self.sq[i] += act * act;
+            self.cross[i] += act * err;
         }
     }
 
-    let (mean_error, mean_abs_error, mean_adjusted_error, mean_derivative) = if err_count > 0 {
-        (
-            Some(err_sum / err_count as f64),
-            Some(abs_err_sum / err_count as f64),
-            Some(adj_err_sum / err_count as f64),
-            Some(deriv_sum / err_count as f64),
-        )
-    } else {
-        (None, None, None, None)
-    };
+    /// Fold another chunk's accumulator into this one (issue #107).
+    ///
+    /// Every accumulated field is a plain sum; the per-source descriptions are
+    /// identical on both sides because both were built from the same creature.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in self.sums.iter_mut().zip(&other.sums) {
+            *mine += *theirs;
+        }
+        for (mine, theirs) in self.sq.iter_mut().zip(&other.sq) {
+            *mine += *theirs;
+        }
+        for (mine, theirs) in self.cross.iter_mut().zip(&other.cross) {
+            *mine += *theirs;
+        }
+        self.err_sum += other.err_sum;
+        self.err_sq += other.err_sq;
+        self.count += other.count;
+    }
 
-    Ok(FocusNeuronStats {
-        neuron_uuid: focus_uuid.to_string(),
-        squash,
-        incoming_count,
-        pre_mean,
-        pre_variance: if count > 0 {
-            pre_m2 / count as f64
-        } else {
-            0.0
-        },
-        pre_min: if count > 0 { pre_min } else { 0.0 },
-        pre_max: if count > 0 { pre_max } else { 0.0 },
-        post_mean,
-        post_variance: if count > 0 {
-            post_m2 / count as f64
-        } else {
-            0.0
-        },
-        near_zero_fraction: if count > 0 {
-            near_zero as f64 / count as f64
-        } else {
-            0.0
-        },
-        saturation_fraction: if count > 0 {
-            saturated as f64 / count as f64
-        } else {
-            0.0
-        },
-        mean_error,
-        mean_abs_error,
-        mean_adjusted_error,
-        mean_derivative,
-        mean_blame: None,
-        blame_count: None,
-        mean_abs_blame: None,
-        blame_no_change: None,
-        record_count: count,
-    })
+    /// Consume the accumulator and hand back the per-source statistics.
+    pub(crate) fn finish(mut self) -> Vec<IncomingSourceStats> {
+        if self.count == 0 {
+            return self.out;
+        }
+        let n_f = self.count as f64;
+        let err_mean = self.err_sum / n_f;
+        let err_var = (self.err_sq / n_f) - err_mean * err_mean;
+        for (i, src) in self.out.iter_mut().enumerate() {
+            if !src.is_input {
+                let mean = self.sums[i] / n_f;
+                let variance = ((self.sq[i] / n_f) - mean * mean).max(0.0);
+                src.mean = mean;
+                src.variance = variance;
+                src.std_dev = variance.sqrt();
+            }
+            if self.output_index.is_some() {
+                let mean = self.sums[i] / n_f;
+                let var = ((self.sq[i] / n_f) - mean * mean).max(0.0);
+                let cov = (self.cross[i] / n_f) - mean * err_mean;
+                let denom = (var * err_var.max(0.0)).sqrt();
+                src.correlation_with_error = if denom > f64::EPSILON {
+                    Some((cov / denom).clamp(-1.0, 1.0))
+                } else {
+                    Some(0.0)
+                };
+            }
+        }
+        self.out
+    }
 }
 
 /// Collect per-incoming-source activation stats (and residual correlation when possible).
@@ -731,159 +1151,24 @@ pub fn collect_incoming_source_stats(
     max_records: Option<u64>,
     observations: Option<&crate::observations::ObservationsStatistics>,
 ) -> Result<Vec<IncomingSourceStats>, String> {
-    let neuron = creature
-        .neurons
-        .iter()
-        .find(|n| n.uuid == focus_uuid)
-        .ok_or_else(|| format!("focus neuron {focus_uuid} not found"))?;
-    let compiled_idx = neuron_index(creature, focus_uuid)
-        .ok_or_else(|| format!("focus neuron {focus_uuid} missing compiled index"))?;
-    let relative_idx = compiled_idx
-        .checked_sub(creature.input)
-        .ok_or("focus neuron index below input count")?;
-    let output_index = if neuron.neuron_type == "output" {
-        creature
-            .neurons
-            .iter()
-            .filter(|n| n.neuron_type == "output")
-            .position(|n| n.uuid == focus_uuid)
-    } else {
-        None
-    };
-
-    let incoming: Vec<(usize, String, f64)> = creature
-        .synapses
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.to_uuid == focus_uuid)
-        .map(|(i, s)| (i, s.from_uuid.clone(), s.weight))
-        .collect();
-    if incoming.is_empty() {
-        return Ok(vec![]);
+    let mut scan = IncomingSourceScan::new(creature, focus_uuid, observations)?;
+    if !scan.needs_scan() {
+        return Ok(scan.finish());
     }
-
-    // Reuse observations for raw inputs when available.
-    let mut out: Vec<IncomingSourceStats> = incoming
-        .iter()
-        .map(|(syn_idx, from, weight)| {
-            let input_index = from
-                .strip_prefix("input-")
-                .and_then(|s| s.parse::<usize>().ok());
-            let (mean, variance, std_dev) = if let (Some(idx), Some(obs)) =
-                (input_index, observations)
-                && let Some(stats) = obs.inputs.get(idx)
-            {
-                (stats.mean, stats.variance, stats.std_dev)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-            IncomingSourceStats {
-                synapse_index: *syn_idx,
-                from_uuid: from.clone(),
-                weight: *weight,
-                is_input: input_index.is_some(),
-                input_index,
-                mean,
-                variance,
-                std_dev,
-                correlation_with_error: None,
-                weight_signal_count: None,
-                proposed_weight_delta: None,
-                mean_weight_sensitivity: None,
-            }
-        })
-        .collect();
-
-    // Measure hidden sources (and refine correlations) with a live scan.
-    let need_live = out.iter().any(|s| !s.is_input) || output_index.is_some();
-    if !need_live {
-        return Ok(out);
-    }
-
-    let n = out.len();
-    let mut sums = vec![0.0f64; n];
-    let mut sq = vec![0.0f64; n];
-    let mut err_sum = 0.0f64;
-    let mut err_sq = 0.0f64;
-    let mut cross = vec![0.0f64; n];
-    let mut count = 0u64;
 
     let config = TrainingDataConfig::new(creature.input, creature.output);
-    let mut iter = TrainingDataIterator::new(training_data, config).map_err(|e| e.to_string())?;
+    let mut iter = crate::analysis::open_training_scan(training_data, config)?;
     while let Some(record) = iter.next_record().map_err(|e| e.to_string())? {
         if let Some(limit) = max_records
-            && count >= limit
+            && scan.count >= limit
         {
             break;
         }
         let traced = network.activate_and_trace(&record.inputs, creature.output);
-        let num_non_inputs = network.num_neurons.saturating_sub(creature.input);
-        let post_offset = creature.output;
-        if post_offset + relative_idx >= traced.len() {
-            continue;
-        }
-        let post = f64::from(traced[post_offset + relative_idx]);
-        let err = if let Some(out_i) = output_index
-            && out_i < record.outputs.len()
-        {
-            f64::from(record.outputs[out_i]) - post
-        } else {
-            0.0
-        };
-        count += 1;
-        err_sum += err;
-        err_sq += err * err;
-        for (i, src) in out.iter().enumerate() {
-            let act = if let Some(idx) = src.input_index {
-                f64::from(*record.inputs.get(idx).unwrap_or(&0.0))
-            } else if let Some(pos) = creature
-                .neurons
-                .iter()
-                .position(|n| n.uuid == src.from_uuid)
-            {
-                let idx = post_offset + pos;
-                if idx < traced.len() {
-                    f64::from(traced[idx])
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
-            sums[i] += act;
-            sq[i] += act * act;
-            cross[i] += act * err;
-        }
-        let _ = num_non_inputs;
+        scan.observe(&record.inputs, &record.outputs, &traced);
     }
 
-    if count == 0 {
-        return Ok(out);
-    }
-    let n_f = count as f64;
-    let err_mean = err_sum / n_f;
-    let err_var = (err_sq / n_f) - err_mean * err_mean;
-    for (i, src) in out.iter_mut().enumerate() {
-        if !src.is_input {
-            let mean = sums[i] / n_f;
-            let variance = ((sq[i] / n_f) - mean * mean).max(0.0);
-            src.mean = mean;
-            src.variance = variance;
-            src.std_dev = variance.sqrt();
-        }
-        if output_index.is_some() {
-            let mean = sums[i] / n_f;
-            let var = ((sq[i] / n_f) - mean * mean).max(0.0);
-            let cov = (cross[i] / n_f) - mean * err_mean;
-            let denom = (var * err_var.max(0.0)).sqrt();
-            src.correlation_with_error = if denom > f64::EPSILON {
-                Some((cov / denom).clamp(-1.0, 1.0))
-            } else {
-                Some(0.0)
-            };
-        }
-    }
-    Ok(out)
+    Ok(scan.finish())
 }
 
 /// Attach backprop bias blame for the focus neuron onto focus stats.
@@ -1283,6 +1568,94 @@ mod tests {
                 || incoming[0].proposed_weight_delta.is_some(),
             "incoming weight signal should attach for hidden focus"
         );
+    }
+
+    /// Issue #109: an excluded focus is never drawn again, whatever the policy.
+    #[test]
+    fn exclusion_skips_already_chosen_focuses() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let mut rng = StdRng::seed_from_u64(3);
+
+        // Random: excluding one of two non-inputs leaves exactly the other.
+        for _ in 0..8 {
+            assert_eq!(
+                select_random_excluding(&creature, &["h1".into()], &mut rng),
+                Some("o1".to_string())
+            );
+        }
+        assert_eq!(
+            select_random_excluding(&creature, &["h1".into(), "o1".into()], &mut rng),
+            None,
+            "a fully excluded creature yields no focus rather than repeating one"
+        );
+
+        // Unsaturated prefers outputs, so excluding the output falls back.
+        assert_eq!(
+            select_unsaturated_excluding(&creature, &["o1".into()], &mut rng),
+            Some("h1".to_string())
+        );
+
+        // High-error picks the next strongest signal once the top is taken.
+        let signals: HashMap<String, f64> =
+            [("o1".to_string(), 1.0), ("h1".to_string(), 0.5)].into();
+        assert_eq!(
+            select_highest_signal(&signals).map(|c| c.uuid),
+            Some("o1".to_string())
+        );
+        assert_eq!(
+            select_highest_signal_excluding(&signals, &["o1".into()]).map(|c| c.uuid),
+            Some("h1".to_string())
+        );
+        assert!(
+            select_highest_signal_excluding(&signals, &["o1".into(), "h1".into()]).is_none(),
+            "no unexcluded signal means no focus"
+        );
+
+        // Weighted: with the only other neuron excluded the draw is forced.
+        let selector = WeightedFocusSelector::default();
+        for _ in 0..8 {
+            let choice = selector
+                .select_weighted_excluding(&creature, &signals, &["o1".into()], &mut rng)
+                .expect("one candidate remains");
+            assert_eq!(choice.uuid, "h1");
+        }
+        assert!(
+            selector
+                .select_weighted_excluding(
+                    &creature,
+                    &signals,
+                    &["o1".into(), "h1".into()],
+                    &mut rng
+                )
+                .is_none()
+        );
+    }
+
+    /// Issue #109: excluding nothing must consume the rng exactly as the
+    /// unfiltered draw did, or a K=1 run would drift from its recorded seed.
+    #[test]
+    fn an_empty_exclusion_draws_exactly_as_before() {
+        let creature = parse_creature_json(TINY).unwrap();
+        let signals: HashMap<String, f64> =
+            [("o1".to_string(), 1.0), ("h1".to_string(), 0.5)].into();
+        let selector = WeightedFocusSelector::default();
+
+        let mut a = StdRng::seed_from_u64(11);
+        let mut b = StdRng::seed_from_u64(11);
+        for _ in 0..16 {
+            let plain = selector.select_weighted(&creature, &signals, &mut a);
+            let excluding = selector.select_weighted_excluding(&creature, &signals, &[], &mut b);
+            assert_eq!(plain.map(|c| c.uuid), excluding.map(|c| c.uuid));
+        }
+
+        let mut a = StdRng::seed_from_u64(5);
+        let mut b = StdRng::seed_from_u64(5);
+        for _ in 0..16 {
+            assert_eq!(
+                RandomFocusSelector.select(&creature, &mut a),
+                select_random_excluding(&creature, &[], &mut b)
+            );
+        }
     }
 
     #[test]

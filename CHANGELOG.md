@@ -6,7 +6,105 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Scorer-facing batch files are compact, and promote directories are
+  hard-linked (Issue #114).** `write_candidate_batch` writes `baseline.json` and
+  every `candidate-NNN.json` without pretty-printing — `rust_scorer` is their
+  only reader — and `write_promote_batch` presents the promoted files as hard
+  links into the screen directory instead of copying them, falling back to a
+  copy when the link cannot be made (existing destination, different filesystem,
+  no link support). A missing source still fails loudly. Human-facing artefacts
+  are untouched: `best.json` and `winners/` stay pretty. Measured on a
+  production-shaped batch (baseline + 29 candidates, 2511 inputs, 23 479
+  synapses): **87.0 MB → 61.1 MB written per experiment (-29.8%)**, ≈25 ms less
+  serialisation and ≈15 ms less scorer-side read-plus-parse, plus 8.1 MB of
+  promote copies no longer written. The wall-clock effect is **well under 0.2%
+  of a 36–65 s experiment** — far below the 1%–4% the issue projected, and
+  recorded as a null timing result in
+  [`docs/compact-batch-io.md`](docs/compact-batch-io.md) rather than dressed up.
+
 ### Added
+
+- **An opt-in noise-aware promote gate (Issue #111).**
+  `--screen-promote-gate noise-aware` prices each screened batch's own spread
+  before deciding what earns an ~11 s full-corpus score: it promotes on
+  `Δ > max(k · σ̂, --screen-promote-threshold)`, with `k` set by
+  `--screen-promote-sigma-k` (default `3`) and σ̂ the lower quartile of the
+  batch's absolute screen deltas rescaled from a half-normal — a low quantile
+  because a candidate batch is bimodal, so the standard deviation and the MAD
+  measure proposal dispersion rather than the screen's resolution floor. Taking
+  the `max` with the existing threshold means the gate can only ever promote a
+  **subset** of what the absolute gate promotes; acceptance is untouched and
+  stays on the full corpus at `--min-improvement`. A degenerate batch (fewer
+  than four candidates, a non-finite delta, a zero lower quartile) yields no
+  estimate and falls back to the absolute floor instead of dividing by zero or
+  promoting everything. **The default is unchanged** — `absolute` is the
+  pre-#111 run, pinned by tests. The gate and its `k` are recorded in the
+  journal `runHeader` (`screenPromoteGate` / `screenPromoteSigmaK`) and each
+  experiment records its tier admissions (`screenTiers`: gate, screened,
+  promoted, threshold, σ̂). `report` gains a `promoteGateReplay` bucket that
+  replays the gate offline over any journal, so it can be priced — and its
+  effect on the accepts actually earned checked — without box time. Replayed
+  over the journals in hand (6805 screened candidates, 244 promotions, **2**
+  accepts): **161 of 244 promotions avoided (66%) with both accepts kept**, at
+  every `k` from 1 to 5, asserted as a hard `cargo test` failure in
+  `lamarck/tests/promote_gate_replay.rs`. Written up with its limits in
+  `docs/promote-gate.md`, reproducible via `scripts/summarise-promote-gate.sh`
+  and the `promote-gate` arm of `scripts/run-followup-economics.sh`.
+
+- **`report` measures the screen against the full corpus (Issue #110).** A new
+  `screenCalibration` section pairs every candidate that carries **both** a
+  `screenScores` and a `scores` entry into a (screen Δ, full Δ) point and
+  reports the Spearman rank correlation, the promote gate's precision, the
+  full-corpus spread of what it promoted, the screen's empirical noise floor,
+  the subsample-versus-corpus baseline gap and the screen Δ of every accepted
+  candidate. Only the intersection of the two stem sets is paired — the
+  remainder is counted (`screenOnlyCandidates` / `fullOnlyCandidates`), never
+  dropped — `baseline` is excluded from both sides, a journal with no screen
+  phase reports `screenEnabled: false` instead of a fabricated correlation, and
+  a score map missing its `baseline` anchor fails loudly. `distinctPairs` and
+  `spearmanDistinct` expose repeated proposals so a sample size cannot be
+  overstated. Measured over the journals in hand (222 experiments, 6805 screened
+  candidates, 244 promotions, 136 distinct points, **2** accepts): rank
+  correlation **-0.55**, promote precision **15.2%**, and a `1e-6` threshold
+  sitting at ~1σ of the screen's own noise — written up with its limits in
+  `docs/screen-calibration.md`, reproducible via
+  `scripts/summarise-screen-calibration.sh`. No default flag changes; the
+  promote gate itself is issue #111.
+
+- **The candidate generator's per-phase quotas can scale with the budget (Issue
+  #108).** `--scale-candidate-quotas` keeps generating after the fixed opening
+  quotas are spent, sweeping the ranked-source × weight-scale and
+  ranked-source × squash grids a slice of every strategy family per round, so
+  `--candidates N` binds until the generator is genuinely exhausted instead of
+  topping out at ~29. Duplicate proposals are rejected rather than counted, and
+  each batch reports whether the **budget**, the **fixed quota ceiling** or
+  genuine **exhaustion** bound it — logged per experiment and journalled as
+  `candidatesRequested` / `batchLimit`, with `report` summarising the achieved
+  size in a `candidateBatch` bucket. On a production-shaped creature (2511
+  inputs) the budget now binds at every count measured up to 240, at ~0.08 ms
+  per candidate (`cargo run --release --example candidate_quota_bench`); the
+  fixed quotas stop at 27, of which only 22 are distinct. The flag is
+  **opt-in**: no default changes until the paired `candidate-quotas` arm of
+  `scripts/run-followup-economics.sh` prices a bigger batch in promote-scores
+  per scorer-minute — see `docs/followup-economics.md` Arm 5.
+
+- **The per-experiment analysis scans fold record chunks across cores (Issue
+  #107).** Both scans are read-only reductions, so they now run on
+  `--analysis-threads` workers (default `4`, `0` aborts the run). Determinism
+  comes from the partition rather than the schedule: the sample is cut into
+  fixed 2048-record chunks — a function of the sample alone, never of the thread
+  count or the host — and the per-chunk partials are merged in ascending chunk
+  order, so 1, 2 and 8 threads produce **bit-identical** accumulators and
+  `--seed` replay is unaffected. Every RNG draw (`select_sparse`) stays on the
+  calling thread, ahead of the parallel region, and a creature that is not
+  `forwardOnly` is folded as a single chunk because its activations carry state
+  between records. Measured on the 10-core M4 host at production sample shape:
+  the analysis phase is **1.9× faster at 2 threads, 3.1× at the default 4 and
+  4.1× at 8** (`cargo run --release --example analysis_threads_bench`). The
+  thread count in force is recorded in the journal `runHeader` as
+  `analysisThreads`.
 
 - **The three exclusive-box economics arms are wired up (Issue #96).**
   `scripts/run-followup-economics.sh` gains an `output-neuron` arm (pins
