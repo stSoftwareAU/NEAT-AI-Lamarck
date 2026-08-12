@@ -983,6 +983,13 @@ champion, 75 experiments):
   full-corpus promotes are skipped when the sample shows nothing;
 - no strategy has earned removal — the sample is far too small to disable one.
 
+And from the per-call scorer measurement in
+[`docs/scorer-call-cost.md`](docs/scorer-call-cost.md) (issue #112): a scorer call
+costs ≈9.9 s **before it scores its first creature** on a 5% sample, against
+0.45 s per creature after that, so the fixed per-call cost is **24–29% of a
+45-minute run**. Sampled calls carry five times the fixed cost of a full-corpus
+call while doing a twentieth of the work.
+
 The open experimental questions the journal is designed to answer:
 
 1. Do statistically informed candidates beat ordinary random mutation often enough to justify their analysis cost?
@@ -1011,6 +1018,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
+| [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | Every scorer call pays a fixed ≈9.9 s (sampled) / ≈2.0 s (full corpus) before it scores anything — 24–29% of a 45-minute run, measured in [`docs/scorer-call-cost.md`](docs/scorer-call-cost.md). Unfixed: either the scorer's sample-path setup or a persistent scoring session. |
 
 ## Repository layout
 

@@ -1,0 +1,48 @@
+# sample-rate: 0.05
+# sizes: 0,1,29  repeats: 3
+# creature: /Users/nigelleck/src/GRQ-cluster/network.json
+# trainingData: /Users/nigelleck/src/NEAT-AI-Lamarck/.lamarck-baseline-45/train-data
+# scorer: /Users/nigelleck/src/NEAT-AI-scorer/target/release/rust_scorer
+# loadBefore: 17.48
+# startedUtc: 2026-08-12T00:59:26Z
+creature /Users/nigelleck/src/GRQ-cluster/network.json : inputs=2511 outputs=1 neurons=1605 synapses=22016
+corpus /Users/nigelleck/src/NEAT-AI-Lamarck/.lamarck-baseline-45/train-data : sample-rate=0.05 repeats=3 sizes=[0, 1, 29] (candidates; +1 baseline)
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 1: 1 creature(s) scored, baseline=0.348151087761
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 1: 2 creature(s) scored, baseline=0.348151675562
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 1: 30 creature(s) scored, baseline=0.348151461905
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 2: 1 creature(s) scored, baseline=0.348151087761
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 2: 2 creature(s) scored, baseline=0.348151675562
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 2: 30 creature(s) scored, baseline=0.348151461905
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 3: 1 creature(s) scored, baseline=0.348151087761
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 3: 2 creature(s) scored, baseline=0.348151675562
+[gpu] auto fallback to CPU directory mode: deep scratch-kernel creatures are faster on CPU for production-scale full-corpus scoring; rerun with --gpu off to skip GPU detection
+repeat 3: 30 creature(s) scored, baseline=0.348151461905
+
+phase,creatures,ms,sampleRate,failed
+screen,1,9243,0.05,false
+screen,2,9835,0.05,false
+screen,30,20983,0.05,false
+screen,1,11260,0.05,false
+screen,2,12367,0.05,false
+screen,30,24436,0.05,false
+screen,1,9953,0.05,false
+screen,2,10821,0.05,false
+screen,30,24966,0.05,false
+
+fit over 9 call(s) at sample-rate=0.05
+  mean creatures : 11.00
+  mean ms        : 14874
+  fixed ms/call  : 9898
+  marginal ms/cr : 452
+  r^2            : 0.9570
+  fixed share    : 66.5%
+# loadAfter: 24.77
+# finishedUtc: 2026-08-12T01:01:41Z
