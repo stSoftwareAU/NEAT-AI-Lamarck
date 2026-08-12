@@ -1,5 +1,6 @@
 //! Benchmark / strategy economics reporting from `experiments.jsonl`.
 
+use crate::baseline::BaselineSource;
 use crate::candidates::{BatchLimit, CandidateStrategy};
 use crate::log;
 use crate::promote_gate::{PromoteGateReplay, PromoteGateReplayAccumulator};
@@ -247,6 +248,12 @@ pub struct JournalReport {
     pub candidate_batch: CandidateBatchStats,
     /// How well the 5% screen predicted the full-corpus score (issue #110).
     pub screen_calibration: ScreenCalibration,
+    /// Promote-call baseline economics (issue #113).
+    ///
+    /// How many promote calls reused the run's remembered full-corpus baseline
+    /// instead of re-scoring the incumbent, what that saved in creature-scores,
+    /// and how many accepts were re-decided against a freshly scored pair.
+    pub baseline_reuse: BaselineReuseStats,
     /// Fixed vs marginal scorer cost per call, fitted per phase (issue #112).
     ///
     /// The intercept of call time against creature count is what a persistent
@@ -281,6 +288,29 @@ pub struct CandidateBatchStats {
     pub quota_ceiling_experiments: u64,
     /// Experiments whose generator ran genuinely dry.
     pub exhausted_experiments: u64,
+}
+
+/// Promote-call baseline economics summed over a journal (issue #113).
+///
+/// A journal written before the field existed — or a run with reuse off —
+/// reports every promote call as `fresh`, which is exactly what it was.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaselineReuseStats {
+    /// Promote calls that carried the incumbent and scored it.
+    pub fresh_promote_calls: u64,
+    /// Promote calls that omitted the incumbent and reused a known score.
+    pub remembered_promote_calls: u64,
+    /// Accepts re-decided against a freshly scored baseline + winner pair.
+    pub verified_accepts: u64,
+    /// Full-corpus creature-scores the omitted baselines saved (one each).
+    pub baseline_scores_saved: u64,
+    /// Creature-scores the accept verifications cost (baseline + winner each).
+    pub verification_creature_scores: u64,
+    /// Saved minus verification cost — never an over-claim.
+    pub net_creature_scores_saved: i64,
+    /// Share of promote calls that reused a remembered baseline.
+    pub remembered_fraction: f64,
 }
 
 /// Cross-experiment analysis-memo economics summed over a journal (issue #106).
@@ -344,6 +374,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut batch_requested_mixed = false;
     let mut batch_quota_ceiling = 0u64;
     let mut batch_exhausted = 0u64;
+    let mut baseline_reuse = BaselineReuseStats::default();
     let mut scorer_call_cost = ScorerCallCostAccumulator::default();
     let mut screen_calibration = ScreenCalibrationAccumulator::default();
     let mut promote_gate_replay = PromoteGateReplayAccumulator::default();
@@ -399,6 +430,17 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         total_scorer_ms += record.scorer_ms;
         if let Some(calls) = &record.scorer_calls {
             scorer_call_cost.push_all(calls);
+        }
+        match record.baseline_source {
+            Some(BaselineSource::Fresh) => baseline_reuse.fresh_promote_calls += 1,
+            Some(source) => {
+                baseline_reuse.remembered_promote_calls += 1;
+                if source == BaselineSource::RememberedVerified {
+                    baseline_reuse.verified_accepts += 1;
+                }
+            }
+            // No promote call ran (the screen was empty, or the batch failed).
+            None => {}
         }
         elapsed += record.analysis_ms + record.scorer_ms;
         first_ts = Some(first_ts.map_or(record.timestamp_unix, |t| t.min(record.timestamp_unix)));
@@ -676,6 +718,20 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             quota_ceiling_experiments: batch_quota_ceiling,
             exhausted_experiments: batch_exhausted,
         },
+        baseline_reuse: {
+            let promote_calls =
+                baseline_reuse.fresh_promote_calls + baseline_reuse.remembered_promote_calls;
+            baseline_reuse.baseline_scores_saved = baseline_reuse.remembered_promote_calls;
+            baseline_reuse.verification_creature_scores = baseline_reuse.verified_accepts * 2;
+            baseline_reuse.net_creature_scores_saved = baseline_reuse.baseline_scores_saved as i64
+                - baseline_reuse.verification_creature_scores as i64;
+            baseline_reuse.remembered_fraction = if promote_calls > 0 {
+                baseline_reuse.remembered_promote_calls as f64 / promote_calls as f64
+            } else {
+                0.0
+            };
+            baseline_reuse
+        },
         screen_calibration: screen_calibration.finish(),
         scorer_call_cost: scorer_call_cost.finish(),
         promote_gate_replay: promote_gate_replay.finish(),
@@ -843,6 +899,18 @@ pub fn print_run_summary(result: &RunResult) {
                 memo.hit_rate * 100.0,
                 format_ms(memo.ms_saved),
                 memo.analysis_ms_saved_fraction * 100.0
+            ));
+        }
+        let reuse = &report.baseline_reuse;
+        if reuse.remembered_promote_calls > 0 {
+            log::detail(&format!(
+                "baseline:      {} remembered / {} fresh promote call(s) ({:.0}%); \
+                 {} creature-score(s) saved net, {} accept(s) verified",
+                reuse.remembered_promote_calls,
+                reuse.fresh_promote_calls,
+                reuse.remembered_fraction * 100.0,
+                reuse.net_creature_scores_saved,
+                reuse.verified_accepts
             ));
         }
         let cost = &report.scorer_call_cost;
@@ -1029,6 +1097,7 @@ mod tests {
             scores: BTreeMap::new(),
             screen_scores: None,
             screen_tiers: None,
+            baseline_source: None,
             winner: accepted.then(|| "candidate-000".to_string()),
             improvement: accepted.then_some(1e-6),
             accepted,
@@ -1358,6 +1427,7 @@ mod tests {
             scores: BTreeMap::new(),
             screen_scores: None,
             screen_tiers: None,
+            baseline_source: None,
             winner: None,
             improvement: None,
             accepted: false,
@@ -1580,6 +1650,41 @@ mod tests {
         record
     }
 
+    /// Issue #113: the report counts which baseline decided each promote call
+    /// and never over-claims the saving — the verification call is subtracted.
+    #[test]
+    fn report_counts_remembered_promote_calls_and_nets_off_verification() {
+        let mut fresh = promoted(1, 0.3470, None);
+        fresh.baseline_source = Some(BaselineSource::Fresh);
+        let mut remembered = promoted(2, 0.3470, None);
+        remembered.baseline_source = Some(BaselineSource::Remembered);
+        let mut verified = promoted(3, 0.3470, Some(2e-6));
+        verified.baseline_source = Some(BaselineSource::RememberedVerified);
+        // An experiment whose screen was empty made no promote call at all.
+        let empty = screened_empty(4, 0.3475);
+        let file = journal_of(&[fresh, remembered, verified, empty]);
+
+        let reuse = report_from_journal(file.path()).unwrap().baseline_reuse;
+        assert_eq!(reuse.fresh_promote_calls, 1);
+        assert_eq!(reuse.remembered_promote_calls, 2);
+        assert_eq!(reuse.verified_accepts, 1);
+        assert_eq!(reuse.baseline_scores_saved, 2);
+        assert_eq!(reuse.verification_creature_scores, 2);
+        assert_eq!(reuse.net_creature_scores_saved, 0);
+        assert!((reuse.remembered_fraction - 2.0 / 3.0).abs() < 1e-12);
+    }
+
+    /// A journal written before the field existed reports every promote call as
+    /// what it was: paired with a freshly scored baseline.
+    #[test]
+    fn a_pre_113_journal_reports_no_remembered_baselines() {
+        let file = journal_of(&[promoted(1, 0.3470, None), promoted(2, 0.3470, None)]);
+        let reuse = report_from_journal(file.path()).unwrap().baseline_reuse;
+        assert_eq!(reuse.remembered_promote_calls, 0);
+        assert_eq!(reuse.net_creature_scores_saved, 0);
+        assert_eq!(reuse.remembered_fraction, 0.0);
+    }
+
     /// Issue #84: the opening anchor must never be a 5% screen-sample baseline.
     ///
     /// With `--skip-phase0` the first experiments can all screen empty, and each
@@ -1672,6 +1777,7 @@ mod tests {
                 m
             }),
             screen_tiers: None,
+            baseline_source: None,
             winner: Some("candidate-000".into()),
             improvement: Some(2e-6),
             accepted: true,
@@ -1708,6 +1814,7 @@ mod tests {
             },
             screen_scores: None,
             screen_tiers: None,
+            baseline_source: None,
             winner: None,
             improvement: None,
             accepted: false,

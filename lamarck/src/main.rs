@@ -4,11 +4,11 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS, DEFAULT_CANDIDATE_COUNT,
-    DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K,
-    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
-    ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary, report_from_journal,
-    run_optimisation_cancellable,
+    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS,
+    DEFAULT_BASELINE_DRIFT_EPSILON, DEFAULT_CANDIDATE_COUNT, DEFAULT_FOCUS_COUNT,
+    DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
+    DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
+    PromoteGateMode, print_run_summary, report_from_journal, run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -142,6 +142,26 @@ struct Cli {
     /// the screen's noise floor and recommended 3σ.
     #[arg(long, default_value_t = DEFAULT_SCREEN_PROMOTE_SIGMA_K)]
     screen_promote_sigma_k: f64,
+
+    /// Promote calls served from the remembered full-corpus baseline before one
+    /// scores it fresh again (issue #113). `0` (default) disables reuse.
+    ///
+    /// Between accepts the incumbent's full-corpus score is a constant the run
+    /// already knows, so a promote call that reuses it drops ≈20% of its
+    /// creature-scores. That also drops the pairing that makes a promote call
+    /// self-verifying, so every Nth call re-scores the incumbent and checks it
+    /// against `--baseline-drift-epsilon`, and any accept is re-decided against
+    /// a freshly scored pair before the incumbent is swapped.
+    #[arg(long, default_value_t = 0)]
+    baseline_reverify_interval: u64,
+
+    /// Absolute baseline-score drift that aborts the run (issue #113).
+    ///
+    /// Checked whenever a fresh baseline arrives while a remembered one is held.
+    /// Beyond it the two disagree about the same creature on the same corpus —
+    /// the state that lands a false accept — so the run stops.
+    #[arg(long, default_value_t = DEFAULT_BASELINE_DRIFT_EPSILON)]
+    baseline_drift_epsilon: f64,
 
     /// Local JSON store for structural graft memory (phase-G replay).
     ///
@@ -278,6 +298,8 @@ fn main() -> ExitCode {
         screen_promote_threshold: cli.screen_promote_threshold,
         screen_promote_gate,
         screen_promote_sigma_k: cli.screen_promote_sigma_k,
+        baseline_reverify_interval: cli.baseline_reverify_interval,
+        baseline_drift_epsilon: cli.baseline_drift_epsilon,
         grafts_path: cli.grafts_path,
         graft_replay_budget: cli.graft_replay_budget_seconds.map(Duration::from_secs),
         backprop_learning_rate: cli.backprop_learning_rate,
@@ -300,6 +322,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = config.promote_gate() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.baseline_reuse_policy() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }

@@ -673,6 +673,7 @@ mod tests {
                     .collect(),
             ),
             screen_tiers: None,
+            baseline_source: None,
             winner: None,
             improvement: None,
             accepted: false,

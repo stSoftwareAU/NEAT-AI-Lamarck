@@ -7,6 +7,7 @@
 
 pub mod analysis;
 pub mod backprop;
+pub mod baseline;
 pub mod cancel;
 pub mod candidates;
 pub mod chunks;
@@ -34,13 +35,17 @@ pub use analysis::{
     training_scans_opened,
 };
 pub use backprop::{BackpropConfig, LearningSignal, apply_learnings};
+pub use baseline::{
+    BaselineKey, BaselineReusePolicy, BaselineSource, DEFAULT_BASELINE_DRIFT_EPSILON,
+    RememberedBaseline, training_data_key,
+};
 pub use cancel::CancelToken;
 pub use chunks::{ANALYSIS_CHUNK_RECORDS, DEFAULT_ANALYSIS_THREADS};
 pub use combos::{
     ComboSelectRequest, ComboSelection, Improver, MAX_COMBO_CANDIDATES, STACK_DAMPEN_EXPONENT,
-    StackDampenReport, StackDampenTarget, collect_improvers, combination_index_sets,
-    dampen_stacked_new_synapses, merge_candidate_deltas, new_synapse_contributor_counts,
-    select_best_with_combinations, stack_dampen_scale,
+    StackDampenReport, StackDampenTarget, collect_improvers, collect_improvers_against,
+    combination_index_sets, dampen_stacked_new_synapses, merge_candidate_deltas,
+    new_synapse_contributor_counts, select_best_with_combinations, stack_dampen_scale,
 };
 pub use config::{
     DEFAULT_CANDIDATE_COUNT, DEFAULT_FOCUS_COUNT, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
@@ -73,8 +78,9 @@ pub use run::{
 };
 pub use scorer::{
     ExternalScorer, PromoteDecision, RecordingScorer, ScoreResult, ScoreSample,
-    accepts_improvement, log_scorer_batch_stats, screen_promote_decision, screen_promote_stems,
-    write_promote_batch,
+    accepts_improvement, log_scorer_batch_stats, screen_promote_decision,
+    screen_promote_decision_against, screen_promote_stems, select_winner, select_winner_against,
+    write_promote_batch, write_promote_batch_without_baseline,
 };
 pub use scorer_cost::{
     CallCostFit, ScorerCallCost, ScorerCallCostAccumulator, ScorerCallPhase, ScorerCallRecord,

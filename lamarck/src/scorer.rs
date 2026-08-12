@@ -262,6 +262,28 @@ pub fn log_scorer_batch_stats_labeled(
     min_improvement: f64,
     label: &str,
 ) {
+    log_scorer_batch_stats_against(
+        scores,
+        scores.get("baseline"),
+        scorer_ms,
+        min_improvement,
+        label,
+    )
+}
+
+/// Like [`log_scorer_batch_stats_labeled`] with the baseline supplied.
+///
+/// A promote call that reused a remembered baseline (issue #113) has no
+/// `baseline` stem of its own, so the score its deltas are measured against is
+/// passed in. `None` still logs the missing-baseline warning rather than
+/// reporting deltas against nothing.
+pub fn log_scorer_batch_stats_against(
+    scores: &BTreeMap<String, ScoreResult>,
+    baseline: Option<&ScoreResult>,
+    scorer_ms: u128,
+    min_improvement: f64,
+    label: &str,
+) {
     let n = scores.len();
     let per = if n > 0 {
         scorer_ms as f64 / n as f64
@@ -272,7 +294,7 @@ pub fn log_scorer_batch_stats_labeled(
         "{label} batch: {n} creatures in {scorer_ms}ms ({per:.0} ms/creature, one directory call)"
     ));
 
-    let Some(baseline) = scores.get("baseline") else {
+    let Some(baseline) = baseline else {
         log::warn(&format!("{label} batch missing baseline"));
         return;
     };
@@ -345,6 +367,9 @@ pub fn screen_promote_stems(
 /// The absolute gate reproduces [`screen_promote_stems`] exactly; the
 /// noise-aware gate prices the batch's own spread first and can only ever
 /// admit a subset of what the absolute one would.
+///
+/// The batch must carry its own `baseline` stem; use
+/// [`screen_promote_decision_against`] when the baseline was scored elsewhere.
 pub fn screen_promote_decision(
     scores: &BTreeMap<String, ScoreResult>,
     gate: &PromoteGate,
@@ -352,6 +377,20 @@ pub fn screen_promote_decision(
     let baseline = scores
         .get("baseline")
         .ok_or_else(|| ScorerError::Missing("baseline missing from scorer results".into()))?;
+    Ok(screen_promote_decision_against(scores, baseline, gate))
+}
+
+/// Apply a promote gate against a baseline scored outside this batch (#113).
+///
+/// A promote call that reused a remembered baseline has no `baseline` stem in
+/// its map at all, so the score to compare against is a parameter rather than a
+/// lookup. A `baseline` stem, when present, is still never treated as a
+/// candidate.
+pub fn screen_promote_decision_against(
+    scores: &BTreeMap<String, ScoreResult>,
+    baseline: &ScoreResult,
+    gate: &PromoteGate,
+) -> PromoteDecision {
     let mut deltas: Vec<(String, f64)> = scores
         .iter()
         .filter(|(stem, _)| stem.as_str() != "baseline")
@@ -361,12 +400,12 @@ pub fn screen_promote_decision(
     let screened = deltas.len();
     deltas.retain(|(_, delta)| *delta > resolved.threshold);
     deltas.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(PromoteDecision {
+    PromoteDecision {
         stems: deltas.into_iter().map(|(s, _)| s).collect(),
         screened,
         threshold: resolved.threshold,
         sigma: resolved.sigma,
-    })
+    }
 }
 
 /// Copy `baseline.json` + promoted candidate JSON into a fresh promote directory.
@@ -375,13 +414,38 @@ pub fn write_promote_batch(
     source_batch: &Path,
     promote_stems: &[String],
 ) -> Result<(), String> {
+    write_promote_batch_with(promote_dir, source_batch, promote_stems, true)
+}
+
+/// Write a promote batch of candidates only, for a run that already knows the
+/// incumbent's full-corpus score (issue #113).
+///
+/// The scorer then spends its call on candidates alone — the baseline is ≈20%
+/// of a promote call's creature-scores — and the caller supplies the score to
+/// compare against.
+pub fn write_promote_batch_without_baseline(
+    promote_dir: &Path,
+    source_batch: &Path,
+    promote_stems: &[String],
+) -> Result<(), String> {
+    write_promote_batch_with(promote_dir, source_batch, promote_stems, false)
+}
+
+fn write_promote_batch_with(
+    promote_dir: &Path,
+    source_batch: &Path,
+    promote_stems: &[String],
+    include_baseline: bool,
+) -> Result<(), String> {
     if promote_dir.exists() {
         fs::remove_dir_all(promote_dir).map_err(|e| e.to_string())?;
     }
     fs::create_dir_all(promote_dir).map_err(|e| e.to_string())?;
-    let baseline_src = source_batch.join("baseline.json");
-    fs::copy(&baseline_src, promote_dir.join("baseline.json"))
-        .map_err(|e| format!("copy baseline from {} failed: {e}", baseline_src.display()))?;
+    if include_baseline {
+        let baseline_src = source_batch.join("baseline.json");
+        fs::copy(&baseline_src, promote_dir.join("baseline.json"))
+            .map_err(|e| format!("copy baseline from {} failed: {e}", baseline_src.display()))?;
+    }
     for stem in promote_stems {
         let name = format!("{stem}.json");
         let src = source_batch.join(&name);
@@ -417,6 +481,9 @@ pub fn accepts_improvement(
 }
 
 /// Select the best qualifying candidate from a scored batch.
+///
+/// The batch must carry its own `baseline` stem; use [`select_winner_against`]
+/// when the baseline was scored elsewhere.
 pub fn select_winner(
     results: &BTreeMap<String, ScoreResult>,
     min_improvement: f64,
@@ -424,6 +491,19 @@ pub fn select_winner(
     let baseline = results
         .get("baseline")
         .ok_or_else(|| ScorerError::Missing("baseline missing from scorer results".into()))?;
+    Ok(select_winner_against(results, baseline, min_improvement))
+}
+
+/// Select the best qualifying candidate against a baseline scored elsewhere.
+///
+/// The baseline is a parameter, so a promote call that omitted it (issue #113)
+/// is decided by exactly the same rule as a paired one. A `baseline` stem, when
+/// present, is still never a candidate for the win.
+pub fn select_winner_against<'a>(
+    results: &'a BTreeMap<String, ScoreResult>,
+    baseline: &ScoreResult,
+    min_improvement: f64,
+) -> Option<(&'a str, &'a ScoreResult, f64)> {
     let mut best: Option<(&str, &ScoreResult, f64)> = None;
     for (stem, result) in results {
         if stem == "baseline" {
@@ -439,7 +519,7 @@ pub fn select_winner(
     }
     // Microscopic changes below the default threshold must be rejected.
     let _ = DEFAULT_MIN_IMPROVEMENT;
-    Ok(best)
+    best
 }
 
 #[cfg(test)]
@@ -504,9 +584,28 @@ mod tests {
                 complexity_penalty: 0.0,
             },
         );
-        let winner = select_winner(&map, 1e-6).unwrap().unwrap();
-        assert_eq!(winner.0, "candidate-001");
-        assert!(winner.2 > 1e-6);
+        let (winner_stem, winner_delta) = {
+            let winner = select_winner(&map, 1e-6).unwrap().unwrap();
+            (winner.0.to_string(), winner.2)
+        };
+        assert_eq!(winner_stem, "candidate-001");
+        assert!(winner_delta > 1e-6);
+
+        // Issue #113: the same batch with the baseline supplied rather than
+        // present picks the same winner with the same delta. A map with no
+        // `baseline` key is the shape a remembered-baseline promote call
+        // returns, and it must not be read as a score of 0 — which would
+        // promote everything.
+        let baseline = map.remove("baseline").expect("removed for this case");
+        let parameterised = select_winner_against(&map, &baseline, 1e-6).expect("still a winner");
+        assert_eq!(parameterised.0, winner_stem);
+        assert!((parameterised.2 - winner_delta).abs() < 1e-15);
+        // The existing loud failure is preserved for callers that still require
+        // the batch to carry its own baseline.
+        assert!(matches!(
+            select_winner(&map, 1e-6).unwrap_err(),
+            ScorerError::Missing(_)
+        ));
     }
 
     #[test]
@@ -573,6 +672,17 @@ mod tests {
         let stems = screen_promote_stems(&map, 0.0).unwrap();
         assert_eq!(stems, vec!["candidate-002", "candidate-000"]);
         assert!(screen_promote_stems(&map, 1e-3).unwrap().is_empty());
+
+        // Issue #113: supplying the baseline instead of carrying it in the map
+        // admits exactly the same stems, in the same order, and counts the same
+        // screened total.
+        let baseline = map.get("baseline").cloned().expect("present above");
+        let mut without = map.clone();
+        without.remove("baseline");
+        let parameterised =
+            screen_promote_decision_against(&without, &baseline, &PromoteGate::absolute(0.0));
+        assert_eq!(parameterised.stems, stems);
+        assert_eq!(parameterised.screened, 3);
 
         // Issue #111 default-drift guard: the absolute gate promotes exactly
         // the stems the pre-#111 gate promoted, in the same order.
@@ -754,5 +864,21 @@ mod tests {
         assert!(promote.join("baseline.json").is_file());
         assert!(promote.join("candidate-001.json").is_file());
         assert!(!promote.join("candidate-000.json").exists());
+    }
+
+    /// Issue #113: the baseline-free batch carries the promoted candidates and
+    /// nothing else, so the scorer spends the call on candidates alone.
+    #[test]
+    fn write_promote_batch_without_baseline_copies_only_the_stems() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("baseline.json"), b"{}").unwrap();
+        fs::write(src.join("candidate-000.json"), b"{\"a\":1}").unwrap();
+        let promote = dir.path().join("promote");
+        write_promote_batch_without_baseline(&promote, &src, &["candidate-000".into()]).unwrap();
+        assert!(!promote.join("baseline.json").exists());
+        assert!(promote.join("candidate-000.json").is_file());
+        assert_eq!(count_creature_files(&promote).unwrap(), 1);
     }
 }

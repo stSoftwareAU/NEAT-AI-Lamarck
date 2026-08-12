@@ -549,6 +549,7 @@ mod tests {
             scores: BTreeMap::new(),
             screen_scores: None,
             screen_tiers: None,
+            baseline_source: None,
             winner: None,
             improvement: None,
             accepted: false,
