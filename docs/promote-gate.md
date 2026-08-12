@@ -146,7 +146,7 @@ CREATURE=... TRAIN_DATA=... SCORER=... OUT_DIR=... \
 Both arms ran the production creature (2511 inputs, 1 output, 1593 neurons)
 against the 2 262 277-record GRQ corpus, seed 81, `--candidates 100`, a 900 s
 budget and `--screen-sample-rate 0.05`, one after the other on a box that also
-runs GRQ. Lamarck `0.1.12`, `k = 3`.
+runs GRQ. Lamarck `0.1.12` (this branch, pre-version-bump), `k = 3`.
 
 | Metric | `absolute` (control) | `noise-aware` (k = 3) |
 |--------|----------------------|-----------------------|
