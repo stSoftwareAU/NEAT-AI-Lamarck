@@ -9,8 +9,8 @@ use crate::structural::{
     rank_unused_sources, split_incoming_synapse, suggested_outbound_weight, suggested_weight,
     suggested_weight_scaled, with_previous_hidden_first,
 };
-use crate::tags::{CreatureMeta, serialize_creature_with_meta};
-use neat_core::{CreatureExport, creature_to_json_pretty};
+use crate::tags::{CreatureMeta, serialize_creature_with_meta_compact};
+use neat_core::{CreatureExport, creature_to_json};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -1126,6 +1126,11 @@ fn pick_best_incoming<'a>(
 ///
 /// When `meta` is provided, `baseline.json` keeps original `uuid` / `tags`
 /// (candidates stay untagged — acceptance stamps the winner on write).
+///
+/// Every file here is **compact** JSON (issue #114): `rust_scorer` is its only
+/// consumer, and on the production creature the pretty-printer's indentation is
+/// about a third of the ~90 MB a batch writes and the scorer then parses.
+/// Human-facing artefacts — `best.json`, `winners/` — stay pretty.
 pub fn write_candidate_batch(
     dir: &Path,
     incumbent: &CreatureExport,
@@ -1137,16 +1142,16 @@ pub fn write_candidate_batch(
     }
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let baseline = if let Some(meta) = meta {
-        serialize_creature_with_meta(incumbent, meta)?
+        serialize_creature_with_meta_compact(incumbent, meta)?
     } else {
-        creature_to_json_pretty(incumbent).map_err(|e| e.to_string())?
+        creature_to_json(incumbent).map_err(|e| e.to_string())?
     };
     fs::write(dir.join("baseline.json"), baseline).map_err(|e| e.to_string())?;
 
     let mut stems = vec!["baseline".to_string()];
     for (i, candidate) in candidates.iter().enumerate() {
         let stem = format!("candidate-{i:03}");
-        let json = creature_to_json_pretty(&candidate.creature).map_err(|e| e.to_string())?;
+        let json = creature_to_json(&candidate.creature).map_err(|e| e.to_string())?;
         fs::write(dir.join(format!("{stem}.json")), json).map_err(|e| e.to_string())?;
         stems.push(stem);
     }
@@ -1158,7 +1163,7 @@ mod tests {
     use super::*;
     use crate::backprop::BiasSignal;
     use crate::structural::{refine_sources_from_probes, synthetic_observation_probes};
-    use neat_core::parse_creature_json;
+    use neat_core::{creature_to_json_pretty, parse_creature_json};
     use rand::{SeedableRng, rngs::StdRng};
 
     const TINY: &str = r#"{
@@ -2395,5 +2400,90 @@ mod tests {
             "mutation={}",
             first_neuron.provenance.mutation
         );
+    }
+
+    fn one_candidate(incumbent: &CreatureExport) -> Vec<Candidate> {
+        let mut creature = incumbent.clone();
+        creature.neurons[0].bias += 0.25;
+        vec![Candidate {
+            creature,
+            provenance: CandidateProvenance {
+                strategy: CandidateStrategy::Random,
+                focus_neuron: "h1".into(),
+                mutation: "test bias nudge".into(),
+                old_value: Some(0.1),
+                new_value: Some(0.35),
+            },
+        }]
+    }
+
+    /// Issue #114: the scorer is the only reader of a batch file, so it carries
+    /// no pretty-printing.
+    #[test]
+    fn batch_files_are_compact_and_parse_back_to_the_same_creatures() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let candidates = one_candidate(&incumbent);
+        let dir = tempfile::tempdir().unwrap();
+        let batch = dir.path().join("candidates-exp-1");
+        let stems = write_candidate_batch(&batch, &incumbent, &candidates, None).unwrap();
+        assert_eq!(stems, ["baseline", "candidate-000"]);
+
+        for stem in &stems {
+            let text = fs::read_to_string(batch.join(format!("{stem}.json"))).unwrap();
+            assert!(
+                !text.contains('\n'),
+                "{stem}.json must be compact, got:\n{text}"
+            );
+        }
+        // Formatting never changes a parsed value.
+        let baseline = fs::read_to_string(batch.join("baseline.json")).unwrap();
+        assert_eq!(parse_creature_json(&baseline).unwrap(), incumbent);
+        let written = fs::read_to_string(batch.join("candidate-000.json")).unwrap();
+        assert_eq!(
+            parse_creature_json(&written).unwrap(),
+            candidates[0].creature
+        );
+        // …and it is genuinely smaller than the pretty form it replaced.
+        assert!(
+            written.len()
+                < creature_to_json_pretty(&candidates[0].creature)
+                    .unwrap()
+                    .len()
+        );
+    }
+
+    /// The compact baseline still carries the `uuid` / `tags` the scorer and the
+    /// check-in path read (issue #114).
+    #[test]
+    fn compact_baseline_keeps_uuid_and_tags() {
+        let tagged = r#"{
+          "uuid": "creature-9",
+          "semanticVersion": "4.0.0",
+          "forwardOnly": true,
+          "input": 1,
+          "output": 1,
+          "neurons": [
+            {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY"},
+            {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+          ],
+          "synapses": [
+            {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+            {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+          ],
+          "tags": [{"name":"score","value":"0.1"}]
+        }"#;
+        let incumbent = parse_creature_json(tagged).unwrap();
+        let meta = CreatureMeta::from_creature_json(tagged);
+        let dir = tempfile::tempdir().unwrap();
+        let batch = dir.path().join("candidates-exp-2");
+        write_candidate_batch(&batch, &incumbent, &[], Some(&meta)).unwrap();
+
+        let text = fs::read_to_string(batch.join("baseline.json")).unwrap();
+        assert!(!text.contains('\n'), "baseline.json must be compact");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["uuid"], "creature-9");
+        assert_eq!(value["tags"][0]["name"], "score");
+        assert_eq!(value["tags"][0]["value"], "0.1");
+        assert_eq!(parse_creature_json(&text).unwrap(), incumbent);
     }
 }

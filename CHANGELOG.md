@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Scorer-facing batch files are compact, and promote directories are
+  hard-linked (Issue #114).** `write_candidate_batch` writes `baseline.json` and
+  every `candidate-NNN.json` without pretty-printing — `rust_scorer` is their
+  only reader — and `write_promote_batch` presents the promoted files as hard
+  links into the screen directory instead of copying them, falling back to a
+  copy when the link cannot be made (existing destination, different filesystem,
+  no link support). A missing source still fails loudly. Human-facing artefacts
+  are untouched: `best.json` and `winners/` stay pretty. Measured on a
+  production-shaped batch (baseline + 29 candidates, 2511 inputs, 23 479
+  synapses): **87.0 MB → 61.1 MB written per experiment (-29.8%)**, ≈25 ms less
+  serialisation and ≈15 ms less scorer-side read-plus-parse, plus 8.1 MB of
+  promote copies no longer written. The wall-clock effect is **well under 0.2%
+  of a 36–65 s experiment** — far below the 1%–4% the issue projected, and
+  recorded as a null timing result in
+  [`docs/compact-batch-io.md`](docs/compact-batch-io.md) rather than dressed up.
+
 ### Added
 
 - **An opt-in noise-aware promote gate (Issue #111).**
