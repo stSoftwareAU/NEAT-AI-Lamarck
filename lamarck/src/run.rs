@@ -1,6 +1,7 @@
 //! End-to-end Lamarck optimisation loop and experiment journal.
 
 use crate::analysis::{ScanBudget, scan_post_focus, scan_pre_focus};
+use crate::baseline::{BaselineKey, BaselineSource, RememberedBaseline, training_data_key};
 use crate::cancel::CancelToken;
 use crate::candidates::{
     BatchLimit, Candidate, CandidateBudget, CandidateGenContext, CandidateProvenance,
@@ -31,7 +32,8 @@ use crate::promote_gate::PromoteGateMode;
 use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, RecordingScorer, ScoreResult, ScoreSample, accepts_improvement,
-    log_scorer_batch_stats_labeled, screen_promote_decision, write_promote_batch,
+    log_scorer_batch_stats_against, log_scorer_batch_stats_labeled, screen_promote_decision,
+    write_promote_batch, write_promote_batch_without_baseline,
 };
 use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
 use crate::structural::{is_input_source, rank_unused_sources};
@@ -101,6 +103,14 @@ pub struct ExperimentRecord {
     /// before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_tiers: Option<ScreenTierRecord>,
+    /// Which baseline decided this experiment's promote call (issue #113).
+    ///
+    /// `fresh` when the call carried the incumbent and scored it, `remembered`
+    /// when it reused the run's carried full-corpus score. Omitted when no
+    /// promote call ran, and absent from journals written before the field
+    /// existed — so any accept can be traced to the baseline that decided it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_source: Option<BaselineSource>,
     /// Winning stem if accepted.
     pub winner: Option<String>,
     /// Absolute score improvement when accepted.
@@ -303,6 +313,16 @@ pub struct RunConfigRecord {
     /// σ̂ multiplier the noise-aware gate used; `None` under the absolute gate.
     #[serde(default)]
     pub screen_promote_sigma_k: Option<f64>,
+    /// Promote calls served from a remembered baseline before one is scored
+    /// fresh (`--baseline-reverify-interval`, issue #113).
+    ///
+    /// `0` — the default, and what a journal written before the knob existed
+    /// reports — means every promote call carried the incumbent.
+    #[serde(default)]
+    pub baseline_reverify_interval: u64,
+    /// Baseline score drift that aborts the run (`--baseline-drift-epsilon`).
+    #[serde(default)]
+    pub baseline_drift_epsilon: f64,
     /// Pinned focus neuron UUID when set.
     pub focus_neuron: Option<String>,
     /// Focus selection policy label.
@@ -369,6 +389,8 @@ impl RunConfigRecord {
                 PromoteGateMode::Absolute => None,
                 PromoteGateMode::NoiseAware => Some(config.screen_promote_sigma_k),
             },
+            baseline_reverify_interval: config.baseline_reverify_interval,
+            baseline_drift_epsilon: config.baseline_drift_epsilon,
             focus_neuron: config.focus_neuron.clone(),
             focus_policy: config.focus_policy.label().to_string(),
             focus_count: config.focus_count,
@@ -754,6 +776,7 @@ pub fn run_optimisation_cancellable(
     let analysis_threads = config.analysis_threads()?;
     let focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
+    let baseline_policy = config.baseline_reuse_policy()?;
     // Measure every scorer call at the boundary (issue #112): the wrapper sees
     // Phase-0, Phase-G, screen, promote and combo batches alike, so the journal
     // can never be fitted to a subset of the calls a run actually made.
@@ -820,6 +843,11 @@ pub fn run_optimisation_cancellable(
     .map_err(|e| e.to_string())?;
 
     let mut opening_baseline_score = None;
+    // The authoritative full-corpus baseline the run carries (issue #113).
+    // Established here by Phase-0 and re-established by every fresh promote
+    // call; only ever handed to a promote call whose creature and corpus still
+    // match the key it was measured under.
+    let mut remembered_baseline: Option<RememberedBaseline> = None;
     if config.phase0_parity {
         log::info("Phase-0: scoring incumbent baseline via authoritative scorer");
         scorer.set_phase(ScorerCallPhase::Phase0);
@@ -851,6 +879,14 @@ pub fn run_optimisation_cancellable(
                 )?;
                 log::ok("Phase-0 Lamarck ↔ scorer parity within documented epsilon");
                 opening_baseline_score = Some(baseline.score);
+                // Phase-0 scored the incumbent on the full corpus, so the run
+                // starts already knowing the number every promote call would
+                // otherwise re-derive (issue #113).
+                if baseline_policy.is_enabled()
+                    && let Some(key) = baseline_key(&incumbent, &config.training_data)
+                {
+                    remembered_baseline = Some(RememberedBaseline::new(key, baseline.clone()));
+                }
                 creature_meta.upsert("score", format!("{}", baseline.score));
                 creature_meta.upsert("error", format!("{}", baseline.error));
                 if !config.preserve_losers {
@@ -1428,6 +1464,11 @@ pub fn run_optimisation_cancellable(
         let mut screen_score_map: Option<std::collections::BTreeMap<String, f64>> = None;
         let mut screen_tiers: Option<ScreenTierRecord> = None;
         let mut promote_dir: Option<PathBuf> = None;
+        // Identity any remembered baseline must still match this experiment
+        // (issue #113): a changed creature or a changed corpus invalidates it.
+        let baseline_scope = baseline_key(&incumbent, &config.training_data);
+        let mut promote_reuse: Option<ScoreResult> = None;
+        let mut experiment_scorer_error: Option<String> = None;
 
         let scores = if let Some(rate) = screen_rate {
             // --- Screen phase (cheap subsample) ---
@@ -1473,6 +1514,7 @@ pub fn run_optimisation_cancellable(
                             scores: Default::default(),
                             screen_scores: None,
                             screen_tiers: None,
+                            baseline_source: None,
                             winner: None,
                             improvement: None,
                             accepted: false,
@@ -1555,6 +1597,7 @@ pub fn run_optimisation_cancellable(
                         scores: Default::default(),
                         screen_scores: screen_score_map,
                         screen_tiers,
+                        baseline_source: None,
                         winner: None,
                         improvement: None,
                         accepted: false,
@@ -1590,7 +1633,26 @@ pub fn run_optimisation_cancellable(
                 }
             ));
             let pdir = config.output_dir.join(format!("promote-exp-{experiments}"));
-            write_promote_batch(&pdir, &batch_dir, &promote_stems)?;
+            // Issue #113: between accepts the incumbent's full-corpus score is
+            // a constant the run already holds, so a promote call with a valid
+            // remembered score spends the whole call on candidates.
+            promote_reuse = match (&remembered_baseline, &baseline_scope) {
+                (Some(remembered), Some(scope)) if remembered.may_serve(scope, baseline_policy) => {
+                    Some(remembered.result().clone())
+                }
+                _ => None,
+            };
+            match &promote_reuse {
+                Some(remembered) => {
+                    log::detail(&format!(
+                        "promote: reusing the remembered full-corpus baseline score={:.12} \
+                         (not re-scored this call)",
+                        remembered.score
+                    ));
+                    write_promote_batch_without_baseline(&pdir, &batch_dir, &promote_stems)?;
+                }
+                None => write_promote_batch(&pdir, &batch_dir, &promote_stems)?,
+            }
             promote_dir = Some(pdir.clone());
 
             let promote_start = Instant::now();
@@ -1598,8 +1660,9 @@ pub fn run_optimisation_cancellable(
             match scorer.score_directory(&pdir, &config.training_data) {
                 Ok(s) => {
                     let promote_ms = promote_start.elapsed().as_millis();
-                    log_scorer_batch_stats_labeled(
+                    log_scorer_batch_stats_against(
                         &s,
+                        s.get("baseline").or(promote_reuse.as_ref()),
                         promote_ms,
                         config.min_improvement,
                         "promote",
@@ -1631,6 +1694,7 @@ pub fn run_optimisation_cancellable(
                             scores: Default::default(),
                             screen_scores: screen_score_map,
                             screen_tiers,
+                            baseline_source: None,
                             winner: None,
                             improvement: None,
                             accepted: false,
@@ -1699,6 +1763,7 @@ pub fn run_optimisation_cancellable(
                             scores: Default::default(),
                             screen_scores: None,
                             screen_tiers: None,
+                            baseline_source: None,
                             winner: None,
                             improvement: None,
                             accepted: false,
@@ -1730,11 +1795,50 @@ pub fn run_optimisation_cancellable(
         };
 
         consecutive_scorer_failures = 0;
-        let scorer_ms = scorer_start.elapsed().as_millis();
+        // Screen + promote, as before #113; the accept-path verification call
+        // is added to it below when it runs.
+        let mut scorer_ms = scorer_start.elapsed().as_millis();
 
-        let baseline = scores
-            .get("baseline")
-            .ok_or_else(|| "baseline missing from scorer results".to_string())?;
+        // Resolve the full-corpus baseline this experiment is judged against
+        // (issue #113). A fresh score is also the re-verification of any score
+        // the run was carrying: two different numbers for the same creature on
+        // the same corpus is the state that lands a false accept, so it aborts
+        // the run rather than deciding anything.
+        let (mut baseline, mut baseline_source) = match scores.get("baseline") {
+            Some(fresh) => {
+                if let (Some(remembered), Some(scope)) = (&remembered_baseline, &baseline_scope)
+                    && remembered.is_valid_for(scope)
+                {
+                    let drift = remembered.drift(fresh);
+                    if drift > baseline_policy.drift_epsilon {
+                        return Err(baseline_drift_error(
+                            drift,
+                            remembered.result().score,
+                            fresh.score,
+                            baseline_policy.drift_epsilon,
+                            "promote re-verification",
+                        ));
+                    }
+                }
+                remembered_baseline = baseline_scope
+                    .clone()
+                    .map(|scope| RememberedBaseline::new(scope, fresh.clone()));
+                (fresh.clone(), BaselineSource::Fresh)
+            }
+            None => {
+                // Reached only when this run deliberately omitted the baseline;
+                // a scorer that silently dropped it must never be read as a
+                // score of zero, which would promote everything.
+                let remembered = promote_reuse.clone().ok_or_else(|| {
+                    "baseline missing from scorer results and no remembered score is valid"
+                        .to_string()
+                })?;
+                if let Some(carried) = remembered_baseline.as_mut() {
+                    carried.note_reuse();
+                }
+                (remembered, BaselineSource::Remembered)
+            }
+        };
         if best_score.is_infinite() {
             best_score = baseline.score;
         }
@@ -1745,13 +1849,14 @@ pub fn run_optimisation_cancellable(
         let source_dir = promote_dir.as_ref().unwrap_or(&batch_dir);
         let combo_dir = config.output_dir.join(format!("combos-exp-{experiments}"));
         scorer.set_phase(ScorerCallPhase::Combo);
-        let selection = match select_best_with_combinations(
+        let mut selection = match select_best_with_combinations(
             scorer,
             ComboSelectRequest {
                 training_data: &config.training_data,
                 incumbent: &incumbent,
                 candidates: &candidates,
                 scores: &scores,
+                baseline: &baseline,
                 min_improvement: config.min_improvement,
                 source_dir,
                 combo_work_dir: &combo_dir,
@@ -1762,23 +1867,108 @@ pub fn run_optimisation_cancellable(
                 log::warn(&format!(
                     "combo selection failed: {e}; using best improving single if any"
                 ));
-                crate::combos::collect_improvers(&scores, config.min_improvement)
-                    .ok()
-                    .and_then(|improvers| {
-                        let best = improvers.into_iter().next()?;
-                        Some(ComboSelection {
-                            creature_path: source_dir.join(format!("{}.json", best.stem)),
-                            stem: best.stem,
-                            result: best.result,
-                            delta: best.delta,
-                            member_indices: vec![best.index],
-                            dampen: StackDampenReport::default(),
-                            combos_scored: 0,
-                            combos_dampened: 0,
-                        })
+                crate::combos::collect_improvers_against(&scores, &baseline, config.min_improvement)
+                    .into_iter()
+                    .next()
+                    .map(|best| ComboSelection {
+                        creature_path: source_dir.join(format!("{}.json", best.stem)),
+                        stem: best.stem,
+                        result: best.result,
+                        delta: best.delta,
+                        member_indices: vec![best.index],
+                        dampen: StackDampenReport::default(),
+                        combos_scored: 0,
+                        combos_dampened: 0,
                     })
             }
         };
+
+        // Issue #113: an accept proposed against a remembered baseline is never
+        // swapped in on that number. The winner and the incumbent are re-scored
+        // together — same binary, same corpus, same call — so the decision that
+        // changes the incumbent is always made from a self-consistent pair.
+        if baseline_source == BaselineSource::Remembered
+            && selection.as_ref().is_some_and(|sel| {
+                accepts_improvement(sel.result.score, baseline.score, config.min_improvement)
+            })
+        {
+            let verify_dir = config.output_dir.join(format!("verify-exp-{experiments}"));
+            let winner_path = selection
+                .as_ref()
+                .map(|sel| sel.creature_path.clone())
+                .expect("checked above");
+            let verify_start = Instant::now();
+            scorer.set_phase(ScorerCallPhase::Promote);
+            let verified = verify_accept_pair(
+                scorer,
+                &incumbent,
+                &winner_path,
+                &config.training_data,
+                &verify_dir,
+            );
+            scorer_ms = scorer_ms.saturating_add(verify_start.elapsed().as_millis());
+            if !config.preserve_losers {
+                let _ = fs::remove_dir_all(&verify_dir);
+            }
+            match verified {
+                Ok(pair) => {
+                    if let Some(remembered) = &remembered_baseline {
+                        let drift = remembered.drift(&pair.baseline);
+                        if drift > baseline_policy.drift_epsilon {
+                            return Err(baseline_drift_error(
+                                drift,
+                                remembered.result().score,
+                                pair.baseline.score,
+                                baseline_policy.drift_epsilon,
+                                "accept verification",
+                            ));
+                        }
+                    }
+                    let fresh_delta = improvement(pair.winner.score, pair.baseline.score);
+                    if accepts_improvement(
+                        pair.winner.score,
+                        pair.baseline.score,
+                        config.min_improvement,
+                    ) {
+                        log::ok(&format!(
+                            "accept verified against a freshly scored baseline: Δ {fresh_delta:+.6e}"
+                        ));
+                        if let Some(sel) = selection.as_mut() {
+                            sel.result = pair.winner.clone();
+                            sel.delta = fresh_delta;
+                        }
+                    } else {
+                        log::warn(&format!(
+                            "accept withdrawn: the freshly scored pair rejects {} (Δ {fresh_delta:+.6e} ≤ {:.6e})",
+                            selection
+                                .as_ref()
+                                .map(|sel| sel.stem.clone())
+                                .unwrap_or_default(),
+                            config.min_improvement
+                        ));
+                        selection = None;
+                    }
+                    baseline = pair.baseline.clone();
+                    remembered_baseline = baseline_scope
+                        .clone()
+                        .map(|scope| RememberedBaseline::new(scope, pair.baseline));
+                    baseline_source = BaselineSource::RememberedVerified;
+                }
+                Err(e) => {
+                    // No fresh pair, no swap: a verification that could not run
+                    // is a rejected accept, never an unverified one.
+                    consecutive_scorer_failures += 1;
+                    log::warn(&format!("accept verification failed: {e}; not accepting"));
+                    experiment_scorer_error = Some(e.clone());
+                    selection = None;
+                    if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
+                        return Err(format!(
+                            "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
+                        ));
+                    }
+                }
+            }
+        }
 
         let (combo_members, combos_scored, combos_dampened, combo_dampen) = match &selection {
             Some(sel) if sel.combos_scored > 0 || sel.member_indices.len() > 1 => (
@@ -1836,8 +2026,11 @@ pub fn run_optimisation_cancellable(
             let previous = incumbent.clone();
             incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
             // The analysis the memo holds describes the creature we just
-            // replaced — every entry is stale from here (issue #106).
+            // replaced — every entry is stale from here (issue #106). So is the
+            // remembered baseline: it scores the old incumbent, and the next
+            // promote call must establish the new one's score fresh (#113).
             analysis_memo.invalidate();
+            remembered_baseline = None;
             let opening = opening_baseline_score.unwrap_or(baseline.score);
             last_accept_focus = winner_focus.clone();
             last_accept_strategy = strategy;
@@ -1931,11 +2124,17 @@ pub fn run_optimisation_cancellable(
             &focus_set,
             &accepted_focuses,
             &scores,
+            &baseline,
             &candidates,
             config.min_improvement,
         );
 
-        let score_map = scores.iter().map(|(k, v)| (k.clone(), v.score)).collect();
+        // A promote call that omitted the baseline still journals the score the
+        // experiment was judged against, so `scores.baseline` means the same
+        // thing to every reader; `baselineSource` says where it came from.
+        let mut score_map: std::collections::BTreeMap<String, f64> =
+            scores.iter().map(|(k, v)| (k.clone(), v.score)).collect();
+        score_map.insert("baseline".to_string(), baseline.score);
         append_journal(
             &journal_path,
             &ExperimentRecord {
@@ -1953,6 +2152,7 @@ pub fn run_optimisation_cancellable(
                 scores: score_map,
                 screen_scores: screen_score_map,
                 screen_tiers,
+                baseline_source: Some(baseline_source),
                 winner: winner_stem,
                 improvement,
                 accepted,
@@ -1962,7 +2162,7 @@ pub fn run_optimisation_cancellable(
                 memo_ms_saved: memo_delta.ms_saved,
                 scorer_ms,
                 scorer_calls: journal_calls(scorer.drain()),
-                scorer_error: None,
+                scorer_error: experiment_scorer_error,
                 combo_members,
                 combo_member_indices: winner_member_indices,
                 combos_scored,
@@ -2049,10 +2249,10 @@ pub fn run_optimisation_cancellable(
 /// judged only on what it actually proposed (issue #109).
 fn best_focus_delta(
     scores: &std::collections::BTreeMap<String, ScoreResult>,
+    baseline: &ScoreResult,
     candidates: &[Candidate],
     focus: &str,
 ) -> Option<f64> {
-    let baseline = scores.get("baseline")?;
     scores
         .iter()
         .filter(|(stem, _)| stem.as_str() != "baseline")
@@ -2091,6 +2291,7 @@ fn record_focus_outcomes(
     focus_set: &[String],
     accepted_focuses: &std::collections::BTreeSet<String>,
     scores: &std::collections::BTreeMap<String, ScoreResult>,
+    baseline: &ScoreResult,
     candidates: &[Candidate],
     min_improvement: f64,
 ) {
@@ -2098,7 +2299,7 @@ fn record_focus_outcomes(
         selector.record_outcome(
             focus_uuid,
             accepted_focuses.contains(focus_uuid),
-            best_focus_delta(scores, candidates, focus_uuid),
+            best_focus_delta(scores, baseline, candidates, focus_uuid),
             false,
             min_improvement,
         );
@@ -2186,6 +2387,91 @@ fn journal_scorer_calls(
             calls,
         },
     )
+}
+
+/// Identity a remembered baseline must still match to be reused (issue #113).
+///
+/// `None` when the training corpus cannot be fingerprinted: the run then scores
+/// a fresh baseline in every promote call, which costs work rather than
+/// correctness, and says so in the log rather than reusing a score it cannot
+/// key.
+fn baseline_key(
+    incumbent: &neat_core::CreatureExport,
+    training_data: &Path,
+) -> Option<BaselineKey> {
+    match training_data_key(training_data) {
+        Ok(training) => Some(BaselineKey {
+            // The coarse shape id alone would survive a weight-only accept, so
+            // the content fingerprint is what actually guards reuse.
+            incumbent_id: incumbent_id(incumbent),
+            fingerprint: crate::memo::creature_fingerprint(incumbent),
+            training,
+        }),
+        Err(e) => {
+            log::warn(&format!(
+                "baseline reuse disabled for this experiment: {e}; scoring a fresh baseline"
+            ));
+            None
+        }
+    }
+}
+
+/// The abort message for a baseline that moved beyond the documented epsilon.
+fn baseline_drift_error(
+    drift: f64,
+    remembered: f64,
+    fresh: f64,
+    epsilon: f64,
+    stage: &str,
+) -> String {
+    format!(
+        "baseline drift at {stage}: the incumbent scored {fresh:.12} now against the \
+         remembered {remembered:.12} (|Δ| {drift:.6e} > --baseline-drift-epsilon {epsilon:.6e}). \
+         The training data, the scorer or the incumbent changed under the run — \
+         aborting rather than deciding an acceptance against a stale score."
+    )
+}
+
+/// A winner and the incumbent, scored together in one full-corpus call (#113).
+struct VerifiedPair {
+    /// Freshly scored incumbent.
+    baseline: ScoreResult,
+    /// Freshly scored proposed winner.
+    winner: ScoreResult,
+}
+
+/// Re-score a proposed winner beside the incumbent, full corpus, in one call.
+///
+/// This is what makes an accept off a remembered baseline safe: both creatures
+/// are scored by the same binary, on the same corpus, in the same process, at
+/// the same moment — the pairing the promote call gave up.
+fn verify_accept_pair(
+    scorer: &impl DirectoryScorer,
+    incumbent: &neat_core::CreatureExport,
+    winner_path: &Path,
+    training_data: &Path,
+    work_dir: &Path,
+) -> Result<VerifiedPair, String> {
+    if work_dir.exists() {
+        fs::remove_dir_all(work_dir).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
+    let json = creature_to_json_pretty(incumbent).map_err(|e| e.to_string())?;
+    fs::write(work_dir.join("baseline.json"), json).map_err(|e| e.to_string())?;
+    fs::copy(winner_path, work_dir.join("winner.json"))
+        .map_err(|e| format!("copy winner from {} failed: {e}", winner_path.display()))?;
+    let scores = scorer
+        .score_directory(work_dir, training_data)
+        .map_err(|e| e.to_string())?;
+    let baseline = scores
+        .get("baseline")
+        .cloned()
+        .ok_or_else(|| "accept verification returned no baseline".to_string())?;
+    let winner = scores
+        .get("winner")
+        .cloned()
+        .ok_or_else(|| "accept verification returned no winner".to_string())?;
+    Ok(VerifiedPair { baseline, winner })
 }
 
 /// Score the supplied creature once for Phase-0 baseline recording.
@@ -2341,6 +2627,8 @@ mod tests {
             screen_promote_threshold: 0.0,
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2466,6 +2754,8 @@ mod tests {
             screen_promote_threshold: 0.0,
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2570,6 +2860,8 @@ mod tests {
             screen_promote_threshold: 1e-6,
             screen_promote_gate: gate,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2628,6 +2920,8 @@ mod tests {
             screen_promote_threshold: 0.0,
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2871,6 +3165,8 @@ mod tests {
             screen_promote_threshold: 0.0,
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
             grafts_path: Some(grafts_path.clone()),
             // Explicit budget so phase-G is not starved by a sub-second run timeout.
             graft_replay_budget: Some(Duration::from_secs(5)),
@@ -2969,6 +3265,8 @@ mod tests {
             screen_promote_threshold: 0.0,
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -3023,6 +3321,8 @@ mod tests {
             screen_promote_threshold: 0.0,
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -4024,12 +4324,16 @@ mod tests {
             ("candidate-002", 0.5 - 1e-3),
         ]);
 
-        let a = best_focus_delta(&scores, &candidates, "a").expect("focus a scored");
-        let b = best_focus_delta(&scores, &candidates, "b").expect("focus b scored");
+        let baseline = scores
+            .get("baseline")
+            .expect("the fixture carries one")
+            .clone();
+        let a = best_focus_delta(&scores, &baseline, &candidates, "a").expect("focus a scored");
+        let b = best_focus_delta(&scores, &baseline, &candidates, "b").expect("focus b scored");
         assert!((a - 1e-3).abs() < 1e-12, "focus a takes its own best: {a}");
         assert!(b < 0.0, "focus b must not inherit focus a's winner: {b}");
         assert_eq!(
-            best_focus_delta(&scores, &candidates, "unseen"),
+            best_focus_delta(&scores, &baseline, &candidates, "unseen"),
             None,
             "a focus with no scored candidate has no delta"
         );
@@ -4056,6 +4360,7 @@ mod tests {
             &focus_set,
             &winners,
             &scores,
+            scores.get("baseline").expect("the fixture carries one"),
             &candidates,
             1e-6,
         );
@@ -4137,6 +4442,8 @@ mod tests {
             screen_promote_threshold: 0.0,
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: 0,
+            baseline_drift_epsilon: crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -4146,5 +4453,345 @@ mod tests {
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #113 — remembered full-corpus baseline
+    // ---------------------------------------------------------------------
+
+    /// Scores tiny_setup batches while recording exactly which creatures each
+    /// call was handed, so a test can assert what the promote directory held.
+    ///
+    /// Baseline error/score match `tiny_setup`'s local MSE so the Phase-0
+    /// parity gate passes; the second and later full-corpus calls can report a
+    /// moved baseline, which is the drift these tests exist to catch.
+    struct BaselineProbeScorer {
+        batches: Arc<Mutex<Vec<(Vec<String>, bool)>>>,
+        /// Baseline score for the first full-corpus call (Phase-0).
+        baseline_first: f64,
+        /// Baseline score for every full-corpus call after it.
+        baseline_after: f64,
+        /// Candidate Δ vs `baseline_first` on a sampled (screen) call.
+        screen_delta: f64,
+        /// Candidate Δ vs `baseline_first` on a full-corpus call.
+        promote_delta: f64,
+    }
+
+    impl BaselineProbeScorer {
+        fn rejecting() -> Self {
+            Self {
+                batches: Arc::new(Mutex::new(Vec::new())),
+                baseline_first: 0.64,
+                baseline_after: 0.64,
+                // Promoted by the screen, rejected on the full corpus: the
+                // overwhelmingly common shape, and the one the saving is for.
+                screen_delta: 1e-4,
+                promote_delta: -1e-4,
+            }
+        }
+
+        /// Full-corpus batches, in call order (Phase-0 first).
+        fn full_batches(&self) -> Vec<Vec<String>> {
+            self.batches
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, sampled)| !sampled)
+                .map(|(stems, _)| stems.clone())
+                .collect()
+        }
+    }
+
+    impl DirectoryScorer for BaselineProbeScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            let mut stems: Vec<String> = fs::read_dir(candidates_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .strip_suffix(".json")
+                        .map(str::to_string)
+                })
+                .collect();
+            stems.sort();
+            let sampled = sample.is_subsample();
+            let full_calls_before = self
+                .batches
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, s)| !s)
+                .count();
+            self.batches.lock().unwrap().push((stems.clone(), sampled));
+
+            let baseline = if sampled || full_calls_before == 0 {
+                self.baseline_first
+            } else {
+                self.baseline_after
+            };
+            let delta = if sampled {
+                self.screen_delta
+            } else {
+                self.promote_delta
+            };
+            let mut map = BTreeMap::new();
+            for stem in stems {
+                let score = if stem == "baseline" {
+                    baseline
+                } else {
+                    self.baseline_first + delta
+                };
+                map.insert(
+                    stem,
+                    ScoreResult {
+                        score,
+                        error: 1.0 - score,
+                        complexity_penalty: 0.0,
+                    },
+                );
+            }
+            Ok(map)
+        }
+    }
+
+    /// Config for the #113 probes: screen + promote, one pinned focus, and the
+    /// reuse knobs under test.
+    fn reuse_config(
+        creature: PathBuf,
+        training: PathBuf,
+        out: PathBuf,
+        interval: u64,
+        epsilon: f64,
+        max_experiments: u64,
+    ) -> LamarckConfig {
+        LamarckConfig {
+            creature,
+            training_data: training,
+            timeout: Duration::from_secs(20),
+            max_experiments: Some(max_experiments),
+            candidates: 3,
+            scale_candidate_quotas: false,
+            min_improvement: 1e-6,
+            seed: Some(7),
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir: out,
+            preserve_losers: false,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            phase0_parity: true,
+            structural_only: false,
+            screen_sample_rate: Some(0.1),
+            screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            baseline_reverify_interval: interval,
+            baseline_drift_epsilon: epsilon,
+            grafts_path: None,
+            graft_replay_budget: None,
+            backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+        }
+    }
+
+    /// The saving itself: with a valid remembered score, promote calls carry
+    /// candidates only — and the run still rejects them correctly.
+    #[test]
+    fn promote_calls_omit_the_baseline_when_a_remembered_score_is_valid() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let scorer = BaselineProbeScorer::rejecting();
+        let config = reuse_config(
+            creature_path,
+            training,
+            dir.path().join("out"),
+            10,
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            3,
+        );
+        let result = run_optimisation(&config, &scorer).unwrap();
+        assert_eq!(
+            result.acceptances, 0,
+            "the probe promotes but never accepts"
+        );
+
+        let full = scorer.full_batches();
+        assert!(
+            full.len() >= 3,
+            "expected Phase-0 + promote calls: {full:?}"
+        );
+        assert_eq!(full[0], vec!["baseline".to_string()], "Phase-0 scores it");
+        for batch in &full[1..] {
+            assert!(
+                !batch.contains(&"baseline".to_string()),
+                "a promote call still carried the incumbent: {batch:?}"
+            );
+            assert!(!batch.is_empty(), "the promote call scored nothing");
+        }
+
+        let records = experiment_records(&result.journal_path);
+        assert!(!records.is_empty());
+        for record in &records {
+            assert_eq!(
+                record.baseline_source,
+                Some(BaselineSource::Remembered),
+                "experiment {} did not journal the remembered baseline",
+                record.experiment_number
+            );
+            // The journal still names the score the experiment was judged
+            // against, so every existing reader stays correct.
+            assert!((record.scores["baseline"] - 0.64).abs() < 1e-12);
+        }
+    }
+
+    /// The pre-#113 default: every promote call carries the incumbent.
+    #[test]
+    fn the_default_run_still_pairs_every_promote_call_with_a_fresh_baseline() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let scorer = BaselineProbeScorer::rejecting();
+        let config = reuse_config(
+            creature_path,
+            training,
+            dir.path().join("out"),
+            0,
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            2,
+        );
+        let result = run_optimisation(&config, &scorer).unwrap();
+        for batch in scorer.full_batches() {
+            assert!(
+                batch.contains(&"baseline".to_string()),
+                "the default run dropped the paired baseline: {batch:?}"
+            );
+        }
+        for record in experiment_records(&result.journal_path) {
+            assert_eq!(record.baseline_source, Some(BaselineSource::Fresh));
+        }
+    }
+
+    /// The guard the reuse removes, put back: a baseline that has moved beyond
+    /// the epsilon by the time it is re-scored aborts the run.
+    #[test]
+    fn a_drifted_baseline_aborts_the_run() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut scorer = BaselineProbeScorer::rejecting();
+        // Every full-corpus call after Phase-0 reports a moved incumbent — the
+        // training data or the scorer changed under the run.
+        scorer.baseline_after = 0.64 + 1e-3;
+        let config = reuse_config(
+            creature_path,
+            training,
+            dir.path().join("out"),
+            // One reuse, then a fresh baseline: the re-verification.
+            1,
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            4,
+        );
+        let err = run_optimisation(&config, &scorer)
+            .expect_err("a moved baseline must stop the run, not be scored against");
+        assert!(err.contains("baseline drift"), "{err}");
+        assert!(err.contains("--baseline-drift-epsilon"), "{err}");
+    }
+
+    /// The worst outcome this issue could cause, made impossible: a margin that
+    /// exists only against the remembered score is withdrawn by the fresh pair.
+    #[test]
+    fn an_accept_whose_margin_needs_the_stale_baseline_is_withdrawn() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut scorer = BaselineProbeScorer::rejecting();
+        // The candidate beats the remembered 0.64 by 2e-6 …
+        scorer.promote_delta = 2e-6;
+        // … but the incumbent is really worth 5e-6 more than that now, so the
+        // freshly scored pair rejects it. The movement is inside this run's
+        // documented epsilon, so it is a withdrawal, not an abort.
+        scorer.baseline_after = 0.64 + 5e-6;
+        let config = reuse_config(creature_path, training, dir.path().join("out"), 10, 1e-3, 1);
+        let result = run_optimisation(&config, &scorer).unwrap();
+        assert_eq!(
+            result.acceptances, 0,
+            "the stale margin must never reach best.json"
+        );
+        let records = experiment_records(&result.journal_path);
+        let promoted = records
+            .iter()
+            .find(|r| r.baseline_source.is_some_and(|s| s.omitted_baseline()))
+            .expect("an experiment promoted off the remembered baseline");
+        assert!(!promoted.accepted);
+        assert_eq!(
+            promoted.baseline_source,
+            Some(BaselineSource::RememberedVerified),
+            "an accept off a remembered baseline is always verified"
+        );
+        // The verification call is the pair, scored together.
+        let verify = scorer
+            .full_batches()
+            .into_iter()
+            .find(|batch| batch.contains(&"winner".to_string()))
+            .expect("the accept was verified against a freshly scored pair");
+        assert!(verify.contains(&"baseline".to_string()), "{verify:?}");
+    }
+
+    /// The positive control: a real improver survives verification, is swapped
+    /// in, and invalidates the remembered score for the new incumbent.
+    #[test]
+    fn a_real_improver_survives_verification_and_invalidates_the_remembered_score() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let mut scorer = BaselineProbeScorer::rejecting();
+        scorer.promote_delta = 2e-5;
+        let config = reuse_config(
+            creature_path,
+            training,
+            dir.path().join("out"),
+            10,
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+            2,
+        );
+        let result = run_optimisation(&config, &scorer).unwrap();
+        assert!(
+            result.acceptances >= 1,
+            "a genuine improver must be accepted"
+        );
+
+        let records = experiment_records(&result.journal_path);
+        let accepted = records
+            .iter()
+            .find(|r| r.accepted)
+            .expect("an accepted experiment");
+        assert_eq!(
+            accepted.baseline_source,
+            Some(BaselineSource::RememberedVerified)
+        );
+        assert!(accepted.improvement.is_some_and(|d| d > 1e-6));
+
+        // The accept changed the incumbent, so the promote call after it can no
+        // longer reuse the score — it carries the baseline again.
+        let full = scorer.full_batches();
+        let verify_at = full
+            .iter()
+            .position(|batch| batch.contains(&"winner".to_string()))
+            .expect("the accept was verified");
+        if let Some(next) = full.get(verify_at + 1) {
+            assert!(
+                next.contains(&"baseline".to_string()),
+                "the promote call after an accept reused a score of the old incumbent: {next:?}"
+            );
+        }
     }
 }

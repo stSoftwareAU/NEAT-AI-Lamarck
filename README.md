@@ -168,6 +168,8 @@ The run always uses these; the flag only overrides the value.
 | `--screen-promote-gate` | `absolute` | Promote gate (issue #111). `absolute` is the pre-#111 run: promote on a bare `--screen-promote-threshold`. `noise-aware` prices the batch's own screen-Δ spread first and promotes on `Δ > max(k · σ̂, --screen-promote-threshold)`, so it can only ever promote a **subset** of what `absolute` does. Opt-in until a paired benchmark on accepts per wall-clock hour justifies moving the default — see [The promote gate](#the-promote-gate). Any other value aborts the run. |
 | `--screen-promote-sigma-k` | `3` | σ̂ multiplier `k` for `--screen-promote-gate noise-aware`; ignored under `absolute`. Must be `> 0` — a non-positive or non-finite value aborts the run instead of reverting to the default. Recorded in the journal `runHeader` so an A/B arm is identifiable. |
 | `--focus-policy` | `weighted` | `weighted` \| `high-error` \| `random` \| `unsaturated`. |
+| `--baseline-reverify-interval` | `0` | Promote calls served from the run's **remembered** full-corpus baseline before one scores the incumbent again (issue #113). `0` is the pre-#113 run: every promote call carries the incumbent. A value `N >= 1` omits it from up to `N` consecutive promote calls — ≈20% of a promote call's creature-scores — then re-scores it and checks it against `--baseline-drift-epsilon`. Any accept off a remembered baseline is re-decided against a freshly scored pair before the incumbent is swapped. Recorded in the journal `runHeader`. See [The remembered baseline](#the-remembered-baseline). |
+| `--baseline-drift-epsilon` | `1e-9` | Absolute baseline-score drift that **aborts the run** (issue #113), checked whenever a fresh baseline arrives while a remembered one is held. Three orders below `--min-improvement`, so a drift big enough to flip an acceptance can never pass. Must be finite and `>= 0`; anything else aborts the run instead of reverting to the default. |
 | `--focus-count` | `1` | Focus neurons an experiment proposes against (issue #109). The creature-wide learning and output-residual passes run **once per experiment** whatever this is, so `K > 1` amortises them over `K` focuses and splits `--candidates` between them. `0` aborts the run; `--focus-neuron` pins the focus and caps this at 1. See [Phase 2](#phase-2--select-the-focus-neurons). |
 | `--quick-sample-records` | `25000` | Record cap for `--quick` observations / focus / learning scans. |
 | `--analysis-memo-entries` | `16` | Focus-dependent entries the cross-experiment analysis memo may hold. `0` disables memoisation; every entry is dropped whenever the incumbent changes. See [Memoised analysis across experiments](#memoised-analysis-across-experiments). |
@@ -669,8 +671,10 @@ Scorer argv is the locked two-argument form plus the screen sampling flags only;
 Lamarck never passes `--gpu` or `--cost`, so scorer defaults decide backend and
 loss. Pass `--screen-sample-rate 1` to disable screening.
 
-The incumbent is included in every scored batch, so a candidate is never
-compared against a stale score. Acceptance uses the scorer JSON **`score`**
+The incumbent is included in every scored batch by default, so a candidate is
+never compared against a stale score. `--baseline-reverify-interval` trades part
+of that pairing for throughput under an explicit guard — see
+[The remembered baseline](#the-remembered-baseline). Acceptance uses the scorer JSON **`score`**
 field (**larger-is-better**) from the **full-corpus** score only — never `error`
 alone:
 
@@ -680,6 +684,62 @@ candidate.score - baseline.score > 1e-6
 
 (default absolute threshold, strict greater-than). GRQ `costOfGrowth` is `1e-7`,
 so `1e-6` sits deliberately above growth noise.
+
+#### The remembered baseline
+
+Between accepts the incumbent does not change, so its full-corpus score is a
+constant the run already holds — established by the Phase-0 gate and by the last
+accept. Scoring it again in every promote call is ≈20% of that call's
+creature-scores, on the expensive tier. `--baseline-reverify-interval N` lets
+the run reuse the number it knows (issue #113):
+
+```mermaid
+flowchart TD
+    START[["promote batch to score"]] --> VALID{"remembered score valid?<br/>same creature, same corpus,<br/>fewer than N calls since fresh"}
+    VALID -->|no| PAIRED["score baseline + candidates"]
+    VALID -->|yes| SOLO["score candidates only<br/>(baseline omitted)"]
+    PAIRED --> DRIFT{"|fresh - remembered|<br/>> --baseline-drift-epsilon?"}
+    DRIFT -->|yes| ABORT(["abort the run"])
+    DRIFT -->|no| DECIDE
+    SOLO --> ACCEPTS{"a candidate clears<br/>--min-improvement?"}
+    ACCEPTS -->|no| DECIDE["reject — no incumbent change"]
+    ACCEPTS -->|yes| VERIFY["re-score winner + incumbent<br/>together, full corpus"]
+    VERIFY --> DRIFT
+    DECIDE --> SWAP(["accept: swap the incumbent,<br/>forget the remembered score"])
+
+    classDef gate fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef work fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0c1e4e
+    classDef out fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef bad fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+    class VALID,DRIFT,ACCEPTS gate
+    class START,PAIRED,SOLO,VERIFY,DECIDE work
+    class SWAP out
+    class ABORT bad
+```
+
+The pairing a promote call gives up is a guard as well as a cost — candidate and
+baseline are otherwise scored by the same binary, on the same corpus, in the
+same process, at the same moment — so three rules hold, each pinned by tests in
+`lamarck/src/run.rs`:
+
+- **The remembered score is keyed to what could invalidate it.** The creature's
+  coarse `incumbentId` *and* its content fingerprint (a weight-only accept
+  leaves the shape id untouched), plus a fingerprint of every `*.bin` in the
+  training directory with its size and mtime. `docs/baseline-economics.md`
+  records the corpus being deleted mid-run by GRQ `node.sh`, so "the data
+  changed under the run" is history here, not a hypothetical.
+- **Any accept is verified before the swap.** A winner proposed against a
+  remembered baseline is re-scored *beside the incumbent* in one full-corpus
+  call, and only that fresh pair can change `best.json`. A margin that exists
+  only against the remembered number is withdrawn.
+- **Drift aborts the run.** Whenever a fresh baseline lands while a remembered
+  one is held — on the re-verification interval or on the accept path — the two
+  are compared, and a disagreement beyond `--baseline-drift-epsilon` stops the
+  run rather than deciding anything.
+
+The screen phase is deliberately untouched: its sample phase rotates per
+experiment, so each screen scores the incumbent on a different stratum and that
+sampled score is genuinely new information.
 
 An accepted winner becomes the incumbent immediately: `best.json` is rewritten
 with the creature's `uuid`/`tags` re-attached and a run-summary `lamarck` tag,
@@ -765,7 +825,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -808,6 +868,7 @@ Every following line is one experiment:
 | `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — pass `--scale-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
 | `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Absent when no screen phase ran, and from journals written before the field existed. |
+| `baselineSource` | Which baseline decided this experiment's promote call (issue #113): `fresh` (the call carried the incumbent and scored it), `remembered` (it reused the run's carried full-corpus score) or `rememberedVerified` (it reused it *and* proposed an accept, so the winner and the incumbent were re-scored together before the swap). Omitted when no promote call ran, and absent from journals written before the field existed — so any accept is traceable to the baseline that decided it. |
 | `winner`, `improvement`, `accepted` | Outcome of the experiment. |
 | `analysisMs`, `scorerMs` | Where the time went. |
 | `scorerCalls[]` | Every scorer invocation this experiment made (issue #112): `phase` (`screen` / `promote` / `combo`), `creatures` handed over, `sampleRate` when the call sampled, `elapsedMs`, and `failed` on a call that did not complete. `scorerMs` sums calls of different sizes, so it cannot be regressed on its own; the per-call creature count is what recovers the fixed per-call and marginal per-creature cost. Absent from journals written before the field existed. |
@@ -857,6 +918,14 @@ for **every** member strategy and is also carried in that row's `comboWins`
 combos win. A combo win in a journal written before `comboMemberIndices` existed
 names no members, so it cannot be attributed at all — those are counted in
 `comboAcceptancesUnattributed` rather than silently dropped.
+
+The `baselineReuse` bucket prices the remembered baseline (issue #113):
+`freshPromoteCalls`, `rememberedPromoteCalls`, `verifiedAccepts`,
+`baselineScoresSaved` (one full-corpus creature-score per omitted baseline),
+`verificationCreatureScores` (two per verified accept — the pair) and
+`netCreatureScoresSaved`, which subtracts the second from the first so the
+saving is never over-claimed. A pre-#113 journal, or a run left at
+`--baseline-reverify-interval 0`, reports every promote call as `fresh`.
 
 The `analysisMemo` report bucket totals the memo columns — `hits`, `misses`,
 `msSaved`, `hitRate` and `analysisMsSavedFraction` (saved milliseconds as a share

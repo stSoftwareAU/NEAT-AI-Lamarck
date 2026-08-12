@@ -132,6 +132,20 @@ pub fn collect_improvers(
     let baseline = scores
         .get("baseline")
         .ok_or_else(|| "baseline missing from scorer results".to_string())?;
+    Ok(collect_improvers_against(scores, baseline, min_improvement))
+}
+
+/// Collect improvers against a baseline scored outside this batch (issue #113).
+///
+/// A promote call that reused a remembered baseline returns no `baseline` stem,
+/// so the score to beat is supplied rather than looked up. Treating a missing
+/// baseline as `0.0` would promote every candidate, so there is deliberately no
+/// default here.
+pub fn collect_improvers_against(
+    scores: &BTreeMap<String, ScoreResult>,
+    baseline: &ScoreResult,
+    min_improvement: f64,
+) -> Vec<Improver> {
     let mut out = Vec::new();
     for (stem, result) in scores {
         if stem == "baseline" || !stem.starts_with("candidate-") {
@@ -159,7 +173,7 @@ pub fn collect_improvers(
             .partial_cmp(&a.delta)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(out)
+    out
 }
 
 fn neuron_changed(base: &NeuronExport, other: &NeuronExport) -> bool {
@@ -417,8 +431,12 @@ pub struct ComboSelectRequest<'a> {
     pub incumbent: &'a CreatureExport,
     /// Generated candidates for this experiment.
     pub candidates: &'a [Candidate],
-    /// Full-corpus scores (must include `baseline` + `candidate-*`).
+    /// Full-corpus `candidate-*` scores. A `baseline` stem is ignored — the
+    /// score to beat is [`Self::baseline`], which may have been measured by an
+    /// earlier call (issue #113).
     pub scores: &'a BTreeMap<String, ScoreResult>,
+    /// Authoritative full-corpus score of the incumbent.
+    pub baseline: &'a ScoreResult,
     /// Absolute score Δ required for acceptance.
     pub min_improvement: f64,
     /// Directory holding scored `candidate-*.json` files.
@@ -439,14 +457,12 @@ pub fn select_best_with_combinations(
         incumbent,
         candidates,
         scores,
+        baseline,
         min_improvement,
         source_dir,
         combo_work_dir,
     } = request;
-    let baseline = scores
-        .get("baseline")
-        .ok_or_else(|| "baseline missing".to_string())?;
-    let improvers = collect_improvers(scores, min_improvement)?;
+    let improvers = collect_improvers_against(scores, baseline, min_improvement);
     if improvers.is_empty() {
         return Ok(None);
     }
@@ -989,6 +1005,7 @@ mod tests {
                 incumbent: &base,
                 candidates: &candidates,
                 scores: &scores,
+                baseline: scores.get("baseline").expect("the test batch carries one"),
                 min_improvement: 1e-6,
                 source_dir: &source,
                 combo_work_dir: &dir.path().join("combos"),
@@ -1113,6 +1130,7 @@ mod tests {
                 incumbent: &base,
                 candidates: &candidates,
                 scores: &scores,
+                baseline: scores.get("baseline").expect("the test batch carries one"),
                 min_improvement: 1e-6,
                 source_dir: &source,
                 combo_work_dir: &combo_work,
