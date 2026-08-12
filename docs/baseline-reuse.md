@@ -147,9 +147,9 @@ carrying one creature fewer. Promote-ms tracks the creature count to within
 ### Projected onto a production run
 
 From [`docs/scorer-call-cost.md`](scorer-call-cost.md) (issue #112), a
-full-corpus promote call costs ≈1 977 ms fixed plus ≈5 490 ms per creature. The
-#8 baseline run made 26 promote calls in 45 minutes for 2 236 s of scorer time,
-so removing one creature from each is:
+full-corpus promote call costs ≈1 977 ms fixed plus ≈5 490 ms per creature.
+The issue #8 baseline run made 26 promote calls in 45 minutes for 2 236 s of
+scorer time, so removing one creature from each is:
 
 ```text
 26 × 5.49 s ≈ 143 s  ≈ 6.4% of scorer time  ≈ 5% of a 45-minute run
