@@ -5,9 +5,10 @@ use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
     CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS, DEFAULT_CANDIDATE_COUNT,
-    DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD,
-    DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig,
-    print_run_summary, report_from_journal, run_optimisation_cancellable,
+    DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
+    ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary, report_from_journal,
+    run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -119,8 +120,28 @@ struct Cli {
     screen_sample_rate: f64,
 
     /// Minimum sample-score Δ to promote a candidate to full-corpus scoring.
+    ///
+    /// Stays in force under `--screen-promote-gate noise-aware` as that gate's
+    /// absolute floor, so the noise-aware gate is never the weaker of the two.
     #[arg(long, default_value_t = DEFAULT_SCREEN_PROMOTE_THRESHOLD)]
     screen_promote_threshold: f64,
+
+    /// Promote gate: absolute (default) | noise-aware (issue #111).
+    ///
+    /// `absolute` is the pre-#111 run: promote on a bare
+    /// `--screen-promote-threshold`. `noise-aware` prices the batch's own
+    /// screen-Δ spread first and promotes on
+    /// `Δ > max(k · σ̂, --screen-promote-threshold)`. Opt-in until a paired
+    /// benchmark on accepts per wall-clock hour justifies moving the default.
+    #[arg(long, default_value = "absolute")]
+    screen_promote_gate: String,
+
+    /// σ̂ multiplier `k` for `--screen-promote-gate noise-aware`. Must be > 0.
+    ///
+    /// Ignored under the absolute gate. `docs/screen-calibration.md` measured
+    /// the screen's noise floor and recommended 3σ.
+    #[arg(long, default_value_t = DEFAULT_SCREEN_PROMOTE_SIGMA_K)]
+    screen_promote_sigma_k: f64,
 
     /// Local JSON store for structural graft memory (phase-G replay).
     ///
@@ -215,6 +236,15 @@ fn main() -> ExitCode {
         std::process::exit(2);
     });
 
+    let screen_promote_gate =
+        PromoteGateMode::parse(&cli.screen_promote_gate).unwrap_or_else(|| {
+            eprintln!(
+                "unknown --screen-promote-gate '{}'; expected absolute|noise-aware",
+                cli.screen_promote_gate
+            );
+            std::process::exit(2);
+        });
+
     let config = LamarckConfig {
         creature,
         training_data,
@@ -246,6 +276,8 @@ fn main() -> ExitCode {
             None
         },
         screen_promote_threshold: cli.screen_promote_threshold,
+        screen_promote_gate,
+        screen_promote_sigma_k: cli.screen_promote_sigma_k,
         grafts_path: cli.grafts_path,
         graft_replay_budget: cli.graft_replay_budget_seconds.map(Duration::from_secs),
         backprop_learning_rate: cli.backprop_learning_rate,
@@ -264,6 +296,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = config.focus_count() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.promote_gate() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }

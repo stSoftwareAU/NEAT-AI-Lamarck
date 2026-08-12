@@ -7,6 +7,7 @@ use crate::chunks::DEFAULT_ANALYSIS_THREADS;
 use crate::focus::FocusPolicy;
 use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
+use crate::promote_gate::{DEFAULT_SCREEN_PROMOTE_SIGMA_K, PromoteGate, PromoteGateMode};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -111,7 +112,18 @@ pub struct LamarckConfig {
     /// (issue #24). `None` or `Some(1.0)` = full-corpus score only.
     pub screen_sample_rate: Option<f64>,
     /// Minimum sample-score Δ to promote a candidate to full-corpus scoring.
+    ///
+    /// Under [`PromoteGateMode::NoiseAware`] this stays in force as the gate's
+    /// absolute floor, so the noise-aware gate is never weaker than this one.
     pub screen_promote_threshold: f64,
+    /// Promote gate in force (issue #111).
+    ///
+    /// [`PromoteGateMode::Absolute`] by default — the pre-#111 run. The
+    /// noise-aware gate is opt-in until a paired benchmark on accepts per
+    /// wall-clock hour justifies moving the default.
+    pub screen_promote_gate: PromoteGateMode,
+    /// σ̂ multiplier for [`PromoteGateMode::NoiseAware`]; ignored otherwise.
+    pub screen_promote_sigma_k: f64,
     /// Local structural graft store path. `None` disables phase-G replay / recording.
     pub grafts_path: Option<PathBuf>,
     /// Wall-clock budget for phase-G graft replay. `None` → 10% of [`Self::timeout`].
@@ -160,6 +172,27 @@ impl LamarckConfig {
             return Err("--focus-count must be at least 1 (got 0)".to_string());
         }
         Ok(self.focus_count)
+    }
+
+    /// Promote gate for this run, validated (issue #111).
+    ///
+    /// A σ̂ multiplier that is not finite and strictly positive is a
+    /// configuration fault, reported rather than silently reverting to the
+    /// default: a run that quietly ignored the flag would invalidate the
+    /// paired benchmark it was set for.
+    pub fn promote_gate(&self) -> Result<PromoteGate, String> {
+        match self.screen_promote_gate {
+            PromoteGateMode::Absolute => Ok(PromoteGate::absolute(self.screen_promote_threshold)),
+            PromoteGateMode::NoiseAware => {
+                let k = self.screen_promote_sigma_k;
+                if !k.is_finite() || k <= 0.0 {
+                    return Err(format!(
+                        "--screen-promote-sigma-k must be finite and greater than 0 (got {k})"
+                    ));
+                }
+                Ok(PromoteGate::noise_aware(self.screen_promote_threshold, k))
+            }
+        }
     }
 
     /// Backprop configuration for this run, with the CLI overrides applied.
@@ -217,6 +250,8 @@ impl Default for LamarckConfig {
             structural_only: false,
             screen_sample_rate: Some(DEFAULT_SCREEN_SAMPLE_RATE),
             screen_promote_threshold: DEFAULT_SCREEN_PROMOTE_THRESHOLD,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -251,6 +286,61 @@ mod tests {
         };
         let err = none.focus_count().expect_err("zero is rejected");
         assert!(err.contains("--focus-count"), "error names the flag: {err}");
+    }
+
+    /// Issue #111: the opt-in property. With no new flag set the run gets the
+    /// pre-#111 absolute gate at the pre-#111 threshold.
+    #[test]
+    fn the_promote_gate_defaults_to_the_pre_111_absolute_one() {
+        let config = LamarckConfig::default();
+        assert_eq!(config.screen_promote_gate, PromoteGateMode::Absolute);
+        let gate = config.promote_gate().expect("the default is valid");
+        assert_eq!(gate.label(), "absolute");
+        assert_eq!(gate.floor(), DEFAULT_SCREEN_PROMOTE_THRESHOLD);
+        assert_eq!(gate.sigma_k(), None);
+    }
+
+    #[test]
+    fn the_noise_aware_gate_carries_the_threshold_as_its_floor() {
+        let config = LamarckConfig {
+            screen_promote_gate: PromoteGateMode::NoiseAware,
+            screen_promote_sigma_k: 4.0,
+            screen_promote_threshold: 2e-6,
+            ..LamarckConfig::default()
+        };
+        let gate = config.promote_gate().expect("4.0 is valid");
+        assert_eq!(gate.label(), "noise-aware");
+        assert_eq!(gate.sigma_k(), Some(4.0));
+        assert_eq!(gate.floor(), 2e-6);
+    }
+
+    #[test]
+    fn a_non_positive_or_non_finite_sigma_k_is_rejected_loudly() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let config = LamarckConfig {
+                screen_promote_gate: PromoteGateMode::NoiseAware,
+                screen_promote_sigma_k: bad,
+                ..LamarckConfig::default()
+            };
+            let err = config
+                .promote_gate()
+                .expect_err("invalid k must not fall back to the default");
+            assert!(
+                err.contains("--screen-promote-sigma-k"),
+                "error should name the flag: {err}"
+            );
+        }
+    }
+
+    /// An invalid `k` under the default gate is inert — the flag is unused, so
+    /// it must not fail a run that never opted in.
+    #[test]
+    fn an_unused_sigma_k_does_not_fail_the_absolute_gate() {
+        let config = LamarckConfig {
+            screen_promote_sigma_k: -1.0,
+            ..LamarckConfig::default()
+        };
+        assert!(config.promote_gate().is_ok());
     }
 
     #[test]

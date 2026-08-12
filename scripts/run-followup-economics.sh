@@ -13,10 +13,11 @@
 #
 # Arms: output-focus | backprop-step | batch-size | multi-seed
 #       output-neuron | backprop-cap | candidate-quotas | focus-count
+#       promote-gate
 #
 # `output-neuron` and `backprop-cap` are #96 arms, `candidate-quotas` is the
-# #108 arm, `focus-count` is the #109 arm, and none of the four is in the
-# default set: like `multi-seed` they need the production creature and
+# #108 arm, `focus-count` is the #109 arm, `promote-gate` is the #111 arm, and
+# none of the five is in the default set: like `multi-seed` they need the production creature and
 # exclusive use of the scorer, so name them explicitly and run them one at a
 # time.
 set -euo pipefail
@@ -60,6 +61,11 @@ QUOTA_SECONDS="${QUOTA_SECONDS:-900}"
 FOCUS_COUNTS="${FOCUS_COUNTS:-1 3}"
 FOCUS_COUNT_CANDIDATES="${FOCUS_COUNT_CANDIDATES:-40}"
 FOCUS_COUNT_SECONDS="${FOCUS_COUNT_SECONDS:-900}"
+# #111 promote-gate A/B: the same seed, budget and batch on both sides, so the
+# only variable is which gate decides what earns a full-corpus score.
+PROMOTE_GATE_CANDIDATES="${PROMOTE_GATE_CANDIDATES:-100}"
+PROMOTE_GATE_SECONDS="${PROMOTE_GATE_SECONDS:-900}"
+PROMOTE_GATE_SIGMA_K="${PROMOTE_GATE_SIGMA_K:-3}"
 # Neuron pinned by the #96 output slice. NEAT-AI names output neurons
 # `output-<index>`; a UUID that does not exist aborts the run rather than
 # quietly falling back to policy selection.
@@ -208,6 +214,24 @@ arm_focus_count() {
   done
 }
 
+arm_promote_gate() {
+  # #111 — the paired benchmark the noise-aware gate needs before its default
+  # can move. Both runs share the seed, the wall budget and `--candidates`, so
+  # the only difference is the promote gate. The metric that decides it is
+  # **accepts per wall-clock hour**, not promotions avoided: a gate that buys
+  # fewer full-corpus scores and finds fewer accepts is a loss.
+  run_arm "promote-gate-absolute" \
+    --timeout-seconds "$PROMOTE_GATE_SECONDS" \
+    --candidates "$PROMOTE_GATE_CANDIDATES" --seed 81 \
+    --focus-policy weighted
+  run_arm "promote-gate-noise-aware" \
+    --timeout-seconds "$PROMOTE_GATE_SECONDS" \
+    --candidates "$PROMOTE_GATE_CANDIDATES" --seed 81 \
+    --focus-policy weighted \
+    --screen-promote-gate noise-aware \
+    --screen-promote-sigma-k "$PROMOTE_GATE_SIGMA_K"
+}
+
 arms=("$@")
 if [[ ${#arms[@]} -eq 0 ]]; then
   arms=(output-focus backprop-step batch-size multi-seed)
@@ -223,7 +247,8 @@ for arm in "${arms[@]}"; do
   backprop-cap) arm_backprop_cap ;;
   candidate-quotas) arm_candidate_quotas ;;
   focus-count) arm_focus_count ;;
-  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap | candidate-quotas | focus-count)" ;;
+  promote-gate) arm_promote_gate ;;
+  *) die "unknown arm '$arm' (output-focus | backprop-step | batch-size | multi-seed | output-neuron | backprop-cap | candidate-quotas | focus-count | promote-gate)" ;;
   esac
 done
 

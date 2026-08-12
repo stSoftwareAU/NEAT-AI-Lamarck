@@ -243,3 +243,11 @@ For the promote-gate change tracked in
    change that only moves the cut-off leaves that on the table.
 
 No flag default is changed by this issue.
+
+**What #111 did with it:** the gate landed as opt-in
+`--screen-promote-gate noise-aware`, with σ̂ estimated per batch from the lower
+quartile of its own |screen Δ| rather than from the pooled figure above — the
+pooled 1.06e-6 is a cross-experiment noise floor, and a per-batch gate needs a
+per-batch scale. Replayed over these same journals it avoids 66% of promotions
+while keeping both accepts; see [`docs/promote-gate.md`](promote-gate.md). The
+default remains `absolute`.

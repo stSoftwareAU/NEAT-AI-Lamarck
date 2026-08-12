@@ -2,6 +2,7 @@
 
 use crate::candidates::{BatchLimit, CandidateStrategy};
 use crate::log;
+use crate::promote_gate::{PromoteGateReplay, PromoteGateReplayAccumulator};
 use crate::run::{JournalLine, RunResult};
 use crate::screen_calibration::{ScreenCalibration, ScreenCalibrationAccumulator};
 use serde::Serialize;
@@ -245,6 +246,12 @@ pub struct JournalReport {
     pub candidate_batch: CandidateBatchStats,
     /// How well the 5% screen predicted the full-corpus score (issue #110).
     pub screen_calibration: ScreenCalibration,
+    /// What the noise-aware promote gate would have done to this journal (#111).
+    ///
+    /// Replayed offline from the journal's own `screenScores`, at the default
+    /// σ̂ multiplier, so a gate change can be priced — and its effect on the
+    /// accepts that were actually earned checked — without any box time.
+    pub promote_gate_replay: PromoteGateReplay,
 }
 
 /// Achieved candidate batch size across a journal (issue #108).
@@ -331,6 +338,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut batch_quota_ceiling = 0u64;
     let mut batch_exhausted = 0u64;
     let mut screen_calibration = ScreenCalibrationAccumulator::default();
+    let mut promote_gate_replay = PromoteGateReplayAccumulator::default();
     let mut focus_all = FocusStatsAccumulator::default();
     let mut focus_accepted = FocusStatsAccumulator::default();
     let mut focus_rejected = FocusStatsAccumulator::default();
@@ -345,6 +353,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         let record = match JournalLine::parse(&line)? {
             JournalLine::Header(header) => {
                 screen_calibration.push_header(&header.config);
+                promote_gate_replay.push_header(&header.config);
                 continue;
             }
             JournalLine::GraftReplay(replay) => {
@@ -365,6 +374,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         };
         experiments += 1;
         screen_calibration.push_experiment(&record)?;
+        promote_gate_replay.push_experiment(&record)?;
         memo_hits += record.memo_hits;
         memo_misses += record.memo_misses;
         memo_ms_saved = memo_ms_saved.saturating_add(record.memo_ms_saved);
@@ -647,6 +657,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             exhausted_experiments: batch_exhausted,
         },
         screen_calibration: screen_calibration.finish(),
+        promote_gate_replay: promote_gate_replay.finish(),
     })
 }
 
@@ -974,6 +985,7 @@ mod tests {
             batch_limit: None,
             scores: BTreeMap::new(),
             screen_scores: None,
+            screen_tiers: None,
             winner: accepted.then(|| "candidate-000".to_string()),
             improvement: accepted.then_some(1e-6),
             accepted,
@@ -1197,6 +1209,7 @@ mod tests {
             batch_limit: None,
             scores: BTreeMap::new(),
             screen_scores: None,
+            screen_tiers: None,
             winner: None,
             improvement: None,
             accepted: false,
@@ -1507,6 +1520,7 @@ mod tests {
                 m.insert("candidate-001".into(), 0.39);
                 m
             }),
+            screen_tiers: None,
             winner: Some("candidate-000".into()),
             improvement: Some(2e-6),
             accepted: true,
@@ -1541,6 +1555,7 @@ mod tests {
                 m
             },
             screen_scores: None,
+            screen_tiers: None,
             winner: None,
             improvement: None,
             accepted: false,

@@ -8,6 +8,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **An opt-in noise-aware promote gate (Issue #111).**
+  `--screen-promote-gate noise-aware` prices each screened batch's own spread
+  before deciding what earns an ~11 s full-corpus score: it promotes on
+  `Δ > max(k · σ̂, --screen-promote-threshold)`, with `k` set by
+  `--screen-promote-sigma-k` (default `3`) and σ̂ the lower quartile of the
+  batch's absolute screen deltas rescaled from a half-normal — a low quantile
+  because a candidate batch is bimodal, so the standard deviation and the MAD
+  measure proposal dispersion rather than the screen's resolution floor. Taking
+  the `max` with the existing threshold means the gate can only ever promote a
+  **subset** of what the absolute gate promotes; acceptance is untouched and
+  stays on the full corpus at `--min-improvement`. A degenerate batch (fewer
+  than four candidates, a non-finite delta, a zero lower quartile) yields no
+  estimate and falls back to the absolute floor instead of dividing by zero or
+  promoting everything. **The default is unchanged** — `absolute` is the
+  pre-#111 run, pinned by tests. The gate and its `k` are recorded in the
+  journal `runHeader` (`screenPromoteGate` / `screenPromoteSigmaK`) and each
+  experiment records its tier admissions (`screenTiers`: gate, screened,
+  promoted, threshold, σ̂). `report` gains a `promoteGateReplay` bucket that
+  replays the gate offline over any journal, so it can be priced — and its
+  effect on the accepts actually earned checked — without box time. Replayed
+  over the journals in hand (6805 screened candidates, 244 promotions, **2**
+  accepts): **161 of 244 promotions avoided (66%) with both accepts kept**, at
+  every `k` from 1 to 5, asserted as a hard `cargo test` failure in
+  `lamarck/tests/promote_gate_replay.rs`. Written up with its limits in
+  `docs/promote-gate.md`, reproducible via `scripts/summarise-promote-gate.sh`
+  and the `promote-gate` arm of `scripts/run-followup-economics.sh`.
+
 - **`report` measures the screen against the full corpus (Issue #110).** A new
   `screenCalibration` section pairs every candidate that carries **both** a
   `screenScores` and a `scores` entry into a (screen Δ, full Δ) point and

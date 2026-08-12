@@ -25,10 +25,13 @@ use crate::log;
 use crate::memo::{AnalysisMemo, MemoScope};
 use crate::observations::ensure_statistics;
 use crate::parity::{check_phase0_parity, compute_local_mse};
+#[cfg(test)]
+use crate::promote_gate::DEFAULT_SCREEN_PROMOTE_SIGMA_K;
+use crate::promote_gate::PromoteGateMode;
 use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, ScoreSample, accepts_improvement, log_scorer_batch_stats_labeled,
-    screen_promote_stems, write_promote_batch,
+    screen_promote_decision, write_promote_batch,
 };
 use crate::structural::{is_input_source, rank_unused_sources};
 use crate::tags::{CreatureMeta, LamarckProgress, serialize_creature_with_meta};
@@ -91,6 +94,12 @@ pub struct ExperimentRecord {
     /// Screen-phase (subsample) scores by stem when two-phase scoring is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_scores: Option<std::collections::BTreeMap<String, f64>>,
+    /// What the screen tier and the promote gate did this experiment (#111).
+    ///
+    /// Omitted when no screen phase ran, and absent from journals written
+    /// before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_tiers: Option<ScreenTierRecord>,
     /// Winning stem if accepted.
     pub winner: Option<String>,
     /// Absolute score improvement when accepted.
@@ -138,6 +147,28 @@ pub struct ExperimentRecord {
     /// Per-target dampen detail for the accepted winner (when any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combo_dampen: Option<StackDampenReport>,
+}
+
+/// Per-experiment admission counts for the screen tier (issue #111).
+///
+/// Recorded so `report` can price a gate change from the journal alone: an
+/// over- or under-promoting gate is visible in the first few experiments of a
+/// run rather than at the end of a 45-minute budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenTierRecord {
+    /// Promote gate in force (`absolute` / `noise-aware`).
+    pub gate: String,
+    /// Candidates the screen tier scored (baseline excluded).
+    pub screened: u64,
+    /// Candidates the gate admitted to full-corpus scoring.
+    pub promoted: u64,
+    /// Screen Δ a candidate had to clear in this batch.
+    pub threshold: f64,
+    /// σ̂ estimated for this batch; omitted under the absolute gate and when
+    /// the batch was too degenerate to price its own noise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sigma: Option<f64>,
 }
 
 /// Marks a journal line as the one-off run header (issue #71).
@@ -221,7 +252,18 @@ pub struct RunConfigRecord {
     /// Screen subsample rate (`None` = full-corpus scoring only).
     pub screen_sample_rate: Option<f64>,
     /// Minimum sample-score delta to promote to full-corpus scoring.
+    ///
+    /// Under the noise-aware gate this is the gate's absolute floor.
     pub screen_promote_threshold: f64,
+    /// Promote gate in force (`absolute` / `noise-aware`, issue #111).
+    ///
+    /// `None` in journals written before the gate was a knob — those ran the
+    /// absolute gate, which is still the default.
+    #[serde(default)]
+    pub screen_promote_gate: Option<String>,
+    /// σ̂ multiplier the noise-aware gate used; `None` under the absolute gate.
+    #[serde(default)]
+    pub screen_promote_sigma_k: Option<f64>,
     /// Pinned focus neuron UUID when set.
     pub focus_neuron: Option<String>,
     /// Focus selection policy label.
@@ -281,6 +323,13 @@ impl RunConfigRecord {
             min_improvement: config.min_improvement,
             screen_sample_rate: config.screen_sample_rate,
             screen_promote_threshold: config.screen_promote_threshold,
+            screen_promote_gate: Some(config.screen_promote_gate.label().to_string()),
+            // Recorded only when it is actually in force, so a journal never
+            // implies a knob the run did not use.
+            screen_promote_sigma_k: match config.screen_promote_gate {
+                PromoteGateMode::Absolute => None,
+                PromoteGateMode::NoiseAware => Some(config.screen_promote_sigma_k),
+            },
             focus_neuron: config.focus_neuron.clone(),
             focus_policy: config.focus_policy.label().to_string(),
             focus_count: config.focus_count,
@@ -659,6 +708,7 @@ pub fn run_optimisation_cancellable(
     let backprop = config.backprop_config()?;
     let analysis_threads = config.analysis_threads()?;
     let focus_count = config.focus_count()?;
+    let promote_gate = config.promote_gate()?;
     fs::create_dir_all(&config.output_dir).map_err(|e| e.to_string())?;
     let journal_path = config.output_dir.join("experiments.jsonl");
     let best_path = config.output_dir.join("best.json");
@@ -1323,6 +1373,7 @@ pub fn run_optimisation_cancellable(
         let screen_rate = config.screen_sample_rate.filter(|r| *r > 0.0 && *r < 1.0);
         let scorer_start = Instant::now();
         let mut screen_score_map: Option<std::collections::BTreeMap<String, f64>> = None;
+        let mut screen_tiers: Option<ScreenTierRecord> = None;
         let mut promote_dir: Option<PathBuf> = None;
 
         let scores = if let Some(rate) = screen_rate {
@@ -1368,6 +1419,7 @@ pub fn run_optimisation_cancellable(
                             batch_limit: Some(batch_limit),
                             scores: Default::default(),
                             screen_scores: None,
+                            screen_tiers: None,
                             winner: None,
                             improvement: None,
                             accepted: false,
@@ -1396,12 +1448,11 @@ pub fn run_optimisation_cancellable(
                 }
             };
             let screen_ms = scorer_start.elapsed().as_millis();
-            log_scorer_batch_stats_labeled(
-                &screen_scores,
-                screen_ms,
-                config.screen_promote_threshold,
-                "screen",
-            );
+            let decision = screen_promote_decision(&screen_scores, &promote_gate)
+                .map_err(|e| e.to_string())?;
+            // Report the batch against the threshold the gate actually applied,
+            // so the ">threshold" count cannot disagree with what is promoted.
+            log_scorer_batch_stats_labeled(&screen_scores, screen_ms, decision.threshold, "screen");
             consecutive_scorer_failures = 0;
             scorer_successes += 1;
             screen_score_map = Some(
@@ -1411,9 +1462,14 @@ pub fn run_optimisation_cancellable(
                     .collect(),
             );
 
-            let promote_stems =
-                screen_promote_stems(&screen_scores, config.screen_promote_threshold)
-                    .map_err(|e| e.to_string())?;
+            let promote_stems = decision.stems.clone();
+            screen_tiers = Some(ScreenTierRecord {
+                gate: promote_gate.label().to_string(),
+                screened: decision.screened as u64,
+                promoted: promote_stems.len() as u64,
+                threshold: decision.threshold,
+                sigma: decision.sigma,
+            });
             if promote_stems.is_empty() {
                 log::detail("screen empty: no sample improvers → skipping full-corpus score");
                 // Sterile focus: dampen so weighted draw explores elsewhere.
@@ -1445,6 +1501,7 @@ pub fn run_optimisation_cancellable(
                         batch_limit: Some(batch_limit),
                         scores: Default::default(),
                         screen_scores: screen_score_map,
+                        screen_tiers,
                         winner: None,
                         improvement: None,
                         accepted: false,
@@ -1468,9 +1525,15 @@ pub fn run_optimisation_cancellable(
             }
 
             log::detail(&format!(
-                "promote: {} candidate(s) cleared screen (threshold Δ > {}) → full corpus",
+                "promote: {} of {} candidate(s) cleared the {} screen gate (Δ > {:.6e}{}) → full corpus",
                 promote_stems.len(),
-                config.screen_promote_threshold
+                decision.screened,
+                promote_gate.label(),
+                decision.threshold,
+                match decision.sigma {
+                    Some(sigma) => format!(", σ̂ {sigma:.6e}"),
+                    None => String::new(),
+                }
             ));
             let pdir = config.output_dir.join(format!("promote-exp-{experiments}"));
             write_promote_batch(&pdir, &batch_dir, &promote_stems)?;
@@ -1514,6 +1577,7 @@ pub fn run_optimisation_cancellable(
                             batch_limit: Some(batch_limit),
                             scores: Default::default(),
                             screen_scores: screen_score_map,
+                            screen_tiers,
                             winner: None,
                             improvement: None,
                             accepted: false,
@@ -1581,6 +1645,7 @@ pub fn run_optimisation_cancellable(
                             batch_limit: Some(batch_limit),
                             scores: Default::default(),
                             screen_scores: None,
+                            screen_tiers: None,
                             winner: None,
                             improvement: None,
                             accepted: false,
@@ -1832,6 +1897,7 @@ pub fn run_optimisation_cancellable(
                 batch_limit: Some(batch_limit),
                 scores: score_map,
                 screen_scores: screen_score_map,
+                screen_tiers,
                 winner: winner_stem,
                 improvement,
                 accepted,
@@ -2179,6 +2245,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: None,
             screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2299,6 +2367,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: Some(0.1),
             screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2321,6 +2391,171 @@ mod tests {
         assert!(first.scores.is_empty());
         assert!(!first.accepted);
         assert!(!out.join("promote-exp-1").exists());
+    }
+
+    /// Screen scorer producing one clear improver in a sea of sampling wobble
+    /// (issue #111): the shape the noise-aware gate exists to separate.
+    struct BimodalScreenScorer;
+
+    impl DirectoryScorer for BimodalScreenScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            let mut stems: Vec<String> = fs::read_dir(candidates_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.strip_suffix(".json")
+                        .filter(|stem| *stem != "baseline")
+                        .map(str::to_string)
+                })
+                .collect();
+            stems.sort();
+            let mut map = BTreeMap::new();
+            let score = |delta: f64| ScoreResult {
+                score: 0.5 + delta,
+                error: 0.5 - delta,
+                complexity_penalty: 0.0,
+            };
+            map.insert("baseline".to_string(), score(0.0));
+            for (index, stem) in stems.iter().enumerate() {
+                let delta = match (sample.is_subsample(), index) {
+                    // One real improver, far above the batch's own wobble.
+                    (true, 0) => 5e-5,
+                    // Wobble: alternating, all comfortably over the 1e-6 floor.
+                    (true, _) if index % 2 == 0 => 1.4e-6,
+                    (true, _) => -1.3e-6,
+                    // The full corpus contradicts every promotion, so the run
+                    // never accepts and keeps screening.
+                    (false, _) => -1e-4,
+                };
+                map.insert(stem.clone(), score(delta));
+            }
+            Ok(map)
+        }
+    }
+
+    fn bimodal_screen_config(dir: &Path, gate: PromoteGateMode) -> (LamarckConfig, PathBuf) {
+        let (creature_path, training) = tiny_setup(dir);
+        let out = dir.join(match gate {
+            PromoteGateMode::Absolute => "out-absolute",
+            PromoteGateMode::NoiseAware => "out-noise-aware",
+        });
+        let config = LamarckConfig {
+            creature: creature_path,
+            training_data: training,
+            timeout: Duration::from_millis(800),
+            max_experiments: Some(1),
+            candidates: 12,
+            scale_candidate_quotas: true,
+            min_improvement: 1e-6,
+            seed: Some(1),
+            scorer_path: PathBuf::from("rust_scorer"),
+            output_dir: out.clone(),
+            preserve_losers: true,
+            stats_mode: crate::observations::StatsMode::Quick,
+            quick_sample_records: 8,
+            focus_neuron: Some("o1".into()),
+            focus_policy: FocusPolicy::Random,
+            focus_count: crate::config::DEFAULT_FOCUS_COUNT,
+            compute_correlations: false,
+            max_consecutive_scorer_failures: 3,
+            phase0_parity: false,
+            structural_only: false,
+            screen_sample_rate: Some(0.1),
+            screen_promote_threshold: 1e-6,
+            screen_promote_gate: gate,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            grafts_path: None,
+            graft_replay_budget: None,
+            backprop_learning_rate: None,
+            backprop_max_bias_adjustment_scale: None,
+            analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
+            analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+        };
+        (config, out)
+    }
+
+    fn first_experiment(path: &Path) -> ExperimentRecord {
+        journal_lines(path)
+            .into_iter()
+            .find_map(|l| match l {
+                JournalLine::Experiment(record) => Some(*record),
+                JournalLine::Header(_) | JournalLine::GraftReplay(_) => None,
+            })
+            .expect("at least one experiment")
+    }
+
+    fn run_header(path: &Path) -> RunHeaderRecord {
+        journal_lines(path)
+            .into_iter()
+            .find_map(|l| match l {
+                JournalLine::Header(header) => Some(*header),
+                JournalLine::Experiment(_) | JournalLine::GraftReplay(_) => None,
+            })
+            .expect("a run header")
+    }
+
+    /// Issue #111 end to end: the noise-aware gate promotes the improver alone,
+    /// journals its tier counts, and records itself in the run header.
+    #[test]
+    fn the_noise_aware_gate_promotes_only_the_improver_and_journals_the_tiers() {
+        let dir = tempdir().unwrap();
+        let (config, _out) = bimodal_screen_config(dir.path(), PromoteGateMode::NoiseAware);
+        let result = run_optimisation(&config, &BimodalScreenScorer).unwrap();
+
+        let header = run_header(&result.journal_path);
+        assert_eq!(
+            header.config.screen_promote_gate.as_deref(),
+            Some("noise-aware")
+        );
+        assert_eq!(
+            header.config.screen_promote_sigma_k,
+            Some(DEFAULT_SCREEN_PROMOTE_SIGMA_K)
+        );
+
+        let record = first_experiment(&result.journal_path);
+        let tiers = record.screen_tiers.expect("the screen tier is journalled");
+        assert_eq!(tiers.gate, "noise-aware");
+        assert!(tiers.screened >= 4, "batch too small to price: {tiers:?}");
+        assert_eq!(tiers.promoted, 1, "only the improver should be bought");
+        assert!(tiers.sigma.is_some_and(|s| s > 0.0));
+        assert!(tiers.threshold > 1e-6, "the gate rose above the floor");
+        // The full corpus scored exactly what the gate admitted, plus baseline.
+        assert_eq!(record.scores.len(), 2);
+    }
+
+    /// The opt-in property, end to end: with no new flag set the same batch
+    /// promotes everything over the bare threshold, exactly as before #111.
+    #[test]
+    fn the_default_gate_still_promotes_every_candidate_over_the_threshold() {
+        let dir = tempdir().unwrap();
+        let (config, _out) = bimodal_screen_config(dir.path(), PromoteGateMode::Absolute);
+        let result = run_optimisation(&config, &BimodalScreenScorer).unwrap();
+
+        let header = run_header(&result.journal_path);
+        assert_eq!(
+            header.config.screen_promote_gate.as_deref(),
+            Some("absolute")
+        );
+        assert_eq!(header.config.screen_promote_sigma_k, None);
+
+        let record = first_experiment(&result.journal_path);
+        let tiers = record.screen_tiers.expect("the screen tier is journalled");
+        assert_eq!(tiers.gate, "absolute");
+        assert_eq!(tiers.threshold, 1e-6);
+        assert_eq!(tiers.sigma, None);
+        // Every wobble above the floor is bought, which is the cost #111 measures.
+        assert!(
+            tiers.promoted > 1,
+            "the absolute gate should buy the wobble too: {tiers:?}"
+        );
+        assert_eq!(record.scores.len() as u64, tiers.promoted + 1);
     }
 
     /// Phase-G replays a stored synapse graft onto the opening fittest.
@@ -2428,6 +2663,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: None,
             screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             grafts_path: Some(grafts_path.clone()),
             // Explicit budget so phase-G is not starved by a sub-second run timeout.
             graft_replay_budget: Some(Duration::from_secs(5)),
@@ -2524,6 +2761,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: None,
             screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -2576,6 +2815,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: None,
             screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,
@@ -3674,6 +3915,8 @@ mod tests {
             structural_only: false,
             screen_sample_rate: None,
             screen_promote_threshold: 0.0,
+            screen_promote_gate: PromoteGateMode::Absolute,
+            screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
             grafts_path: None,
             graft_replay_budget: None,
             backprop_learning_rate: None,

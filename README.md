@@ -164,7 +164,9 @@ The run always uses these; the flag only overrides the value.
 | `--timeout-seconds` | `2700` | Wall-clock budget (45 minutes). |
 | `--min-improvement` | `1e-6` | Absolute score delta required to accept, strict `>`. |
 | `--screen-sample-rate` | `0.05` | Scorer subsample for the screen phase. `1` (or `>= 1`) disables screening. |
-| `--screen-promote-threshold` | `1e-6` | Minimum sample-score Δ before a candidate earns a full-corpus score. |
+| `--screen-promote-threshold` | `1e-6` | Minimum sample-score Δ before a candidate earns a full-corpus score. Stays in force under `--screen-promote-gate noise-aware` as that gate's absolute floor. |
+| `--screen-promote-gate` | `absolute` | Promote gate (issue #111). `absolute` is the pre-#111 run: promote on a bare `--screen-promote-threshold`. `noise-aware` prices the batch's own screen-Δ spread first and promotes on `Δ > max(k · σ̂, --screen-promote-threshold)`, so it can only ever promote a **subset** of what `absolute` does. Opt-in until a paired benchmark on accepts per wall-clock hour justifies moving the default — see [The promote gate](#the-promote-gate). Any other value aborts the run. |
+| `--screen-promote-sigma-k` | `3` | σ̂ multiplier `k` for `--screen-promote-gate noise-aware`; ignored under `absolute`. Must be `> 0` — a non-positive or non-finite value aborts the run instead of reverting to the default. Recorded in the journal `runHeader` so an A/B arm is identifiable. |
 | `--focus-policy` | `weighted` | `weighted` \| `high-error` \| `random` \| `unsaturated`. |
 | `--focus-count` | `1` | Focus neurons an experiment proposes against (issue #109). The creature-wide learning and output-residual passes run **once per experiment** whatever this is, so `K > 1` amortises them over `K` focuses and splits `--candidates` between them. `0` aborts the run; `--focus-neuron` pins the focus and caps this at 1. See [Phase 2](#phase-2--select-the-focus-neurons). |
 | `--quick-sample-records` | `25000` | Record cap for `--quick` observations / focus / learning scans. |
@@ -599,9 +601,10 @@ Scoring runs in three steps:
 1. **Screen** the full candidate directory with
    `rust_scorer --sample-rate 0.05 --sample-phase <n> …` (≈0.7–1s/creature on
    GRQ against ≈11s full). The sample phase rotates per experiment.
-2. **Promote** only stems with sample Δ `> --screen-promote-threshold` into a
-   full-corpus batch, so full-corpus time is not spent on sample noise. An empty
-   screen ends the experiment without a full-corpus call.
+2. **Promote** only stems the promote gate admits into a full-corpus batch, so
+   full-corpus time is not spent on sample noise. An empty screen ends the
+   experiment without a full-corpus call. Which gate is in force is
+   `--screen-promote-gate` — see [The promote gate](#the-promote-gate).
 3. **Combine** — when two or more promoted candidates each beat the baseline,
    their mutation deltas are merged into combination creatures (all pairs, then
    triples, budget-capped) and scored in one further full-corpus batch.
@@ -614,8 +617,53 @@ journals already in hand, in
 [`docs/screen-calibration.md`](docs/screen-calibration.md): over 244 promotions
 the rank correlation between screen Δ and full-corpus Δ is **-0.55**, and the
 `1e-6` threshold sits at about **one** standard deviation of the screen's own
-sampling noise. No default is changed on that evidence — the promote gate is
-issue #111.
+sampling noise.
+
+#### The promote gate
+
+`--screen-promote-gate` chooses how step 2 decides. **The default is unchanged
+by issue #111** — `absolute` is exactly the pre-#111 run:
+
+```mermaid
+flowchart LR
+    SCREEN[["screen Δ per candidate"]] --> GATE{"--screen-promote-gate"}
+    GATE -->|"absolute (default)"| ABS["Δ > --screen-promote-threshold"]
+    GATE -->|"noise-aware"| SIGMA["σ̂ = q25(|Δ|) / 0.3186"]
+    SIGMA --> NA["Δ > max(k · σ̂, --screen-promote-threshold)"]
+    ABS --> FULL[["full-corpus promote batch"]]
+    NA --> FULL
+    ABS -.->|"below the bar"| DROP["dropped — no full-corpus score"]
+    NA -.->|"below the bar"| DROP
+```
+
+σ̂ is the **lower quartile of the batch's own absolute screen deltas**, rescaled
+as if that quartile came from a half-normal. A low quantile is used on purpose:
+a candidate batch is bimodal — structural proposals routinely move the score by
+`5e-2` while weight/bias nudges move it by `~1e-8` — so the median or the
+standard deviation would measure *proposal dispersion* rather than the
+resolution floor the gate cares about. The `--screen-sample-rate` is **not**
+applied a second time: σ̂ is measured on scores the run produced at its own rate,
+so the rate is already inside the estimate.
+
+Two properties hold whatever the batch looks like, both pinned by tests in
+`lamarck/src/promote_gate.rs`:
+
+- **Never weaker than `absolute`.** The threshold is a `max` with the floor, so
+  the noise-aware gate promotes a subset of what the absolute gate promotes.
+  Nothing here can make a candidate acceptable on sampled evidence — acceptance
+  stays on the full corpus at `--min-improvement`.
+- **A degenerate batch falls back rather than misfiring.** Fewer than four
+  candidates, a non-finite delta, or a batch whose lower quartile is exactly
+  zero yields no estimate, and the gate reverts to the absolute floor instead of
+  dividing by zero or promoting everything.
+
+Because a lost accept is invisible in production — nothing journals the
+acceptance that never happened — the gate is replayed **offline** against the
+journals in `docs/screen-calibration.md` before it can cost a run anything.
+`lamarck/tests/promote_gate_replay.rs` asserts that both of the accepts issue #8
+ever earned (`+1.11e-6` and `+1.00e-6`, each barely over the bar) would still
+have been promoted, at every `k` from 1 to 5. A gate that drops either fails
+`cargo test`.
 
 Scorer argv is the locked two-argument form plus the screen sampling flags only;
 Lamarck never passes `--gpu` or `--cost`, so scorer defaults decide backend and
@@ -717,7 +765,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -746,6 +794,7 @@ Every following line is one experiment:
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`. |
 | `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — pass `--scale-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
+| `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Absent when no screen phase ran, and from journals written before the field existed. |
 | `winner`, `improvement`, `accepted` | Outcome of the experiment. |
 | `analysisMs`, `scorerMs` | Where the time went. |
 | `memoHits`, `memoMisses`, `memoMsSaved` | Analysis-memo accounting for this experiment (issue #106): lookups served from the memo, lookups recomputed, and the training-scan milliseconds the hits avoided. `memoMsSaved` counts whole scans skipped, measured on the miss that stored the entry — a cached output-MAE map saves only the residual accumulation inside a scan that still runs for the learning signal, so it is deliberately not counted. Journals written before the field existed read as `0`. |
@@ -826,6 +875,18 @@ Run it over several journals with
 `scripts/summarise-screen-calibration.sh JOURNAL...`; the measured result for
 the journals in hand is
 [`docs/screen-calibration.md`](docs/screen-calibration.md).
+
+The `promoteGateReplay` bucket answers "what would the noise-aware gate have
+done to this journal?" without spending any box time (issue #111). It replays
+`--screen-promote-gate noise-aware` at the default `k` over the journal's own
+`screenScores`, reporting the gate the run actually used (`gateAsRun`, `null`
+for a pre-#111 journal or a concatenation of arms that disagree), the
+`replaySigmaK` and `replayFloor` it replayed with, `screened`, `promotedAsRun`
+against `promotedUnderGate`, the `promotionsAvoided` between them, and — the
+number that decides whether the gate is safe — `acceptsKept` against
+`acceptsDropped`, with every accepted winner listed in `accepts[]` beside the Δ
+it had and the Δ the gate demanded. The measured result for the journals in hand
+is [`docs/promote-gate.md`](docs/promote-gate.md).
 
 `focusStats` is aggregated into a `focusStats` report object with three buckets —
 `all`, `accepted` and `rejected` — each carrying `experiments`,

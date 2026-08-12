@@ -2,6 +2,7 @@
 
 use crate::config::DEFAULT_MIN_IMPROVEMENT;
 use crate::log;
+use crate::promote_gate::PromoteGate;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -203,22 +204,55 @@ pub fn log_scorer_batch_stats_labeled(
     }
 }
 
+/// What one promote gate did to one screened batch (issue #111).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromoteDecision {
+    /// Stems admitted to full-corpus scoring, best sample Δ first.
+    pub stems: Vec<String>,
+    /// Candidates the screen tier scored (baseline excluded).
+    pub screened: usize,
+    /// Screen Δ a candidate had to clear in this batch.
+    pub threshold: f64,
+    /// σ̂ the gate estimated for this batch; `None` under the absolute gate or
+    /// when the batch was too degenerate to price its own noise.
+    pub sigma: Option<f64>,
+}
+
 /// Stems (excluding baseline) whose sample score beats baseline by more than `threshold`.
 pub fn screen_promote_stems(
     scores: &BTreeMap<String, ScoreResult>,
     threshold: f64,
 ) -> Result<Vec<String>, ScorerError> {
+    Ok(screen_promote_decision(scores, &PromoteGate::absolute(threshold))?.stems)
+}
+
+/// Apply a promote gate to a screened batch (issue #111).
+///
+/// The absolute gate reproduces [`screen_promote_stems`] exactly; the
+/// noise-aware gate prices the batch's own spread first and can only ever
+/// admit a subset of what the absolute one would.
+pub fn screen_promote_decision(
+    scores: &BTreeMap<String, ScoreResult>,
+    gate: &PromoteGate,
+) -> Result<PromoteDecision, ScorerError> {
     let baseline = scores
         .get("baseline")
         .ok_or_else(|| ScorerError::Missing("baseline missing from scorer results".into()))?;
-    let mut stems: Vec<(String, f64)> = scores
+    let mut deltas: Vec<(String, f64)> = scores
         .iter()
         .filter(|(stem, _)| stem.as_str() != "baseline")
         .map(|(stem, r)| (stem.clone(), improvement(r.score, baseline.score)))
-        .filter(|(_, delta)| *delta > threshold)
         .collect();
-    stems.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(stems.into_iter().map(|(s, _)| s).collect())
+    let resolved = gate.threshold_for(&deltas.iter().map(|(_, d)| *d).collect::<Vec<_>>());
+    let screened = deltas.len();
+    deltas.retain(|(_, delta)| *delta > resolved.threshold);
+    deltas.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(PromoteDecision {
+        stems: deltas.into_iter().map(|(s, _)| s).collect(),
+        screened,
+        threshold: resolved.threshold,
+        sigma: resolved.sigma,
+    })
 }
 
 /// Copy `baseline.json` + promoted candidate JSON into a fresh promote directory.
@@ -425,6 +459,66 @@ mod tests {
         let stems = screen_promote_stems(&map, 0.0).unwrap();
         assert_eq!(stems, vec!["candidate-002", "candidate-000"]);
         assert!(screen_promote_stems(&map, 1e-3).unwrap().is_empty());
+
+        // Issue #111 default-drift guard: the absolute gate promotes exactly
+        // the stems the pre-#111 gate promoted, in the same order.
+        let decision = screen_promote_decision(&map, &PromoteGate::absolute(0.0)).unwrap();
+        assert_eq!(decision.stems, stems);
+        assert_eq!(decision.screened, 3);
+        assert_eq!(decision.threshold, 0.0);
+        assert_eq!(decision.sigma, None);
+    }
+
+    /// A batch built from one real improver and a core of sampling wobble: the
+    /// noise-aware gate keeps the improver and drops the wobble the absolute
+    /// gate would have bought full-corpus scores for.
+    #[test]
+    fn the_noise_aware_gate_drops_wobble_and_keeps_a_real_improver() {
+        let mut map = BTreeMap::new();
+        let insert = |map: &mut BTreeMap<String, ScoreResult>, stem: &str, delta: f64| {
+            map.insert(
+                stem.to_string(),
+                ScoreResult {
+                    score: 0.5 + delta,
+                    error: 0.5,
+                    complexity_penalty: 0.0,
+                },
+            );
+        };
+        insert(&mut map, "baseline", 0.0);
+        for (index, delta) in [
+            1.2e-6, -1.1e-6, 1.4e-6, -1.3e-6, 1.05e-6, -9e-7, 1.6e-6, -1.5e-6,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert(&mut map, &format!("candidate-{index:03}"), delta);
+        }
+        insert(&mut map, "candidate-100", 4.7e-5);
+
+        let absolute = screen_promote_decision(&map, &PromoteGate::absolute(1e-6)).unwrap();
+        assert_eq!(absolute.stems.len(), 5, "the absolute gate buys the wobble");
+
+        let noise_aware =
+            screen_promote_decision(&map, &PromoteGate::noise_aware(1e-6, 3.0)).unwrap();
+        assert_eq!(noise_aware.stems, vec!["candidate-100"]);
+        assert_eq!(noise_aware.screened, 9);
+        assert!(noise_aware.sigma.is_some_and(|s| s > 0.0));
+        assert!(noise_aware.threshold > absolute.threshold);
+    }
+
+    #[test]
+    fn a_promote_decision_without_a_baseline_fails_loudly() {
+        let map = BTreeMap::from([(
+            "candidate-000".to_string(),
+            ScoreResult {
+                score: 0.5,
+                error: 0.5,
+                complexity_penalty: 0.0,
+            },
+        )]);
+        let err = screen_promote_decision(&map, &PromoteGate::noise_aware(1e-6, 3.0)).unwrap_err();
+        assert!(matches!(err, ScorerError::Missing(_)));
     }
 
     #[test]
