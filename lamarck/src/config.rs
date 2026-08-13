@@ -71,10 +71,9 @@ pub struct LamarckConfig {
     /// Scale the candidate generator's per-phase quotas with [`Self::candidates`]
     /// (issue #108), so the budget binds until the generator is exhausted.
     ///
-    /// Off by default: the pre-#108 fixed quotas top out at ~29 candidates on
-    /// the production creature, and raising that ceiling is a batch-economics
-    /// change the paired benchmark in `docs/followup-economics.md` has to
-    /// justify before it becomes the default.
+    /// On by default: the legacy fixed quotas top out at ~33 distinct
+    /// candidates whatever the budget says. `false` reproduces that fixed
+    /// ceiling (`--fixed-candidate-quotas`), kept only for A/B benchmarking.
     pub scale_candidate_quotas: bool,
     /// Absolute score delta required for acceptance (`candidate - baseline`).
     pub min_improvement: f64,
@@ -271,7 +270,7 @@ impl Default for LamarckConfig {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
             max_experiments: None,
             candidates: DEFAULT_CANDIDATE_COUNT,
-            scale_candidate_quotas: false,
+            scale_candidate_quotas: true,
             min_improvement: DEFAULT_MIN_IMPROVEMENT,
             seed: None,
             scorer_path: PathBuf::from("rust_scorer"),

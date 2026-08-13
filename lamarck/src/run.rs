@@ -1588,7 +1588,7 @@ pub fn run_optimisation_cancellable(
             match batch_limit {
                 BatchLimit::QuotaCeiling => log::warn(&format!(
                     "candidate budget {} unmet: the fixed per-phase quotas topped out at {} \
-                     — pass --scale-candidate-quotas to let the budget bind",
+                     — drop --fixed-candidate-quotas to let the budget bind",
                     config.candidates,
                     candidates.len()
                 )),
