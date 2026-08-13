@@ -163,6 +163,13 @@ The arm as specified — 40 vs 100 vs 150 candidates under a fixed 15 minutes �
 > so a run that passes the flag fills the budget until the generator is
 > genuinely exhausted. The flag stays opt-in until the paired benchmark under
 > [Arm 5](#arm-5--candidate-quota-scaling-108) justifies changing the default.
+>
+> **Ceiling restated (#119).** The default path now rejects duplicate
+> proposals and passes the freed slot to the next strategy, so the round-robin
+> fill contributes up to three *accepted* candidates per strategy rather than
+> three attempts. The ceiling measured below therefore reads ~6 higher (27 →
+> 33 on the synthetic creature), and every candidate under it is a distinct
+> hypothesis.
 
 `generate_candidates` fills a batch through fixed per-phase quotas (one scaled
 `structural_add` per ranked source, at most three growth squashes, two hidden
@@ -245,41 +252,62 @@ The generator itself is measured, on a production-shaped synthetic creature
 
 | `--candidates` | Fixed quotas | Distinct | Scaled quotas | Distinct | Generation (scaled) |
 |----------------|--------------|----------|---------------|----------|---------------------|
-| 12 | 12 (budget) | 11 | 12 (budget) | 12 | 1.2 ms |
-| 29 | 27 (ceiling) | 22 | 29 (budget) | 29 | 3.4 ms |
-| 40 | 27 (ceiling) | 22 | 40 (budget) | 40 | 4.5 ms |
-| 60 | 27 (ceiling) | 22 | 60 (budget) | 60 | 5.9 ms |
-| 100 | 27 (ceiling) | 22 | 100 (budget) | 100 | 9.1 ms |
-| 120 | 27 (ceiling) | 22 | 120 (budget) | 120 | 10.1 ms |
-| 240 | 27 (ceiling) | 22 | 240 (budget) | 240 | 19.7 ms |
+| 12 | 12 (budget) | 12 | 12 (budget) | 12 | 1.5 ms |
+| 29 | 29 (budget) | 29 | 29 (budget) | 29 | 5.2 ms |
+| 40 | 33 (ceiling) | 33 | 40 (budget) | 40 | 7.1 ms |
+| 60 | 33 (ceiling) | 33 | 60 (budget) | 60 | 9.1 ms |
+| 100 | 33 (ceiling) | 33 | 100 (budget) | 100 | 12.1 ms |
+| 120 | 33 (ceiling) | 33 | 120 (budget) | 120 | 13.9 ms |
+| 240 | 33 (ceiling) | 33 | 240 (budget) | 240 | 25.7 ms |
 
-Two things to read off it. Generation costs ~0.08 ms per candidate — four
+Two things to read off it. Generation costs ~0.1 ms per candidate — four
 orders of magnitude below the ~11 s per-experiment learning pass, so the extra
 batch costs **screen time**, not generation time, and that is exactly what the
-paired arm has to price. And the *distinct* columns show the fixed quotas
-propose 27 candidates of which only **22 are distinct**: five creatures per
-experiment are scored twice. The scaled path rejects duplicates rather than
-counting them, so a filled budget is 240 distinct hypotheses, not 240 slots.
+paired arm has to price. And both paths now propose only distinct hypotheses:
+a batch of *N* is *N* mutations, not *N* slots.
+
+Before issue #119 the fixed-quota column read `27 (ceiling) | 22` at every
+budget from 29 up: five of the 27 creatures screened each experiment were
+byte-identical hypotheses differing only in a grown neuron's random UUID, so
+they were screened — and sometimes promoted — twice. The rejection the scaled
+path already applied now runs on the default path too, and the rejected
+proposal's slot falls through to the next strategy instead of shrinking the
+batch:
+
+| `--candidates` | Before (#119) | Distinct | After | Distinct |
+|----------------|---------------|----------|-------|----------|
+| 12 | 12 (budget) | 11 | 12 (budget) | 12 |
+| 29 | 27 (ceiling) | 22 | **29 (budget)** | **29** |
+| 40–240 | 27 (ceiling) | 22 | 33 (ceiling) | 33 |
+
+At the production `--candidates 29` that trades **+2 screened creatures for +7
+distinct hypotheses**. Priced with the screen fit in
+[`docs/scorer-call-cost.md`](scorer-call-cost.md) (9 898 ms fixed + 452 ms per
+creature), the screen call goes 22.1 s → 23.0 s while the cost per *distinct*
+hypothesis falls **1.00 s → 0.79 s (-21%)**. Generation itself rises 3.2 ms →
+5.2 ms per experiment — the fingerprint hash over a 23 479-synapse creature —
+which is under 0.02% of a 36–65 s experiment.
 
 Strategy mix at `--candidates 120` on that creature, fixed → scaled:
 
 | Strategy | Fixed | Scaled |
 |----------|-------|--------|
-| `structural_add` | 8 | 52 |
-| `structural_add_neuron` | 6 | 30 |
-| `stats_weight` | 3 | 12 |
-| `stats_bias` | 3 | 12 |
-| `random` | 3 | 12 |
-| `structural_weaken` | 3 | 1 |
+| `structural_add` | 11 | 49 |
+| `structural_add_neuron` | 3 | 28 |
+| `stats_weight` | 6 | 14 |
+| `stats_bias` | 6 | 14 |
+| `random` | 5 | 13 |
+| `structural_weaken` | 1 | 1 |
 | `mean_error_bias` | 1 | 1 |
 
 No family disappears. Two shifts are expected and recorded: the mix tilts
 towards the structural families, whose hypothesis space (ranked sources ×
 weight scales, ranked sources × squashes) is what the extra budget sweeps; and
-`structural_weaken` falls to 1 because it proposes one deterministic mutation,
-so its repeats are duplicates and are dropped rather than counted. (`backprop`
-appears in neither column: the benchmark supplies no learning signal, so it
-proposes nothing on either side — see Arm 2 for its own economics.)
+`structural_weaken` and `structural_add_neuron` hold at 1 and 3 because their
+repeat proposals at a spent grid position are duplicates, dropped on both paths
+since #119 rather than counted. (`backprop` appears in neither column: the
+benchmark supplies no learning signal, so it proposes nothing on either side —
+see Arm 2 for its own economics.)
 
 Run the paired benchmark with:
 
