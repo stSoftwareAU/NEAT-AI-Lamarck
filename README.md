@@ -621,7 +621,9 @@ Scoring runs in three steps:
    `--screen-promote-gate` — see [The promote gate](#the-promote-gate).
 3. **Combine** — when two or more promoted candidates each beat the baseline,
    their mutation deltas are merged into combination creatures (all pairs, then
-   triples, budget-capped) and scored in one further full-corpus batch.
+   triples, budget-capped) and scored in one further full-corpus batch **with
+   the incumbent**, and each combo is judged against that incumbent score rather
+   than the promote call's (see [Same-call deltas](#same-call-deltas)).
    Synapses newly stacked into the same target by `k` members are scaled by
    `k^-0.5` so a merge is not louder than the sum of its evidence. Conflicting
    edits to the same neuron or edge are skipped.
@@ -696,6 +698,23 @@ candidate.score - baseline.score > 1e-6
 
 (default absolute threshold, strict greater-than). GRQ `costOfGrowth` is `1e-7`,
 so `1e-6` sits deliberately above growth noise.
+
+#### Same-call deltas
+
+Both scores in that subtraction must come from the **same** scorer call. The
+scorer partitions a creature's records by how many creatures share the call, so
+the same creature on the same corpus scores differently in a directory of one,
+two or three — `1.755e-7` relative on the production creature, a sizeable
+fraction of a `1e-6` bar, and it moves the incumbent and the candidate by
+different amounts (issue #130).
+
+Every phase therefore scores the incumbent in its own call and subtracts locally:
+the screen gate against the screen baseline, a promoted single against the
+promote baseline, a combo against the incumbent re-scored **in the combo call**,
+and the remembered-baseline accept against a freshly scored pair. A combo call
+that returns no `baseline` fails loudly rather than borrowing the promote call's
+number. The artefact, the rule and the upstream fix are recorded in
+[`docs/scorer-batch-composition.md`](docs/scorer-batch-composition.md).
 
 #### The remembered baseline
 

@@ -495,12 +495,29 @@ pub fn improvement(candidate: f64, baseline: f64) -> f64 {
 }
 
 /// True when the absolute score improvement exceeds the threshold (strict `>`).
+///
+/// Both scores must come from the **same** scorer call: directory scoring is
+/// only reproducible for a fixed batch composition, so subtracting two scores
+/// measured in calls of different sizes carries a measurement artefact of its
+/// own (issue #130, `docs/scorer-batch-composition.md`).
 pub fn accepts_improvement(
     candidate_score: f64,
     baseline_score: f64,
     min_improvement: f64,
 ) -> bool {
-    improvement(candidate_score, baseline_score) > min_improvement
+    accepts_improvement_delta(
+        improvement(candidate_score, baseline_score),
+        min_improvement,
+    )
+}
+
+/// True when an already-measured Δ exceeds the threshold (strict `>`).
+///
+/// Use this when the Δ was formed inside one scorer call and the two raw scores
+/// are no longer to hand — the accept gate on a combo winner, whose score was
+/// measured in the combo call rather than the promote call (issue #130).
+pub fn accepts_improvement_delta(delta: f64, min_improvement: f64) -> bool {
+    delta > min_improvement
 }
 
 /// Select the best qualifying candidate from a scored batch.
