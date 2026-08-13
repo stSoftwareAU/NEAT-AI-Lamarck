@@ -198,9 +198,10 @@ fn main() {
     println!("inputs={inputs} hidden={hidden} repeats={repeats}");
     println!("\nminimum of {repeats} repeats (least-noise estimator):");
     println!(
-        "| --candidates | fixed quotas | distinct | scaled quotas | distinct | scaled generation |"
+        "| --candidates | fixed quotas | distinct | fixed generation \
+         | scaled quotas | distinct | scaled generation |"
     );
-    println!("|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|");
     let mut mixes = Vec::new();
     for &count in &counts {
         let mut fixed_us = u128::MAX;
@@ -219,10 +220,11 @@ fn main() {
         let fixed = fixed.expect("at least one repeat");
         let scaled = scaled.expect("at least one repeat");
         println!(
-            "| {count} | {} ({}) | {} | {} ({}) | {} | {:.2} ms |",
+            "| {count} | {} ({}) | {} | {:.2} ms | {} ({}) | {} | {:.2} ms |",
             fixed.candidates.len(),
             fixed.limit.label(),
             distinct_mutations(&fixed),
+            fixed_us as f64 / 1000.0,
             scaled.candidates.len(),
             scaled.limit.label(),
             distinct_mutations(&scaled),

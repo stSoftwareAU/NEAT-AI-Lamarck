@@ -185,7 +185,7 @@ Leaving these unset changes behaviour.
 | `--max-experiments` | Stop after this many experiments, whichever of it and `--timeout-seconds` comes first. Unset = wall-clock bounded only. |
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
-| `--scale-candidate-quotas` | Scale the generator's per-phase quotas with `--candidates` so the budget binds until the generator is genuinely exhausted (issue #108). Unset, the fixed quotas cap a batch at ~29 on the production creature whatever `--candidates` says. Opt-in until the paired batch-economics benchmark in [`docs/followup-economics.md`](docs/followup-economics.md) justifies making it the default. |
+| `--scale-candidate-quotas` | Scale the generator's per-phase quotas with `--candidates` so the budget binds until the generator is genuinely exhausted (issue #108). Unset, the fixed quotas cap a batch at ~33 distinct candidates on the production creature whatever `--candidates` says. Opt-in until the paired batch-economics benchmark in [`docs/followup-economics.md`](docs/followup-economics.md) justifies making it the default. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
 | `--compute-correlations` | Compute the expensive input×input correlation matrix in observations. |
 | `--skip-phase0` | Skip the Phase-0 parity gate. |
@@ -537,12 +537,15 @@ sized to keep a ~10-core scorer box saturated. The generator front-loads
 structural probes, then round-robins the remaining budget across the strategies
 below; `--structural-only` restricts it to growth candidates.
 
-Those opening phases carry **fixed** quotas, so the batch tops out at ~29 on the
-production creature whatever `--candidates` says.
+Those opening phases carry **fixed** quotas, and the round-robin fill that
+follows them contributes at most three candidates per strategy, so the batch
+tops out at ~33 on the production creature whatever `--candidates` says.
 `--scale-candidate-quotas` (issue #108) keeps going after them, sweeping the
 ranked-source × weight-scale and ranked-source × squash grids a slice of every
 family at a time, until the budget is met or the generator is genuinely
-exhausted. Duplicate proposals are dropped rather than counted, and every
+exhausted. **Every** batch — default or scaled — drops duplicate proposals
+rather than counting them, and the freed slot falls through to the next
+strategy, so a batch of *N* is *N* distinct hypotheses (issue #119). Every
 experiment logs — and journals, as `candidatesRequested` / `batchLimit` — which
 of the three limits bound it:
 

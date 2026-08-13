@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The default candidate batch is duplicate-free (Issue #119).** Duplicate
+  rejection — the structural fingerprint that normalises a grown neuron's
+  random UUID away — ran only on the opt-in `--scale-candidate-quotas` path, so
+  a default batch of 27 on the production creature carried just **22 distinct**
+  hypotheses: five creatures per experiment were screened, and sometimes
+  promoted, twice. It now runs on every batch, and a rejected proposal passes
+  its slot to the next strategy rather than shrinking the batch: the
+  round-robin fill's `8 x 3` budget counts candidates that *joined* the batch
+  instead of attempts made. On the production-shaped creature
+  (`cargo run --release --example candidate_quota_bench`) `--candidates 29` now
+  yields **29 candidates, all distinct** (was 27 / 22 distinct), and the ceiling
+  above it is 33 distinct (was 27 / 22). Priced with the screen fit in
+  `docs/scorer-call-cost.md`, that is +2 screened creatures for +7 distinct
+  hypotheses — **1.00 s → 0.79 s of screen time per distinct hypothesis
+  (-21%)** — for 2 ms more generation per experiment. See
+  `docs/followup-economics.md` Arm 5.
+
 - **Self-tune `--baseline-drift-epsilon` (and stop canarying when reuse is
   off).** The old fixed `1e-9` assumed successive full-corpus scores of an
   unchanged creature were bit-identical. Directory-mode scoring re-associates
@@ -98,7 +115,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   size in a `candidateBatch` bucket. On a production-shaped creature (2511
   inputs) the budget now binds at every count measured up to 240, at ~0.08 ms
   per candidate (`cargo run --release --example candidate_quota_bench`); the
-  fixed quotas stop at 27, of which only 22 are distinct. The flag is
+  fixed quotas stopped at 27, of which only 22 were distinct — the duplicates
+  are gone from the default path too under #119 above. The flag is
   **opt-in**: no default changes until the paired `candidate-quotas` arm of
   `scripts/run-followup-economics.sh` prices a bigger batch in promote-scores
   per scorer-minute — see `docs/followup-economics.md` Arm 5.
