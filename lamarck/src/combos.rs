@@ -13,7 +13,9 @@
 
 use crate::candidates::Candidate;
 use crate::log;
-use crate::scorer::{DirectoryScorer, ScoreResult, accepts_improvement, improvement};
+use crate::scorer::{
+    DirectoryScorer, ScoreResult, accepts_improvement, accepts_improvement_delta, improvement,
+};
 use crate::structural::insert_index_for_hidden;
 use neat_core::{CreatureExport, NeuronExport, SynapseExport, creature_to_json_pretty};
 use serde::{Deserialize, Serialize};
@@ -65,7 +67,10 @@ pub struct ComboSelection {
     pub stem: String,
     /// Score of the winner.
     pub result: ScoreResult,
-    /// Δ vs the full-corpus baseline.
+    /// Δ vs the full-corpus incumbent scored in the **same call** as
+    /// [`Self::result`] — the promote call for a single, the combo call for a
+    /// combo (issue #130). This is the number the accept gate reads;
+    /// [`Self::result`] and a baseline from another call are not comparable.
     pub delta: f64,
     /// Candidate indices merged into this winner (length 1 for a pure single).
     pub member_indices: Vec<usize>,
@@ -75,6 +80,18 @@ pub struct ComboSelection {
     pub combos_scored: usize,
     /// How many of those combos had at least one stacked-target dampen.
     pub combos_dampened: usize,
+}
+
+impl ComboSelection {
+    /// True when this selection's Δ clears the accept bar (issue #130).
+    ///
+    /// The gate reads [`ComboSelection::delta`] rather than re-subtracting
+    /// [`ComboSelection::result`] from a baseline, because a combo winner was
+    /// scored in the combo call and the promote-call baseline is not a
+    /// comparable number (`docs/scorer-batch-composition.md`).
+    pub fn accepts(&self, min_improvement: f64) -> bool {
+        accepts_improvement_delta(self.delta, min_improvement)
+    }
 }
 
 /// Index sets for combinations of size `>= 2` over `0..n`, up to `max_combos`.
@@ -435,7 +452,10 @@ pub struct ComboSelectRequest<'a> {
     /// score to beat is [`Self::baseline`], which may have been measured by an
     /// earlier call (issue #113).
     pub scores: &'a BTreeMap<String, ScoreResult>,
-    /// Authoritative full-corpus score of the incumbent.
+    /// Authoritative full-corpus score of the incumbent, measured in the same
+    /// call as [`Self::scores`]. It shortlists the improving singles; the
+    /// combos are judged against the incumbent re-scored inside the combo call
+    /// itself (issue #130).
     pub baseline: &'a ScoreResult,
     /// Absolute score Δ required for acceptance.
     pub min_improvement: f64,
@@ -550,18 +570,31 @@ pub fn select_best_with_combinations(
         .score_directory(combo_work_dir, training_data)
         .map_err(|e| e.to_string())?;
 
+    // Issue #130: the combo call scores the incumbent alongside the combos, and
+    // that is the only baseline its scores may be subtracted from. Directory
+    // scoring is reproducible for a fixed batch composition but not across
+    // compositions, so the promote call's baseline — measured beside a different
+    // number of creatures — is not a comparable number here.
+    let combo_baseline = combo_scores.get("baseline").ok_or_else(|| {
+        format!(
+            "combo call returned no 'baseline' score for the incumbent scored in {}",
+            combo_work_dir.display()
+        )
+    })?;
+
     for (stem, members) in &stem_to_members {
         let Some(result) = combo_scores.get(stem) else {
             continue;
         };
-        if accepts_improvement(result.score, baseline.score, min_improvement)
-            && result.score > best.result.score
+        let delta = improvement(result.score, combo_baseline.score);
+        if accepts_improvement(result.score, combo_baseline.score, min_improvement)
+            && delta > best.delta
         {
             best = ComboSelection {
                 creature_path: combo_work_dir.join(format!("{stem}.json")),
                 stem: stem.clone(),
                 result: result.clone(),
-                delta: improvement(result.score, baseline.score),
+                delta,
                 member_indices: members.clone(),
                 dampen: stem_to_dampen.get(stem).cloned().unwrap_or_default(),
                 combos_scored,
@@ -1161,6 +1194,258 @@ mod tests {
             .weight;
         assert!((w0 - 0.06 * scale).abs() < 1e-12);
         assert!((w1 - 0.08 * scale).abs() < 1e-12);
+    }
+
+    /// Scorer that reproduces the issue #130 artefact: the combo call holds a
+    /// different number of creatures from the promote call, so *every* score it
+    /// returns — the incumbent's included — is shifted by `offset`. The merged
+    /// combo earns `combo_delta` over the incumbent **within that call**.
+    struct DriftingComboScorer {
+        offset: f64,
+        combo_delta: f64,
+    }
+
+    impl DirectoryScorer for DriftingComboScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            let mut map = BTreeMap::new();
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(stem) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                let score = if stem.starts_with("combo-") {
+                    0.5 + self.offset + self.combo_delta
+                } else {
+                    0.5 + self.offset
+                };
+                map.insert(
+                    stem.to_string(),
+                    ScoreResult {
+                        score,
+                        error: 1.0 - score,
+                        complexity_penalty: 0.0,
+                    },
+                );
+            }
+            Ok(map)
+        }
+    }
+
+    /// Two improving singles plus the promote-call scores that shortlist them.
+    fn drift_fixture(
+        dir: &Path,
+    ) -> (
+        CreatureExport,
+        Vec<Candidate>,
+        BTreeMap<String, ScoreResult>,
+    ) {
+        let base = tiny();
+        let mut a = base.clone();
+        a.synapses.push(SynapseExport {
+            from_uuid: "input-1".into(),
+            to_uuid: "h1".into(),
+            weight: 0.05,
+            synapse_type: None,
+        });
+        let mut b = base.clone();
+        b.synapses.push(SynapseExport {
+            from_uuid: "input-0".into(),
+            to_uuid: "o1".into(),
+            weight: 0.02,
+            synapse_type: None,
+        });
+        let candidates = vec![cand(a), cand(b)];
+        let source = dir.join("source");
+        fs::create_dir_all(&source).unwrap();
+        write_creature_json(&source.join("baseline.json"), &base).unwrap();
+        write_creature_json(&source.join("candidate-000.json"), &candidates[0].creature).unwrap();
+        write_creature_json(&source.join("candidate-001.json"), &candidates[1].creature).unwrap();
+
+        let mut scores = BTreeMap::new();
+        for (stem, score) in [
+            ("baseline", 0.5),
+            ("candidate-000", 0.5 + 2e-6),
+            ("candidate-001", 0.5 + 2e-6),
+        ] {
+            scores.insert(
+                stem.to_string(),
+                ScoreResult {
+                    score,
+                    error: 1.0 - score,
+                    complexity_penalty: 0.0,
+                },
+            );
+        }
+        (base, candidates, scores)
+    }
+
+    /// Issue #130: a combo is judged against the incumbent scored in **its own**
+    /// call. Here the combo call's scores all sit 3e-6 above the promote call's,
+    /// so subtracting the promote-call baseline would show a 3.5e-6 "improvement"
+    /// where the same-call evidence is only 0.5e-6 — below the 1e-6 bar.
+    #[test]
+    fn combo_is_rejected_when_only_a_cross_call_baseline_would_accept_it() {
+        let dir = tempdir().unwrap();
+        let (base, candidates, scores) = drift_fixture(dir.path());
+
+        let best = select_best_with_combinations(
+            &DriftingComboScorer {
+                offset: 3e-6,
+                combo_delta: 0.5e-6,
+            },
+            ComboSelectRequest {
+                training_data: dir.path(),
+                incumbent: &base,
+                candidates: &candidates,
+                scores: &scores,
+                baseline: scores.get("baseline").expect("the test batch carries one"),
+                min_improvement: 1e-6,
+                source_dir: &dir.path().join("source"),
+                combo_work_dir: &dir.path().join("combos"),
+            },
+        )
+        .unwrap()
+        .expect("the improving single is still a selection");
+        assert!(
+            best.stem.starts_with("candidate-"),
+            "a combo that only clears the bar against another call's baseline must not win, got {}",
+            best.stem
+        );
+        assert!(
+            (best.delta - 2e-6).abs() < 1e-12,
+            "the surviving single keeps its own same-call Δ, got {:e}",
+            best.delta
+        );
+    }
+
+    /// Issue #130: the mirror case — the combo call's scores sit 3e-6 *below* the
+    /// promote call's, so the combo's raw score never beats the single's, but its
+    /// same-call Δ (5e-6) is the larger real improvement.
+    #[test]
+    fn combo_wins_on_its_same_call_delta_even_when_its_raw_score_looks_worse() {
+        let dir = tempdir().unwrap();
+        let (base, candidates, scores) = drift_fixture(dir.path());
+
+        let best = select_best_with_combinations(
+            &DriftingComboScorer {
+                offset: -3e-6,
+                combo_delta: 5e-6,
+            },
+            ComboSelectRequest {
+                training_data: dir.path(),
+                incumbent: &base,
+                candidates: &candidates,
+                scores: &scores,
+                baseline: scores.get("baseline").expect("the test batch carries one"),
+                min_improvement: 1e-6,
+                source_dir: &dir.path().join("source"),
+                combo_work_dir: &dir.path().join("combos"),
+            },
+        )
+        .unwrap()
+        .expect("selection");
+        assert!(
+            best.stem.starts_with("combo-"),
+            "the combo earns the larger same-call Δ and must win, got {}",
+            best.stem
+        );
+        assert!(
+            (best.delta - 5e-6).abs() < 1e-12,
+            "the winner's Δ is measured against the incumbent in its own call, got {:e}",
+            best.delta
+        );
+    }
+
+    /// Scorer that drops the incumbent from its result map.
+    struct BaselinelessScorer;
+
+    impl DirectoryScorer for BaselinelessScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            let mut map = BTreeMap::new();
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(stem) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                if stem == "baseline" {
+                    continue;
+                }
+                map.insert(
+                    stem.to_string(),
+                    ScoreResult {
+                        score: 0.6,
+                        error: 0.4,
+                        complexity_penalty: 0.0,
+                    },
+                );
+            }
+            Ok(map)
+        }
+    }
+
+    /// Issue #130: the combo call pays to score the incumbent, so a missing
+    /// `baseline` stem is a broken call — never a licence to fall back to another
+    /// call's number.
+    #[test]
+    fn combo_call_without_a_baseline_score_is_a_loud_error() {
+        let dir = tempdir().unwrap();
+        let (base, candidates, scores) = drift_fixture(dir.path());
+
+        let err = select_best_with_combinations(
+            &BaselinelessScorer,
+            ComboSelectRequest {
+                training_data: dir.path(),
+                incumbent: &base,
+                candidates: &candidates,
+                scores: &scores,
+                baseline: scores.get("baseline").expect("the test batch carries one"),
+                min_improvement: 1e-6,
+                source_dir: &dir.path().join("source"),
+                combo_work_dir: &dir.path().join("combos"),
+            },
+        )
+        .expect_err("a combo call that returns no baseline must fail loudly");
+        assert!(
+            err.contains("baseline"),
+            "the error must name the missing baseline, got: {err}"
+        );
+    }
+
+    /// Issue #130: the accept gate reads the selection's same-call Δ, and the bar
+    /// is strict — a Δ exactly on it is not an improvement.
+    #[test]
+    fn selection_accepts_on_its_same_call_delta() {
+        let mut sel = ComboSelection {
+            creature_path: std::path::PathBuf::from("winner.json"),
+            stem: "combo-000-k2".into(),
+            // A raw score far below the promote-call baseline: irrelevant to the
+            // gate, which reads `delta` alone.
+            result: ScoreResult {
+                score: 0.1,
+                error: 0.9,
+                complexity_penalty: 0.0,
+            },
+            delta: 2e-6,
+            member_indices: vec![0, 1],
+            dampen: StackDampenReport::default(),
+            combos_scored: 1,
+            combos_dampened: 0,
+        };
+        assert!(sel.accepts(1e-6));
+        sel.delta = 1e-6;
+        assert!(!sel.accepts(1e-6), "the bar is strict");
+        sel.delta = -2e-6;
+        assert!(!sel.accepts(1e-6));
     }
 
     #[test]
