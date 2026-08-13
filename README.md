@@ -1078,7 +1078,9 @@ And from the per-call scorer measurement in
 costs ≈9.9 s **before it scores its first creature** on a 5% sample, against
 0.45 s per creature after that, so the fixed per-call cost is **24–29% of a
 45-minute run**. Sampled calls carry five times the fixed cost of a full-corpus
-call while doing a twentieth of the work.
+call while doing a twentieth of the work — because the scorer read and decoded
+the whole corpus before dropping 95% of the records. Issue #123 removed that:
+[`docs/scorer-fixed-cost.md`](docs/scorer-fixed-cost.md).
 
 The open experimental questions the journal is designed to answer:
 
@@ -1108,7 +1110,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 |-------|-----|
 | [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
-| [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | Every scorer call pays a fixed ≈9.9 s (sampled) / ≈2.0 s (full corpus) before it scores anything — 24–29% of a 45-minute run, measured in [`docs/scorer-call-cost.md`](docs/scorer-call-cost.md). Unfixed: either the scorer's sample-path setup or a persistent scoring session. |
+| [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | **Fixed, pending release.** A sampled scorer call used to read and decode the whole corpus to score a twentieth of it; it now fetches only the records it scores, cutting the fixed cost of a screen call from **10 693 ms to 3 423 ms** ([`docs/scorer-fixed-cost.md`](docs/scorer-fixed-cost.md)). The change lives in NEAT-AI-core (`issue-scorer-sampled-read`) and NEAT-AI-scorer (`issue-lamarck-123-sampled-read`); a human must open those two PRs and cut a scorer release before a run picks it up ([#141](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/141)). The whole-run `scorerCallCost` re-measure on an idle box is owed then. |
 
 ## Repository layout
 
@@ -1126,7 +1128,8 @@ NEAT-AI-Lamarck/
 │   ├── architecture.md
 │   ├── baseline-economics.md
 │   ├── screen-calibration.md
-│   └── scorer-call-cost.md
+│   ├── scorer-call-cost.md
+│   └── scorer-fixed-cost.md
 └── lamarck/src/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)

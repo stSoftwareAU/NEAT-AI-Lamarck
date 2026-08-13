@@ -1,0 +1,16 @@
+# interleaved 1-creature screen calls, sample-rate 0.05
+# creature: ../GRQ-cluster/network.json (2511 inputs, 22104 synapses)
+# trainingData: /Users/sloth/GRQ/.trainData-binary_116 (520 files, 21.17 GiB, 10048 B/record)
+# scorer: NEAT-AI-scorer@issue-lamarck-123-sampled-read (release)
+# method: alternating NEAT_SCORER_SAMPLED_READ=off / unset, one call each, 4 pairs
+# startedUtc: 2026-08-13T09:52:33Z
+pair,sampledRead,phase,creatures,ms,sampleRate,failed,load1m
+1,off,screen,1,11522,0.05,false,33.92
+1,on,screen,1,5925,0.05,false,33.88
+2,off,screen,1,10787,0.05,false,34.09
+2,on,screen,1,5684,0.05,false,34.36
+3,off,screen,1,12397,0.05,false,35.30
+3,on,screen,1,3045,0.05,false,35.19
+4,off,screen,1,10868,0.05,false,34.93
+4,on,screen,1,3450,0.05,false,35.21
+# finishedUtc: 2026-08-13T09:54:45Z
