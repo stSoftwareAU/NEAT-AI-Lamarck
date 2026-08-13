@@ -51,7 +51,11 @@ struct Cli {
     /// Use the legacy fixed per-phase quotas instead of scaling with
     /// `--candidates`. Caps a batch at ~33 distinct candidates whatever the
     /// budget says; kept only for A/B benchmarking against pre-#108 runs.
-    #[arg(long, default_value_t = false, conflicts_with = "scale_candidate_quotas")]
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with = "scale_candidate_quotas"
+    )]
     fixed_candidate_quotas: bool,
 
     /// Minimum absolute score improvement (strict `>`).

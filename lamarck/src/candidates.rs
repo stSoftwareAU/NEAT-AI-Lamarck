@@ -496,11 +496,7 @@ const GRID_WEIGHT_FLOOR: f64 = 1e-4;
 /// surely finish early — so the batch still tries the obvious pairings first —
 /// while light ones retain probability `w_i / Σw` per draw of jumping the
 /// queue. Deterministic for a given seed.
-fn weighted_slot_order(
-    n: usize,
-    weight: impl Fn(usize) -> f64,
-    rng: &mut impl Rng,
-) -> Vec<usize> {
+fn weighted_slot_order(n: usize, weight: impl Fn(usize) -> f64, rng: &mut impl Rng) -> Vec<usize> {
     let mut keyed: Vec<(f64, usize)> = (0..n)
         .map(|slot| {
             let w = weight(slot).max(GRID_WEIGHT_FLOOR);
@@ -1800,7 +1796,10 @@ mod tests {
             }
         }
         // P(another slot beating a 100000:1 weight) is negligible per draw.
-        assert!(heavy_first >= 19, "heavy slot led only {heavy_first}/20 draws");
+        assert!(
+            heavy_first >= 19,
+            "heavy slot led only {heavy_first}/20 draws"
+        );
 
         let mut rng_a = StdRng::seed_from_u64(11);
         let mut rng_b = StdRng::seed_from_u64(11);
