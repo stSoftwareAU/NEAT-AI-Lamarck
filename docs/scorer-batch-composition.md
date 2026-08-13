@@ -97,15 +97,22 @@ movement is about **175x** that bound, and batch size is an undocumented second
 driver of it (`activation_threads` is a third: the same creature scores
 differently on hosts with different worker defaults).
 
-The upstream fix is to make a creature's record partition independent of
-`n_creatures` and of the thread budget — partition every creature's chunk into
-fixed-size record blocks decided by the corpus, fold the per-block f64 partials
-in block order, and bound *concurrency* (and the `CompiledNetwork` clone count
-that scorer issue #537 was protecting) separately from the partition. That makes
-the score a pure function of creature + corpus, which is what the scorer's own
-`multi_score.rs` and `stream_score.rs` documentation already claims.
+That fix is **written and pushed**, on the scorer branch
+[`issue-lamarck-130-batch-invariant-partition`](https://github.com/stSoftwareAU/NEAT-AI-scorer/tree/issue-lamarck-130-batch-invariant-partition):
+every chunk is cut into fixed 64-record blocks (`RECORDS_PER_PARTITION`), each
+creature's per-block f64 sums fold back in block order, and a creature's workers
+take a contiguous span of blocks — so the batch, `activation_threads` and
+`NEAT_SCORER_WORKER_SPLIT` are all invisible in the scores, bit-identically. Its
+`./quality.sh` passes, and directory scoring is unchanged at N=1/10 creatures and
+~19–21% faster at N=50/200.
 
-Raising it there needs a human: the Vibe Coder run allowlist refuses issue and
-PR creation against `stSoftwareAU/NEAT-AI-scorer` from this repository's runs.
-Until the scorer lands that change, the same-call rule above is what keeps the
-artefact out of Lamarck's accept decisions.
+Opening the PR for that branch, and releasing the scorer afterwards, are human
+decisions — the run allowlist refuses issue and PR creation against
+`stSoftwareAU/NEAT-AI-scorer` from this repository's runs. Issue #143 tracks
+that hand-off and what is owed once it lands (re-measuring the #98 economics
+deltas, and revisiting the baseline drift epsilon that was priced against noise
+the fix removes).
+
+Until the released scorer arrives, the same-call rule above is what keeps the
+artefact out of Lamarck's accept decisions — and it stays correct afterwards,
+because a Δ formed inside one call is the right subtraction either way.
