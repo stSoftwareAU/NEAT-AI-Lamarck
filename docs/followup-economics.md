@@ -158,11 +158,12 @@ The arm as specified — 40 vs 100 vs 150 candidates under a fixed 15 minutes �
 
 ### `--candidates` above ~29 is inert
 
-> **Superseded for opted-in runs (#108).** The quotas below are still the
-> default, but `--scale-candidate-quotas` now scales them with `--candidates`,
-> so a run that passes the flag fills the budget until the generator is
-> genuinely exhausted. The flag stays opt-in until the paired benchmark under
-> [Arm 5](#arm-5--candidate-quota-scaling-108) justifies changing the default.
+> **Superseded (#108).** Scaled quotas are now the default: every run fills
+> the budget until the generator is genuinely exhausted, and
+> `--fixed-candidate-quotas` reproduces the fixed ceiling below only for A/B
+> benchmarking. The paired benchmark under
+> [Arm 5](#arm-5--candidate-quota-scaling-108) is still worth running, but it
+> gates nothing — the default was flipped by owner decision (2026-08-14).
 >
 > **Ceiling restated (#119).** The default path now rejects duplicate
 > proposals and passes the freed slot to the next strategy, so the round-robin

@@ -263,6 +263,8 @@ pub fn generate_candidates(
 /// keeps sweeping the ranked-source × weight-scale and ranked-source × squash
 /// grids — a slice of every family per round, so the strategy mix stays
 /// proportional — until the budget is met or nothing new can be proposed.
+/// Each grid is visited in weighted-random order ([`weighted_slot_order`]):
+/// best guesses almost surely first, every pairing a nonzero chance per batch.
 pub fn generate_candidate_batch(
     ctx: &CandidateGenContext<'_>,
     budget: CandidateBudget,
@@ -303,15 +305,39 @@ pub fn generate_candidate_batch(
         };
         return batch.finish(limit);
     }
+    if batch.is_full() {
+        // The opening filled the budget — don't spend rng draws ordering
+        // grids no round will visit.
+        return batch.finish(BatchLimit::Budget);
+    }
 
     // --- Scaled quotas (issue #108) ---
+    // Each grid is visited in weighted-random order rather than strict rank
+    // order: the best guesses almost surely come first, but every pairing
+    // keeps a nonzero chance of an early draw, so repeated experiments cover
+    // the whole grid in expectation — with no cross-run cursor to invalidate
+    // when the incumbent changes.
     let mut cursors = GridCursors {
         add: 0,
         neuron: 0,
         hidden: 0,
-        add_grid: ranked.len() * ADD_SCALE_STEPS.len(),
-        neuron_grid: ranked.len() * growth_squashes.len(),
-        hidden_grid: hidden_growth.map_or(0, |h| h.len() * growth_squashes.len()),
+        add_order: weighted_slot_order(
+            ranked.len() * ADD_SCALE_STEPS.len(),
+            |slot| ranked[slot % ranked.len()].score / (1 + slot / ranked.len()) as f64,
+            rng,
+        ),
+        neuron_order: weighted_slot_order(
+            ranked.len() * growth_squashes.len(),
+            |slot| ranked[slot % ranked.len()].score / (1 + slot / ranked.len()) as f64,
+            rng,
+        ),
+        hidden_order: hidden_growth.map_or_else(Vec::new, |h| {
+            weighted_slot_order(
+                h.len() * growth_squashes.len(),
+                |slot| h[slot % h.len()].score / (1 + slot / h.len()) as f64,
+                rng,
+            )
+        }),
     };
     let limit = loop {
         if batch.is_full() {
@@ -459,20 +485,50 @@ fn fill_opening(
     }
 }
 
-/// How far each scaled-quota grid has been swept.
+/// Floor applied to grid-slot weights so an unmeasured source (probe score
+/// still zero) keeps a nonzero chance of being drawn.
+const GRID_WEIGHT_FLOOR: f64 = 1e-4;
+
+/// Weighted random visiting order over `n` grid slots, without replacement.
+///
+/// An exponential race (Efraimidis–Spirakis): slot `i` finishes at
+/// `-ln(U)/w_i`, and slots are visited by finish time. Heavier slots almost
+/// surely finish early — so the batch still tries the obvious pairings first —
+/// while light ones retain probability `w_i / Σw` per draw of jumping the
+/// queue. Deterministic for a given seed.
+fn weighted_slot_order(
+    n: usize,
+    weight: impl Fn(usize) -> f64,
+    rng: &mut impl Rng,
+) -> Vec<usize> {
+    let mut keyed: Vec<(f64, usize)> = (0..n)
+        .map(|slot| {
+            let w = weight(slot).max(GRID_WEIGHT_FLOOR);
+            let u = rng.random::<f64>().max(f64::MIN_POSITIVE);
+            (-u.ln() / w, slot)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    keyed.into_iter().map(|(_, slot)| slot).collect()
+}
+
+/// How far each scaled-quota grid has been swept, in its weighted-random
+/// visiting order.
 struct GridCursors {
     add: usize,
     neuron: usize,
     hidden: usize,
-    add_grid: usize,
-    neuron_grid: usize,
-    hidden_grid: usize,
+    add_order: Vec<usize>,
+    neuron_order: Vec<usize>,
+    hidden_order: Vec<usize>,
 }
 
 impl GridCursors {
     /// True while a ranked source / squash pairing is still unproposed.
     fn structural_remaining(&self) -> bool {
-        self.add < self.add_grid || self.neuron < self.neuron_grid || self.hidden < self.hidden_grid
+        self.add < self.add_order.len()
+            || self.neuron < self.neuron_order.len()
+            || self.hidden < self.hidden_order.len()
     }
 }
 
@@ -489,10 +545,10 @@ fn fill_round(
 ) -> bool {
     let mut productive = false;
     for _ in 0..ADDS_PER_ROUND {
-        if batch.is_full() || cursors.add >= cursors.add_grid {
+        if batch.is_full() || cursors.add >= cursors.add_order.len() {
             break;
         }
-        let slot = cursors.add;
+        let slot = cursors.add_order[cursors.add];
         cursors.add += 1;
         let source_index = slot % ranked.len();
         let scale = ADD_SCALE_STEPS[slot / ranked.len()] * OLS_WEIGHT_FRACTION;
@@ -506,10 +562,10 @@ fn fill_round(
             .accepted();
     }
     for _ in 0..NEURONS_PER_ROUND {
-        if batch.is_full() || cursors.neuron >= cursors.neuron_grid {
+        if batch.is_full() || cursors.neuron >= cursors.neuron_order.len() {
             break;
         }
-        let slot = cursors.neuron;
+        let slot = cursors.neuron_order[cursors.neuron];
         cursors.neuron += 1;
         let squash = growth_squashes[slot / ranked.len()];
         productive |= batch
@@ -524,10 +580,10 @@ fn fill_round(
     }
     if let Some(hid_ranked) = hidden_growth {
         for _ in 0..HIDDEN_NEURONS_PER_ROUND {
-            if batch.is_full() || cursors.hidden >= cursors.hidden_grid {
+            if batch.is_full() || cursors.hidden >= cursors.hidden_order.len() {
                 break;
             }
-            let slot = cursors.hidden;
+            let slot = cursors.hidden_order[cursors.hidden];
             cursors.hidden += 1;
             let squash = growth_squashes[slot / hid_ranked.len()];
             productive |= batch
@@ -1718,6 +1774,51 @@ mod tests {
             },
             &mut rng,
         )
+    }
+
+    /// The weighted-random grid order is a true permutation — no slot is lost
+    /// or repeated — so `Exhausted` still means every pairing was proposed.
+    #[test]
+    fn weighted_slot_order_is_a_permutation() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut order = super::weighted_slot_order(97, |slot| (slot + 1) as f64, &mut rng);
+        order.sort_unstable();
+        assert_eq!(order, (0..97).collect::<Vec<_>>());
+    }
+
+    /// Heavy slots almost surely lead the order (the obvious guesses go
+    /// first), while the draw stays deterministic for a given seed.
+    #[test]
+    fn weighted_slot_order_puts_heavy_slots_first_and_is_seed_stable() {
+        let weight = |slot: usize| if slot == 7 { 100.0 } else { 0.001 };
+        let mut heavy_first = 0;
+        for seed in 0..20 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let order = super::weighted_slot_order(32, weight, &mut rng);
+            if order[0] == 7 {
+                heavy_first += 1;
+            }
+        }
+        // P(another slot beating a 100000:1 weight) is negligible per draw.
+        assert!(heavy_first >= 19, "heavy slot led only {heavy_first}/20 draws");
+
+        let mut rng_a = StdRng::seed_from_u64(11);
+        let mut rng_b = StdRng::seed_from_u64(11);
+        assert_eq!(
+            super::weighted_slot_order(64, |s| (s + 1) as f64, &mut rng_a),
+            super::weighted_slot_order(64, |s| (s + 1) as f64, &mut rng_b),
+        );
+    }
+
+    /// Different seeds visit the grid tail differently — the property that
+    /// lets repeated experiments cover the whole grid with no cursor.
+    #[test]
+    fn weighted_slot_order_varies_across_seeds() {
+        let mut rng_a = StdRng::seed_from_u64(1);
+        let mut rng_b = StdRng::seed_from_u64(2);
+        let a = super::weighted_slot_order(64, |_| 1.0, &mut rng_a);
+        let b = super::weighted_slot_order(64, |_| 1.0, &mut rng_b);
+        assert_ne!(a, b);
     }
 
     /// Issue #108: with the quotas scaled, `--candidates N` binds at every N a
