@@ -167,8 +167,8 @@ reads misbehave. It is an escape hatch, not configuration.
 - **It is a per-call measurement, not a run.** #123's acceptance also asks for
   the reduction to show in the `scorerCallCost` regression of `report` over a
   **real run's journal**. That needs the two dependency PRs merged and a scorer
-  release, so it is owed once a human has cut one — see the follow-up issue
-  named in [`README.md`](../README.md#outstanding-work).
+  release, so it is owed once a human has cut one —
+  [#141](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/141).
 - **One creature, one corpus, one rate.** The line is fitted over 1, 2 and 30
   creatures at rate 0.05 on one creature and one corpus, as #112's was.
 
