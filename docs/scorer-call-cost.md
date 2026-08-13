@@ -179,6 +179,10 @@ survey.
 
 Follow-up: [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) —
 remove the per-call fixed scorer cost, cross-referenced to NEAT-AI-scorer#536.
+**Done, by the cheaper shape:** the sampled call now fetches only the records it
+scores instead of reading and decoding the whole corpus, cutting a screen call's
+fixed cost from 10 693 ms to 3 423 ms with no persistent session and no protocol
+change — [`scorer-fixed-cost.md`](scorer-fixed-cost.md).
 
 **No change was made to the scoring path in this issue.** The only behaviour
 added is measurement: per-call records in the journal and their regression in

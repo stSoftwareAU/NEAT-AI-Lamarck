@@ -9,6 +9,14 @@
 //!    — a stray rng draw, a reshaped journal — fails here. The comparison is
 //!    exact on structure and seven significant figures on values, because the
 //!    analysis reduction is not bit-identical across architectures.
+//!
+//!    **One deliberate edit since capture (issue #119).** Experiment 3 held two
+//!    byte-identical `structural add input-1 -> h1 w=0.001633605619369263`
+//!    proposals — the opening scaled add, re-proposed by the round-robin fill.
+//!    The default path now rejects that duplicate and passes its slot to the
+//!    next strategy, so the fifth candidate is a `stats_bias` proposal instead.
+//!    Every other captured value is untouched, which is what keeps the fixture
+//!    a guard against unintended drift.
 //! 2. At `K > 1` the creature-wide passes still run **once** per experiment.
 //!    An implementation that loops the whole analysis per focus would be
 //!    *slower*, not faster, and would otherwise look correct.

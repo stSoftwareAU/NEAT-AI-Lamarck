@@ -109,6 +109,13 @@ const FILL_STRATEGIES: [CandidateStrategy; 8] = [
     CandidateStrategy::Random,
 ];
 
+/// Candidates the round-robin fill may contribute per strategy (issue #119).
+///
+/// The cap counts candidates that *joined* the batch, not proposals offered, so
+/// a rejected duplicate frees its slot for the next strategy instead of
+/// shrinking the batch.
+const FILL_PER_STRATEGY: usize = 3;
+
 /// Scaled-quota per-round quota: synapse adds swept from the ranked grid.
 const ADDS_PER_ROUND: usize = 4;
 /// Scaled-quota per-round quota: neuron growths swept from the ranked × squash grid.
@@ -130,7 +137,8 @@ pub struct CandidateBudget {
     /// until the generator genuinely runs out of proposals.
     ///
     /// When false the pre-#108 fixed quotas apply and the batch tops out at
-    /// their ceiling (~29 on the production creature) whatever `count` says.
+    /// their ceiling (~33 distinct candidates on the production creature)
+    /// whatever `count` says.
     pub scale_quotas: bool,
 }
 
@@ -225,8 +233,10 @@ pub struct CandidateGenContext<'a> {
 /// Generate a candidate population under the pre-#108 fixed quotas.
 ///
 /// Kept as the legacy entry point: the batch tops out at the fixed per-phase
-/// ceiling whatever `count` says. Use [`generate_candidate_batch`] with
-/// [`CandidateBudget::scale_quotas`] to let the budget bind.
+/// ceiling whatever `count` says. Duplicate proposals are rejected here too
+/// (issue #119), so the ceiling is a count of distinct hypotheses. Use
+/// [`generate_candidate_batch`] with [`CandidateBudget::scale_quotas`] to let
+/// the budget bind.
 pub fn generate_candidates(
     ctx: &CandidateGenContext<'_>,
     count: usize,
@@ -245,8 +255,11 @@ pub fn generate_candidates(
 
 /// Generate a candidate population without mutating the incumbent.
 ///
-/// The opening phases are the pre-#108 fixed quotas, so a small batch is
-/// unchanged. When [`CandidateBudget::scale_quotas`] is set, generation then
+/// The opening phases are the pre-#108 fixed quotas, and the round-robin fill
+/// after them contributes at most three *accepted* candidates
+/// per strategy — a duplicate frees its slot for the next strategy rather than
+/// shrinking the batch (issue #119). When [`CandidateBudget::scale_quotas`] is
+/// set, generation then
 /// keeps sweeping the ranked-source × weight-scale and ranked-source × squash
 /// grids — a slice of every family per round, so the strategy mix stays
 /// proportional — until the budget is met or nothing new can be proposed.
@@ -255,7 +268,7 @@ pub fn generate_candidate_batch(
     budget: CandidateBudget,
     rng: &mut impl Rng,
 ) -> CandidateBatch {
-    let mut batch = Batch::new(ctx.incumbent, budget.count, budget.scale_quotas);
+    let mut batch = Batch::new(ctx.incumbent, budget.count);
     if budget.count == 0 {
         return batch.finish(BatchLimit::Budget);
     }
@@ -425,11 +438,24 @@ fn fill_opening(
         batch.push(build_candidate(ctx, CandidateStrategy::MeanErrorBias, rng));
     }
 
+    // Round-robin fill. The budget counts candidates that joined the batch, so
+    // a duplicate (or a strategy with nothing to offer) passes its slot to the
+    // next strategy rather than costing the batch a hypothesis (issue #119).
+    // A whole sweep that adds nothing means every strategy is spent — stop
+    // there rather than spinning on proposals the batch already holds.
+    let fill_budget = FILL_STRATEGIES.len() * FILL_PER_STRATEGY;
     let mut strategy_i = 0usize;
-    while !batch.is_full() && strategy_i < FILL_STRATEGIES.len() * 3 {
+    let mut filled = 0usize;
+    let mut barren = 0usize;
+    while !batch.is_full() && filled < fill_budget && barren < FILL_STRATEGIES.len() {
         let strategy = FILL_STRATEGIES[strategy_i % FILL_STRATEGIES.len()];
         strategy_i += 1;
-        batch.push(build_candidate(ctx, strategy, rng));
+        if batch.push(build_candidate(ctx, strategy, rng)).accepted() {
+            filled += 1;
+            barren = 0;
+        } else {
+            barren += 1;
+        }
     }
 }
 
@@ -470,12 +496,14 @@ fn fill_round(
         cursors.add += 1;
         let source_index = slot % ranked.len();
         let scale = ADD_SCALE_STEPS[slot / ranked.len()] * OLS_WEIGHT_FRACTION;
-        productive |= batch.push(build_structural_add_scaled(
-            ctx,
-            ranked,
-            source_index,
-            scale,
-        ));
+        productive |= batch
+            .push(build_structural_add_scaled(
+                ctx,
+                ranked,
+                source_index,
+                scale,
+            ))
+            .accepted();
     }
     for _ in 0..NEURONS_PER_ROUND {
         if batch.is_full() || cursors.neuron >= cursors.neuron_grid {
@@ -484,13 +512,15 @@ fn fill_round(
         let slot = cursors.neuron;
         cursors.neuron += 1;
         let squash = growth_squashes[slot / ranked.len()];
-        productive |= batch.push(build_structural_add_neuron_combo(
-            ctx,
-            ranked,
-            rng,
-            squash,
-            slot % ranked.len(),
-        ));
+        productive |= batch
+            .push(build_structural_add_neuron_combo(
+                ctx,
+                ranked,
+                rng,
+                squash,
+                slot % ranked.len(),
+            ))
+            .accepted();
     }
     if let Some(hid_ranked) = hidden_growth {
         for _ in 0..HIDDEN_NEURONS_PER_ROUND {
@@ -500,13 +530,15 @@ fn fill_round(
             let slot = cursors.hidden;
             cursors.hidden += 1;
             let squash = growth_squashes[slot / hid_ranked.len()];
-            productive |= batch.push(build_structural_add_neuron_combo(
-                ctx,
-                hid_ranked,
-                rng,
-                squash,
-                slot % hid_ranked.len(),
-            ));
+            productive |= batch
+                .push(build_structural_add_neuron_combo(
+                    ctx,
+                    hid_ranked,
+                    rng,
+                    squash,
+                    slot % hid_ranked.len(),
+                ))
+                .accepted();
         }
     }
     if !ctx.structural_only {
@@ -514,30 +546,46 @@ fn fill_round(
             if batch.is_full() {
                 break;
             }
-            productive |= batch.push(build_candidate(ctx, strategy, rng));
+            productive |= batch.push(build_candidate(ctx, strategy, rng)).accepted();
         }
     }
     productive
 }
 
-/// Accumulator that enforces the budget and (under scaled quotas) rejects
-/// duplicate proposals, so a "filled" batch is never padded with repeats.
+/// What became of a proposal offered to the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Proposal {
+    /// Joined the batch.
+    Accepted,
+    /// Structurally identical to a candidate the batch already holds.
+    Duplicate,
+    /// The strategy had nothing to offer, or the batch was already full.
+    Nothing,
+}
+
+impl Proposal {
+    /// True when the proposal joined the batch.
+    fn accepted(self) -> bool {
+        self == Proposal::Accepted
+    }
+}
+
+/// Accumulator that enforces the budget and rejects duplicate proposals, so a
+/// "filled" batch is never padded with repeats (issues #108, #119).
 struct Batch {
     out: Vec<Candidate>,
     seen: HashSet<u64>,
     incumbent_uuids: HashSet<String>,
     count: usize,
-    dedup: bool,
 }
 
 impl Batch {
-    fn new(incumbent: &CreatureExport, count: usize, dedup: bool) -> Self {
+    fn new(incumbent: &CreatureExport, count: usize) -> Self {
         Self {
             out: Vec::with_capacity(count.min(1024)),
             seen: HashSet::new(),
             incumbent_uuids: incumbent.neurons.iter().map(|n| n.uuid.clone()).collect(),
             count,
-            dedup,
         }
     }
 
@@ -549,19 +597,19 @@ impl Batch {
         &self.out
     }
 
-    /// Accept a proposal; returns whether it joined the batch.
-    fn push(&mut self, candidate: Option<Candidate>) -> bool {
+    /// Offer a proposal to the batch, reporting what became of it.
+    fn push(&mut self, candidate: Option<Candidate>) -> Proposal {
         let Some(candidate) = candidate else {
-            return false;
+            return Proposal::Nothing;
         };
         if self.is_full() {
-            return false;
+            return Proposal::Nothing;
         }
-        if self.dedup && !self.seen.insert(self.fingerprint(&candidate.creature)) {
-            return false;
+        if !self.seen.insert(self.fingerprint(&candidate.creature)) {
+            return Proposal::Duplicate;
         }
         self.out.push(candidate);
-        true
+        Proposal::Accepted
     }
 
     /// Structural fingerprint of a candidate creature.
@@ -1819,6 +1867,79 @@ mod tests {
             );
         }
         assert_eq!(seen.len(), 120);
+    }
+
+    /// Issue #119: the **default** batch must not bill screen time twice for
+    /// the same hypothesis. The round-robin fill re-proposed what the opening
+    /// structural phases had already emitted, so 27 candidates carried only 22
+    /// distinct mutations.
+    #[test]
+    fn the_default_batch_contains_no_duplicate_candidates() {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let mut rng = StdRng::seed_from_u64(5);
+        let batch = generate_candidates(&ctx, 29, &mut rng);
+        let mut seen = std::collections::BTreeSet::new();
+        for candidate in &batch {
+            let identity = mutation_identity(candidate);
+            assert!(
+                seen.insert(identity.clone()),
+                "duplicate candidate in the default batch: {identity}"
+            );
+        }
+    }
+
+    /// Issue #119: rejecting a duplicate must free its slot for the next
+    /// strategy, not shrink the batch — the default path still delivers the
+    /// requested budget, now as distinct hypotheses.
+    #[test]
+    fn rejecting_a_duplicate_frees_its_slot_rather_than_shrinking_the_batch() {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+        };
+        let mut rng = StdRng::seed_from_u64(5);
+        let batch = generate_candidate_batch(
+            &ctx,
+            CandidateBudget {
+                count: 29,
+                scale_quotas: false,
+            },
+            &mut rng,
+        );
+        assert_eq!(
+            batch.candidates.len(),
+            29,
+            "the default batch under-filled its budget (limit {:?})",
+            batch.limit
+        );
+        assert_eq!(batch.limit, BatchLimit::Budget);
     }
 
     /// A production-width creature has hundreds of ranked sources, so the
