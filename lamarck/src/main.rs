@@ -44,10 +44,19 @@ struct Cli {
 
     /// Scale the generator's per-phase quotas with `--candidates` (issue #108).
     ///
-    /// Without it the fixed quotas cap the batch at ~29 on the production
-    /// creature whatever `--candidates` says.
-    #[arg(long, default_value_t = false)]
+    /// On by default; accepted as a no-op for older scripts.
+    #[arg(long, default_value_t = true)]
     scale_candidate_quotas: bool,
+
+    /// Use the legacy fixed per-phase quotas instead of scaling with
+    /// `--candidates`. Caps a batch at ~33 distinct candidates whatever the
+    /// budget says; kept only for A/B benchmarking against pre-#108 runs.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with = "scale_candidate_quotas"
+    )]
+    fixed_candidate_quotas: bool,
 
     /// Minimum absolute score improvement (strict `>`).
     #[arg(long, default_value_t = DEFAULT_MIN_IMPROVEMENT)]
@@ -272,7 +281,7 @@ fn main() -> ExitCode {
         timeout: Duration::from_secs(cli.timeout_seconds),
         max_experiments: cli.max_experiments,
         candidates: cli.candidates,
-        scale_candidate_quotas: cli.scale_candidate_quotas,
+        scale_candidate_quotas: cli.scale_candidate_quotas && !cli.fixed_candidate_quotas,
         min_improvement: cli.min_improvement,
         seed: cli.seed,
         scorer_path: cli.scorer.clone(),

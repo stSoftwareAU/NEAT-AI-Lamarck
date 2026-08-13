@@ -136,6 +136,9 @@ fn config(dir: &Path, out: &str) -> LamarckConfig {
         timeout: Duration::from_secs(60),
         max_experiments: Some(3),
         candidates: 6,
+        // The k1 fixture was captured under the legacy fixed quotas; pin them
+        // so the scaled default's extra rng draws can't drift the stream.
+        scale_candidate_quotas: false,
         min_improvement: 1e-6,
         seed: Some(42),
         scorer_path: PathBuf::from("rust_scorer"),

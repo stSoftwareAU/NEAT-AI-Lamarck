@@ -185,7 +185,7 @@ Leaving these unset changes behaviour.
 | `--max-experiments` | Stop after this many experiments, whichever of it and `--timeout-seconds` comes first. Unset = wall-clock bounded only. |
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
-| `--scale-candidate-quotas` | Scale the generator's per-phase quotas with `--candidates` so the budget binds until the generator is genuinely exhausted (issue #108). Unset, the fixed quotas cap a batch at ~33 distinct candidates on the production creature whatever `--candidates` says. Opt-in until the paired batch-economics benchmark in [`docs/followup-economics.md`](docs/followup-economics.md) justifies making it the default. |
+| `--fixed-candidate-quotas` | Use the legacy fixed per-phase quotas instead of scaling them with `--candidates` (issue #108). Caps a batch at ~33 distinct candidates on the production creature whatever `--candidates` says; kept only for A/B benchmarking against pre-#108 runs. Scaled quotas are the default (`--scale-candidate-quotas` is accepted as a no-op for older scripts), so the budget binds until the generator is genuinely exhausted. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
 | `--compute-correlations` | Compute the expensive input×input correlation matrix in observations. |
 | `--skip-phase0` | Skip the Phase-0 parity gate. |
@@ -538,12 +538,18 @@ structural probes, then round-robins the remaining budget across the strategies
 below; `--structural-only` restricts it to growth candidates.
 
 Those opening phases carry **fixed** quotas, and the round-robin fill that
-follows them contributes at most three candidates per strategy, so the batch
-tops out at ~33 on the production creature whatever `--candidates` says.
-`--scale-candidate-quotas` (issue #108) keeps going after them, sweeping the
+follows them contributes at most three candidates per strategy, so on their own
+they top out at ~33 on the production creature whatever `--candidates` says.
+By default (issue #108) generation keeps going after them, sweeping the
 ranked-source × weight-scale and ranked-source × squash grids a slice of every
 family at a time, until the budget is met or the generator is genuinely
-exhausted. **Every** batch — default or scaled — drops duplicate proposals
+exhausted; `--fixed-candidate-quotas` reproduces the legacy ceiling for A/B
+benchmarking. Each grid is visited in **weighted-random order** — a seeded
+exponential race weighted by residual-correlation score (floored so unmeasured
+sources stay drawable) — so the obvious pairings almost surely go first, yet
+every pairing keeps a nonzero chance of an early draw each batch. Repeated
+experiments therefore cover the whole grid in expectation with no cross-run
+cursor to invalidate when an accept changes the incumbent. **Every** batch — default or scaled — drops duplicate proposals
 rather than counting them, and the freed slot falls through to the next
 strategy, so a batch of *N* is *N* distinct hypotheses (issue #119). Every
 experiment logs — and journals, as `candidatesRequested` / `batchLimit` — which
@@ -553,8 +559,8 @@ of the three limits bound it:
 flowchart LR
     OPEN["fixed opening quotas"] --> FULL{"budget met?"}
     FULL -- yes --> BUDGET(["budget reached"])
-    FULL -- "no, flag unset" --> CEIL(["fixed quota ceiling"])
-    FULL -- "no, --scale-candidate-quotas" --> ROUND["round: adds x scales,<br/>growths x squashes,<br/>one of each weight strategy"]
+    FULL -- "no, --fixed-candidate-quotas" --> CEIL(["fixed quota ceiling"])
+    FULL -- "no (default)" --> ROUND["round: adds x scales,<br/>growths x squashes,<br/>one of each weight strategy"]
     ROUND --> NEW{"anything new,<br/>or grid left?"}
     NEW -- yes --> FULL
     NEW -- no --> DRY(["generator exhausted"])
@@ -905,7 +911,7 @@ Every following line is one experiment:
 | `focusNeurons` | Every focus this experiment proposed against (issue #109). Omitted for a single-focus experiment — `focusNeuron` already says it — and absent from journals written before the field existed. Each entry of `candidates[]` names its own `focusNeuron`, so a winner is attributable to one member of this set. |
 | `focusStats` | The focus scan of the **primary** focus (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`. |
-| `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — pass `--scale-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
+| `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — only under `--fixed-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
 | `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Absent when no screen phase ran, and from journals written before the field existed. |
 | `baselineSource` | Which baseline decided this experiment's promote call (issue #113): `fresh` (the call carried the incumbent and scored it), `remembered` (it reused the run's carried full-corpus score) or `rememberedVerified` (it reused it *and* proposed an accept, so the winner and the incumbent were re-scored together before the swap). Omitted when no promote call ran, and absent from journals written before the field existed — so any accept is traceable to the baseline that decided it. |
@@ -1117,8 +1123,8 @@ for #75 — an output-focus slice, a backprop step A/B and a batch-size A/B,
 118 further experiments — is written up in
 [`docs/followup-economics.md`](docs/followup-economics.md). Its headline: **no
 strategy has earned removal**, `--candidates` above ~29 bought nothing on this
-creature under the fixed quotas (`--scale-candidate-quotas` lifts that ceiling —
-its own paired benchmark is still to run), and `backprop` fails on a saturated
+creature under the then-default fixed quotas (scaled quotas, now the default,
+lift that ceiling — their paired benchmark is still to run), and `backprop` fails on a saturated
 step cap rather than on its learning rate. Questions 4–7 need the arms wired up by
 [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96) and still to be
 run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
