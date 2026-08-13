@@ -263,7 +263,7 @@ pub fn generate_candidates(
 /// keeps sweeping the ranked-source × weight-scale and ranked-source × squash
 /// grids — a slice of every family per round, so the strategy mix stays
 /// proportional — until the budget is met or nothing new can be proposed.
-/// Each grid is visited in weighted-random order ([`weighted_slot_order`]):
+/// Each grid is visited in weighted-random order (`weighted_slot_order`):
 /// best guesses almost surely first, every pairing a nonzero chance per batch.
 pub fn generate_candidate_batch(
     ctx: &CandidateGenContext<'_>,
