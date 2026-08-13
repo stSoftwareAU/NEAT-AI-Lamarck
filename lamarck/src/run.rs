@@ -2187,9 +2187,9 @@ pub fn run_optimisation_cancellable(
         // together — same binary, same corpus, same call — so the decision that
         // changes the incumbent is always made from a self-consistent pair.
         if baseline_source == BaselineSource::Remembered
-            && selection.as_ref().is_some_and(|sel| {
-                accepts_improvement(sel.result.score, baseline.score, config.min_improvement)
-            })
+            && selection
+                .as_ref()
+                .is_some_and(|sel| sel.accepts(config.min_improvement))
         {
             let verify_dir = config.output_dir.join(format!("verify-exp-{experiments}"));
             let winner_path = selection
@@ -2292,8 +2292,12 @@ pub fn run_optimisation_cancellable(
         // experiment always was (issue #109, following the #74 member rule).
         let mut accepted_focuses: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
+        // Issue #130: the gate reads the selection's own Δ, which was formed
+        // inside the call that scored the winner. Re-subtracting the promote
+        // call's baseline would compare a combo winner against a number
+        // measured beside a different set of creatures.
         if let Some(sel) = selection
-            && accepts_improvement(sel.result.score, baseline.score, config.min_improvement)
+            && sel.accepts(config.min_improvement)
         {
             if screen_rate.is_some() {
                 log::detail(

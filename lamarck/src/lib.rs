@@ -90,9 +90,9 @@ pub use run::{
 };
 pub use scorer::{
     ExternalScorer, PromoteDecision, RecordingScorer, ScoreResult, ScoreSample,
-    accepts_improvement, log_scorer_batch_stats, screen_promote_decision,
-    screen_promote_decision_against, screen_promote_stems, select_winner, select_winner_against,
-    write_promote_batch, write_promote_batch_without_baseline,
+    accepts_improvement, accepts_improvement_delta, log_scorer_batch_stats,
+    screen_promote_decision, screen_promote_decision_against, screen_promote_stems, select_winner,
+    select_winner_against, write_promote_batch, write_promote_batch_without_baseline,
 };
 pub use scorer_cost::{
     CallCostFit, ScorerCallCost, ScorerCallCostAccumulator, ScorerCallPhase, ScorerCallRecord,
