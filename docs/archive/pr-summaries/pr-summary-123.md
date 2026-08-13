@@ -1,7 +1,7 @@
 ## Summary
 
-Removed the fixed per-call scorer cost by the cheaper of the two shapes issue
-#123 offered — the sample-path fix — so **no persistent scoring session was
+Removed the fixed per-call scorer cost by the cheaper of the two shapes
+issue #123 offered — the sample-path fix — so **no persistent scoring session was
 built**: no wire protocol, no supervised process, none of a session's failure
 modes. Closes #123.
 

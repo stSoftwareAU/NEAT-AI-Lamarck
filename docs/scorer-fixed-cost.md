@@ -115,8 +115,8 @@ four pairs, 1-minute load 33.9–35.3 throughout
 A 1-creature screen call is **59% faster**, and every pair agrees.
 
 Projected onto the [#75](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/75)
-baseline run's own call mix (75 screen calls, 26 promote calls, 1 Phase-0 call),
-#112's direct estimate attributed **742 s** of that 45-minute run to screen-call
+baseline run's own call mix (75 screen calls, 26 promote calls,
+1 Phase-0 call), issue #112's direct estimate attributed **742 s** of that 45-minute run to screen-call
 fixed cost. A 68% cut returns ≈**500 s — about 8 minutes of every 45, ~19% of
 the run** — which is the "~20% of a run with no protocol change" #112 predicted
 for exactly this fix.
