@@ -53,6 +53,23 @@ The creature has also moved on since #8 — GRQ evolution lifted the opening sco
 from `0.344965` to `0.346760`, so accept rates here are measured against a
 harder incumbent.
 
+**Scorer caveat (#130) — every full-corpus Δ below is provisional.** This
+campaign ran on a scorer whose directory score depended on *which other
+creatures shared the call*: a `6.7e-8` deterministic artefact that moved the
+incumbent and the candidate by different amounts, documented with the measured
+numbers in
+[`docs/scorer-batch-composition.md`](scorer-batch-composition.md). The
+full-corpus deltas reported here sit at `1e-7`–`1e-6`, so the artefact is a
+significant fraction of the very signal the `1e-6` accept bar is read off. It is
+big enough to have decided the campaign's verdict: `stats_weight`'s best Δ,
+`+9.76e-7`, missed the bar by `2.4e-8` — about a third of the artefact — so
+"0 accepts across five arms" is not a safe conclusion. The upstream fix is
+written and pushed but not yet merged or released. Re-measuring these deltas
+against the released scorer is tracked in
+[#143](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/143); until then,
+read the per-strategy ordering as indicative and the Δ magnitudes as good to
+about `1e-7`, not to their last digit.
+
 ## Arm 1 — Output-focus slice (#75.1)
 
 Item #75.1 offered two ways in — `--focus-policy high-error` or
@@ -371,6 +388,11 @@ multi-focus side wins on **accepts-per-hour**, not on candidates per minute.
 
 **Nothing is disabled.** Every strategy stays enabled. Across all five arms —
 118 experiments, 3014 candidates, 162 full-corpus promotions, **0 accepts**:
+
+> Read this table against the [scorer caveat (#130)](#environment) above: the
+> `6.7e-8` batch-composition artefact is larger than the `2.4e-8` by which the
+> best Δ here missed the accept bar, so the "0 accepts" headline and the
+> ordering below are both provisional until #143 re-measures them.
 
 | Strategy | Candidates | Promoted | Best full-corpus Δ | Verdict |
 |----------|------------|----------|--------------------|---------|
