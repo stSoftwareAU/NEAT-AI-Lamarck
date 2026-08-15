@@ -788,7 +788,9 @@ Projected onto a production run with the per-call costs #112 fitted, that is
 ≈6% of scorer time.
 
 An accepted winner becomes the incumbent immediately: `best.json` is rewritten
-with the creature's `uuid`/`tags` re-attached and a run-summary `lamarck` tag,
+with the creature's own metadata intact — `uuid`, `tags`, `memetic`, and the
+per-neuron and per-synapse tags neat-core round-trips — plus a run-summary
+`lamarck` tag,
 a copy is kept under `winners/`, structural accepts are recorded into the graft
 store, and creature-specific analysis is recomputed next iteration.
 

@@ -1,85 +1,52 @@
-//! Creature JSON tags (`{ name, value }[]`) for check-in / GRQ compatibility.
+//! Creature check-in tags (`{ name, value }[]`) for GRQ.
 //!
-//! `neat_core::CreatureExport` does not round-trip `tags` / `uuid`, so Lamarck
-//! keeps them in [`CreatureMeta`] and re-attaches on write — preserving the
-//! original pedigree (name, version, …) while stamping a **run-level** Lamarck
-//! summary for GRQ check-in (`worker/Lamarck/run.sh` reads the tag as-is).
+//! `neat_core::CreatureExport` round-trips a creature's metadata natively —
+//! top-level `uuid` / `tags` / `memetic`, per-neuron and per-synapse `tags`,
+//! and any key the Rust structs do not declare (NEAT-AI#3747 / NEAT-AI#3748).
+//! This module therefore no longer mirrors that metadata on the side: it only
+//! stamps the tags this optimiser owns — `score` / `error` / `lamarck` — onto
+//! the creature's own tag list, and writes the check-in form
+//! (`worker/Lamarck/run.sh` reads those tags as-is).
 
 use crate::candidates::CandidateStrategy;
-use neat_core::{CreatureExport, creature_to_json};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use neat_core::{CreatureExport, CreatureTag, creature_to_json_pretty};
 
-/// One creature tag (NEAT-AI / `@stsoftware/tags` shape).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreatureTag {
-    /// Tag key (`score`, `error`, `name`, `lamarck`, …).
-    pub name: String,
-    /// Tag value (always a string in the export format).
-    pub value: String,
+/// Insert or replace a tag by name, keeping the order of first insert.
+///
+/// A creature with no `tags` key gains one; every other tag is left alone.
+pub fn upsert_tag(creature: &mut CreatureExport, name: &str, value: impl Into<String>) {
+    let value = value.into();
+    let tags = creature.tags.get_or_insert_with(Vec::new);
+    if let Some(existing) = tags.iter_mut().find(|t| t.name == name) {
+        existing.value = value;
+    } else {
+        tags.push(CreatureTag {
+            name: name.to_string(),
+            value,
+        });
+    }
 }
 
-/// Top-level fields stripped by `parse_creature_json` that we must keep.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CreatureMeta {
-    /// Optional creature UUID from the source JSON.
-    pub uuid: Option<String>,
-    /// Ordered tags (upserts replace by name, preserving order of first insert).
-    pub tags: Vec<CreatureTag>,
+/// The value of a creature-level tag, or `None` when it carries none.
+pub fn tag_value<'a>(creature: &'a CreatureExport, name: &str) -> Option<&'a str> {
+    creature
+        .tags
+        .as_ref()?
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.value.as_str())
 }
 
-impl CreatureMeta {
-    /// Parse `uuid` + `tags` from raw creature JSON (missing → empty).
-    pub fn from_creature_json(text: &str) -> Self {
-        let Ok(value) = serde_json::from_str::<Value>(text) else {
-            return Self::default();
-        };
-        let uuid = value
-            .get("uuid")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let tags = value
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|t| {
-                        let name = t.get("name")?.as_str()?.to_string();
-                        let value = match t.get("value")? {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        Some(CreatureTag { name, value })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self { uuid, tags }
-    }
-
-    /// Insert or replace a tag by name.
-    pub fn upsert(&mut self, name: &str, value: impl Into<String>) {
-        let value = value.into();
-        if let Some(existing) = self.tags.iter_mut().find(|t| t.name == name) {
-            existing.value = value;
-        } else {
-            self.tags.push(CreatureTag {
-                name: name.to_string(),
-                value,
-            });
-        }
-    }
-
-    /// Update score/error and stamp a run-level Lamarck summary for check-in.
-    pub fn stamp_acceptance(&mut self, progress: &LamarckProgress<'_>) {
-        // Keep full-precision numeric tags for machine consumers.
-        self.upsert("score", format!("{}", progress.score));
-        self.upsert("error", format!("{}", progress.error));
-        // Only the `lamarck` tag is ours. `intelligentDesign` belongs to the
-        // Intelligent Design program — stamping it here overwrote another
-        // program's provenance (GRQ #3952), so never touch it.
-        self.upsert("lamarck", lamarck_progress_message(progress));
-    }
+/// Update score/error and stamp a run-level Lamarck summary for check-in.
+///
+/// Only the `lamarck` tag is ours. `intelligentDesign` belongs to the
+/// Intelligent Design program — stamping it here overwrote another program's
+/// provenance (GRQ #3952), so never touch it.
+pub fn stamp_acceptance(creature: &mut CreatureExport, progress: &LamarckProgress<'_>) {
+    // Keep full-precision numeric tags for machine consumers.
+    upsert_tag(creature, "score", format!("{}", progress.score));
+    upsert_tag(creature, "error", format!("{}", progress.error));
+    upsert_tag(creature, "lamarck", lamarck_progress_message(progress));
 }
 
 /// Fields for the run-level Lamarck check-in summary (cumulative, not last-step).
@@ -197,58 +164,28 @@ fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
     }
 }
 
-/// Creature JSON with `uuid` / `tags` re-attached, before it is printed.
-fn creature_value_with_meta(
-    creature: &CreatureExport,
-    meta: &CreatureMeta,
-) -> Result<Value, String> {
-    let body = creature_to_json(creature).map_err(|e| e.to_string())?;
-    let mut value: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    if let Some(uuid) = &meta.uuid {
-        value["uuid"] = json!(uuid);
-    }
-    if !meta.tags.is_empty() {
-        value["tags"] = serde_json::to_value(&meta.tags).map_err(|e| e.to_string())?;
-    }
-    Ok(value)
-}
-
-/// Pretty-print a creature with `uuid` / `tags` re-attached for check-in.
+/// Pretty-print a creature for check-in, newline-terminated.
 ///
-/// This is the **human-facing** form — `best.json` and `winners/`. Scorer-facing
-/// batch files use [`serialize_creature_with_meta_compact`] (issue #114).
-pub fn serialize_creature_with_meta(
-    creature: &CreatureExport,
-    meta: &CreatureMeta,
-) -> Result<String, String> {
-    let value = creature_value_with_meta(creature, meta)?;
+/// neat-core round-trips the creature's metadata itself (NEAT-AI#3747 /
+/// NEAT-AI#3748), so this writes the parsed creature straight out — nothing is
+/// re-attached on the side, and nothing passes through a `serde_json::Value`
+/// whose sorted map would re-order the `memetic` block. This is the
+/// **human-facing** form (`best.json`, `winners/`); scorer-facing batch files
+/// use `neat_core::creature_to_json` compact (issue #114).
+pub fn serialize_creature_pretty(creature: &CreatureExport) -> Result<String, String> {
     // Match typical NEAT export: trailing newline after pretty JSON.
-    let mut out = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    let mut out = creature_to_json_pretty(creature).map_err(|e| e.to_string())?;
     if !out.ends_with('\n') {
         out.push('\n');
     }
     Ok(out)
 }
 
-/// Compact-print a creature with `uuid` / `tags` re-attached (issue #114).
-///
-/// Same document as [`serialize_creature_with_meta`] — same fields, same
-/// values, same tags — with the indentation and newlines dropped. Only
-/// scorer-facing batch files use it: on the production creature the whitespace
-/// is about a third of the bytes written, parsed and thrown away on every
-/// experiment, and `rust_scorer` is the file's only reader.
-pub fn serialize_creature_with_meta_compact(
-    creature: &CreatureExport,
-    meta: &CreatureMeta,
-) -> Result<String, String> {
-    let value = creature_value_with_meta(creature, meta)?;
-    serde_json::to_string(&value).map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neat_core::parse_creature_json;
+    use neat_core::{creature_to_json, parse_creature_json};
+    use serde_json::Value;
 
     const TINY_TAGGED: &str = r#"{
       "uuid": "creature-1",
@@ -264,28 +201,42 @@ mod tests {
       ]
     }"#;
 
+    const UNTAGGED: &str = r#"{
+      "input": 1,
+      "output": 1,
+      "forwardOnly": true,
+      "neurons": [{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}],
+      "synapses": [{"fromUUID":"input-0","toUUID":"o1","weight":1.0}]
+    }"#;
+
+    /// The parse side of the contract this module now leans on: neat-core
+    /// hands back `uuid` and `tags` rather than dropping them.
     #[test]
-    fn extract_preserves_uuid_and_tags() {
-        let meta = CreatureMeta::from_creature_json(TINY_TAGGED);
-        assert_eq!(meta.uuid.as_deref(), Some("creature-1"));
-        assert_eq!(meta.tags[0].name, "name");
-        assert_eq!(meta.tags[0].value, "Yara Richardson");
+    fn parse_keeps_uuid_and_tags() {
+        let creature = parse_creature_json(TINY_TAGGED).unwrap();
+        assert_eq!(creature.uuid.as_deref(), Some("creature-1"));
+        let tags = creature.tags.expect("creature keeps its tags");
+        assert_eq!(tags[0].name, "name");
+        assert_eq!(tags[0].value, "Yara Richardson");
     }
 
     #[test]
     fn serialize_round_trips_original_tags_plus_lamarck() {
-        let creature = parse_creature_json(TINY_TAGGED).unwrap();
-        let mut meta = CreatureMeta::from_creature_json(TINY_TAGGED);
-        meta.stamp_acceptance(&LamarckProgress {
-            acceptances: 1,
-            score: 0.2,
-            error: 0.8,
-            opening_score: 0.1,
-            focus_neuron: "o1",
-            strategy: CandidateStrategy::Backprop,
-            experiments: 3,
-        });
-        let json = serialize_creature_with_meta(&creature, &meta).unwrap();
+        let mut creature = parse_creature_json(TINY_TAGGED).unwrap();
+        stamp_acceptance(
+            &mut creature,
+            &LamarckProgress {
+                acceptances: 1,
+                score: 0.2,
+                error: 0.8,
+                opening_score: 0.1,
+                focus_neuron: "o1",
+                strategy: CandidateStrategy::Backprop,
+                experiments: 3,
+            },
+        );
+        let json = serialize_creature_pretty(&creature).unwrap();
+        assert!(json.ends_with('\n'), "check-in files end with a newline");
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["uuid"], "creature-1");
         let tags = value["tags"].as_array().unwrap();
@@ -306,19 +257,21 @@ mod tests {
     /// Issue #114: the compact form is the same document, not a lesser one.
     #[test]
     fn compact_round_trips_to_the_same_creature_and_tags_as_pretty() {
-        let creature = parse_creature_json(TINY_TAGGED).unwrap();
-        let mut meta = CreatureMeta::from_creature_json(TINY_TAGGED);
-        meta.stamp_acceptance(&LamarckProgress {
-            acceptances: 1,
-            score: 0.2,
-            error: 0.8,
-            opening_score: 0.1,
-            focus_neuron: "o1",
-            strategy: CandidateStrategy::Backprop,
-            experiments: 3,
-        });
-        let pretty = serialize_creature_with_meta(&creature, &meta).unwrap();
-        let compact = serialize_creature_with_meta_compact(&creature, &meta).unwrap();
+        let mut creature = parse_creature_json(TINY_TAGGED).unwrap();
+        stamp_acceptance(
+            &mut creature,
+            &LamarckProgress {
+                acceptances: 1,
+                score: 0.2,
+                error: 0.8,
+                opening_score: 0.1,
+                focus_neuron: "o1",
+                strategy: CandidateStrategy::Backprop,
+                experiments: 3,
+            },
+        );
+        let pretty = serialize_creature_pretty(&creature).unwrap();
+        let compact = creature_to_json(&creature).unwrap();
 
         assert!(
             !compact.contains('\n'),
@@ -383,32 +336,70 @@ mod tests {
     /// never overwrite an existing value with its own run summary.
     #[test]
     fn stamp_acceptance_preserves_existing_intelligent_design_tag() {
-        let mut meta = CreatureMeta::from_creature_json(TINY_ID_TAGGED);
-        meta.stamp_acceptance(&progress());
-        let id = meta
-            .tags
-            .iter()
-            .find(|t| t.name == "intelligentDesign")
-            .expect("intelligentDesign tag must survive");
-        assert_eq!(id.value, "💍  Tacit Knowledge, score: 0.1 improved by 1e-6");
-        let lamarck = meta
-            .tags
-            .iter()
-            .find(|t| t.name == "lamarck")
-            .expect("lamarck tag must be stamped");
-        assert!(lamarck.value.contains("🦒"));
+        let mut creature = parse_creature_json(TINY_ID_TAGGED).unwrap();
+        stamp_acceptance(&mut creature, &progress());
+        assert_eq!(
+            tag_value(&creature, "intelligentDesign"),
+            Some("💍  Tacit Knowledge, score: 0.1 improved by 1e-6"),
+            "intelligentDesign tag must survive"
+        );
+        let lamarck = tag_value(&creature, "lamarck").expect("lamarck tag must be stamped");
+        assert!(lamarck.contains("🦒"));
     }
 
     /// GRQ #3952: and never invents the tag on a creature that has none.
     #[test]
     fn stamp_acceptance_does_not_add_intelligent_design_tag() {
-        let mut meta = CreatureMeta::from_creature_json(TINY_TAGGED);
-        meta.stamp_acceptance(&progress());
-        assert!(
-            !meta.tags.iter().any(|t| t.name == "intelligentDesign"),
+        let mut creature = parse_creature_json(TINY_TAGGED).unwrap();
+        stamp_acceptance(&mut creature, &progress());
+        assert_eq!(
+            tag_value(&creature, "intelligentDesign"),
+            None,
             "Lamarck must not create an intelligentDesign tag"
         );
-        assert!(meta.tags.iter().any(|t| t.name == "lamarck"));
+        assert!(tag_value(&creature, "lamarck").is_some());
+    }
+
+    #[test]
+    fn stamp_gives_an_untagged_creature_its_first_tags() {
+        let mut creature = parse_creature_json(UNTAGGED).unwrap();
+        assert!(creature.tags.is_none(), "fixture starts without tags");
+        stamp_acceptance(&mut creature, &progress());
+        let names: Vec<&str> = creature
+            .tags
+            .as_ref()
+            .expect("stamping creates the tag list")
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["score", "error", "lamarck"]);
+    }
+
+    /// `worker/Lamarck/run.sh` parses these values: they are stamped verbatim,
+    /// at full precision, never rounded for display.
+    #[test]
+    fn score_and_error_are_stamped_at_full_precision() {
+        let mut creature = parse_creature_json(TINY_TAGGED).unwrap();
+        stamp_acceptance(
+            &mut creature,
+            &LamarckProgress {
+                acceptances: 2,
+                score: 0.3451532296337825,
+                error: 0.6548467703662175,
+                opening_score: 0.3451500296337825,
+                focus_neuron: "o1",
+                strategy: CandidateStrategy::Random,
+                experiments: 75,
+            },
+        );
+        assert_eq!(tag_value(&creature, "score"), Some("0.3451532296337825"));
+        assert_eq!(tag_value(&creature, "error"), Some("0.6548467703662175"));
+        assert_eq!(
+            tag_value(&creature, "lamarck"),
+            Some(
+                "🦒 Lamarck · 2 accepts / 75 exps · last: 🎲 random · 🎯 o1 · score: 0.345153 improved by 3.2e-06"
+            )
+        );
     }
 
     #[test]

@@ -28,9 +28,11 @@ flowchart LR
 ```
 
 - `write_candidate_batch` (`lamarck/src/candidates.rs`) writes `baseline.json`
-  and every `candidate-NNN.json` compactly. The baseline still carries its
-  `uuid` / `tags` — `serialize_creature_with_meta_compact`
-  (`lamarck/src/tags.rs`) is the same document as the pretty form with the
+  and every `candidate-NNN.json` compactly through `neat_core::creature_to_json`.
+  Both keep the creature's metadata — `uuid`, `tags`, `memetic`, per-neuron and
+  per-synapse tags — because neat-core round-trips it (NEAT-AI#3747 /
+  NEAT-AI#3748) and an accepted candidate file is re-parsed as the next
+  incumbent. The compact form is the same document as the pretty form with the
   whitespace dropped, which the round-trip test in `lamarck/src/tags.rs` pins.
 - `write_promote_batch` (`lamarck/src/scorer.rs`) hard-links the promoted files
   from the screen directory instead of copying them, and falls back to a copy

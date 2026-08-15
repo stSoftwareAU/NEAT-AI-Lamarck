@@ -9,7 +9,6 @@ use crate::structural::{
     rank_unused_sources, split_incoming_synapse, suggested_outbound_weight, suggested_weight,
     suggested_weight_scaled, with_previous_hidden_first,
 };
-use crate::tags::{CreatureMeta, serialize_creature_with_meta_compact};
 use neat_core::{CreatureExport, creature_to_json};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -1224,8 +1223,11 @@ fn pick_best_incoming<'a>(
 ///
 /// Recreates `dir` so leftover JSON from a prior larger batch cannot be scored.
 ///
-/// When `meta` is provided, `baseline.json` keeps original `uuid` / `tags`
-/// (candidates stay untagged — acceptance stamps the winner on write).
+/// Baseline and candidates alike keep the incumbent's metadata — `uuid`,
+/// `tags`, `memetic`, per-neuron and per-synapse tags — because neat-core
+/// round-trips it (NEAT-AI#3747 / NEAT-AI#3748) and an accepted candidate file
+/// is re-parsed as the next incumbent. A candidate written without it would
+/// lose the creature's pedigree the moment it won.
 ///
 /// Every file here is **compact** JSON (issue #114): `rust_scorer` is its only
 /// consumer, and on the production creature the pretty-printer's indentation is
@@ -1235,17 +1237,12 @@ pub fn write_candidate_batch(
     dir: &Path,
     incumbent: &CreatureExport,
     candidates: &[Candidate],
-    meta: Option<&CreatureMeta>,
 ) -> Result<Vec<String>, String> {
     if dir.exists() {
         fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     }
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let baseline = if let Some(meta) = meta {
-        serialize_creature_with_meta_compact(incumbent, meta)?
-    } else {
-        creature_to_json(incumbent).map_err(|e| e.to_string())?
-    };
+    let baseline = creature_to_json(incumbent).map_err(|e| e.to_string())?;
     fs::write(dir.join("baseline.json"), baseline).map_err(|e| e.to_string())?;
 
     let mut stems = vec!["baseline".to_string()];
@@ -2646,7 +2643,7 @@ mod tests {
         let candidates = one_candidate(&incumbent);
         let dir = tempfile::tempdir().unwrap();
         let batch = dir.path().join("candidates-exp-1");
-        let stems = write_candidate_batch(&batch, &incumbent, &candidates, None).unwrap();
+        let stems = write_candidate_batch(&batch, &incumbent, &candidates).unwrap();
         assert_eq!(stems, ["baseline", "candidate-000"]);
 
         for stem in &stems {
@@ -2694,10 +2691,9 @@ mod tests {
           "tags": [{"name":"score","value":"0.1"}]
         }"#;
         let incumbent = parse_creature_json(tagged).unwrap();
-        let meta = CreatureMeta::from_creature_json(tagged);
         let dir = tempfile::tempdir().unwrap();
         let batch = dir.path().join("candidates-exp-2");
-        write_candidate_batch(&batch, &incumbent, &[], Some(&meta)).unwrap();
+        write_candidate_batch(&batch, &incumbent, &[]).unwrap();
 
         let text = fs::read_to_string(batch.join("baseline.json")).unwrap();
         assert!(!text.contains('\n'), "baseline.json must be compact");

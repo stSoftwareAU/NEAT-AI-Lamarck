@@ -92,6 +92,5 @@ pub use screen_calibration::{
     ScreenCalibrationAccumulator, ScreenNoise, ScreenPair, spearman_rank_correlation,
 };
 pub use tags::{
-    CreatureMeta, CreatureTag, LamarckProgress, serialize_creature_with_meta,
-    serialize_creature_with_meta_compact,
+    LamarckProgress, serialize_creature_pretty, stamp_acceptance, tag_value, upsert_tag,
 };

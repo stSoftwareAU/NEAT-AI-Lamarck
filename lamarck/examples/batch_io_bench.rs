@@ -329,6 +329,8 @@ fn production_shaped_creature() -> CreatureExport {
             uuid: format!("neuron-{i:07}"),
             bias: pseudo_weight(i as u64),
             squash: Some(if i % 3 == 0 { "TANH" } else { "IDENTITY" }.into()),
+            tags: None,
+            extra: Default::default(),
         });
     }
     neurons.push(NeuronExport {
@@ -336,6 +338,8 @@ fn production_shaped_creature() -> CreatureExport {
         uuid: "output-0".into(),
         bias: 0.0,
         squash: Some("IDENTITY".into()),
+        tags: None,
+        extra: Default::default(),
     });
 
     let mut synapses = Vec::with_capacity(PROD_SYNAPSES);
@@ -353,6 +357,8 @@ fn production_shaped_creature() -> CreatureExport {
             to_uuid: format!("neuron-{to:07}"),
             weight: pseudo_weight(i as u64 + 1),
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
     }
     for i in 0..PROD_HIDDEN {
@@ -361,6 +367,8 @@ fn production_shaped_creature() -> CreatureExport {
             to_uuid: "output-0".into(),
             weight: pseudo_weight(i as u64 + 99),
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
     }
 
@@ -371,6 +379,10 @@ fn production_shaped_creature() -> CreatureExport {
         synapses,
         semantic_version: Some("4.0.0".into()),
         forward_only: true,
+        uuid: None,
+        tags: None,
+        memetic: None,
+        extra: Default::default(),
     }
 }
 

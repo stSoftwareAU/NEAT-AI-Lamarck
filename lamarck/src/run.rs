@@ -39,7 +39,9 @@ use crate::scorer::{
 };
 use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
 use crate::structural::{is_input_source, rank_unused_sources};
-use crate::tags::{CreatureMeta, LamarckProgress, serialize_creature_with_meta};
+use crate::tags::{
+    LamarckProgress, serialize_creature_pretty, stamp_acceptance, tag_value, upsert_tag,
+};
 use neat_core::{
     TrainingDataConfig, compile_creature, creature_to_json_pretty, parse_creature_json,
 };
@@ -809,9 +811,10 @@ pub fn run_optimisation_cancellable(
     }
 
     let original_text = fs::read_to_string(&config.creature).map_err(|e| e.to_string())?;
+    // The parsed creature carries its own metadata — `uuid`, `tags`, `memetic`,
+    // per-neuron and per-synapse tags (NEAT-AI#3747 / NEAT-AI#3748) — so the
+    // check-in writes below stamp it in place rather than re-attaching a copy.
     let mut incumbent = parse_creature_json(&original_text).map_err(|e| e.to_string())?;
-    // Tags/uuid are stripped by CreatureExport — keep them for check-in writes.
-    let mut creature_meta = CreatureMeta::from_creature_json(&original_text);
     // Never modify the supplied file — work from in-memory / output copies.
     fs::write(&best_path, &original_text).map_err(|e| e.to_string())?;
 
@@ -926,8 +929,8 @@ pub fn run_optimisation_cancellable(
                 {
                     remembered_baseline = Some(RememberedBaseline::new(key, baseline.clone()));
                 }
-                creature_meta.upsert("score", format!("{}", baseline.score));
-                creature_meta.upsert("error", format!("{}", baseline.error));
+                upsert_tag(&mut incumbent, "score", format!("{}", baseline.score));
+                upsert_tag(&mut incumbent, "error", format!("{}", baseline.error));
                 if !config.preserve_losers {
                     let _ = fs::remove_dir_all(&phase0_dir);
                 }
@@ -1019,11 +1022,8 @@ pub fn run_optimisation_cancellable(
             grafts_path.display()
         ));
         let baseline_hint = opening_baseline_score.map(|score| {
-            let error = creature_meta
-                .tags
-                .iter()
-                .find(|t| t.name == "error")
-                .and_then(|t| t.value.parse().ok())
+            let error = tag_value(&incumbent, "error")
+                .and_then(|v| v.parse().ok())
                 .unwrap_or(f64::NAN);
             ScoreResult {
                 score,
@@ -1060,9 +1060,9 @@ pub fn run_optimisation_cancellable(
                         last_accept_strategy = CandidateStrategy::StructuralAdd;
                         acceptances += 1;
                         graft_accepted = true;
-                        creature_meta.upsert("score", format!("{score}"));
-                        creature_meta.upsert("error", format!("{error}"));
-                        let tagged = serialize_creature_with_meta(&incumbent, &creature_meta)?;
+                        upsert_tag(&mut incumbent, "score", format!("{score}"));
+                        upsert_tag(&mut incumbent, "error", format!("{error}"));
+                        let tagged = serialize_creature_pretty(&incumbent)?;
                         fs::write(&best_path, &tagged).map_err(|e| e.to_string())?;
                         log::ok(&format!(
                             "Phase-G: applied {} graft(s); incumbent score={score:.12}",
@@ -1496,7 +1496,7 @@ pub fn run_optimisation_cancellable(
         let batch_dir = config
             .output_dir
             .join(format!("candidates-exp-{experiments}"));
-        write_candidate_batch(&batch_dir, &incumbent, &candidates, Some(&creature_meta))?;
+        write_candidate_batch(&batch_dir, &incumbent, &candidates)?;
 
         let screen_rate = config.screen_sample_rate.filter(|r| *r > 0.0 && *r < 1.0);
         let scorer_start = Instant::now();
@@ -2090,24 +2090,22 @@ pub fn run_optimisation_cancellable(
             last_accept_focus = winner_focus.clone();
             last_accept_strategy = strategy;
             last_accept_error = sel.result.error;
-            creature_meta.stamp_acceptance(&LamarckProgress {
-                acceptances: acceptances + 1,
-                score: sel.result.score,
-                error: sel.result.error,
-                opening_score: opening,
-                focus_neuron: &winner_focus,
-                strategy,
-                experiments,
-            });
-            let tagged = serialize_creature_with_meta(&incumbent, &creature_meta)?;
+            stamp_acceptance(
+                &mut incumbent,
+                &LamarckProgress {
+                    acceptances: acceptances + 1,
+                    score: sel.result.score,
+                    error: sel.result.error,
+                    opening_score: opening,
+                    focus_neuron: &winner_focus,
+                    strategy,
+                    experiments,
+                },
+            );
+            let tagged = serialize_creature_pretty(&incumbent)?;
             log::detail(&format!(
                 "🏷️  {}",
-                creature_meta
-                    .tags
-                    .iter()
-                    .find(|t| t.name == "lamarck")
-                    .map(|t| t.value.as_str())
-                    .unwrap_or("(no lamarck tag)")
+                tag_value(&incumbent, "lamarck").unwrap_or("(no lamarck tag)")
             ));
             fs::write(&best_path, &tagged).map_err(|e| e.to_string())?;
             fs::create_dir_all(&winners_dir).map_err(|e| e.to_string())?;
@@ -2254,31 +2252,26 @@ pub fn run_optimisation_cancellable(
         let error = if last_accept_error.is_finite() {
             last_accept_error
         } else {
-            creature_meta
-                .tags
-                .iter()
-                .find(|t| t.name == "error")
-                .and_then(|t| t.value.parse().ok())
+            tag_value(&incumbent, "error")
+                .and_then(|v| v.parse().ok())
                 .unwrap_or(f64::NAN)
         };
-        creature_meta.stamp_acceptance(&LamarckProgress {
-            acceptances,
-            score: best_score,
-            error,
-            opening_score: opening,
-            focus_neuron: &last_accept_focus,
-            strategy: last_accept_strategy,
-            experiments,
-        });
-        let tagged = serialize_creature_with_meta(&incumbent, &creature_meta)?;
+        stamp_acceptance(
+            &mut incumbent,
+            &LamarckProgress {
+                acceptances,
+                score: best_score,
+                error,
+                opening_score: opening,
+                focus_neuron: &last_accept_focus,
+                strategy: last_accept_strategy,
+                experiments,
+            },
+        );
+        let tagged = serialize_creature_pretty(&incumbent)?;
         log::detail(&format!(
             "🏷️  final {}",
-            creature_meta
-                .tags
-                .iter()
-                .find(|t| t.name == "lamarck")
-                .map(|t| t.value.as_str())
-                .unwrap_or("(no lamarck tag)")
+            tag_value(&incumbent, "lamarck").unwrap_or("(no lamarck tag)")
         ));
         fs::write(&best_path, &tagged).map_err(|e| e.to_string())?;
     }

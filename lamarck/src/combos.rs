@@ -244,15 +244,10 @@ pub fn merge_candidate_deltas(
                 let insert_at = insert_index_for_hidden(&out, focus).ok_or_else(|| {
                     format!("cannot insert new neuron {} before focus {focus}", vn.uuid)
                 })?;
-                out.neurons.insert(
-                    insert_at,
-                    NeuronExport {
-                        neuron_type: vn.neuron_type.clone(),
-                        uuid: vn.uuid.clone(),
-                        bias: vn.bias,
-                        squash: vn.squash.clone(),
-                    },
-                );
+                // Cloned whole, never rebuilt field by field: a rebuild drops
+                // the neuron's tags and any key neat-core does not model
+                // (NEAT-AI#3750).
+                out.neurons.insert(insert_at, vn.clone());
             }
         }
 
@@ -288,12 +283,8 @@ pub fn merge_candidate_deltas(
                 .iter()
                 .any(|s| s.from_uuid == key.0 && s.to_uuid == key.1)
             {
-                out.synapses.push(SynapseExport {
-                    from_uuid: vs.from_uuid.clone(),
-                    to_uuid: vs.to_uuid.clone(),
-                    weight: vs.weight,
-                    synapse_type: vs.synapse_type.clone(),
-                });
+                // Cloned whole for the same reason as the neuron above.
+                out.synapses.push(vs.clone());
             }
         }
     }
@@ -689,6 +680,8 @@ mod tests {
             to_uuid: "h1".into(),
             weight: 0.05,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut b = base.clone();
         b.synapses.push(SynapseExport {
@@ -696,6 +689,8 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.02,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let merged = merge_candidate_deltas(&base, &[&a, &b]).unwrap();
         assert!(
@@ -731,6 +726,8 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.05,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut b = base.clone();
         b.synapses.push(SynapseExport {
@@ -738,6 +735,8 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.08,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut merged = merge_candidate_deltas(&base, &[&a, &b]).unwrap();
         let contributors = new_synapse_contributor_counts(&base, &[&a, &b]);
@@ -789,12 +788,16 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.05,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         bridge.synapses.push(SynapseExport {
             from_uuid: "input-1".into(),
             to_uuid: "o1".into(),
             weight: 0.08,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut bias_only = base.clone();
         bias_only.neurons[0].bias = 0.1;
@@ -836,6 +839,8 @@ mod tests {
             to_uuid: "h1".into(),
             weight: 0.05,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut b = base.clone();
         b.synapses.push(SynapseExport {
@@ -843,6 +848,8 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.02,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut merged = merge_candidate_deltas(&base, &[&a, &b]).unwrap();
         let contributors = new_synapse_contributor_counts(&base, &[&a, &b]);
@@ -882,6 +889,8 @@ mod tests {
             to_uuid: "h1".into(),
             weight: 0.05,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut counts = BTreeMap::new();
         counts.insert("h1".into(), 1usize);
@@ -911,6 +920,8 @@ mod tests {
             to_uuid: "h1".into(),
             weight: 0.05,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut merged = merge_candidate_deltas(&base, &[&weight_change, &add]).unwrap();
         let contributors = new_synapse_contributor_counts(&base, &[&weight_change, &add]);
@@ -990,6 +1001,8 @@ mod tests {
             to_uuid: "h1".into(),
             weight: 0.05,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut b = base.clone();
         b.synapses.push(SynapseExport {
@@ -997,6 +1010,8 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.02,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let candidates = vec![cand(a), cand(b)];
         let source = dir.path().join("source");
@@ -1114,6 +1129,8 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.06,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut b = base.clone();
         b.synapses.push(SynapseExport {
@@ -1121,6 +1138,8 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.08,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let candidates = vec![cand(a), cand(b)];
         let source = dir.path().join("source");
@@ -1251,6 +1270,8 @@ mod tests {
             to_uuid: "h1".into(),
             weight: 0.05,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let mut b = base.clone();
         b.synapses.push(SynapseExport {
@@ -1258,6 +1279,8 @@ mod tests {
             to_uuid: "o1".into(),
             weight: 0.02,
             synapse_type: None,
+            tags: None,
+            extra: Default::default(),
         });
         let candidates = vec![cand(a), cand(b)];
         let source = dir.join("source");

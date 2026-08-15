@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lamarck no longer drops creature metadata on write (NEAT-AI#3750).** The
+  `tags.rs` sidecar mirrored only the top-level `uuid` / `tags` and re-attached
+  them through a `serde_json::Value`, so per-neuron tags (including the
+  `intelligentDesign` pedigree), per-synapse tags and the `memetic` block were
+  lost or re-ordered on every rewrite. neat-core now round-trips all of it
+  (NEAT-AI#3747 / NEAT-AI#3748), so the sidecar's extract-and-re-attach half is
+  gone: `best.json`, `winners/` and the scorer batch are written straight from
+  the parsed creature, and `stamp_acceptance` only upserts the `score` / `error`
+  / `lamarck` tags this optimiser owns — at unchanged precision and wording for
+  `worker/Lamarck/run.sh`. Pinned by `lamarck/tests/tags_roundtrip.rs`, which
+  drives a real accept-and-write cycle over a fully tagged creature.
+
 ### Changed
 
 - **The default candidate batch is duplicate-free (Issue #119).** Duplicate

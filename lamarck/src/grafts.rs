@@ -378,6 +378,8 @@ pub fn apply_graft(host: &CreatureExport, graft: &Graft) -> Result<CreatureExpor
                 uuid: neuron.uuid.clone(),
                 bias: neuron.bias,
                 squash: neuron.squash.clone(),
+                tags: None,
+                extra: Default::default(),
             },
         );
     }
@@ -403,6 +405,8 @@ pub fn apply_graft(host: &CreatureExport, graft: &Graft) -> Result<CreatureExpor
             to_uuid: syn.to_uuid.clone(),
             weight: syn.weight,
             synapse_type: syn.synapse_type.clone(),
+            tags: None,
+            extra: Default::default(),
         });
     }
     Ok(out)

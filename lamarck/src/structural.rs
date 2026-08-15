@@ -803,6 +803,8 @@ pub fn add_synapse(
         to_uuid: focus_uuid.to_string(),
         weight,
         synapse_type: None,
+        tags: None,
+        extra: Default::default(),
     });
 }
 
@@ -856,6 +858,8 @@ pub fn add_neuron_bridge(
             uuid: new_uuid.clone(),
             bias,
             squash: Some(squash.to_string()),
+            tags: None,
+            extra: Default::default(),
         },
     );
 
@@ -875,12 +879,16 @@ pub fn add_neuron_bridge(
         to_uuid: new_uuid.clone(),
         weight: w_in,
         synapse_type: None,
+        tags: None,
+        extra: Default::default(),
     });
     creature.synapses.push(SynapseExport {
         from_uuid: new_uuid.clone(),
         to_uuid: focus_uuid.to_string(),
         weight: w_out,
         synapse_type: None,
+        tags: None,
+        extra: Default::default(),
     });
     Ok(new_uuid)
 }
