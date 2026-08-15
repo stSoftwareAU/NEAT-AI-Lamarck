@@ -1,20 +1,16 @@
-# NEAT-AI brand
+# NEAT-AI brand — moved
 
-Shared visual identity for the NEAT-AI repository family.
+The NEAT-AI brand set is shared by the whole repository family, so it lives in
+the hub repository rather than here (Issue #149):
 
-## Social previews
+**<https://github.com/stSoftwareAU/NEAT-AI/tree/Develop/docs/brand>**
 
-Opaque **1280×640** GitHub Social preview images live in
-[`social-previews/`](social-previews/). Each repo keeps the same organic
-lockup (smiley-neuron **A**, teal/coral topology, family pills) and adds a
-small motif + subtitle so siblings stay recognisable as one family.
+That directory holds the opaque 1280×640 GitHub Social preview for every
+sibling repo, plus the transparent organic mark for compositing outside GitHub.
 
-Upload via **Settings → General → Social preview** on each repository.
+This repository's preview is `neat-ai-lamarck.png` (giraffe eating a leaf).
+Download it from the hub repo and upload it via **Settings → General → Social
+preview**.
 
-## Transparent mark
-
-[`neat-ai-social-organic-alt-transparent.png`](neat-ai-social-organic-alt-transparent.png)
-is a transparent PNG of the organic hero for light/dark compositing outside
-GitHub’s social preview (README headers, slides, etc.). Prefer the opaque
-previews for GitHub Social — transparent dark text disappears on the dark
-preview chrome.
+`lamarck/tests/brand_pointer.rs` keeps this pointer honest: it fails if brand
+artwork reappears here or if this file stops naming the hub repository.
