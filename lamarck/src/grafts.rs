@@ -569,6 +569,30 @@ pub struct GraftReplayRequest<'a> {
     pub baseline_hint: Option<&'a ScoreResult>,
 }
 
+/// A graft replay that left the host unchanged — nothing applicable, budget
+/// gone before singles, or singles scoring failed (issue #140).
+fn no_change_result(
+    host: &CreatureExport,
+    baseline_hint: Option<&ScoreResult>,
+    store: GraftStore,
+    scorer_successes: u64,
+    scorer_failures: u64,
+) -> GraftReplayResult {
+    GraftReplayResult {
+        creature: host.clone(),
+        score: baseline_hint.map(|b| b.score),
+        baseline_score: baseline_hint.map(|b| b.score),
+        error: baseline_hint.map(|b| b.error),
+        store,
+        grafts_applied: 0,
+        combos_scored: 0,
+        combos_dampened: 0,
+        combo_dampen: crate::combos::StackDampenReport::default(),
+        scorer_successes,
+        scorer_failures,
+    }
+}
+
 /// Phase-G: classify, score singles, parallel-score helpful combinations, prune.
 pub fn replay_grafts(
     scorer: &impl DirectoryScorer,
@@ -612,36 +636,24 @@ pub fn replay_grafts(
     }
 
     if applicable.is_empty() {
-        return Ok(GraftReplayResult {
-            creature: host.clone(),
-            score: baseline_hint.map(|b| b.score),
-            baseline_score: baseline_hint.map(|b| b.score),
-            error: baseline_hint.map(|b| b.error),
+        return Ok(no_change_result(
+            host,
+            baseline_hint,
             store,
-            grafts_applied: 0,
-            combos_scored: 0,
-            combos_dampened: 0,
-            combo_dampen: crate::combos::StackDampenReport::default(),
             scorer_successes,
             scorer_failures,
-        });
+        ));
     }
 
     if Instant::now() >= deadline {
         log::warn("graft replay: budget exhausted before singles");
-        return Ok(GraftReplayResult {
-            creature: host.clone(),
-            score: baseline_hint.map(|b| b.score),
-            baseline_score: baseline_hint.map(|b| b.score),
-            error: baseline_hint.map(|b| b.error),
+        return Ok(no_change_result(
+            host,
+            baseline_hint,
             store,
-            grafts_applied: 0,
-            combos_scored: 0,
-            combos_dampened: 0,
-            combo_dampen: crate::combos::StackDampenReport::default(),
             scorer_successes,
             scorer_failures,
-        });
+        ));
     }
 
     if let Err(e) = fs::create_dir_all(work_dir) {
@@ -685,19 +697,13 @@ pub fn replay_grafts(
             scorer_failures += 1;
             log::warn(&format!("graft singles score failed: {e}"));
             let _ = fs::remove_dir_all(&singles_dir);
-            return Ok(GraftReplayResult {
-                creature: host.clone(),
-                score: baseline_hint.map(|b| b.score),
-                baseline_score: baseline_hint.map(|b| b.score),
-                error: baseline_hint.map(|b| b.error),
+            return Ok(no_change_result(
+                host,
+                baseline_hint,
                 store,
-                grafts_applied: 0,
-                combos_scored: 0,
-                combos_dampened: 0,
-                combo_dampen: crate::combos::StackDampenReport::default(),
                 scorer_successes,
                 scorer_failures,
-            });
+            ));
         }
     };
 
