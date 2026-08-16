@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Refuse `neat_ai_lamarck` version downgrades vs Develop (Issue #152).** A PR
+  whose `lamarck/Cargo.toml` version is strictly behind `origin/Develop` fails
+  CI instead of being treated as “already bumped”. Equal versions may still
+  auto-patch-bump; ahead versions skip. Covered by
+  `scripts/check-lamarck-version-order.sh` and a WHAT test.
+
 - **The default candidate batch is duplicate-free (Issue #119).** Duplicate
   rejection — the structural fingerprint that normalises a grown neuron's
   random UUID away — ran only on the opt-in `--scale-candidate-quotas` path, so
