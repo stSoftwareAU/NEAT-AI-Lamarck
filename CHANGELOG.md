@@ -14,6 +14,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   auto-patch-bump; ahead versions skip. Covered by
   `scripts/check-lamarck-version-order.sh` and a WHAT test.
 
+- **Rust build profiles follow the fleet split (Issue #153 /
+  [VibeCoding#4159](https://github.com/stSoftwareAU/VibeCoding/issues/4159)).**
+  Dev keeps `opt-level = 0` / incremental and now uses
+  `debug = "line-tables-only"` so rebuilds stay fast while panics still print
+  file:line. Release is workspace-wide `opt-level = 3`, `lto = "fat"`,
+  `codegen-units = 1` (no longer scoped only to `neat_ai_lamarck`), and
+  `.cargo/config.toml` adds `-C target-cpu=native` for host-built binaries
+  (not wasm32; an exported `RUSTFLAGS` still replaces config flags, as CI
+  and `./quality.sh` rely on).
+
 - **The default candidate batch is duplicate-free (Issue #119).** Duplicate
   rejection — the structural fingerprint that normalises a grown neuron's
   random UUID away — ran only on the opt-in `--scale-candidate-quotas` path, so
