@@ -6,6 +6,19 @@ never ran. The #8 strategy table was a single 45-minute, single-seed sample
 (75 experiments, 2 accepts, both `random`); this campaign adds the arms needed
 before any strategy is judged.
 
+**Two #75-era campaigns exist — do not equate them (Issue #132).** This write-up
+is the **scripted #75 campaign**: seeds **11 / 21 / 31**, journals under
+`.lamarck-followup`, arms named `high-error`, `backprop-step-0.01` /
+`0.001`, `batch-size-12` / `40`. A separate **local calibration campaign**
+(`~/.lamarck-followup-75`, mostly seed **1**, Lamarck `0.1.7`) produced the
+journals mined by
+[`docs/screen-calibration.md`](screen-calibration.md) and
+[`docs/promote-gate.md`](promote-gate.md) — including an `output-focus`
+(`--focus-neuron output-0`), `backprop-cap-tenth` and `seed-2` arm. Those
+files are **not** the journals behind this document; they shared a box, report
+no strategy economics, and do not close [#75](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/75)
+or [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
+
 Reproduce with:
 
 ```bash
@@ -96,10 +109,15 @@ That is a result about the policy, not about the output: `high-error` is a
 throughput sink on a fine-tuned creature, and #8's advice to prefer `weighted`
 is confirmed rather than softened.
 
-**The `--focus-neuron output-0` slice was not run** (see
-[Coverage and what is still unrun](#coverage-and-what-is-still-unrun)), so
-`mean_error_bias` remains unmeasured: it appeared once in the whole #8 baseline
-and **zero** times across all 118 experiments here.
+**The `--focus-neuron output-0` slice was not run in this scripted campaign**
+(see [Coverage and what is still unrun](#coverage-and-what-is-still-unrun)).
+The local calibration campaign did run an `output-focus` arm (20 experiments,
+seed 1) and
+[`docs/screen-calibration.md`](screen-calibration.md) tabulates it — but that
+run shared the box, was mined only for screen/promote pairing, and reports no
+per-strategy economics, so it does not close #75.1 or measure
+`mean_error_bias` here. Across the 118 scripted experiments,
+`mean_error_bias` appeared **zero** times (once in the whole #8 baseline).
 
 ## Arm 2 — Backprop step A/B (#75.2)
 
@@ -236,13 +254,14 @@ this arm found.
 
 ## Arm 4 — Multi-seed repeat (#75.4)
 
-**Not run in this campaign.** Four production-budget seeds is 4 × 45 minutes of
-exclusive box time — longer than the whole campaign above — and it cannot be
-interleaved with the other arms without contending for the scorer and
-invalidating every per-minute figure. It is the one recommendation of the four
-still outstanding, tracked in
-[#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) with the exact
-command to run:
+**Not run in this scripted campaign.** The local calibration campaign includes a
+single `seed-2` journal (26 experiments, production config) — useful for
+screen-calibration pairing, not a four-seed exclusive-box repeat — so #75.4 and
+[#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) stay open.
+Four production-budget seeds is 4 × 45 minutes of exclusive box time — longer
+than the whole campaign above — and it cannot be interleaved with the other
+arms without contending for the scorer and invalidating every per-minute
+figure. The exact command to run:
 
 ```bash
 SEEDS="2 3 4 5" scripts/run-followup-economics.sh multi-seed
@@ -414,17 +433,24 @@ stays the default; nothing about it is changed here.
 
 ## Coverage and what is still unrun
 
-| #75 item | Status |
+Status below is for **this scripted #75 campaign** only. The local calibration
+campaign (`~/.lamarck-followup-75`) already has journals named `output-focus`,
+`backprop-cap-tenth` and `seed-2` — see
+[`docs/screen-calibration.md`](screen-calibration.md) — but they do not close
+these rows: shared-box load, strategy economics unreported, and not the
+exclusive-box protocol #98 requires.
+
+| #75 item | Status (scripted campaign) |
 |----------|--------|
-| 1. Output-focus slice | **Partly run** — `high-error` policy done (35 experiments); `--focus-neuron output-0` unrun, so `mean_error_bias` / `stats_skew_bias` stay unmeasured |
-| 2. Backprop step A/B | **Run** — and it showed the learning rate is the wrong knob; the cap A/B is unrun |
+| 1. Output-focus slice | **Partly run** — `high-error` policy done (35 experiments); `--focus-neuron output-0` **unrun here** (a local calibration `output-focus` journal exists but does not measure strategy economics), so `mean_error_bias` / `stats_skew_bias` stay unmeasured for this write-up |
+| 2. Backprop step A/B | **Run** — and it showed the learning rate is the wrong knob; the cap A/B is **unrun here** (local calibration has `backprop-cap-tenth`, mined for screen pairing only) |
 | 3. Batch-size A/B | **Run** — see the ceiling result above |
-| 4. Multi-seed repeat | **Unrun** — 3 hours of exclusive box time |
+| 4. Multi-seed repeat | **Unrun here** — 3 hours of exclusive box time (local calibration has one `seed-2` journal, not seeds 2–5) |
 | #108. Candidate-quota scaling | **Unrun** — the generator change has landed behind `--scale-candidate-quotas`; the paired economics arm needs the same exclusive box time |
 | #109. Multi-focus experiments | **Unrun** — the loop change has landed behind `--focus-count`; the paired economics arm needs the same exclusive box time |
 
-The unrun work is one follow-up, not three: it is all "arms that need exclusive
-box time on the production creature". [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96)
+The remaining work is one follow-up, not three: it is all "arms that need
+exclusive box time on the production creature". [#96](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/96)
 wired the arms up; running them is tracked in
 [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 

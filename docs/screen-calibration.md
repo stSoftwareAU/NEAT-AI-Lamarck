@@ -70,10 +70,12 @@ matters most for the noise floor and is stated again where it bites.
 | `seed-2` | production config, **seed 2**, 2700 s | 26 |
 
 All eight ran `--screen-sample-rate 0.05` and `--screen-promote-threshold 1e-6`
-against the same 2 262 277-record GRQ corpus. The seven arms are the local
-`~/.lamarck-followup-75` campaign (Lamarck `0.1.7`); they are **not** the same
-files behind `docs/followup-economics.md`, whose journals are not on disk. Both
-sets are gitignored run output, so the tables below — not the journals — are the
+against the same 2 262 277-record GRQ corpus. The seven arms are the **local
+calibration campaign** (`~/.lamarck-followup-75`, Lamarck `0.1.7`, mostly seed
+1); they are **not** the same files behind
+[`docs/followup-economics.md`](followup-economics.md) (the **scripted #75
+campaign**, seeds 11 / 21 / 31), whose journals are not on disk. Both sets are
+gitignore'd run output, so the tables below — not the journals — are the
 committed record.
 
 ## Results
