@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Disambiguate the two #75-era follow-up campaigns (Issue #132).** The
+  scripted #75 write-up (`docs/followup-economics.md`, seeds 11 / 21 / 31) and
+  the local calibration journals (`~/.lamarck-followup-75`, mostly seed 1)
+  mined by screen-calibration / promote-gate are named and scoped separately,
+  so “unrun” / “seven #75 arms” / README #98 no longer contradict each other.
+
 - **Refuse `neat_ai_lamarck` version downgrades vs Develop (Issue #152).** A PR
   whose `lamarck/Cargo.toml` version is strictly behind `origin/Develop` fails
   CI instead of being treated as “already bumped”. Equal versions may still
