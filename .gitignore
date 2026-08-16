@@ -4,6 +4,8 @@
 !.gitignore
 !.gitattributes
 !.github/
+!.cargo/
+!.cargo/config.toml
 !.gitleaks.toml
 !.codespellrc
 !.markdownlint.json

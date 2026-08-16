@@ -24,6 +24,11 @@ resolves to `../../NEAT-AI-core/neat-core`.
 - **cargo-deny** — `cargo install cargo-deny --locked`
 - **codespell** — `pip install --user codespell`
 
+Dev builds favour compile speed (`debug = "line-tables-only"`); release builds
+favour the artefact (`opt-level = 3`, fat LTO, one codegen unit, plus
+`target-cpu=native` from [`.cargo/config.toml`](./.cargo/config.toml) when
+`RUSTFLAGS` is unset). See README › Build and quality gate (Issue #153).
+
 ## Local gate
 
 ```bash
