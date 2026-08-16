@@ -1,5 +1,7 @@
 # NEAT-AI-Lamarck
 
+![NEAT-AI-Lamarck — the NEAT-AI mark beside a giraffe nibbling a leaf, captioned "Learned traits passed to the next generation"](https://raw.githubusercontent.com/stSoftwareAU/NEAT-AI/Develop/docs/brand/social-previews/neat-ai-lamarck.png)
+
 > Experimental: teaching evolved NEAT-AI creatures that what they learn in life can be inherited. Adventurous mutations, sceptical scorer — Lamarck would be proud.
 
 NEAT-AI-Lamarck is an experimental Rust optimiser for already-fit [NEAT-AI](https://github.com/stSoftwareAU/NEAT-AI) creatures.
