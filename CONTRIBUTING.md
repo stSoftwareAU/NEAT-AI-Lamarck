@@ -63,5 +63,11 @@ changed — but only if the PR branch has not already bumped it (same approach
 as GRQ-taxation). Bumping locally when your change touches `lamarck/src/` keeps
 the version correct and avoids an extra bot commit.
 
+**Never ship a crate version behind `origin/Develop`.** A merge conflict that
+silently takes Develop's older `lamarck/Cargo.toml` version must fail CI, not
+look like an intentional bump. Equal versions may still auto-patch-bump; ahead
+versions are accepted without another bump
+(`scripts/check-lamarck-version-no-downgrade.sh`, Issue #152).
+
 Docs-only or CI-config-only changes do not need a bump. Record notable changes
 under **[Unreleased]** in [`CHANGELOG.md`](./CHANGELOG.md).
