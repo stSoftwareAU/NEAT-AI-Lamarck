@@ -1,5 +1,7 @@
 # NEAT-AI-Lamarck
 
+![NEAT-AI-Lamarck — the NEAT-AI mark beside a giraffe nibbling a leaf, captioned "Learned traits passed to the next generation"](https://raw.githubusercontent.com/stSoftwareAU/NEAT-AI/Develop/docs/brand/social-previews/neat-ai-lamarck.png)
+
 > Experimental: teaching evolved NEAT-AI creatures that what they learn in life can be inherited. Adventurous mutations, sceptical scorer — Lamarck would be proud.
 
 NEAT-AI-Lamarck is an experimental Rust optimiser for already-fit [NEAT-AI](https://github.com/stSoftwareAU/NEAT-AI) creatures.
@@ -1280,6 +1282,27 @@ Clone **NEAT-AI-core** beside this repository:
 parent/
   NEAT-AI-core/
   NEAT-AI-Lamarck/
+```
+
+### Cargo profiles (Issue #153)
+
+Dev and release optimise for opposite goals (fleet guidance from
+[VibeCoding#4159](https://github.com/stSoftwareAU/VibeCoding/issues/4159)):
+
+| Profile | Goal | Settings |
+| ------- | ---- | -------- |
+| `dev` | Fast compile | `debug = "line-tables-only"` (panic file:line without full DWARF) |
+| `release` | Fastest binary | `opt-level = 3`, `lto = "fat"`, `codegen-units = 1` |
+
+Release binaries built and run on the same host also get
+`-C target-cpu=native` from [`.cargo/config.toml`](./.cargo/config.toml)
+(skipped for `wasm32`). An exported `RUSTFLAGS` — as in `./quality.sh` and CI —
+replaces those config flags entirely, so the quality gate keeps
+`-D warnings` without forcing `native` on CI runners.
+
+```bash
+cargo build                  # fast rebuilds while developing
+cargo build --release        # production / GRQ host binary
 ```
 
 Local gate (mirrors CI):
