@@ -1063,7 +1063,9 @@ statistics.
 The cache must not spend more time than it saves, and must not grow without
 bound. Both are enforced in the code rather than asserted in a report: every
 cache-on run keeps a ledger, and stands the cache down when it stops paying
-(issue #92).
+(issue #92). Issue [#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94)
+measured a practical production pair and **left the flag off by default** —
+see [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md).
 
 ```mermaid
 flowchart TD
@@ -1219,8 +1221,8 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
 | Issue | Gap |
 |-------|-----|
-| [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
-| [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured**: each needs the production creature and exclusive use of the scorer. |
+| Failed-candidate cache ([#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94) / [#158](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/158)) | Shipped **opt-in** (`--failed-cache`, off by default). The #94 pair was underpowered on accepts (0/0); exclusive-box 45-minute repeats are owed before considering default-on. [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md). |
+| [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured on an idle exclusive-box run**: each needs the production creature and exclusive use of the scorer. A shared-box **local calibration campaign** already has journals for an output-0 slice, a backprop-cap arm and a second seed — mined for screen/promote pairing only; see [`docs/screen-calibration.md`](docs/screen-calibration.md) and the campaign disambiguation in [`docs/followup-economics.md`](docs/followup-economics.md). |
 | [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | **Fixed, pending release.** A sampled scorer call used to read and decode the whole corpus to score a twentieth of it; it now fetches only the records it scores, cutting the fixed cost of a screen call from **10 693 ms to 3 423 ms** ([`docs/scorer-fixed-cost.md`](docs/scorer-fixed-cost.md)). The change lives in NEAT-AI-core (`issue-scorer-sampled-read`) and NEAT-AI-scorer (`issue-lamarck-123-sampled-read`); a human must open those two PRs and cut a scorer release before a run picks it up ([#141](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/141)). The whole-run `scorerCallCost` re-measure on an idle box is owed then. |
 
 ## Repository layout
@@ -1235,18 +1237,17 @@ NEAT-AI-Lamarck/
 ├── SECURITY.md
 ├── .github/workflows/   # scorer-aligned quality gates
 ├── scripts/
-├── docs/
-│   ├── architecture.md
-│   ├── baseline-economics.md
-│   ├── screen-calibration.md
-│   ├── scorer-call-cost.md
-│   └── scorer-fixed-cost.md
+├── docs/                # … measurement docs — see links throughout this README
 └── lamarck/src/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
     ├── config.rs            # defaults and run options
     ├── analysis.rs          # the two fused per-experiment training scans
+    ├── chunks.rs            # deterministic analysis chunking (issue #107)
+    ├── memo.rs              # cross-experiment analysis memo (issue #106)
+    ├── cancel.rs            # SIGINT/SIGTERM cancel token (issue #72)
     ├── parity.rs            # Phase-0 scorer parity gate
+    ├── baseline.rs          # remembered full-corpus baseline (issue #113)
     ├── observations.rs      # observations.statistics cache
     ├── focus.rs             # focus-neuron selection policies
     ├── backprop.rs
@@ -1260,6 +1261,8 @@ NEAT-AI-Lamarck/
     ├── scorer_cost.rs      # fixed vs marginal per-call scorer cost (issue #112)
     ├── run.rs
     ├── report.rs
+    ├── failed_cache/        # opt-in unsuccessful-candidate cache (issues #88–#94)
+    ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
     └── log.rs

@@ -23,6 +23,11 @@ for report_path in sorted(root.glob("*/report.json")):
     arm_dir = report_path.parent.name
     data = json.loads(report_path.read_text())
     cache = data.get("cache") or {}
+    stood = cache.get("stoodDownAtExperiment")
+    if cache.get("enabled") or "stoodDownAtExperiment" in cache:
+        stood_display = "no" if stood is None else stood
+    else:
+        stood_display = None
     rows.append({
         "arm": arm_dir,
         "experiments": data.get("experiments"),
@@ -30,11 +35,11 @@ for report_path in sorted(root.glob("*/report.json")):
         "improvement": data.get("totalScoreImprovement"),
         "per_hour": data.get("scoreImprovementPerWallHour"),
         "hit_rate": cache.get("hitRate"),
-        "saved_ms": cache.get("savedMs"),
+        "saved_ms": cache.get("estimatedSavedMs", cache.get("savedMs")),
         "spent_ms": cache.get("spentMs"),
         "net_ms": cache.get("netMs"),
-        "stood_down": cache.get("stoodDownAtExperiment"),
-        "peak_entries": cache.get("peakSize"),
+        "stood_down": stood_display,
+        "peak_entries": cache.get("peakCacheSize", cache.get("peakSize")),
     })
 
 if not rows:

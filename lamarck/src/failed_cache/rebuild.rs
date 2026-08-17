@@ -171,6 +171,7 @@ pub fn rebuild_from_journal(
             Ok(
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
+                | JournalLine::ScorerCalls(_)
                 | JournalLine::CacheStandDown(_),
             ) => continue,
             Err(_) => {
@@ -397,19 +398,28 @@ mod tests {
             incumbent_id: INCUMBENT.into(),
             baseline_score: 0.5,
             focus_neuron: "o1".into(),
+            focus_neurons: None,
             focus_stats: None,
             candidates: mutations
                 .iter()
                 .enumerate()
                 .map(|(i, m)| provenance(m, Some(i as f64)))
                 .collect(),
+            candidates_requested: None,
+            batch_limit: None,
             scores,
             screen_scores: None,
+            screen_tiers: None,
+            baseline_source: None,
             winner: None,
             improvement: None,
             accepted: false,
             analysis_ms: 1,
+            memo_hits: 0,
+            memo_misses: 0,
+            memo_ms_saved: 0,
             scorer_ms: 2,
+            scorer_calls: None,
             scorer_error: None,
             combo_members: None,
             combo_member_indices: None,
@@ -566,7 +576,7 @@ mod tests {
         let header = RunHeaderRecord::new(
             7,
             SeedSource::Supplied,
-            RunConfigRecord::from_config(&crate::config::LamarckConfig::default()),
+            RunConfigRecord::from_config(&crate::config::LamarckConfig::default(), 1e-6),
             1_000,
         );
         let path = write_journal(dir.path(), &[serde_json::to_string(&header).unwrap()]);
@@ -594,6 +604,7 @@ mod tests {
             scorer_successes: 1,
             scorer_failures: 0,
             replay_error: None,
+            scorer_calls: None,
         };
         let path = write_journal(
             dir.path(),

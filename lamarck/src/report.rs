@@ -480,6 +480,8 @@ pub struct JournalReport {
     /// scoring session could save; the slope is what it could not. Fitted from
     /// the journal's own `scorerCalls`, so any run reproduces the measurement.
     pub scorer_call_cost: ScorerCallCost,
+    /// Failed-candidate cache economics (issue #93). `None` on a cache-off journal.
+    pub cache: Option<CacheReport>,
     /// What the noise-aware promote gate would have done to this journal (#111).
     ///
     /// Replayed offline from the journal's own `screenScores`, at the default
@@ -614,6 +616,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             JournalLine::Header(header) => {
                 screen_calibration.push_header(&header.config);
                 promote_gate_replay.push_header(&header.config);
+                cache.push_header(&header.config);
                 continue;
             }
             JournalLine::ScorerCalls(calls) => {
@@ -969,6 +972,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         screen_calibration: screen_calibration.finish(),
         scorer_call_cost: scorer_call_cost.finish(),
         promote_gate_replay: promote_gate_replay.finish(),
+        cache: cache.finish(),
     })
 }
 

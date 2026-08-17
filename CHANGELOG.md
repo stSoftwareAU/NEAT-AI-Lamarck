@@ -6,7 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **README repository-layout tree omitted five `lamarck/src/` modules (Issue
+  #133).** `baseline.rs`, `cancel.rs`, `chunks.rs`, `memo.rs` and
+  `promote_gate.rs` were in the tree on disk — and three of them already cited
+  in the README prose — but missing from the layout map, which listed 21 of 26
+  source files with no elision marker. The five files are in the tree with the
+  same one-line comments as their neighbours; `docs/` is explicitly elided
+  (`…`) so archive / evidence / brand files cannot rot the map file-by-file.
+  `lamarck/tests/readme_contract.rs` now fails if a new `lamarck/src/*.rs`
+  file or source subdirectory is absent from the layout section, or if the
+  `docs/` branch lists files without listing every top-level `docs/*.md`
+  and also omits the elision marker.
+
 ### Changed
+
+- **Disambiguate the two #75-era follow-up campaigns (Issue #132).** The
+  scripted #75 write-up (`docs/followup-economics.md`, seeds 11 / 21 / 31) and
+  the local calibration journals (`~/.lamarck-followup-75`, mostly seed 1)
+  mined by screen-calibration / promote-gate are named and scoped separately,
+  so “unrun” / “seven #75 arms” / README #98 no longer contradict each other.
+
+- **Refuse `neat_ai_lamarck` version downgrades vs Develop (Issue #152).** A PR
+  whose `lamarck/Cargo.toml` version is strictly behind `origin/Develop` fails
+  CI instead of being treated as “already bumped”. Equal versions may still
+  auto-patch-bump; ahead versions skip. Covered by
+  `scripts/check-lamarck-version-order.sh` and a WHAT test.
 
 - **Rust build profiles follow the fleet split (Issue #153 /
   [VibeCoding#4159](https://github.com/stSoftwareAU/VibeCoding/issues/4159)).**
@@ -65,6 +91,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   [`docs/compact-batch-io.md`](docs/compact-batch-io.md) rather than dressed up.
 
 ### Added
+
+- **Failed-candidate cache, still off by default (Issues #88–#94 / #69).**
+  `--failed-cache` skips candidates a previous experiment already scored as
+  failures and backfills the batch; a snapshot and journal rebuild survive
+  across runs; a rolling-window ledger stands the cache down when spend beats
+  savings (#92). Repeated merges from Develop had dropped the config / journal
+  / run-loop wiring while leaving the `failed_cache` module in tree — this
+  restores it on the current experiment loop. Issue #94's practical production
+  pair (seed 1, 600 s, same GRQ creature and corpus as #8) was **underpowered
+  on the primary gate** (0 accepts on both arms, opening scores paired at
+  `0.35175391064496747`) so **`--failed-cache` does not flip to on-by-default**.
+  Secondary evidence on the priced treatment arm: 16.4% hit rate, ≈156 s of
+  estimated redundant scoring avoided vs 0.7 s spend, peak footprint ≪ 25 MiB,
+  rebuild from a 75-experiment journal in 1 ms, guardrail silent. Follow-up:
+  [#158](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/158). Write-up:
+  [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md).
 
 - **An opt-in noise-aware promote gate (Issue #111).**
   `--screen-promote-gate noise-aware` prices each screened batch's own spread

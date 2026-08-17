@@ -18,7 +18,7 @@ use std::fs;
 use std::path::Path;
 
 /// Strategy label recorded in the experiment journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateStrategy {
     /// Conventional backprop-derived bias/weight change.

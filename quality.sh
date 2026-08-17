@@ -45,6 +45,15 @@ echo "Validating auto-format PR workflow (Issue #33)..."
 echo "Validating version-increment PR workflow (runlib / GRQ-taxation)..."
 ./scripts/check-version-increment-workflow.sh
 
+echo "WHAT: lamarck version order (no downgrade vs base)..."
+./scripts/test-check-lamarck-version-order.sh
+
+echo "Refuse neat_ai_lamarck version downgrade vs Develop (Issue #152)..."
+./scripts/check-lamarck-version-no-downgrade.sh
+
+echo "WHAT: failed-cache economics summariser (Issue #94)..."
+./scripts/test-summarise-failed-cache-economics.sh
+
 echo "Running codespell preflight..."
 if ! ./scripts/spell-check.sh; then
   echo "spell-check: FAILED — fix the typos above or update .codespellrc"
