@@ -74,6 +74,15 @@ fn readme_text() -> String {
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+/// The ```text tree under `## Repository layout`.
+fn repository_layout_tree() -> String {
+    let readme = readme_text();
+    let layout = section(&readme, "\n## Repository layout");
+    fenced_block(layout, "text")
+        .expect("README.md `## Repository layout` has no ```text tree")
+        .to_string()
+}
+
 fn help_text() -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_neat_ai_lamarck"))
         .arg("--help")
@@ -146,6 +155,106 @@ fn readme_documents_the_report_subcommand() {
     assert!(
         readme.contains("neat_ai_lamarck report"),
         "README.md does not document the `report` subcommand"
+    );
+}
+
+/// Every `lamarck/src/*.rs` file and source subdirectory must appear in the
+/// layout tree (Issue #133).
+///
+/// The tree named 21 of 26 files with no elision marker, so a reader would
+/// conclude `baseline.rs`, `cancel.rs`, `chunks.rs`, `memo.rs` and
+/// `promote_gate.rs` did not exist — three of which the README's own prose
+/// already cites. A new module that is absent from the tree fails here.
+#[test]
+fn repository_layout_lists_every_lamarck_src_rs() {
+    let tree = repository_layout_tree();
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut missing = Vec::new();
+    for entry in
+        std::fs::read_dir(&src_dir).unwrap_or_else(|e| panic!("read {}: {e}", src_dir.display()))
+    {
+        let path = entry.expect("src dir entry").path();
+        let is_rs = path.extension().and_then(|ext| ext.to_str()) == Some("rs");
+        if !is_rs && !path.is_dir() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("utf-8 rs file name");
+        if !tree.contains(name) {
+            missing.push(name.to_string());
+        }
+    }
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "README.md repository-layout tree omits lamarck/src entries: {missing:?}"
+    );
+}
+
+/// `docs/` in the layout tree must either list every top-level `docs/*.md` or
+/// carry an explicit elision marker (`…` / `...`) so a partial list cannot
+/// read as complete (Issue #133).
+#[test]
+fn repository_layout_elides_or_lists_top_level_docs() {
+    let tree = repository_layout_tree();
+    let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs");
+    let mut on_disk = Vec::new();
+    for entry in
+        std::fs::read_dir(&docs_dir).unwrap_or_else(|e| panic!("read {}: {e}", docs_dir.display()))
+    {
+        let path = entry.expect("docs dir entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("utf-8 md file name");
+            on_disk.push(name.to_string());
+        }
+    }
+    on_disk.sort();
+
+    let mut in_docs = false;
+    let mut listed = Vec::new();
+    let mut elided = false;
+    for line in tree.lines() {
+        if !in_docs {
+            if line.contains("docs/") {
+                in_docs = true;
+                elided = line.contains('…') || line.contains("...");
+            }
+            continue;
+        }
+        if line.contains("lamarck/src/") {
+            break;
+        }
+        if let Some(name) = line.split_whitespace().find(|tok| tok.ends_with(".md")) {
+            listed.push(name.to_string());
+        }
+        if line.contains('…') || line.contains("...") {
+            elided = true;
+        }
+    }
+    assert!(
+        in_docs,
+        "README.md repository-layout tree has no docs/ entry"
+    );
+    if listed.is_empty() {
+        assert!(
+            elided,
+            "README.md repository-layout docs/ lists no files and has no elision marker (`…`)"
+        );
+        return;
+    }
+    let missing: Vec<&String> = on_disk
+        .iter()
+        .filter(|name| !listed.iter().any(|listed| listed == *name))
+        .collect();
+    assert!(
+        missing.is_empty() || elided,
+        "README.md repository-layout docs/ lists some markdown files but omits {missing:?} \
+         and has no elision marker (`…`)"
     );
 }
 

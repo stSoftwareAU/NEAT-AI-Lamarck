@@ -1237,18 +1237,17 @@ NEAT-AI-Lamarck/
 ├── SECURITY.md
 ├── .github/workflows/   # scorer-aligned quality gates
 ├── scripts/
-├── docs/
-│   ├── architecture.md
-│   ├── baseline-economics.md
-│   ├── screen-calibration.md
-│   ├── scorer-call-cost.md
-│   └── scorer-fixed-cost.md
+├── docs/                # … measurement docs — see links throughout this README
 └── lamarck/src/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
     ├── config.rs            # defaults and run options
     ├── analysis.rs          # the two fused per-experiment training scans
+    ├── chunks.rs            # deterministic analysis chunking (issue #107)
+    ├── memo.rs              # cross-experiment analysis memo (issue #106)
+    ├── cancel.rs            # SIGINT/SIGTERM cancel token (issue #72)
     ├── parity.rs            # Phase-0 scorer parity gate
+    ├── baseline.rs          # remembered full-corpus baseline (issue #113)
     ├── observations.rs      # observations.statistics cache
     ├── focus.rs             # focus-neuron selection policies
     ├── backprop.rs
@@ -1262,6 +1261,8 @@ NEAT-AI-Lamarck/
     ├── scorer_cost.rs      # fixed vs marginal per-call scorer cost (issue #112)
     ├── run.rs
     ├── report.rs
+    ├── failed_cache/        # opt-in unsuccessful-candidate cache (issues #88–#94)
+    ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
     └── log.rs

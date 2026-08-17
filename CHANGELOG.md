@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **README repository-layout tree omitted five `lamarck/src/` modules (Issue
+  #133).** `baseline.rs`, `cancel.rs`, `chunks.rs`, `memo.rs` and
+  `promote_gate.rs` were in the tree on disk — and three of them already cited
+  in the README prose — but missing from the layout map, which listed 21 of 26
+  source files with no elision marker. The five files are in the tree with the
+  same one-line comments as their neighbours; `docs/` is explicitly elided
+  (`…`) so archive / evidence / brand files cannot rot the map file-by-file.
+  `lamarck/tests/readme_contract.rs` now fails if a new `lamarck/src/*.rs`
+  file or source subdirectory is absent from the layout section, or if the
+  `docs/` branch lists files without listing every top-level `docs/*.md`
+  and also omits the elision marker.
+
 ### Changed
 
 - **Disambiguate the two #75-era follow-up campaigns (Issue #132).** The
