@@ -158,7 +158,8 @@ fn readme_documents_the_report_subcommand() {
     );
 }
 
-/// Every `lamarck/src/*.rs` module must appear in the layout tree (Issue #133).
+/// Every `lamarck/src/*.rs` file and source subdirectory must appear in the
+/// layout tree (Issue #133).
 ///
 /// The tree named 21 of 26 files with no elision marker, so a reader would
 /// conclude `baseline.rs`, `cancel.rs`, `chunks.rs`, `memo.rs` and
@@ -173,7 +174,8 @@ fn repository_layout_lists_every_lamarck_src_rs() {
         std::fs::read_dir(&src_dir).unwrap_or_else(|e| panic!("read {}: {e}", src_dir.display()))
     {
         let path = entry.expect("src dir entry").path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+        let is_rs = path.extension().and_then(|ext| ext.to_str()) == Some("rs");
+        if !is_rs && !path.is_dir() {
             continue;
         }
         let name = path
@@ -187,7 +189,7 @@ fn repository_layout_lists_every_lamarck_src_rs() {
     missing.sort();
     assert!(
         missing.is_empty(),
-        "README.md repository-layout tree omits lamarck/src/*.rs files: {missing:?}"
+        "README.md repository-layout tree omits lamarck/src entries: {missing:?}"
     );
 }
 

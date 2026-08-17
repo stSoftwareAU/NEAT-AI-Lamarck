@@ -16,9 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   same one-line comments as their neighbours; `docs/` is explicitly elided
   (`…`) so archive / evidence / brand files cannot rot the map file-by-file.
   `lamarck/tests/readme_contract.rs` now fails if a new `lamarck/src/*.rs`
-  module is absent from the layout section, or if the `docs/` branch lists
-  files without listing every top-level `docs/*.md` and also omits the elision
-  marker.
+  file or source subdirectory is absent from the layout section, or if the
+  `docs/` branch lists files without listing every top-level `docs/*.md`
+  and also omits the elision marker.
 
 ### Changed
 

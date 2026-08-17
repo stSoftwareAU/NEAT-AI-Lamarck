@@ -1261,6 +1261,7 @@ NEAT-AI-Lamarck/
     ├── scorer_cost.rs      # fixed vs marginal per-call scorer cost (issue #112)
     ├── run.rs
     ├── report.rs
+    ├── failed_cache/        # opt-in unsuccessful-candidate cache (issues #88–#94)
     ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
