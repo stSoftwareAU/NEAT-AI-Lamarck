@@ -78,6 +78,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Failed-candidate cache, still off by default (Issues #88–#94 / #69).**
+  `--failed-cache` skips candidates a previous experiment already scored as
+  failures and backfills the batch; a snapshot and journal rebuild survive
+  across runs; a rolling-window ledger stands the cache down when spend beats
+  savings (#92). Repeated merges from Develop had dropped the config / journal
+  / run-loop wiring while leaving the `failed_cache` module in tree — this
+  restores it on the current experiment loop. Issue #94's practical production
+  pair (seed 1, 600 s, same GRQ creature and corpus as #8) was **underpowered
+  on the primary gate** (0 accepts on both arms, opening scores paired at
+  `0.35175391064496747`) so **`--failed-cache` does not flip to on-by-default**.
+  Secondary evidence on the priced treatment arm: 16.4% hit rate, ≈156 s of
+  estimated redundant scoring avoided vs 0.7 s spend, peak footprint ≪ 25 MiB,
+  rebuild from a 75-experiment journal in 1 ms, guardrail silent. Follow-up:
+  [#158](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/158). Write-up:
+  [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md).
+
 - **An opt-in noise-aware promote gate (Issue #111).**
   `--screen-promote-gate noise-aware` prices each screened batch's own spread
   before deciding what earns an ~11 s full-corpus score: it promotes on

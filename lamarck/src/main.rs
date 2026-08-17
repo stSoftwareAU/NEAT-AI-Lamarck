@@ -4,11 +4,14 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS, DEFAULT_CANDIDATE_COUNT,
-    DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K,
-    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
-    ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary, report_from_journal,
-    run_optimisation_cancellable,
+    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS,
+    DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
+    DEFAULT_CACHE_STAND_DOWN_WINDOW, DEFAULT_CANDIDATE_COUNT, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
+    DEFAULT_FAILED_CACHE_MAX_ENTRIES, DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
+    DEFAULT_FAILED_CACHE_TOLERANCE_REL, DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT,
+    DEFAULT_SCREEN_PROMOTE_SIGMA_K, DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE,
+    DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary,
+    report_from_journal, run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -219,6 +222,46 @@ struct Cli {
     /// the knob that resizes the step (issue #96).
     #[arg(long)]
     backprop_max_bias_adjustment_scale: Option<f64>,
+
+    /// Skip candidates a previous experiment or run already scored as failures
+    /// (issue #69), backfilling the batch so the scorer still runs at full
+    /// width. Off by default until the feature proves it saves more scorer time
+    /// than it costs.
+    #[arg(long, default_value_t = false)]
+    failed_cache: bool,
+
+    /// Size cap on the failed-candidate cache. `0` disables the cache.
+    #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_MAX_ENTRIES)]
+    failed_cache_max_entries: usize,
+
+    /// Drop failed-candidate entries older than this many seconds. `0` keeps
+    /// entries until the size cap evicts them.
+    #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS)]
+    failed_cache_max_age_seconds: u64,
+
+    /// Absolute bound for treating two candidate values as the same proposal.
+    #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_TOLERANCE_ABS)]
+    failed_cache_tolerance_abs: f64,
+
+    /// Relative bound for treating two candidate values as the same proposal.
+    #[arg(long, default_value_t = DEFAULT_FAILED_CACHE_TOLERANCE_REL)]
+    failed_cache_tolerance_rel: f64,
+
+    /// Milliseconds the failed-candidate cache's cumulative overhead must
+    /// exceed its cumulative estimated savings by before an experiment counts
+    /// as net-negative (issue #92).
+    #[arg(long, default_value_t = DEFAULT_CACHE_STAND_DOWN_MARGIN_MS)]
+    failed_cache_stand_down_margin_ms: f64,
+
+    /// Consecutive net-negative experiments before the cache stands down for
+    /// the rest of the run. `0` disables the guardrail.
+    #[arg(long, default_value_t = DEFAULT_CACHE_STAND_DOWN_WINDOW)]
+    failed_cache_stand_down_window: usize,
+
+    /// Resident-footprint ceiling in bytes, enforced by evicting oldest-first.
+    /// `0` disables the ceiling; the entry cap still bounds the cache.
+    #[arg(long, default_value_t = DEFAULT_CACHE_MAX_RESIDENT_BYTES)]
+    failed_cache_max_bytes: usize,
 }
 
 #[derive(Debug, Subcommand)]
@@ -316,6 +359,14 @@ fn main() -> ExitCode {
         analysis_memo_entries: cli.analysis_memo_entries,
         backprop_max_bias_adjustment_scale: cli.backprop_max_bias_adjustment_scale,
         analysis_threads: cli.analysis_threads,
+        failed_cache: cli.failed_cache,
+        failed_cache_max_entries: cli.failed_cache_max_entries,
+        failed_cache_max_age_seconds: cli.failed_cache_max_age_seconds,
+        failed_cache_tolerance_abs: cli.failed_cache_tolerance_abs,
+        failed_cache_tolerance_rel: cli.failed_cache_tolerance_rel,
+        failed_cache_stand_down_margin_ms: cli.failed_cache_stand_down_margin_ms,
+        failed_cache_stand_down_window: cli.failed_cache_stand_down_window,
+        failed_cache_max_bytes: cli.failed_cache_max_bytes,
     };
 
     // Fail before spawning the scorer rather than deep inside the run.

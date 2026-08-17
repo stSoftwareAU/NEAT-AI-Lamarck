@@ -51,6 +51,9 @@ echo "WHAT: lamarck version order (no downgrade vs base)..."
 echo "Refuse neat_ai_lamarck version downgrade vs Develop (Issue #152)..."
 ./scripts/check-lamarck-version-no-downgrade.sh
 
+echo "WHAT: failed-cache economics summariser (Issue #94)..."
+./scripts/test-summarise-failed-cache-economics.sh
+
 echo "Running codespell preflight..."
 if ! ./scripts/spell-check.sh; then
   echo "spell-check: FAILED — fix the typos above or update .codespellrc"
