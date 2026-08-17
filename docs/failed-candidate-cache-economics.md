@@ -63,7 +63,7 @@ Secondary: accepts / scorer-minute, promote-scores / scorer-minute, cache hit ra
 
 ## Accept-rate sizing
 
-#94 requires the pair to be long enough to see accepts, or an explicit statement that the needed budget is impractical.
+Issue #94 requires the pair to be long enough to see accepts, or an explicit statement that the needed budget is impractical.
 
 | Sample | Wall | Experiments | Accepts | Opening (full-corpus) |
 |--------|------|-------------|---------|------------------------|
