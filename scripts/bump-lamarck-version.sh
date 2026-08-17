@@ -3,12 +3,16 @@
 #
 # Mirrors GRQ-taxation's version-increment job / runlib.sh contract: remotes
 # rebuild when Cargo.toml version changes. Idempotent — skips when the PR
-# branch already differs from base or an auto-increment commit exists.
+# branch is already ahead of base or an auto-increment commit exists.
+#
+# A working-tree version *behind* the base is never treated as "already
+# bumped": that is a downgrade (merge-conflict failure mode) and fails with
+# exit 2 (Issue #152 / VibeCoding fleet rule).
 #
 # Exit codes:
 #   0  version bumped (or --check would bump)
 #   1  no bump needed
-#   2  usage / parse error
+#   2  usage / parse error / version downgrade vs base
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,12 +71,6 @@ if ! git show-ref --verify --quiet "$BASE_REF" \
   exit 2
 fi
 
-# Skip when an auto-increment commit is already on this branch.
-if git log --oneline "${BASE_REF}..HEAD" --grep="$COMMIT_SUBJECT" | grep -q .; then
-  echo "OK   auto-increment commit already present vs $BASE_REF — skip"
-  exit 1
-fi
-
 read_version() {
   local file="$1"
   sed -n 's/^version *= *"\([^"]*\)".*/\1/p' "$file" | head -n 1
@@ -86,8 +84,28 @@ if [[ -z "$CURRENT_VERSION" ]]; then
   exit 2
 fi
 
+# Refuse downgrades before any "already bumped" skip (Issue #152).
+if [[ -n "$BASE_VERSION" ]]; then
+  set +e
+  "$SCRIPT_DIR/check-lamarck-version-order.sh" "$BASE_VERSION" "$CURRENT_VERSION"
+  status=$?
+  set -e
+  if [[ "$status" -eq 1 ]]; then
+    echo "FAIL: neat_ai_lamarck version $CURRENT_VERSION is behind base $BASE_VERSION; package versions must never go backwards" >&2
+    exit 2
+  elif [[ "$status" -ne 0 ]]; then
+    exit "$status"
+  fi
+fi
+
+# Skip when an auto-increment commit is already on this branch.
+if git log --oneline "${BASE_REF}..HEAD" --grep="$COMMIT_SUBJECT" | grep -q .; then
+  echo "OK   auto-increment commit already present vs $BASE_REF — skip"
+  exit 1
+fi
+
 if [[ -n "$BASE_VERSION" && "$CURRENT_VERSION" != "$BASE_VERSION" ]]; then
-  echo "OK   version already differs from base ($BASE_VERSION -> $CURRENT_VERSION) — skip"
+  echo "OK   version already ahead of base ($BASE_VERSION -> $CURRENT_VERSION) — skip"
   exit 1
 fi
 

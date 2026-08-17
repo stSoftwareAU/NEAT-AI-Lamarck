@@ -113,12 +113,16 @@ at every `k` from 1 to 5, which
 asserts as a hard `cargo test` failure over committed journal fixtures.
 
 The seven #75 arms are the other half of the picture: **129 full-corpus scores,
-zero accepts**, and the gate declines every one of them. They ran the production
-creature — not the #8 baseline's — under Lamarck `0.1.7`, and their batches are
-dominated by catastrophic structural proposals, so the estimated noise floor
-sits above every positive screen Δ those arms produced. The paired benchmark
-below shows that this no longer holds for the generator in this release, which
-is the single most important caveat on the 66% figure.
+zero accepts**, and the gate declines every one of them. Those journals are the
+**local calibration campaign** (`~/.lamarck-followup-75`, Lamarck `0.1.7`) —
+they are **not** the same files behind
+[`docs/followup-economics.md`](followup-economics.md) (the scripted #75
+campaign, seeds 11 / 21 / 31). They ran the production creature — not the #8
+baseline's — and their batches are dominated by catastrophic structural
+proposals, so the estimated noise floor sits above every positive screen Δ
+those arms produced. The paired benchmark below shows that this no longer holds
+for the generator in this release, which is the single most important caveat on
+the 66% figure.
 
 ### What this replay cannot support
 
@@ -176,10 +180,11 @@ magnitude *below* the `1e-6` floor, and `max(3σ̂, 1e-6)` collapses to the floo
 `k = 3` is inert.**
 
 That is not what the archived journals showed, and the difference matters. The
-seven #75 arms above were written by Lamarck `0.1.7`, before the generator changes of
-issues #105–#109; their batches carried a much wider near-zero core (lower
-quartile of |Δ| ~`1.2e-6`, so σ̂ ~`3.9e-6`). The saving the replay measures is
-real for those journals and does **not** transfer to the current generator.
+seven local-calibration #75 arms above were written by Lamarck `0.1.7`, before
+the generator changes of issues #105–#109; their batches carried a much wider
+near-zero core (lower quartile of |Δ| ~`1.2e-6`, so σ̂ ~`3.9e-6`). The saving
+the replay measures is real for those journals and does **not** transfer to the
+current generator.
 
 What `k` would it take to bite today? Replaying the control arm's own journal:
 

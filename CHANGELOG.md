@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Disambiguate the two #75-era follow-up campaigns (Issue #132).** The
+  scripted #75 write-up (`docs/followup-economics.md`, seeds 11 / 21 / 31) and
+  the local calibration journals (`~/.lamarck-followup-75`, mostly seed 1)
+  mined by screen-calibration / promote-gate are named and scoped separately,
+  so “unrun” / “seven #75 arms” / README #98 no longer contradict each other.
+
+- **Refuse `neat_ai_lamarck` version downgrades vs Develop (Issue #152).** A PR
+  whose `lamarck/Cargo.toml` version is strictly behind `origin/Develop` fails
+  CI instead of being treated as “already bumped”. Equal versions may still
+  auto-patch-bump; ahead versions skip. Covered by
+  `scripts/check-lamarck-version-order.sh` and a WHAT test.
+
 - **Rust build profiles follow the fleet split (Issue #153 /
   [VibeCoding#4159](https://github.com/stSoftwareAU/VibeCoding/issues/4159)).**
   Dev keeps `opt-level = 0` / incremental and now uses
