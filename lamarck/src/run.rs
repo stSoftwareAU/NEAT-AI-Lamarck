@@ -7,7 +7,8 @@ use crate::baseline::{
 use crate::cancel::CancelToken;
 use crate::candidates::{
     BatchLimit, Candidate, CandidateBudget, CandidateGenContext, CandidateProvenance,
-    CandidateStrategy, generate_candidate_batch, strategy_mix_summary, write_candidate_batch,
+    CandidateStrategy, generate_candidate_batch, generate_candidates, strategy_mix_summary,
+    write_candidate_batch,
 };
 use crate::combos::{
     ComboSelectRequest, ComboSelection, StackDampenReport, select_best_with_combinations,
@@ -428,6 +429,35 @@ pub struct RunConfigRecord {
     /// from the journal alone, without guessing what the host chose.
     #[serde(default)]
     pub analysis_threads: usize,
+    /// Whether the failed-candidate cache was on (issue #69).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub failed_cache: bool,
+    /// Failed-candidate size cap when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_max_entries: Option<usize>,
+    /// Failed-candidate age bound in seconds when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_max_age_seconds: Option<u64>,
+    /// Near-duplicate absolute tolerance when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_tolerance_abs: Option<f64>,
+    /// Near-duplicate relative tolerance when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_tolerance_rel: Option<f64>,
+    /// Net-negative margin the stand-down guardrail used (issue #92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_stand_down_margin_ms: Option<f64>,
+    /// Consecutive net-negative experiments the guardrail allowed (issue #92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_stand_down_window: Option<usize>,
+    /// Resident-footprint ceiling in bytes when the cache was on (issue #92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_max_bytes: Option<usize>,
+}
+
+/// `skip_serializing_if` helper for a flag that is omitted when unset.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl RunConfigRecord {
@@ -472,6 +502,26 @@ impl RunConfigRecord {
             backprop_max_bias_adjustment_scale: config.backprop_max_bias_adjustment_scale,
             analysis_memo_entries: config.analysis_memo_entries,
             analysis_threads: config.analysis_threads,
+            failed_cache: config.failed_cache,
+            failed_cache_max_entries: config
+                .failed_cache
+                .then_some(config.failed_cache_max_entries),
+            failed_cache_max_age_seconds: config
+                .failed_cache
+                .then_some(config.failed_cache_max_age_seconds),
+            failed_cache_tolerance_abs: config
+                .failed_cache
+                .then_some(config.failed_cache_tolerance_abs),
+            failed_cache_tolerance_rel: config
+                .failed_cache
+                .then_some(config.failed_cache_tolerance_rel),
+            failed_cache_stand_down_margin_ms: config
+                .failed_cache
+                .then_some(config.failed_cache_stand_down_margin_ms),
+            failed_cache_stand_down_window: config
+                .failed_cache
+                .then_some(config.failed_cache_stand_down_window),
+            failed_cache_max_bytes: config.failed_cache.then_some(config.failed_cache_max_bytes),
         }
     }
 }
@@ -520,6 +570,59 @@ impl RunHeaderRecord {
     }
 }
 
+/// Discriminator for a failed-cache stand-down journal line (issue #92).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CacheStandDownKind {
+    /// This line is a cache stand-down event, not an experiment.
+    CacheStandDown,
+}
+
+/// One journal line recording that the failed-candidate cache stopped paying
+/// and was taken out of play for the rest of the run (issue #92).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheStandDownRecord {
+    /// Discriminates this line from an [`ExperimentRecord`].
+    pub record: CacheStandDownKind,
+    /// Unix timestamp the guardrail fired at.
+    pub timestamp_unix: u64,
+    /// Experiment the guardrail fired on.
+    pub experiment_number: u64,
+    /// Cumulative estimated scorer milliseconds saved at that point.
+    pub saved_ms: f64,
+    /// Cumulative measured milliseconds of cache overhead at that point.
+    pub spent_ms: f64,
+    /// `saved_ms - spent_ms`.
+    pub net_ms: f64,
+    /// Consecutive net-negative experiments that triggered the stand-down.
+    pub window_experiments: usize,
+    /// Margin the net had to be worse than to count as net-negative.
+    pub margin_ms: f64,
+    /// Live entries the cache gave up.
+    pub entries: usize,
+    /// The warning line that was logged.
+    pub message: String,
+}
+
+impl CacheStandDownRecord {
+    /// Journal line for a stand-down the economics ledger decided on.
+    pub fn new(stand_down: &crate::failed_cache::StandDown, timestamp_unix: u64) -> Self {
+        Self {
+            record: CacheStandDownKind::CacheStandDown,
+            timestamp_unix,
+            experiment_number: stand_down.experiment_number,
+            saved_ms: stand_down.saved_ms,
+            spent_ms: stand_down.spent_ms,
+            net_ms: stand_down.net_ms,
+            window_experiments: stand_down.window_experiments,
+            margin_ms: stand_down.margin_ms,
+            entries: stand_down.entries,
+            message: stand_down.message(),
+        }
+    }
+}
+
 /// One line of `experiments.jsonl`: run header, graft replay or experiment.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
@@ -530,6 +633,8 @@ pub enum JournalLine {
     GraftReplay(Box<GraftReplayRecord>),
     /// Scorer calls made outside any experiment (issue #112).
     ScorerCalls(Box<ScorerCallsRecord>),
+    /// Failed-cache stand-down event (issue #92).
+    CacheStandDown(Box<CacheStandDownRecord>),
     /// One experiment outcome.
     Experiment(Box<ExperimentRecord>),
 }
@@ -558,6 +663,10 @@ impl JournalLine {
             Some("scorerCalls") => {
                 let calls = serde_json::from_str(line).map_err(|e| e.to_string())?;
                 Ok(Self::ScorerCalls(Box::new(calls)))
+            }
+            Some("cacheStandDown") => {
+                let stand_down = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                Ok(Self::CacheStandDown(Box::new(stand_down)))
             }
             Some(other) => Err(format!("unknown journal record kind: {other}")),
             None => {
@@ -1415,6 +1524,9 @@ pub fn run_optimisation_cancellable(
         let mut candidates: Vec<Candidate> = Vec::with_capacity(config.candidates);
         let mut focus_limits: Vec<BatchLimit> = Vec::with_capacity(focus_set.len());
         let mut primary_focus_stats: Option<FocusNeuronStats> = None;
+        let mut primary_incoming: Option<Vec<crate::focus::IncomingSourceStats>> = None;
+        let mut primary_ranked_sources: Option<Vec<crate::structural::RankedSource>> = None;
+        let mut primary_focus_uuid: Option<String> = None;
         let mut generate_ms = 0u128;
         for (index, focus_uuid) in focus_set.iter().enumerate() {
             // Focus stats, incoming-source stats and the residual source ranking
@@ -1554,7 +1666,10 @@ pub fn run_optimisation_cancellable(
             focus_limits.push(batch.limit);
             candidates.extend(batch.candidates);
             if index == 0 {
-                primary_focus_stats = Some(focus_stats);
+                primary_focus_stats = Some(focus_stats.clone());
+                primary_incoming = Some(incoming.clone());
+                primary_ranked_sources = Some(ranked_sources.clone());
+                primary_focus_uuid = Some(focus_uuid.clone());
             }
         }
         let batch_limit = merge_batch_limits(&focus_limits);
@@ -1613,6 +1728,24 @@ pub fn run_optimisation_cancellable(
         let mut cache_lookup_ms = None;
         let mut cache_cost = ExperimentCost::default();
         if let Some(cache) = failed_cache.as_ref() {
+            let backfill_focus = primary_focus_uuid
+                .as_deref()
+                .ok_or_else(|| "no focus neuron produced an analysis".to_string())?;
+            let backfill_incoming = primary_incoming
+                .as_deref()
+                .ok_or_else(|| "no focus neuron produced an analysis".to_string())?;
+            let backfill_ranked = primary_ranked_sources.as_deref();
+            let gen_ctx = CandidateGenContext {
+                incumbent: &incumbent,
+                focus_uuid: backfill_focus,
+                focus_stats: &focus_stats,
+                incoming: backfill_incoming,
+                observations: &observations,
+                ranked_sources: backfill_ranked,
+                learning: Some(&learning),
+                backprop: &backprop,
+                structural_only: config.structural_only,
+            };
             let filtered = filter_and_backfill(
                 cache,
                 &experiment_incumbent_id,
@@ -1778,6 +1911,11 @@ pub fn run_optimisation_cancellable(
             let screen_ms = scorer_start.elapsed().as_millis();
             let decision = screen_promote_decision(&screen_scores, &promote_gate)
                 .map_err(|e| e.to_string())?;
+            // The screen phase is where a skipped candidate would have been
+            // scored, so its measured per-creature cost prices every skip.
+            if let Some(economics) = cache_economics.as_mut() {
+                economics.observe_screen(screen_ms, screen_scores.len());
+            }
             // Report the batch against the threshold the gate actually applied,
             // so the ">threshold" count cannot disagree with what is promoted.
             log_scorer_batch_stats_labeled(&screen_scores, screen_ms, decision.threshold, "screen");
@@ -1809,6 +1947,33 @@ pub fn run_optimisation_cancellable(
                         config.min_improvement,
                     );
                 }
+                let mut cache_size = None;
+                let mut cache_maintenance_ms = None;
+                if let Some(cache) = failed_cache.as_mut() {
+                    let screened = scored_candidate_indices(
+                        screen_score_map
+                            .iter()
+                            .flat_map(|scores| scores.keys())
+                            .map(String::as_str),
+                    );
+                    insert_failures(
+                        cache,
+                        &experiment_incumbent_id,
+                        &candidates,
+                        screened,
+                        false,
+                        unix_now(),
+                    );
+                    enforce_cache_ceiling(cache_economics.as_mut(), cache);
+                    cache_size = Some(cache.len());
+                    cache_maintenance_ms = Some(cache.last_maintenance_ms());
+                }
+                let economics = account_for_experiment(
+                    cache_economics.as_mut(),
+                    failed_cache.as_mut(),
+                    experiments,
+                    cache_cost,
+                );
                 append_journal(
                     &journal_path,
                     &ExperimentRecord {
@@ -1910,6 +2075,9 @@ pub fn run_optimisation_cancellable(
                         config.min_improvement,
                         "promote",
                     );
+                    if let Some(economics) = cache_economics.as_mut() {
+                        economics.observe_promote(promote_ms, s.len());
+                    }
                     s
                 }
                 Err(e) => {
@@ -2426,6 +2594,54 @@ pub fn run_optimisation_cancellable(
             log::detail("no candidate met the acceptance threshold");
         }
 
+        let mut cache_size = None;
+        let mut cache_maintenance_ms = None;
+        if let Some(cache) = failed_cache.as_mut() {
+            let mut promoted = if screen_score_map.is_some() {
+                scored_candidate_indices(scores.keys().map(String::as_str))
+            } else {
+                BTreeSet::new()
+            };
+            let mut screened = scored_candidate_indices(
+                scores.keys().map(String::as_str).chain(
+                    screen_score_map
+                        .iter()
+                        .flat_map(|screen| screen.keys())
+                        .map(String::as_str),
+                ),
+            );
+            for index in winner_member_indices.iter().flatten() {
+                promoted.remove(index);
+                screened.remove(index);
+            }
+            screened.retain(|index| !promoted.contains(index));
+            insert_failures(
+                cache,
+                &experiment_incumbent_id,
+                &candidates,
+                promoted,
+                true,
+                unix_now(),
+            );
+            insert_failures(
+                cache,
+                &experiment_incumbent_id,
+                &candidates,
+                screened,
+                false,
+                unix_now(),
+            );
+            enforce_cache_ceiling(cache_economics.as_mut(), cache);
+            cache_size = Some(cache.len());
+            cache_maintenance_ms = Some(cache.last_maintenance_ms());
+        }
+        let economics = account_for_experiment(
+            cache_economics.as_mut(),
+            failed_cache.as_mut(),
+            experiments,
+            cache_cost,
+        );
+
         record_focus_outcomes(
             &mut selectors.weighted,
             &focus_set,
@@ -2676,6 +2892,64 @@ fn record_focus_failure(
 /// The focus set a journal line records.
 ///
 /// `None` for a single focus, so a `--focus-count 1` journal keeps its
+fn account_for_experiment(
+    economics: Option<&mut CacheEconomics>,
+    cache: Option<&mut FailedCandidateCache>,
+    experiment_number: u64,
+    cost: ExperimentCost,
+) -> Option<ExperimentEconomics> {
+    let economics = economics?;
+    if economics.stood_down() {
+        return None;
+    }
+    let (maintenance_micros, entries) = match cache {
+        Some(cache) => (cache.take_maintenance_micros(), cache.len()),
+        None => (0, 0),
+    };
+    Some(economics.record_experiment(
+        experiment_number,
+        ExperimentCost {
+            maintenance_micros,
+            entries,
+            ..cost
+        },
+    ))
+}
+
+/// Evict down to the byte ceiling, logging the bite: a bound that truncates the
+/// cache silently reads as a working cache (issue #92).
+fn enforce_cache_ceiling(economics: Option<&mut CacheEconomics>, cache: &mut FailedCandidateCache) {
+    let Some(economics) = economics else {
+        return;
+    };
+    if let Some(bite) = economics.enforce_ceiling(cache) {
+        log::warn(&bite.message());
+    }
+}
+
+/// Journal a decided stand-down and take the cache out of play for the rest of
+/// the run.
+fn apply_pending_stand_down(
+    economics: Option<&mut CacheEconomics>,
+    failed_cache: &mut Option<FailedCandidateCache>,
+    journal_path: &Path,
+    timestamp_unix: u64,
+) -> Result<(), String> {
+    let Some(economics) = economics else {
+        return Ok(());
+    };
+    let Some(stand_down) = economics.take_stand_down() else {
+        return Ok(());
+    };
+    log::warn(&stand_down.message());
+    append_journal_line(
+        journal_path,
+        &CacheStandDownRecord::new(&stand_down, timestamp_unix),
+    )?;
+    *failed_cache = None;
+    Ok(())
+}
+
 /// pre-#109 shape and every existing reader stays correct.
 fn journal_focus_set(focus_set: &[String]) -> Option<Vec<String>> {
     (focus_set.len() > 1).then(|| focus_set.to_vec())
@@ -2853,10 +3127,6 @@ pub fn score_single_creature_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failed_cache::{
-        DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
-        DEFAULT_CACHE_STAND_DOWN_WINDOW,
-    };
     use crate::scorer::ScoreResult;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -2997,6 +3267,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         }
     }
 
@@ -3038,6 +3309,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -3241,6 +3513,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
@@ -3252,7 +3525,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .expect("at least one experiment");
         assert!(first.screen_scores.is_some());
@@ -3347,6 +3621,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         (config, out)
     }
@@ -3359,7 +3634,7 @@ mod tests {
                 JournalLine::Experiment(record) => record.scorer_calls.unwrap_or_default(),
                 JournalLine::GraftReplay(replay) => replay.scorer_calls.unwrap_or_default(),
                 JournalLine::ScorerCalls(calls) => calls.calls,
-                JournalLine::Header(_) => Vec::new(),
+                JournalLine::Header(_) | JournalLine::CacheStandDown(_) => Vec::new(),
             })
             .collect()
     }
@@ -3407,6 +3682,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -3463,7 +3739,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .expect("at least one experiment")
     }
@@ -3475,7 +3752,8 @@ mod tests {
                 JournalLine::Header(header) => Some(*header),
                 JournalLine::Experiment(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .expect("a run header")
     }
@@ -3653,6 +3931,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
         (result, grafts_path)
@@ -3752,6 +4031,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -3808,6 +4088,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         }
     }
 
@@ -3846,7 +4127,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(record.as_ref()),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -3876,7 +4158,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -3924,7 +4207,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -4051,7 +4335,8 @@ mod tests {
                     JournalLine::Experiment(record) => Some(*record),
                     JournalLine::Header(_)
                     | JournalLine::GraftReplay(_)
-                    | JournalLine::ScorerCalls(_) => None,
+                    | JournalLine::ScorerCalls(_)
+                    | JournalLine::CacheStandDown(_) => None,
                 })
                 .expect("at least one experiment");
             (
@@ -4141,7 +4426,8 @@ mod tests {
                     JournalLine::Experiment(record) => Some(*record),
                     JournalLine::Header(_)
                     | JournalLine::GraftReplay(_)
-                    | JournalLine::ScorerCalls(_) => None,
+                    | JournalLine::ScorerCalls(_)
+                    | JournalLine::CacheStandDown(_) => None,
                 })
                 .expect("at least one experiment")
         };
@@ -4203,7 +4489,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect()
     }
@@ -4570,7 +4857,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(record.as_ref()),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect();
         assert_eq!(
@@ -4931,6 +5219,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));
@@ -5089,6 +5378,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         }
     }
 

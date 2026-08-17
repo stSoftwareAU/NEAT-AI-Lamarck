@@ -23,9 +23,18 @@ set -euo pipefail
 
 LAMARCK="${LAMARCK:-./target/release/neat_ai_lamarck}"
 CREATURE="${CREATURE:-../GRQ-cluster/network.json}"
-TRAIN_DATA="${TRAIN_DATA:-.lamarck-failed-cache/train-data}"
+if [[ -z "${TRAIN_DATA:-}" ]]; then
+  if [[ -d .lamarck-failed-cache/train-data ]]; then
+    TRAIN_DATA=".lamarck-failed-cache/train-data"
+  elif [[ -d .lamarck-baseline-45/train-data ]]; then
+    TRAIN_DATA=".lamarck-baseline-45/train-data"
+  else
+    TRAIN_DATA=".lamarck-failed-cache/train-data"
+  fi
+fi
 SCORER="${SCORER:-../NEAT-AI-scorer/target/release/rust_scorer}"
 OUT_DIR="${OUT_DIR:-.lamarck-failed-cache}"
+COLD_START_JOURNAL="${COLD_START_JOURNAL:-}"
 
 ARM_SECONDS="${ARM_SECONDS:-2700}"
 SEEDS="${SEEDS:-1 2 3}"
@@ -50,9 +59,11 @@ load_average() {
   uptime | sed -e 's/.*load averages*: //'
 }
 
-common_args() {
+# Populate COMMON_ARGS (bash 3 compatible — macOS /bin/bash has no mapfile).
+COMMON_ARGS=()
+set_common_args() {
   local seed="$1"
-  local args=(
+  COMMON_ARGS=(
     --scorer "$SCORER"
     --timeout-seconds "$ARM_SECONDS"
     --candidates 100
@@ -63,12 +74,11 @@ common_args() {
     --quick --quick-sample-records 25000
   )
   if [[ -n "$BACKPROP_RATE" ]]; then
-    args+=(--backprop-learning-rate "$BACKPROP_RATE")
+    COMMON_ARGS+=(--backprop-learning-rate "$BACKPROP_RATE")
   fi
   if [[ -n "$BACKPROP_CAP" ]]; then
-    args+=(--backprop-max-bias-adjustment-scale "$BACKPROP_CAP")
+    COMMON_ARGS+=(--backprop-max-bias-adjustment-scale "$BACKPROP_CAP")
   fi
-  printf '%s\n' "${args[@]}"
 }
 
 run_arm() {
@@ -84,10 +94,10 @@ run_arm() {
   echo "loadBefore: $(load_average)" >>"$dir/timing.txt"
   echo "seed: $seed" >>"$dir/timing.txt"
 
-  mapfile -t base < <(common_args "$seed")
+  set_common_args "$seed"
   "$LAMARCK" "$CREATURE" "$TRAIN_DATA" \
     --output-dir "$dir" \
-    "${base[@]}" \
+    "${COMMON_ARGS[@]}" \
     "$@" 2>&1 | tee "$dir/run.log"
 
   date -u +"end %Y-%m-%dT%H:%M:%SZ" >>"$dir/timing.txt"
@@ -125,7 +135,7 @@ run_cold_start() {
   local seed="$1"
   # Prefer a long prior journal from the control arm of the same seed so the
   # rebuild cost is real; fall back to empty (cold empty rebuild).
-  local prior="$OUT_DIR/control-seed${seed}/experiments.jsonl"
+  local prior="${COLD_START_JOURNAL:-$OUT_DIR/control-seed${seed}/experiments.jsonl}"
   local dir="$OUT_DIR/cold-start-seed${seed}"
   rm -rf "$dir"
   mkdir -p "$dir"
@@ -135,10 +145,10 @@ run_cold_start() {
   fi
   echo "=== arm cold-start seed=$seed — load before: $(load_average)"
   date -u +"start %Y-%m-%dT%H:%M:%SZ" | tee "$dir/timing.txt"
-  mapfile -t base < <(common_args "$seed")
+  set_common_args "$seed"
   "$LAMARCK" "$CREATURE" "$TRAIN_DATA" \
     --output-dir "$dir" \
-    "${base[@]}" \
+    "${COMMON_ARGS[@]}" \
     --failed-cache 2>&1 | tee "$dir/run.log"
   date -u +"end %Y-%m-%dT%H:%M:%SZ" >>"$dir/timing.txt"
   "$LAMARCK" report "$dir/experiments.jsonl" >"$dir/report.json"

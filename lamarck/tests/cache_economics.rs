@@ -142,6 +142,7 @@ fn cache_run_config(dir: &Path, candidates: usize, experiments: u64) -> LamarckC
         failed_cache_stand_down_margin_ms: 0.0,
         failed_cache_stand_down_window: 1,
         failed_cache_max_bytes: 0,
+        ..LamarckConfig::default()
     }
 }
 

@@ -4,11 +4,14 @@ use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use neat_ai_lamarck::{
-    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS, DEFAULT_CANDIDATE_COUNT,
-    DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K,
-    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
-    ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary, report_from_journal,
-    run_optimisation_cancellable,
+    CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS,
+    DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
+    DEFAULT_CACHE_STAND_DOWN_WINDOW, DEFAULT_CANDIDATE_COUNT, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
+    DEFAULT_FAILED_CACHE_MAX_ENTRIES, DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
+    DEFAULT_FAILED_CACHE_TOLERANCE_REL, DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT,
+    DEFAULT_SCREEN_PROMOTE_SIGMA_K, DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE,
+    DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary,
+    report_from_journal, run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -356,6 +359,14 @@ fn main() -> ExitCode {
         analysis_memo_entries: cli.analysis_memo_entries,
         backprop_max_bias_adjustment_scale: cli.backprop_max_bias_adjustment_scale,
         analysis_threads: cli.analysis_threads,
+        failed_cache: cli.failed_cache,
+        failed_cache_max_entries: cli.failed_cache_max_entries,
+        failed_cache_max_age_seconds: cli.failed_cache_max_age_seconds,
+        failed_cache_tolerance_abs: cli.failed_cache_tolerance_abs,
+        failed_cache_tolerance_rel: cli.failed_cache_tolerance_rel,
+        failed_cache_stand_down_margin_ms: cli.failed_cache_stand_down_margin_ms,
+        failed_cache_stand_down_window: cli.failed_cache_stand_down_window,
+        failed_cache_max_bytes: cli.failed_cache_max_bytes,
     };
 
     // Fail before spawning the scorer rather than deep inside the run.
