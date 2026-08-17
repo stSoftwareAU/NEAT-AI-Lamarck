@@ -196,6 +196,14 @@ Leaving these unset changes behaviour.
 | `--graft-replay-budget-seconds` | Wall-clock budget for Phase-G replay. Default: 10% of `--timeout-seconds`. |
 | `--backprop-learning-rate` | Learning rate for `backprop` candidate proposals. Default: `0.01` (the NEAT-AI port value). Must be `> 0` — a non-positive or non-finite value aborts the run instead of reverting to the default. Recorded in the journal `runHeader` so an A/B arm is identifiable. |
 | `--backprop-max-bias-adjustment-scale` | ± cap on one `backprop` bias step (`BackpropConfig::maximum_bias_adjustment_scale`). Default: `10`. On a focus whose blame mass saturates the cap the step is cap-bound at every learning rate, so this is the knob that resizes it — see [`docs/followup-economics.md`](docs/followup-economics.md). Must be `> 0`; a non-positive or non-finite value aborts the run. Recorded in the journal `runHeader`. |
+| `--failed-cache` | Skip candidates a previous experiment or run already scored as failures, and backfill the batch so the scorer still runs at full width. **Off by default** until the feature proves it saves more scorer time than it costs. The cache is rebuilt at startup from `experiments.jsonl` (or its `failed-candidates.cache.json` snapshot), so it survives across runs. Turning it on adds RNG draws during backfill; with it off the run's RNG stream and journal are unchanged. |
+| `--failed-cache-max-entries` | Size cap on the failed-candidate cache; the oldest entries are evicted past it. Default: `50000`, a worst case of ~25 MiB resident. `0` disables the cache. |
+| `--failed-cache-max-age-seconds` | Drop failed-candidate entries older than this. Entries age from insertion, not from last use. Default: `604800` (7 days). `0` keeps entries until the size cap evicts them. |
+| `--failed-cache-tolerance-abs` | Absolute bound for treating two candidate values as the same proposal: they match when their difference is within `max(abs, rel × largest magnitude)`. Default: `1e-9`; this is the bound that matches deltas passing through zero, where a relative bound has no scale to work with. |
+| `--failed-cache-tolerance-rel` | Relative bound for the same comparison, which carries the match at large magnitudes. Default: `1e-6`. Changing either tolerance invalidates an existing cache snapshot, which is then rebuilt from the journal. |
+| `--failed-cache-stand-down-margin-ms` | Milliseconds the overhead inside the stand-down window must exceed the savings inside it by before the cache is stood down. Default: `1000` — below a second of wasted run time the estimate's own noise is the larger term. |
+| `--failed-cache-stand-down-window` | Experiments in the rolling window the guardrail judges the cache over; a losing window stands the cache down for the rest of the run (logged, journalled as a `cacheStandDown` line, run continues). Default: `20`, long enough that a cold cache — which pays lookup cost before it holds anything to hit on — is not stood down before it can warm up. `0` disables the guardrail. |
+| `--failed-cache-max-bytes` | Resident-footprint ceiling in bytes, enforced by evicting oldest-first and logged whenever it bites. Default: `25600000` (~25 MiB), the entry cap's own worst case. `0` disables the ceiling; `--failed-cache-max-entries` still bounds the cache. |
 
 ## How a run works
 
@@ -924,6 +932,14 @@ Every following line is one experiment:
 | `scorerError` | Present when the batch failed. |
 | `comboMembers`, `combosScored`, `combosDampened`, `comboDampen` | Combination-scoring detail. |
 | `comboMemberIndices` | Indices into `candidates[]` of the accepted winner's members — one entry for a single, several for a merged `combo-NNN-kM`. Present only on an acceptance, and absent from journals written before issue #74. |
+| `cacheSkipped`, `cacheBackfilled` | Proposals dropped by a failed-candidate cache hit, and replacement proposals accepted to refill the batch. Omitted unless `--failed-cache` is on. |
+| `cacheDeduplicated` | Proposals dropped as near-duplicates of one already in the same batch. Counted apart from `cacheSkipped` because the cache is not what suppressed them, so the cache's savings cannot absorb them. |
+| `cacheRebuildMs` | What loading or rebuilding the cache cost at startup, recorded once on the first experiment that ran with the cache on. A run cost, not an experiment cost, but part of what the cache has to earn back. |
+| `cacheSize`, `cacheLookupMs`, `cacheMaintenanceMs` | Live cache entries after the experiment, time spent filtering and backfilling, and time spent in the cache's most recent age sweep. Omitted unless `--failed-cache` is on. |
+| `cacheSavedMs`, `cacheSpentMs`, `cacheNetCumulativeMs`, `cacheResidentBytes` | The experiment's cache ledger: estimated scorer time its skips avoided, measured lookup + maintenance overhead, the run's cumulative saved − spent, and the resident footprint afterwards. Omitted unless `--failed-cache` is on. |
+
+A `cacheStandDown` line is written if the cache stops paying — see
+[Failed-candidate cache economics](#failed-candidate-cache-economics).
 
 Summarise strategy economics from a journal with the `report` subcommand:
 
@@ -1042,6 +1058,76 @@ when no experiment in the bucket recorded blame) and `squashCounts`. Comparing
 questions 4 and 6 below. The object is `null` for a journal with no focus
 statistics.
 
+## Failed-candidate cache economics
+
+The cache must not spend more time than it saves, and must not grow without
+bound. Both are enforced in the code rather than asserted in a report: every
+cache-on run keeps a ledger, and stands the cache down when it stops paying
+(issue #92). Issue [#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94)
+measured a practical production pair and **left the flag off by default** —
+see [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md).
+
+```mermaid
+flowchart TD
+    START[Startup rebuild: journal or snapshot] -->|rebuild ms| SPENT
+    FILTER[Filter batch against the cache] -->|lookup ms| SPENT
+    SWEEP[Age sweep and ceiling eviction] -->|maintenance ms| SPENT
+    SNAP[Snapshot write at the end of the run] -->|write ms + disk bytes| SPENT
+    SCREEN[Measured screen cost per creature this run] --> SAVED
+    SKIP[Candidates skipped by a cache hit] --> SAVED
+    PROMO[Skips whose entry had reached promote] --> SAVED
+    SAVED[Estimated ms of redundant scoring avoided] --> NET{window spend exceeds<br/>window savings by the margin?}
+    SPENT[Measured ms spent] --> NET
+    NET -->|no| KEEP[Cache stays on]
+    NET -->|yes| DOWN[Warn, journal cacheStandDown,<br/>disable the cache, run continues]
+    KEEP --> SUMMARY[End-of-run summary line]
+    DOWN --> SUMMARY
+```
+
+**Savings are estimated, spend is measured.** A skipped candidate was never
+scored, so its cost is priced from this run's own measured screen phase —
+`skipped × mean screen ms per scored creature` — never from a constant. The mean
+divides by every creature the batch scored, the baseline included, so the
+baseline's own cost cannot inflate it. In a run with screening off, the single
+full-corpus batch *is* that first phase and is priced as such. Promote-phase
+time is claimed only for a skip whose cache entry records that the candidate had
+actually reached the promote phase; every other skip is priced at screen cost
+only, which under-claims rather than over-claims. Only a genuine **cache hit**
+counts as a skip — a proposal dropped for repeating one already in the same
+batch is the generator's doing and is counted separately. Spend is accumulated
+in microseconds because a whole-millisecond lookup timer truncates to zero on a
+small batch, and an overhead that rounds to zero would let a losing cache look
+free.
+
+**`savedMs` is redundant scoring avoided, not wall clock removed.** The batch is
+backfilled to full width, so a replaced skip converts redundant scoring into
+fresh exploration rather than shortening the batch. `savedMs` is the quantity in
+which issue #69's constraint is stated ("we spend more time than it saves in
+redundant scoring") and is what the guardrail judges; the part that shortened
+the scorer's work — the skips backfill could not replace — is reported
+separately as `wallClockSavedMs` so the two are never confused.
+
+**Stand-down.** The guardrail judges a **rolling window** of the most recent
+`--failed-cache-stand-down-window` experiments: when the spend inside that
+window exceeds the savings inside it by
+`--failed-cache-stand-down-margin-ms`, Lamarck logs a warning, writes a
+`cacheStandDown` journal line and disables the cache for the rest of the run.
+The run continues and no snapshot is written: a cache that does not earn its
+keep degrades to the cache-off behaviour instead of degrading the run. One-off
+costs (the startup rebuild, the snapshot write) count in the run's cumulative
+`netMs` but not in the window — they are sunk before the window opens, and
+disabling a currently-profitable cache cannot un-spend them.
+
+**Byte ceiling.** `--failed-cache-max-bytes` bounds the resident footprint. Past
+it the cache evicts oldest-first — the ceiling is a bound, not a target — and
+every bite is logged, because a silently truncated cache reads as a working one.
+
+**End-of-run summary.** Every cache-on run ends with one parseable line:
+
+```text
+● failed-cache economics: entries=1240 hitRate=0.1832 savedMs=48210.5 wallClockSavedMs=0.0 spentMs=311.2 netMs=47899.3 peakMemoryBytes=634880 diskBytes=98304 standDown=false ceilingBites=0
+```
+
 ## Safety invariants
 
 These rules are non-negotiable:
@@ -1135,7 +1221,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 
 | Issue | Gap |
 |-------|-----|
-| [#69](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/69) | Unsuccessful candidates are re-scored across experiments instead of being remembered. |
+| Failed-candidate cache ([#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94) / [#158](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/158)) | Shipped **opt-in** (`--failed-cache`, off by default). The #94 pair was underpowered on accepts (0/0); exclusive-box 45-minute repeats are owed before considering default-on. [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md). |
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured on an idle exclusive-box run**: each needs the production creature and exclusive use of the scorer. A shared-box **local calibration campaign** already has journals for an output-0 slice, a backprop-cap arm and a second seed — mined for screen/promote pairing only; see [`docs/screen-calibration.md`](docs/screen-calibration.md) and the campaign disambiguation in [`docs/followup-economics.md`](docs/followup-economics.md). |
 | [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | **Fixed, pending release.** A sampled scorer call used to read and decode the whole corpus to score a twentieth of it; it now fetches only the records it scores, cutting the fixed cost of a screen call from **10 693 ms to 3 423 ms** ([`docs/scorer-fixed-cost.md`](docs/scorer-fixed-cost.md)). The change lives in NEAT-AI-core (`issue-scorer-sampled-read`) and NEAT-AI-scorer (`issue-lamarck-123-sampled-read`); a human must open those two PRs and cut a scorer release before a run picks it up ([#141](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/141)). The whole-run `scorerCallCost` re-measure on an idle box is owed then. |
 

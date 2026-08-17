@@ -7,12 +7,18 @@ use crate::baseline::{
 use crate::cancel::CancelToken;
 use crate::candidates::{
     BatchLimit, Candidate, CandidateBudget, CandidateGenContext, CandidateProvenance,
-    CandidateStrategy, generate_candidate_batch, strategy_mix_summary, write_candidate_batch,
+    CandidateStrategy, generate_candidate_batch, generate_candidates, strategy_mix_summary,
+    write_candidate_batch,
 };
 use crate::combos::{
     ComboSelectRequest, ComboSelection, StackDampenReport, select_best_with_combinations,
 };
 use crate::config::LamarckConfig;
+use crate::failed_cache::{
+    CacheEconomics, EconomicsSummary, ExperimentCost, ExperimentEconomics, FailedCandidateCache,
+    Tolerance, filter_and_backfill, insert_failures, load_or_rebuild, scored_candidate_indices,
+    snapshot_path, write_snapshot,
+};
 use crate::focus::{
     FixedFocusSelector, FocusChoice, FocusNeuronStats, FocusPolicy, FocusSelector,
     HighErrorFocusSelector, RandomFocusSelector, UnsaturatedFocusSelector, WeightedFocusSelector,
@@ -46,6 +52,7 @@ use neat_core::{
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -168,6 +175,56 @@ pub struct ExperimentRecord {
     /// Per-target dampen detail for the accepted winner (when any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combo_dampen: Option<StackDampenReport>,
+    /// Proposals dropped this experiment by a failed-candidate cache hit (#91).
+    ///
+    /// This and the other `cache*` fields are omitted when `--failed-cache` is
+    /// off, and are absent from journals written before the cache existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_skipped: Option<usize>,
+    /// Proposals dropped as near-duplicates of one already in the batch (#93).
+    ///
+    /// Held apart from [`Self::cache_skipped`] because the cache is not what
+    /// suppressed these — the generator proposed the same mutation twice — and
+    /// crediting them to the cache would overstate what it saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_deduplicated: Option<usize>,
+    /// Replacement proposals accepted into the batch to refill it (#91).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_backfilled: Option<usize>,
+    /// Live cache entries after this experiment (#91).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_size: Option<usize>,
+    /// Milliseconds spent filtering and backfilling the batch (#91).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_lookup_ms: Option<u128>,
+    /// Milliseconds spent in the cache's most recent age sweep (#91).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_maintenance_ms: Option<u128>,
+    /// Scorer milliseconds this experiment's cache skips are estimated to have
+    /// saved (#92).
+    ///
+    /// Estimated from this run's own measured screen cost — see
+    /// [`crate::failed_cache::economics`] for the method and its conservatism.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_saved_ms: Option<f64>,
+    /// Milliseconds this experiment spent on cache lookups and maintenance (#92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_spent_ms: Option<f64>,
+    /// Cumulative saved minus spent for the run so far (#92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_net_cumulative_ms: Option<f64>,
+    /// Resident cache bytes after this experiment (#92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_resident_bytes: Option<usize>,
+    /// Milliseconds the startup cache load or journal rebuild cost (#93).
+    ///
+    /// A one-off run cost rather than an experiment cost, recorded on the first
+    /// experiment that ran with the cache on because the run header is written
+    /// before the cache is loaded. It belongs in the run's spend total: a
+    /// rebuild the cache never earns back is the whole point of the #92
+    /// guardrail, so a report that omitted it would flatter the cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_rebuild_ms: Option<u128>,
 }
 
 /// Per-experiment admission counts for the screen tier (issue #111).
@@ -372,6 +429,35 @@ pub struct RunConfigRecord {
     /// from the journal alone, without guessing what the host chose.
     #[serde(default)]
     pub analysis_threads: usize,
+    /// Whether the failed-candidate cache was on (issue #69).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub failed_cache: bool,
+    /// Failed-candidate size cap when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_max_entries: Option<usize>,
+    /// Failed-candidate age bound in seconds when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_max_age_seconds: Option<u64>,
+    /// Near-duplicate absolute tolerance when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_tolerance_abs: Option<f64>,
+    /// Near-duplicate relative tolerance when the cache was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_tolerance_rel: Option<f64>,
+    /// Net-negative margin the stand-down guardrail used (issue #92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_stand_down_margin_ms: Option<f64>,
+    /// Consecutive net-negative experiments the guardrail allowed (issue #92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_stand_down_window: Option<usize>,
+    /// Resident-footprint ceiling in bytes when the cache was on (issue #92).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_cache_max_bytes: Option<usize>,
+}
+
+/// `skip_serializing_if` helper for a flag that is omitted when unset.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl RunConfigRecord {
@@ -416,6 +502,26 @@ impl RunConfigRecord {
             backprop_max_bias_adjustment_scale: config.backprop_max_bias_adjustment_scale,
             analysis_memo_entries: config.analysis_memo_entries,
             analysis_threads: config.analysis_threads,
+            failed_cache: config.failed_cache,
+            failed_cache_max_entries: config
+                .failed_cache
+                .then_some(config.failed_cache_max_entries),
+            failed_cache_max_age_seconds: config
+                .failed_cache
+                .then_some(config.failed_cache_max_age_seconds),
+            failed_cache_tolerance_abs: config
+                .failed_cache
+                .then_some(config.failed_cache_tolerance_abs),
+            failed_cache_tolerance_rel: config
+                .failed_cache
+                .then_some(config.failed_cache_tolerance_rel),
+            failed_cache_stand_down_margin_ms: config
+                .failed_cache
+                .then_some(config.failed_cache_stand_down_margin_ms),
+            failed_cache_stand_down_window: config
+                .failed_cache
+                .then_some(config.failed_cache_stand_down_window),
+            failed_cache_max_bytes: config.failed_cache.then_some(config.failed_cache_max_bytes),
         }
     }
 }
@@ -464,6 +570,59 @@ impl RunHeaderRecord {
     }
 }
 
+/// Discriminator for a failed-cache stand-down journal line (issue #92).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CacheStandDownKind {
+    /// This line is a cache stand-down event, not an experiment.
+    CacheStandDown,
+}
+
+/// One journal line recording that the failed-candidate cache stopped paying
+/// and was taken out of play for the rest of the run (issue #92).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheStandDownRecord {
+    /// Discriminates this line from an [`ExperimentRecord`].
+    pub record: CacheStandDownKind,
+    /// Unix timestamp the guardrail fired at.
+    pub timestamp_unix: u64,
+    /// Experiment the guardrail fired on.
+    pub experiment_number: u64,
+    /// Cumulative estimated scorer milliseconds saved at that point.
+    pub saved_ms: f64,
+    /// Cumulative measured milliseconds of cache overhead at that point.
+    pub spent_ms: f64,
+    /// `saved_ms - spent_ms`.
+    pub net_ms: f64,
+    /// Consecutive net-negative experiments that triggered the stand-down.
+    pub window_experiments: usize,
+    /// Margin the net had to be worse than to count as net-negative.
+    pub margin_ms: f64,
+    /// Live entries the cache gave up.
+    pub entries: usize,
+    /// The warning line that was logged.
+    pub message: String,
+}
+
+impl CacheStandDownRecord {
+    /// Journal line for a stand-down the economics ledger decided on.
+    pub fn new(stand_down: &crate::failed_cache::StandDown, timestamp_unix: u64) -> Self {
+        Self {
+            record: CacheStandDownKind::CacheStandDown,
+            timestamp_unix,
+            experiment_number: stand_down.experiment_number,
+            saved_ms: stand_down.saved_ms,
+            spent_ms: stand_down.spent_ms,
+            net_ms: stand_down.net_ms,
+            window_experiments: stand_down.window_experiments,
+            margin_ms: stand_down.margin_ms,
+            entries: stand_down.entries,
+            message: stand_down.message(),
+        }
+    }
+}
+
 /// One line of `experiments.jsonl`: run header, graft replay or experiment.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
@@ -474,6 +633,8 @@ pub enum JournalLine {
     GraftReplay(Box<GraftReplayRecord>),
     /// Scorer calls made outside any experiment (issue #112).
     ScorerCalls(Box<ScorerCallsRecord>),
+    /// Failed-cache stand-down event (issue #92).
+    CacheStandDown(Box<CacheStandDownRecord>),
     /// One experiment outcome.
     Experiment(Box<ExperimentRecord>),
 }
@@ -502,6 +663,10 @@ impl JournalLine {
             Some("scorerCalls") => {
                 let calls = serde_json::from_str(line).map_err(|e| e.to_string())?;
                 Ok(Self::ScorerCalls(Box::new(calls)))
+            }
+            Some("cacheStandDown") => {
+                let stand_down = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                Ok(Self::CacheStandDown(Box::new(stand_down)))
             }
             Some(other) => Err(format!("unknown journal record kind: {other}")),
             None => {
@@ -558,6 +723,8 @@ pub struct RunResult {
     pub seed: u64,
     /// Which stopping rule ended the loop.
     pub stop_reason: StopReason,
+    /// Failed-candidate cache ledger when the cache was on (issue #92).
+    pub cache_economics: Option<EconomicsSummary>,
 }
 
 /// The focus selectors an optimisation run keeps across experiments.
@@ -1160,7 +1327,69 @@ pub fn run_optimisation_cancellable(
         ));
     }
 
+    // Failed-candidate cache (issue #69), off by default. Rebuilt from this
+    // output directory's journal — or its snapshot — so rejections survive
+    // across runs. Rebuild cost is overhead the cache has to earn back, so it
+    // is logged rather than assumed negligible.
+    let mut cache_economics = config
+        .failed_cache
+        .then(|| CacheEconomics::new(config.cache_economics_config()));
+    // Held until the first cache-on experiment journals it (issue #93): the run
+    // header is written before the cache loads, so the rebuild cost has nowhere
+    // else to land.
+    let mut pending_cache_rebuild_ms = None;
+    let mut failed_cache = if config.failed_cache {
+        let (mut cache, report) = load_or_rebuild(
+            &config.output_dir,
+            Tolerance::new(
+                config.failed_cache_tolerance_abs,
+                config.failed_cache_tolerance_rel,
+            ),
+            config.failed_cache_max_entries,
+            config.failed_cache_max_age_seconds,
+            unix_now(),
+        );
+        if let Some(reason) = &report.snapshot_rejected {
+            log::warn(&format!("failed-cache: ignoring snapshot — {reason}"));
+        }
+        // Rebuild cost is spend the cache has to earn back, so it opens the
+        // ledger rather than being waved through as a one-off. The replay's own
+        // age sweeps are already inside `elapsed_ms`, so the counter they left
+        // behind is discarded rather than charged a second time to the first
+        // experiment (issue #92).
+        let _ = cache.take_maintenance_micros();
+        if let Some(economics) = cache_economics.as_mut() {
+            economics.record_startup_rebuild(report.elapsed_ms);
+        }
+        pending_cache_rebuild_ms = Some(report.elapsed_ms);
+        // A rebuild can land above the ceiling — a snapshot written under a
+        // larger one, say — so the bound is applied before the loop rather than
+        // waiting for the first insert to notice (issue #92).
+        enforce_cache_ceiling(cache_economics.as_mut(), &mut cache);
+        log::info(&format!(
+            "failed-cache: {} entr(ies) from {} in {}ms (cap={}, max_age={}s, worst case {} bytes)",
+            report.entries,
+            report.source.label(),
+            report.elapsed_ms,
+            cache.max_entries(),
+            cache.max_age_seconds(),
+            cache.worst_case_bytes()
+        ));
+        Some(cache)
+    } else {
+        None
+    };
+
     let stop_reason = loop {
+        // A cache that stopped paying is taken out of play before the next
+        // experiment can spend anything more on it (issue #92).
+        apply_pending_stand_down(
+            cache_economics.as_mut(),
+            &mut failed_cache,
+            &journal_path,
+            unix_now(),
+        )?;
+
         // Stopping rules, cheapest and most urgent first.
         if cancel.is_cancelled() {
             log::warn("cancellation requested — stopping before the next experiment");
@@ -1295,6 +1524,9 @@ pub fn run_optimisation_cancellable(
         let mut candidates: Vec<Candidate> = Vec::with_capacity(config.candidates);
         let mut focus_limits: Vec<BatchLimit> = Vec::with_capacity(focus_set.len());
         let mut primary_focus_stats: Option<FocusNeuronStats> = None;
+        let mut primary_incoming: Option<Vec<crate::focus::IncomingSourceStats>> = None;
+        let mut primary_ranked_sources: Option<Vec<crate::structural::RankedSource>> = None;
+        let mut primary_focus_uuid: Option<String> = None;
         let mut generate_ms = 0u128;
         for (index, focus_uuid) in focus_set.iter().enumerate() {
             // Focus stats, incoming-source stats and the residual source ranking
@@ -1434,7 +1666,10 @@ pub fn run_optimisation_cancellable(
             focus_limits.push(batch.limit);
             candidates.extend(batch.candidates);
             if index == 0 {
-                primary_focus_stats = Some(focus_stats);
+                primary_focus_stats = Some(focus_stats.clone());
+                primary_incoming = Some(incoming.clone());
+                primary_ranked_sources = Some(ranked_sources.clone());
+                primary_focus_uuid = Some(focus_uuid.clone());
             }
         }
         let batch_limit = merge_batch_limits(&focus_limits);
@@ -1480,6 +1715,75 @@ pub fn run_optimisation_cancellable(
                 )),
                 BatchLimit::Budget => {}
             }
+        }
+
+        // The identity every candidate in this batch was proposed against.
+        // Captured *before* any acceptance swaps the incumbent: a post-accept
+        // id would key the batch's rejections to a creature they were never
+        // proposed for (issue #91).
+        let experiment_incumbent_id = incumbent_id(&incumbent);
+        let mut cache_skipped = None;
+        let mut cache_deduplicated = None;
+        let mut cache_backfilled = None;
+        let mut cache_lookup_ms = None;
+        let mut cache_cost = ExperimentCost::default();
+        if let Some(cache) = failed_cache.as_ref() {
+            let backfill_focus = primary_focus_uuid
+                .as_deref()
+                .ok_or_else(|| "no focus neuron produced an analysis".to_string())?;
+            let backfill_incoming = primary_incoming
+                .as_deref()
+                .ok_or_else(|| "no focus neuron produced an analysis".to_string())?;
+            let backfill_ranked = primary_ranked_sources.as_deref();
+            let gen_ctx = CandidateGenContext {
+                incumbent: &incumbent,
+                focus_uuid: backfill_focus,
+                focus_stats: &focus_stats,
+                incoming: backfill_incoming,
+                observations: &observations,
+                ranked_sources: backfill_ranked,
+                learning: Some(&learning),
+                backprop: &backprop,
+                structural_only: config.structural_only,
+            };
+            let filtered = filter_and_backfill(
+                cache,
+                &experiment_incumbent_id,
+                candidates,
+                config.candidates,
+                unix_now(),
+                cancel,
+                |wanted| generate_candidates(&gen_ctx, wanted, &mut rng),
+            );
+            if filtered.short_batch && !filtered.cancelled {
+                log::warn(&format!(
+                    "failed-cache: SHORT BATCH — scoring {} of {} candidates after {} cache skip(s) and {} repeat(s) of this batch, {} backfill(s) from {} proposal(s); the generator can only re-propose known-failed candidates",
+                    filtered.candidates.len(),
+                    config.candidates,
+                    filtered.skipped,
+                    filtered.duplicates,
+                    filtered.backfilled,
+                    filtered.proposals
+                ));
+            } else if filtered.skipped > 0 || filtered.duplicates > 0 {
+                log::detail(&format!(
+                    "failed-cache: skipped {} known-failed candidate(s) and {} repeat(s) of this batch, backfilled {} in {}ms",
+                    filtered.skipped, filtered.duplicates, filtered.backfilled, filtered.lookup_ms
+                ));
+            }
+            cache_skipped = Some(filtered.skipped);
+            cache_deduplicated = Some(filtered.duplicates);
+            cache_backfilled = Some(filtered.backfilled);
+            cache_lookup_ms = Some(filtered.lookup_ms);
+            cache_cost = ExperimentCost {
+                proposals: filtered.proposals,
+                skipped: filtered.skipped,
+                skipped_previously_promoted: filtered.skipped_previously_promoted,
+                backfilled: filtered.backfilled,
+                lookup_micros: filtered.lookup_micros,
+                ..ExperimentCost::default()
+            };
+            candidates = filtered.candidates;
         }
 
         // Scoring dominates an experiment, so poll here: a signal arriving
@@ -1536,6 +1840,12 @@ pub fn run_optimisation_cancellable(
                         &focus_set,
                         config.min_improvement,
                     );
+                    let economics = account_for_experiment(
+                        cache_economics.as_mut(),
+                        failed_cache.as_mut(),
+                        experiments,
+                        cache_cost,
+                    );
                     append_journal(
                         &journal_path,
                         &ExperimentRecord {
@@ -1569,6 +1879,22 @@ pub fn run_optimisation_cancellable(
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
+                            // A scorer crash is not evidence about the
+                            // mutations, so nothing is cached — but the work
+                            // the cache already saved this experiment is.
+                            cache_skipped,
+                            cache_deduplicated,
+                            cache_backfilled,
+                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
+                            cache_lookup_ms,
+                            cache_maintenance_ms: failed_cache
+                                .as_ref()
+                                .map(FailedCandidateCache::last_maintenance_ms),
+                            cache_saved_ms: economics.map(|e| e.saved_ms),
+                            cache_spent_ms: economics.map(|e| e.spent_ms),
+                            cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
+                            cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -1585,6 +1911,11 @@ pub fn run_optimisation_cancellable(
             let screen_ms = scorer_start.elapsed().as_millis();
             let decision = screen_promote_decision(&screen_scores, &promote_gate)
                 .map_err(|e| e.to_string())?;
+            // The screen phase is where a skipped candidate would have been
+            // scored, so its measured per-creature cost prices every skip.
+            if let Some(economics) = cache_economics.as_mut() {
+                economics.observe_screen(screen_ms, screen_scores.len());
+            }
             // Report the batch against the threshold the gate actually applied,
             // so the ">threshold" count cannot disagree with what is promoted.
             log_scorer_batch_stats_labeled(&screen_scores, screen_ms, decision.threshold, "screen");
@@ -1616,6 +1947,33 @@ pub fn run_optimisation_cancellable(
                         config.min_improvement,
                     );
                 }
+                let mut cache_size = None;
+                let mut cache_maintenance_ms = None;
+                if let Some(cache) = failed_cache.as_mut() {
+                    let screened = scored_candidate_indices(
+                        screen_score_map
+                            .iter()
+                            .flat_map(|scores| scores.keys())
+                            .map(String::as_str),
+                    );
+                    insert_failures(
+                        cache,
+                        &experiment_incumbent_id,
+                        &candidates,
+                        screened,
+                        false,
+                        unix_now(),
+                    );
+                    enforce_cache_ceiling(cache_economics.as_mut(), cache);
+                    cache_size = Some(cache.len());
+                    cache_maintenance_ms = Some(cache.last_maintenance_ms());
+                }
+                let economics = account_for_experiment(
+                    cache_economics.as_mut(),
+                    failed_cache.as_mut(),
+                    experiments,
+                    cache_cost,
+                );
                 append_journal(
                     &journal_path,
                     &ExperimentRecord {
@@ -1652,6 +2010,17 @@ pub fn run_optimisation_cancellable(
                         combos_scored: None,
                         combos_dampened: None,
                         combo_dampen: None,
+                        cache_skipped,
+                        cache_deduplicated,
+                        cache_backfilled,
+                        cache_size,
+                        cache_lookup_ms,
+                        cache_maintenance_ms,
+                        cache_saved_ms: economics.map(|e| e.saved_ms),
+                        cache_spent_ms: economics.map(|e| e.spent_ms),
+                        cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
+                        cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                        cache_rebuild_ms: pending_cache_rebuild_ms.take(),
                     },
                 )?;
                 if !config.preserve_losers {
@@ -1706,6 +2075,9 @@ pub fn run_optimisation_cancellable(
                         config.min_improvement,
                         "promote",
                     );
+                    if let Some(economics) = cache_economics.as_mut() {
+                        economics.observe_promote(promote_ms, s.len());
+                    }
                     s
                 }
                 Err(e) => {
@@ -1715,6 +2087,12 @@ pub fn run_optimisation_cancellable(
                         &mut selectors.weighted,
                         &focus_set,
                         config.min_improvement,
+                    );
+                    let economics = account_for_experiment(
+                        cache_economics.as_mut(),
+                        failed_cache.as_mut(),
+                        experiments,
+                        cache_cost,
                     );
                     append_journal(
                         &journal_path,
@@ -1749,6 +2127,19 @@ pub fn run_optimisation_cancellable(
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
+                            cache_skipped,
+                            cache_deduplicated,
+                            cache_backfilled,
+                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
+                            cache_lookup_ms,
+                            cache_maintenance_ms: failed_cache
+                                .as_ref()
+                                .map(FailedCandidateCache::last_maintenance_ms),
+                            cache_saved_ms: economics.map(|e| e.saved_ms),
+                            cache_spent_ms: economics.map(|e| e.spent_ms),
+                            cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
+                            cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -1775,6 +2166,13 @@ pub fn run_optimisation_cancellable(
                 Ok(s) => {
                     let full_ms = scorer_start.elapsed().as_millis();
                     log_scorer_batch_stats_labeled(&s, full_ms, config.min_improvement, "scorer");
+                    // With screening off this single batch is the phase a
+                    // skipped candidate would have been scored in, so it is
+                    // what prices a skip — and nothing here is "promoted", so
+                    // no skip may claim a second phase back (issue #92).
+                    if let Some(economics) = cache_economics.as_mut() {
+                        economics.observe_screen(full_ms, s.len());
+                    }
                     s
                 }
                 Err(e) => {
@@ -1784,6 +2182,12 @@ pub fn run_optimisation_cancellable(
                         &mut selectors.weighted,
                         &focus_set,
                         config.min_improvement,
+                    );
+                    let economics = account_for_experiment(
+                        cache_economics.as_mut(),
+                        failed_cache.as_mut(),
+                        experiments,
+                        cache_cost,
                     );
                     append_journal(
                         &journal_path,
@@ -1818,6 +2222,22 @@ pub fn run_optimisation_cancellable(
                             combos_scored: None,
                             combos_dampened: None,
                             combo_dampen: None,
+                            // A scorer crash is not evidence about the
+                            // mutations, so nothing is cached — but the work
+                            // the cache already saved this experiment is.
+                            cache_skipped,
+                            cache_deduplicated,
+                            cache_backfilled,
+                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
+                            cache_lookup_ms,
+                            cache_maintenance_ms: failed_cache
+                                .as_ref()
+                                .map(FailedCandidateCache::last_maintenance_ms),
+                            cache_saved_ms: economics.map(|e| e.saved_ms),
+                            cache_spent_ms: economics.map(|e| e.spent_ms),
+                            cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
+                            cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
                         },
                     )?;
                     if !config.preserve_losers {
@@ -2174,6 +2594,54 @@ pub fn run_optimisation_cancellable(
             log::detail("no candidate met the acceptance threshold");
         }
 
+        let mut cache_size = None;
+        let mut cache_maintenance_ms = None;
+        if let Some(cache) = failed_cache.as_mut() {
+            let mut promoted = if screen_score_map.is_some() {
+                scored_candidate_indices(scores.keys().map(String::as_str))
+            } else {
+                BTreeSet::new()
+            };
+            let mut screened = scored_candidate_indices(
+                scores.keys().map(String::as_str).chain(
+                    screen_score_map
+                        .iter()
+                        .flat_map(|screen| screen.keys())
+                        .map(String::as_str),
+                ),
+            );
+            for index in winner_member_indices.iter().flatten() {
+                promoted.remove(index);
+                screened.remove(index);
+            }
+            screened.retain(|index| !promoted.contains(index));
+            insert_failures(
+                cache,
+                &experiment_incumbent_id,
+                &candidates,
+                promoted,
+                true,
+                unix_now(),
+            );
+            insert_failures(
+                cache,
+                &experiment_incumbent_id,
+                &candidates,
+                screened,
+                false,
+                unix_now(),
+            );
+            enforce_cache_ceiling(cache_economics.as_mut(), cache);
+            cache_size = Some(cache.len());
+            cache_maintenance_ms = Some(cache.last_maintenance_ms());
+        }
+        let economics = account_for_experiment(
+            cache_economics.as_mut(),
+            failed_cache.as_mut(),
+            experiments,
+            cache_cost,
+        );
+
         record_focus_outcomes(
             &mut selectors.weighted,
             &focus_set,
@@ -2223,6 +2691,17 @@ pub fn run_optimisation_cancellable(
                 combos_scored,
                 combos_dampened,
                 combo_dampen,
+                cache_skipped,
+                cache_deduplicated,
+                cache_backfilled,
+                cache_size,
+                cache_lookup_ms,
+                cache_maintenance_ms,
+                cache_saved_ms: economics.map(|e| e.saved_ms),
+                cache_spent_ms: economics.map(|e| e.spent_ms),
+                cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
+                cache_resident_bytes: economics.map(|e| e.resident_bytes),
+                cache_rebuild_ms: pending_cache_rebuild_ms.take(),
             },
         )?;
 
@@ -2283,6 +2762,43 @@ pub fn run_optimisation_cancellable(
         fs::write(&best_path, &tagged).map_err(|e| e.to_string())?;
     }
 
+    // Snapshot the cache so the next run does not have to replay the journal.
+    // A failed write is a warning, never a failed run: the journal remains the
+    // source of truth and the next startup can always rebuild from it.
+    // A stand-down decided by the final experiment still has to be journalled,
+    // even though the loop is already over.
+    apply_pending_stand_down(
+        cache_economics.as_mut(),
+        &mut failed_cache,
+        &journal_path,
+        unix_now(),
+    )?;
+
+    if let Some(cache) = failed_cache.as_ref() {
+        let snapshot_start = Instant::now();
+        match write_snapshot(&config.output_dir, cache, unix_now()) {
+            Ok(bytes) => {
+                if let Some(economics) = cache_economics.as_mut() {
+                    economics.record_snapshot(snapshot_start.elapsed().as_millis(), bytes);
+                }
+                log::info(&format!(
+                    "failed-cache: wrote {} entr(ies) ({bytes} bytes) to {}",
+                    cache.len(),
+                    snapshot_path(&config.output_dir).display()
+                ));
+            }
+            Err(e) => log::warn(&format!("failed-cache: could not write snapshot: {e}")),
+        }
+    }
+
+    // One line, every field: what the cache saved, what it cost, and how big it
+    // got. Downstream tooling parses this, so it is emitted for every cache-on
+    // run — including one that stood down (issue #92).
+    let cache_summary = cache_economics.as_ref().map(CacheEconomics::summary);
+    if let Some(summary) = &cache_summary {
+        log::info(&summary.summary_line());
+    }
+
     Ok(RunResult {
         best_path,
         journal_path,
@@ -2294,6 +2810,7 @@ pub fn run_optimisation_cancellable(
         opening_baseline_score,
         seed,
         stop_reason,
+        cache_economics: cache_summary,
     })
 }
 
@@ -2375,6 +2892,64 @@ fn record_focus_failure(
 /// The focus set a journal line records.
 ///
 /// `None` for a single focus, so a `--focus-count 1` journal keeps its
+fn account_for_experiment(
+    economics: Option<&mut CacheEconomics>,
+    cache: Option<&mut FailedCandidateCache>,
+    experiment_number: u64,
+    cost: ExperimentCost,
+) -> Option<ExperimentEconomics> {
+    let economics = economics?;
+    if economics.stood_down() {
+        return None;
+    }
+    let (maintenance_micros, entries) = match cache {
+        Some(cache) => (cache.take_maintenance_micros(), cache.len()),
+        None => (0, 0),
+    };
+    Some(economics.record_experiment(
+        experiment_number,
+        ExperimentCost {
+            maintenance_micros,
+            entries,
+            ..cost
+        },
+    ))
+}
+
+/// Evict down to the byte ceiling, logging the bite: a bound that truncates the
+/// cache silently reads as a working cache (issue #92).
+fn enforce_cache_ceiling(economics: Option<&mut CacheEconomics>, cache: &mut FailedCandidateCache) {
+    let Some(economics) = economics else {
+        return;
+    };
+    if let Some(bite) = economics.enforce_ceiling(cache) {
+        log::warn(&bite.message());
+    }
+}
+
+/// Journal a decided stand-down and take the cache out of play for the rest of
+/// the run.
+fn apply_pending_stand_down(
+    economics: Option<&mut CacheEconomics>,
+    failed_cache: &mut Option<FailedCandidateCache>,
+    journal_path: &Path,
+    timestamp_unix: u64,
+) -> Result<(), String> {
+    let Some(economics) = economics else {
+        return Ok(());
+    };
+    let Some(stand_down) = economics.take_stand_down() else {
+        return Ok(());
+    };
+    log::warn(&stand_down.message());
+    append_journal_line(
+        journal_path,
+        &CacheStandDownRecord::new(&stand_down, timestamp_unix),
+    )?;
+    *failed_cache = None;
+    Ok(())
+}
+
 /// pre-#109 shape and every existing reader stays correct.
 fn journal_focus_set(focus_set: &[String]) -> Option<Vec<String>> {
     (focus_set.len() > 1).then(|| focus_set.to_vec())
@@ -2692,6 +3267,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         }
     }
 
@@ -2733,6 +3309,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -2936,6 +3513,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let result = run_optimisation(&config, &NegativeScreenScorer).unwrap();
         assert!(result.experiments >= 1);
@@ -2947,7 +3525,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .expect("at least one experiment");
         assert!(first.screen_scores.is_some());
@@ -3042,6 +3621,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         (config, out)
     }
@@ -3054,7 +3634,7 @@ mod tests {
                 JournalLine::Experiment(record) => record.scorer_calls.unwrap_or_default(),
                 JournalLine::GraftReplay(replay) => replay.scorer_calls.unwrap_or_default(),
                 JournalLine::ScorerCalls(calls) => calls.calls,
-                JournalLine::Header(_) => Vec::new(),
+                JournalLine::Header(_) | JournalLine::CacheStandDown(_) => Vec::new(),
             })
             .collect()
     }
@@ -3102,6 +3682,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -3158,7 +3739,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .expect("at least one experiment")
     }
@@ -3170,7 +3752,8 @@ mod tests {
                 JournalLine::Header(header) => Some(*header),
                 JournalLine::Experiment(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .expect("a run header")
     }
@@ -3348,6 +3931,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let result = run_optimisation(&config, &GraftAwareScorer).unwrap();
         (result, grafts_path)
@@ -3447,6 +4031,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let scorer = ScriptedScorer {
             calls: Arc::new(Mutex::new(0)),
@@ -3503,6 +4088,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         }
     }
 
@@ -3541,7 +4127,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(record.as_ref()),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -3571,7 +4158,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -3619,7 +4207,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -3746,7 +4335,8 @@ mod tests {
                     JournalLine::Experiment(record) => Some(*record),
                     JournalLine::Header(_)
                     | JournalLine::GraftReplay(_)
-                    | JournalLine::ScorerCalls(_) => None,
+                    | JournalLine::ScorerCalls(_)
+                    | JournalLine::CacheStandDown(_) => None,
                 })
                 .expect("at least one experiment");
             (
@@ -3836,7 +4426,8 @@ mod tests {
                     JournalLine::Experiment(record) => Some(*record),
                     JournalLine::Header(_)
                     | JournalLine::GraftReplay(_)
-                    | JournalLine::ScorerCalls(_) => None,
+                    | JournalLine::ScorerCalls(_)
+                    | JournalLine::CacheStandDown(_) => None,
                 })
                 .expect("at least one experiment")
         };
@@ -3898,7 +4489,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(*record),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect()
     }
@@ -4265,7 +4857,8 @@ mod tests {
                 JournalLine::Experiment(record) => Some(record.as_ref()),
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
-                | JournalLine::ScorerCalls(_) => None,
+                | JournalLine::ScorerCalls(_)
+                | JournalLine::CacheStandDown(_) => None,
             })
             .collect();
         assert_eq!(
@@ -4626,6 +5219,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         };
         let err = run_optimisation(&config, &FailingScorer).unwrap_err();
         assert!(err.contains("consecutive scorer failures") || err.contains("no successful"));
@@ -4784,6 +5378,7 @@ mod tests {
             backprop_max_bias_adjustment_scale: None,
             analysis_memo_entries: crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES,
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
+            ..LamarckConfig::default()
         }
     }
 
