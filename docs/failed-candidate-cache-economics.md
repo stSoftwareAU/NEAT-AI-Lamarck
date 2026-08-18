@@ -4,9 +4,13 @@ Issue [#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94) / parent 
 
 ## Status
 
-**Measured. No-go on flipping `--failed-cache` to on-by-default.** The implementation stays in tree, **off by default**, as an opt-in. The primary gate (`scoreImprovementPerWallHour`) was underpowered on the largest practical pair: **zero accepts** on both live arms. Secondary evidence says the cache works (hit rate 16.4%, ≈156 s estimated redundant scoring avoided vs 0.7 s spend, footprint ≪ 25 MiB, guardrail silent), but that is not a default-on case until an exclusive-box 45-minute campaign actually records accepts.
+**Measured. No-go on flipping `--failed-cache` to on-by-default.** The implementation stays in tree, **off by default**, as an opt-in.
 
-Journals live under gitignored `.lamarck-failed-cache/` (not committed). This document is the retained record.
+Issue [#158](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/158) ran the production 45-minute knobs on seed 1. Both arms recorded **2 accepts** and the **same** full-corpus Δ (`+3.610e-6`). Treatment did **not** improve `scoreImprovementPerWallHour` (4.878e-6 vs control 4.899e-6). Secondary evidence remains healthy (19.5% hit rate, ≈502 s estimated redundant scoring avoided vs 3.0 s spend, footprint ≪ 25 MiB, guardrail silent). Seeds 2 and 3 were **not** run: a GRQ `.lamarck-sampler` job took the shared scorer after seed 1, so further arms would not have been exclusive-box.
+
+The earlier #94 10-minute pair (0/0 accepts) is kept below as the underpowered sizing run.
+
+Journals live under gitignored `.lamarck-failed-cache/` (#94) and `.lamarck-failed-cache-45/` (#158) — not committed. This document is the retained record.
 
 ## Environment
 
@@ -127,6 +131,50 @@ End-of-run treatment summary (parseable log line; `savedMs` here is the live led
 
 Treatment completed **more experiments** in the same wall budget (14 vs 8). Promote-scored creatures were similar (30 vs 33) — the streams have already diverged via backfill, so this is not a clean “saved promotes” comparison.
 
+## Exclusive-box 45-minute pair (Issue #158)
+
+Production knobs (`ARM_SECONDS=2700`, `--candidates 100`, screen 0.05 / 1e-6, weighted focus, Phase-0 on, `#83` knobs unset). Binary `0.1.20`. Creature / corpus as above (opening is this creature's current Phase-0, not the #8 / #94 incumbent).
+
+Reproduce:
+
+```bash
+SEEDS=1 ARM_SECONDS=2700 \
+  OUT_DIR=.lamarck-failed-cache-45 \
+  TRAIN_DATA=.lamarck-baseline-45/train-data \
+  bash scripts/run-failed-cache-economics.sh control treatment
+```
+
+### Validity
+
+| Check | Result |
+|-------|--------|
+| Journalled seed | **1** / `supplied` on both arms |
+| Opening full-corpus score | control and treatment **match** at `0.35225098963703705` |
+| Version stamp | both arms `0.1.20` |
+| `#83` state | backprop knobs **unset** on both arms |
+| Accepts | **2 / 2** — pair is powered; per-run counts stay visible |
+| Guardrail | `stoodDownAtExperiment` is `null` |
+| Load | control started at ≈5.0; treatment started at ≈10.7. A GRQ `.lamarck-sampler` job (same `rust_scorer`) appeared around the end of seed 1. That biases **against** treatment on wall-clock if it overlapped; seeds 2–3 were aborted rather than recorded as exclusive-box repeats |
+
+### Results
+
+From `scripts/summarise-failed-cache-economics.sh .lamarck-failed-cache-45`:
+
+| Arm | Experiments | Accepts | Opening (full-corpus) | Δ score | Δ / wall-hour | Hit rate | Saved ms | Spent ms | Net ms | Peak entries | Stood down | Peak mem / disk |
+|-----|-------------|---------|----------------------|---------|---------------|----------|----------|----------|--------|--------------|------------|-----------------|
+| `control-seed1` | 31 | 2 | 0.35225098963703705 | 3.610e-6 | 4.899e-6 | — | — | — | — | — | — | — |
+| `treatment-seed1` | 25 | 2 | 0.35225098963703705 | 3.610e-6 | 4.878e-6 | 0.1953 | 502181 | 2964 | +499217 | 2478 | no | 1 268 736 B / 816 065 B |
+
+End-of-run treatment summary:
+
+```text
+● failed-cache economics: entries=2478 hitRate=0.1953 savedMs=557722.9 wallClockSavedMs=177371.3 spentMs=2965.9 netMs=554757.0 peakMemoryBytes=1268736 diskBytes=816065 standDown=false ceilingBites=0
+```
+
+Same two accepts, same Δ, first accept at 46.8 s (control) / 47.8 s (treatment). Treatment ran **fewer** experiments (25 vs 31) and scored fewer screen / promote creatures (2480 / 114 vs 3100 / 150). Estimated redundant scoring avoided is large (~502 s vs 3 s spend; `wallClockSavedMs` ≈177 s) but that did not buy more accepted Δ, so improvement-per-wall-hour is a **null** (treatment 0.4% lower — same Δ, 11 s more journalled wall).
+
+Seeds 2 and 3 are **not** in the table. After seed 1 a GRQ sampler held the scorer; further arms would have measured a shared box.
+
 ## Decision
 
 **No-go on default-on. Keep `--failed-cache` opt-in (off by default).**
@@ -134,11 +182,10 @@ Treatment completed **more experiments** in the same wall budget (14 vs 8). Prom
 | Question | Answer |
 |----------|--------|
 | Does it ship? | **Yes, opt-in.** The filter, snapshot, rebuild, ledger, and stand-down guardrail are in the binary. |
-| Flip `--failed-cache` to on-by-default? | **No.** The primary metric is unmeasured (zero accepts). #69 says a negative / unreadable result is not a merge of default-on. |
-| Remove the feature? | **No.** Hits, footprint, rebuild cost, and the priced ledger all look healthy; removal would throw away a working opt-in on the basis of an underpowered primary gate. |
-| Tolerance / size / age defaults | **Leave the provisional values** (`50000` entries, 7-day age, 25 MiB ceiling, stand-down window 20 / margin 1000 ms). Nothing in this campaign suggested they were wrong; nothing measured them tightly enough to retune. |
-
-Follow-up: exclusive-box 45-minute repeats (seeds 1–3, control + treatment, same knobs) before reconsidering default-on — [#158](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/158), not a removal issue.
+| Flip `--failed-cache` to on-by-default? | **No.** The powered 45-minute pair (#158, seed 1) recorded the same accepts and the same Δ; treatment did not improve `scoreImprovementPerWallHour`. |
+| Remove the feature? | **No.** The ledger is net-positive on redundant scoring and the footprint stays ≪ 25 MiB. #69 said a negative primary result is not a merge of default-on; it did not require deleting a working opt-in. |
+| Tolerance / size / age defaults | **Leave the provisional values.** Peak 2478 entries / ~1.3 MiB did not approach the caps. |
+| Further 45-minute seeds | Stopped. The primary gate already has a readable null on seed 1; more seeds on a shared scorer would not flip the default. |
 
 ## Ledger pricing (implementation note)
 

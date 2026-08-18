@@ -22,6 +22,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`--failed-cache` stays off by default after the #158 45-minute pair.**
+  Seed 1 at production knobs (`2700` s, same GRQ creature and corpus as #8)
+  recorded **2 accepts on both arms** and the same full-corpus Δ
+  (`+3.610e-6`). Treatment `scoreImprovementPerWallHour` was 4.878e-6 vs
+  control 4.899e-6 — a null on the primary gate. Secondary evidence stayed
+  healthy (19.5% hit rate, ≈502 s estimated savings vs 3 s spend, peak
+  ≈1.3 MiB, guardrail silent). Seeds 2–3 were aborted when a GRQ sampler
+  took the shared scorer. Write-up:
+  [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md).
+
 - **Disambiguate the two #75-era follow-up campaigns (Issue #132).** The
   scripted #75 write-up (`docs/followup-economics.md`, seeds 11 / 21 / 31) and
   the local calibration journals (`~/.lamarck-followup-75`, mostly seed 1)
