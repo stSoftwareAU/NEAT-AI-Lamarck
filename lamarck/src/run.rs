@@ -52,7 +52,7 @@ use neat_core::{
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1802,6 +1802,29 @@ pub fn run_optimisation_cancellable(
             .join(format!("candidates-exp-{experiments}"));
         write_candidate_batch(&batch_dir, &incumbent, &candidates, Some(&creature_meta))?;
 
+        // Shared by the three scorer-failure paths and the screen-empty write
+        // so a new journal field has one construction site (issue #139).
+        let unaccepted = UnacceptedJournal {
+            experiment_number: experiments,
+            seed: Some(seed),
+            incumbent_id: experiment_incumbent_id.clone(),
+            baseline_score: best_score,
+            focus_neuron: focus.clone(),
+            focus_neurons: journal_focus_set(&focus_set),
+            focus_stats: Some(focus_stats.clone()),
+            candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
+            candidates_requested: Some(config.candidates),
+            batch_limit: Some(batch_limit),
+            analysis_ms,
+            memo_hits: memo_delta.hits,
+            memo_misses: memo_delta.misses,
+            memo_ms_saved: memo_delta.ms_saved,
+            cache_skipped,
+            cache_deduplicated,
+            cache_backfilled,
+            cache_lookup_ms,
+        };
+
         let screen_rate = config.screen_sample_rate.filter(|r| *r > 0.0 && *r < 1.0);
         let scorer_start = Instant::now();
         let mut screen_score_map: Option<std::collections::BTreeMap<String, f64>> = None;
@@ -1826,88 +1849,34 @@ pub fn run_optimisation_cancellable(
                 config.scorer_path.display()
             ));
             scorer.set_phase(ScorerCallPhase::Screen);
-            let screen_scores = match scorer.score_directory_sampled(
-                &batch_dir,
-                &config.training_data,
-                sample,
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    consecutive_scorer_failures += 1;
-                    log::warn(&format!("screen scorer failed: {e}"));
-                    record_focus_failure(
-                        &mut selectors.weighted,
-                        &focus_set,
-                        config.min_improvement,
-                    );
-                    let economics = account_for_experiment(
-                        cache_economics.as_mut(),
-                        failed_cache.as_mut(),
-                        experiments,
-                        cache_cost,
-                    );
-                    append_journal(
-                        &journal_path,
-                        &ExperimentRecord {
-                            experiment_number: experiments,
-                            timestamp_unix: unix_now(),
-                            seed: Some(seed),
-                            incumbent_id: incumbent_id(&incumbent),
-                            baseline_score: best_score,
-                            focus_neuron: focus.clone(),
-                            focus_neurons: journal_focus_set(&focus_set),
-                            focus_stats: Some(focus_stats.clone()),
-                            candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
-                            candidates_requested: Some(config.candidates),
-                            batch_limit: Some(batch_limit),
-                            scores: Default::default(),
+            let screen_scores =
+                match scorer.score_directory_sampled(&batch_dir, &config.training_data, sample) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        handle_scorer_failure(ScorerFailure {
+                            consecutive: &mut consecutive_scorer_failures,
+                            max_consecutive: config.max_consecutive_scorer_failures,
+                            err: e.to_string(),
+                            warn_label: "screen scorer failed",
+                            selector: &mut selectors.weighted,
+                            focus_set: &focus_set,
+                            min_improvement: config.min_improvement,
+                            journal_path: &journal_path,
+                            cleanup: &[&batch_dir],
+                            preserve_losers: config.preserve_losers,
                             screen_scores: None,
                             screen_tiers: None,
-                            baseline_source: None,
-                            winner: None,
-                            improvement: None,
-                            accepted: false,
-                            analysis_ms,
-                            memo_hits: memo_delta.hits,
-                            memo_misses: memo_delta.misses,
-                            memo_ms_saved: memo_delta.ms_saved,
+                            cache_economics: cache_economics.as_mut(),
+                            failed_cache: failed_cache.as_mut(),
+                            cache_cost,
+                            journal: &unaccepted,
                             scorer_ms: scorer_start.elapsed().as_millis(),
                             scorer_calls: journal_calls(scorer.drain()),
-                            scorer_error: Some(e.to_string()),
-                            combo_members: None,
-                            combo_member_indices: None,
-                            combos_scored: None,
-                            combos_dampened: None,
-                            combo_dampen: None,
-                            // A scorer crash is not evidence about the
-                            // mutations, so nothing is cached — but the work
-                            // the cache already saved this experiment is.
-                            cache_skipped,
-                            cache_deduplicated,
-                            cache_backfilled,
-                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
-                            cache_lookup_ms,
-                            cache_maintenance_ms: failed_cache
-                                .as_ref()
-                                .map(FailedCandidateCache::last_maintenance_ms),
-                            cache_saved_ms: economics.map(|e| e.saved_ms),
-                            cache_spent_ms: economics.map(|e| e.spent_ms),
-                            cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
-                            cache_resident_bytes: economics.map(|e| e.resident_bytes),
-                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
-                        },
-                    )?;
-                    if !config.preserve_losers {
-                        let _ = fs::remove_dir_all(&batch_dir);
+                            pending_cache_rebuild_ms: &mut pending_cache_rebuild_ms,
+                        })?;
+                        continue;
                     }
-                    if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
-                        return Err(format!(
-                            "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
-                        ));
-                    }
-                    continue;
-                }
-            };
+                };
             let screen_ms = scorer_start.elapsed().as_millis();
             let decision = screen_promote_decision(&screen_scores, &promote_gate)
                 .map_err(|e| e.to_string())?;
@@ -1976,52 +1945,24 @@ pub fn run_optimisation_cancellable(
                 );
                 append_journal(
                     &journal_path,
-                    &ExperimentRecord {
-                        experiment_number: experiments,
-                        timestamp_unix: unix_now(),
-                        seed: Some(seed),
-                        incumbent_id: incumbent_id(&incumbent),
-                        baseline_score: screen_scores
-                            .get("baseline")
-                            .map(|b| b.score)
-                            .unwrap_or(best_score),
-                        focus_neuron: focus.clone(),
-                        focus_neurons: journal_focus_set(&focus_set),
-                        focus_stats: Some(focus_stats.clone()),
-                        candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
-                        candidates_requested: Some(config.candidates),
-                        batch_limit: Some(batch_limit),
-                        scores: Default::default(),
-                        screen_scores: screen_score_map,
-                        screen_tiers,
-                        baseline_source: None,
-                        winner: None,
-                        improvement: None,
-                        accepted: false,
-                        analysis_ms,
-                        memo_hits: memo_delta.hits,
-                        memo_misses: memo_delta.misses,
-                        memo_ms_saved: memo_delta.ms_saved,
-                        scorer_ms: screen_ms,
-                        scorer_calls: journal_calls(scorer.drain()),
-                        scorer_error: None,
-                        combo_members: None,
-                        combo_member_indices: None,
-                        combos_scored: None,
-                        combos_dampened: None,
-                        combo_dampen: None,
-                        cache_skipped,
-                        cache_deduplicated,
-                        cache_backfilled,
-                        cache_size,
-                        cache_lookup_ms,
-                        cache_maintenance_ms,
-                        cache_saved_ms: economics.map(|e| e.saved_ms),
-                        cache_spent_ms: economics.map(|e| e.spent_ms),
-                        cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
-                        cache_resident_bytes: economics.map(|e| e.resident_bytes),
-                        cache_rebuild_ms: pending_cache_rebuild_ms.take(),
-                    },
+                    &ExperimentRecord::unaccepted(
+                        &unaccepted,
+                        UnacceptedOutcome {
+                            baseline_score: screen_scores
+                                .get("baseline")
+                                .map(|b| b.score)
+                                .unwrap_or(best_score),
+                            screen_scores: screen_score_map,
+                            screen_tiers,
+                            scorer_ms: screen_ms,
+                            scorer_calls: journal_calls(scorer.drain()),
+                            scorer_error: None,
+                            cache_size,
+                            cache_maintenance_ms,
+                            economics,
+                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
+                        },
+                    ),
                 )?;
                 if !config.preserve_losers {
                     let _ = fs::remove_dir_all(&batch_dir);
@@ -2081,76 +2022,27 @@ pub fn run_optimisation_cancellable(
                     s
                 }
                 Err(e) => {
-                    consecutive_scorer_failures += 1;
-                    log::warn(&format!("promote scorer failed: {e}"));
-                    record_focus_failure(
-                        &mut selectors.weighted,
-                        &focus_set,
-                        config.min_improvement,
-                    );
-                    let economics = account_for_experiment(
-                        cache_economics.as_mut(),
-                        failed_cache.as_mut(),
-                        experiments,
+                    handle_scorer_failure(ScorerFailure {
+                        consecutive: &mut consecutive_scorer_failures,
+                        max_consecutive: config.max_consecutive_scorer_failures,
+                        err: e.to_string(),
+                        warn_label: "promote scorer failed",
+                        selector: &mut selectors.weighted,
+                        focus_set: &focus_set,
+                        min_improvement: config.min_improvement,
+                        journal_path: &journal_path,
+                        cleanup: &[&batch_dir, &pdir],
+                        preserve_losers: config.preserve_losers,
+                        screen_scores: screen_score_map,
+                        screen_tiers,
+                        cache_economics: cache_economics.as_mut(),
+                        failed_cache: failed_cache.as_mut(),
                         cache_cost,
-                    );
-                    append_journal(
-                        &journal_path,
-                        &ExperimentRecord {
-                            experiment_number: experiments,
-                            timestamp_unix: unix_now(),
-                            seed: Some(seed),
-                            incumbent_id: incumbent_id(&incumbent),
-                            baseline_score: best_score,
-                            focus_neuron: focus.clone(),
-                            focus_neurons: journal_focus_set(&focus_set),
-                            focus_stats: Some(focus_stats.clone()),
-                            candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
-                            candidates_requested: Some(config.candidates),
-                            batch_limit: Some(batch_limit),
-                            scores: Default::default(),
-                            screen_scores: screen_score_map,
-                            screen_tiers,
-                            baseline_source: None,
-                            winner: None,
-                            improvement: None,
-                            accepted: false,
-                            analysis_ms,
-                            memo_hits: memo_delta.hits,
-                            memo_misses: memo_delta.misses,
-                            memo_ms_saved: memo_delta.ms_saved,
-                            scorer_ms: scorer_start.elapsed().as_millis(),
-                            scorer_calls: journal_calls(scorer.drain()),
-                            scorer_error: Some(e.to_string()),
-                            combo_members: None,
-                            combo_member_indices: None,
-                            combos_scored: None,
-                            combos_dampened: None,
-                            combo_dampen: None,
-                            cache_skipped,
-                            cache_deduplicated,
-                            cache_backfilled,
-                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
-                            cache_lookup_ms,
-                            cache_maintenance_ms: failed_cache
-                                .as_ref()
-                                .map(FailedCandidateCache::last_maintenance_ms),
-                            cache_saved_ms: economics.map(|e| e.saved_ms),
-                            cache_spent_ms: economics.map(|e| e.spent_ms),
-                            cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
-                            cache_resident_bytes: economics.map(|e| e.resident_bytes),
-                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
-                        },
-                    )?;
-                    if !config.preserve_losers {
-                        let _ = fs::remove_dir_all(&batch_dir);
-                        let _ = fs::remove_dir_all(&pdir);
-                    }
-                    if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
-                        return Err(format!(
-                            "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
-                        ));
-                    }
+                        journal: &unaccepted,
+                        scorer_ms: scorer_start.elapsed().as_millis(),
+                        scorer_calls: journal_calls(scorer.drain()),
+                        pending_cache_rebuild_ms: &mut pending_cache_rebuild_ms,
+                    })?;
                     continue;
                 }
             }
@@ -2176,78 +2068,27 @@ pub fn run_optimisation_cancellable(
                     s
                 }
                 Err(e) => {
-                    consecutive_scorer_failures += 1;
-                    log::warn(&format!("scorer failed: {e}"));
-                    record_focus_failure(
-                        &mut selectors.weighted,
-                        &focus_set,
-                        config.min_improvement,
-                    );
-                    let economics = account_for_experiment(
-                        cache_economics.as_mut(),
-                        failed_cache.as_mut(),
-                        experiments,
+                    handle_scorer_failure(ScorerFailure {
+                        consecutive: &mut consecutive_scorer_failures,
+                        max_consecutive: config.max_consecutive_scorer_failures,
+                        err: e.to_string(),
+                        warn_label: "scorer failed",
+                        selector: &mut selectors.weighted,
+                        focus_set: &focus_set,
+                        min_improvement: config.min_improvement,
+                        journal_path: &journal_path,
+                        cleanup: &[&batch_dir],
+                        preserve_losers: config.preserve_losers,
+                        screen_scores: None,
+                        screen_tiers: None,
+                        cache_economics: cache_economics.as_mut(),
+                        failed_cache: failed_cache.as_mut(),
                         cache_cost,
-                    );
-                    append_journal(
-                        &journal_path,
-                        &ExperimentRecord {
-                            experiment_number: experiments,
-                            timestamp_unix: unix_now(),
-                            seed: Some(seed),
-                            incumbent_id: incumbent_id(&incumbent),
-                            baseline_score: best_score,
-                            focus_neuron: focus.clone(),
-                            focus_neurons: journal_focus_set(&focus_set),
-                            focus_stats: Some(focus_stats.clone()),
-                            candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
-                            candidates_requested: Some(config.candidates),
-                            batch_limit: Some(batch_limit),
-                            scores: Default::default(),
-                            screen_scores: None,
-                            screen_tiers: None,
-                            baseline_source: None,
-                            winner: None,
-                            improvement: None,
-                            accepted: false,
-                            analysis_ms,
-                            memo_hits: memo_delta.hits,
-                            memo_misses: memo_delta.misses,
-                            memo_ms_saved: memo_delta.ms_saved,
-                            scorer_ms: scorer_start.elapsed().as_millis(),
-                            scorer_calls: journal_calls(scorer.drain()),
-                            scorer_error: Some(e.to_string()),
-                            combo_members: None,
-                            combo_member_indices: None,
-                            combos_scored: None,
-                            combos_dampened: None,
-                            combo_dampen: None,
-                            // A scorer crash is not evidence about the
-                            // mutations, so nothing is cached — but the work
-                            // the cache already saved this experiment is.
-                            cache_skipped,
-                            cache_deduplicated,
-                            cache_backfilled,
-                            cache_size: failed_cache.as_ref().map(FailedCandidateCache::len),
-                            cache_lookup_ms,
-                            cache_maintenance_ms: failed_cache
-                                .as_ref()
-                                .map(FailedCandidateCache::last_maintenance_ms),
-                            cache_saved_ms: economics.map(|e| e.saved_ms),
-                            cache_spent_ms: economics.map(|e| e.spent_ms),
-                            cache_net_cumulative_ms: economics.map(|e| e.net_cumulative_ms),
-                            cache_resident_bytes: economics.map(|e| e.resident_bytes),
-                            cache_rebuild_ms: pending_cache_rebuild_ms.take(),
-                        },
-                    )?;
-                    if !config.preserve_losers {
-                        let _ = fs::remove_dir_all(&batch_dir);
-                    }
-                    if consecutive_scorer_failures >= config.max_consecutive_scorer_failures {
-                        return Err(format!(
-                            "aborting after {consecutive_scorer_failures} consecutive scorer failures; last error: {e}"
-                        ));
-                    }
+                        journal: &unaccepted,
+                        scorer_ms: scorer_start.elapsed().as_millis(),
+                        scorer_calls: journal_calls(scorer.drain()),
+                        pending_cache_rebuild_ms: &mut pending_cache_rebuild_ms,
+                    })?;
                     continue;
                 }
             }
@@ -2876,6 +2717,179 @@ fn record_focus_outcomes(
             min_improvement,
         );
     }
+}
+
+/// Journal fields known before scoring, shared by every unaccepted write.
+///
+/// Outcome fields (`scores`, `winner`, `improvement`, `accepted`, combo
+/// reports, `baseline_source`) are the rejected defaults on
+/// [`ExperimentRecord::unaccepted`] — one site, so a new journal field cannot
+/// land on three of four unaccepted writes and miss the fourth (issue #139).
+struct UnacceptedJournal {
+    experiment_number: u64,
+    seed: Option<u64>,
+    incumbent_id: String,
+    baseline_score: f64,
+    focus_neuron: String,
+    focus_neurons: Option<Vec<String>>,
+    focus_stats: Option<FocusNeuronStats>,
+    candidates: Vec<CandidateProvenance>,
+    candidates_requested: Option<usize>,
+    batch_limit: Option<BatchLimit>,
+    analysis_ms: u128,
+    memo_hits: u64,
+    memo_misses: u64,
+    memo_ms_saved: u128,
+    cache_skipped: Option<usize>,
+    cache_deduplicated: Option<usize>,
+    cache_backfilled: Option<usize>,
+    cache_lookup_ms: Option<u128>,
+}
+
+/// Fields that differ across unaccepted journal writes (issue #139).
+struct UnacceptedOutcome {
+    baseline_score: f64,
+    screen_scores: Option<BTreeMap<String, f64>>,
+    screen_tiers: Option<ScreenTierRecord>,
+    scorer_ms: u128,
+    scorer_calls: Option<Vec<ScorerCallRecord>>,
+    scorer_error: Option<String>,
+    cache_size: Option<usize>,
+    cache_maintenance_ms: Option<u128>,
+    economics: Option<ExperimentEconomics>,
+    cache_rebuild_ms: Option<u128>,
+}
+
+impl ExperimentRecord {
+    /// A finished experiment that did not accept — scorer failure or screen-empty.
+    fn unaccepted(journal: &UnacceptedJournal, outcome: UnacceptedOutcome) -> Self {
+        Self {
+            experiment_number: journal.experiment_number,
+            timestamp_unix: unix_now(),
+            seed: journal.seed,
+            incumbent_id: journal.incumbent_id.clone(),
+            baseline_score: outcome.baseline_score,
+            focus_neuron: journal.focus_neuron.clone(),
+            focus_neurons: journal.focus_neurons.clone(),
+            focus_stats: journal.focus_stats.clone(),
+            candidates: journal.candidates.clone(),
+            candidates_requested: journal.candidates_requested,
+            batch_limit: journal.batch_limit,
+            scores: BTreeMap::new(),
+            screen_scores: outcome.screen_scores,
+            screen_tiers: outcome.screen_tiers,
+            baseline_source: None,
+            winner: None,
+            improvement: None,
+            accepted: false,
+            analysis_ms: journal.analysis_ms,
+            memo_hits: journal.memo_hits,
+            memo_misses: journal.memo_misses,
+            memo_ms_saved: journal.memo_ms_saved,
+            scorer_ms: outcome.scorer_ms,
+            scorer_calls: outcome.scorer_calls,
+            scorer_error: outcome.scorer_error,
+            combo_members: None,
+            combo_member_indices: None,
+            combos_scored: None,
+            combos_dampened: None,
+            combo_dampen: None,
+            cache_skipped: journal.cache_skipped,
+            cache_deduplicated: journal.cache_deduplicated,
+            cache_backfilled: journal.cache_backfilled,
+            cache_size: outcome.cache_size,
+            cache_lookup_ms: journal.cache_lookup_ms,
+            cache_maintenance_ms: outcome.cache_maintenance_ms,
+            cache_saved_ms: outcome.economics.map(|e| e.saved_ms),
+            cache_spent_ms: outcome.economics.map(|e| e.spent_ms),
+            cache_net_cumulative_ms: outcome.economics.map(|e| e.net_cumulative_ms),
+            cache_resident_bytes: outcome.economics.map(|e| e.resident_bytes),
+            cache_rebuild_ms: outcome.cache_rebuild_ms,
+        }
+    }
+}
+
+/// Inputs to the one scorer-batch-failure policy (issue #139).
+struct ScorerFailure<'a> {
+    consecutive: &'a mut u32,
+    max_consecutive: u32,
+    err: String,
+    warn_label: &'a str,
+    selector: &'a mut WeightedFocusSelector,
+    focus_set: &'a [String],
+    min_improvement: f64,
+    journal_path: &'a Path,
+    cleanup: &'a [&'a Path],
+    preserve_losers: bool,
+    screen_scores: Option<BTreeMap<String, f64>>,
+    screen_tiers: Option<ScreenTierRecord>,
+    cache_economics: Option<&'a mut CacheEconomics>,
+    failed_cache: Option<&'a mut FailedCandidateCache>,
+    cache_cost: ExperimentCost,
+    journal: &'a UnacceptedJournal,
+    scorer_ms: u128,
+    scorer_calls: Option<Vec<ScorerCallRecord>>,
+    pending_cache_rebuild_ms: &'a mut Option<u128>,
+}
+
+/// Apply the one scorer-batch-failure policy (issue #139).
+///
+/// Increments the consecutive-failure counter, warns, dampens every focus,
+/// journals an unaccepted record, deletes work dirs unless `--preserve-losers`,
+/// and aborts once `max_consecutive` is hit. A scorer crash is not mutation
+/// evidence, so nothing is inserted into the failed-candidate cache — but
+/// work the cache already saved this experiment is still accounted.
+///
+/// Accept-verification failures stay on their own path: they do not journal a
+/// rejected experiment or `continue`.
+fn handle_scorer_failure(failure: ScorerFailure<'_>) -> Result<(), String> {
+    *failure.consecutive += 1;
+    log::warn(&format!("{}: {}", failure.warn_label, failure.err));
+    record_focus_failure(failure.selector, failure.focus_set, failure.min_improvement);
+    let cache_size = failure
+        .failed_cache
+        .as_deref()
+        .map(FailedCandidateCache::len);
+    let cache_maintenance_ms = failure
+        .failed_cache
+        .as_deref()
+        .map(FailedCandidateCache::last_maintenance_ms);
+    let economics = account_for_experiment(
+        failure.cache_economics,
+        failure.failed_cache,
+        failure.journal.experiment_number,
+        failure.cache_cost,
+    );
+    append_journal(
+        failure.journal_path,
+        &ExperimentRecord::unaccepted(
+            failure.journal,
+            UnacceptedOutcome {
+                baseline_score: failure.journal.baseline_score,
+                screen_scores: failure.screen_scores,
+                screen_tiers: failure.screen_tiers,
+                scorer_ms: failure.scorer_ms,
+                scorer_calls: failure.scorer_calls,
+                scorer_error: Some(failure.err.clone()),
+                cache_size,
+                cache_maintenance_ms,
+                economics,
+                cache_rebuild_ms: failure.pending_cache_rebuild_ms.take(),
+            },
+        ),
+    )?;
+    if !failure.preserve_losers {
+        for path in failure.cleanup {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+    if *failure.consecutive >= failure.max_consecutive {
+        return Err(format!(
+            "aborting after {} consecutive scorer failures; last error: {}",
+            failure.consecutive, failure.err
+        ));
+    }
+    Ok(())
 }
 
 /// Record a scorer failure against every focus the experiment proposed against.
@@ -5180,6 +5194,118 @@ mod tests {
                 "focus {uuid} carried the scorer failure"
             );
         }
+    }
+
+    fn unaccepted_journal(experiment_number: u64) -> UnacceptedJournal {
+        UnacceptedJournal {
+            experiment_number,
+            seed: Some(1),
+            incumbent_id: "inc".into(),
+            baseline_score: 0.5,
+            focus_neuron: "f".into(),
+            focus_neurons: None,
+            focus_stats: None,
+            candidates: vec![],
+            candidates_requested: Some(4),
+            batch_limit: Some(BatchLimit::Budget),
+            analysis_ms: 10,
+            memo_hits: 1,
+            memo_misses: 2,
+            memo_ms_saved: 3,
+            cache_skipped: Some(0),
+            cache_deduplicated: Some(0),
+            cache_backfilled: Some(0),
+            cache_lookup_ms: Some(0),
+        }
+    }
+
+    /// Issue #139: rejected outcome fields have one default site.
+    #[test]
+    fn unaccepted_experiment_defaults_the_rejected_outcome_fields() {
+        let record = ExperimentRecord::unaccepted(
+            &unaccepted_journal(7),
+            UnacceptedOutcome {
+                baseline_score: 0.42,
+                screen_scores: None,
+                screen_tiers: None,
+                scorer_ms: 99,
+                scorer_calls: None,
+                scorer_error: Some("boom".into()),
+                cache_size: Some(0),
+                cache_maintenance_ms: Some(0),
+                economics: None,
+                cache_rebuild_ms: None,
+            },
+        );
+        assert_eq!(record.experiment_number, 7);
+        assert_eq!(record.baseline_score, 0.42);
+        assert_eq!(record.scorer_ms, 99);
+        assert_eq!(record.scorer_error.as_deref(), Some("boom"));
+        assert!(!record.accepted);
+        assert!(record.winner.is_none());
+        assert!(record.improvement.is_none());
+        assert!(record.scores.is_empty());
+        assert!(record.baseline_source.is_none());
+        assert!(record.combo_members.is_none());
+        assert!(record.combo_member_indices.is_none());
+        assert!(record.combos_scored.is_none());
+        assert!(record.combos_dampened.is_none());
+        assert!(record.combo_dampen.is_none());
+        assert_eq!(record.memo_hits, 1);
+        assert_eq!(record.candidates_requested, Some(4));
+    }
+
+    /// Issue #139: the one policy call journals, cleans up, and aborts at the cap.
+    #[test]
+    fn handle_scorer_failure_journals_cleans_up_and_aborts_at_the_cap() {
+        let dir = tempdir().unwrap();
+        let journal_path = dir.path().join("experiments.jsonl");
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        let mut consecutive = 0;
+        let mut selector = WeightedFocusSelector::default();
+        let focus_set = vec!["a".to_string()];
+        let mut rebuild = None;
+        let journal = unaccepted_journal(1);
+        let err = handle_scorer_failure(ScorerFailure {
+            consecutive: &mut consecutive,
+            max_consecutive: 1,
+            err: "boom".into(),
+            warn_label: "scorer failed",
+            selector: &mut selector,
+            focus_set: &focus_set,
+            min_improvement: 1e-6,
+            journal_path: &journal_path,
+            cleanup: &[&work],
+            preserve_losers: false,
+            screen_scores: None,
+            screen_tiers: None,
+            cache_economics: None,
+            failed_cache: None,
+            cache_cost: ExperimentCost::default(),
+            journal: &journal,
+            scorer_ms: 5,
+            scorer_calls: None,
+            pending_cache_rebuild_ms: &mut rebuild,
+        })
+        .unwrap_err();
+        assert!(
+            err.contains("aborting after 1 consecutive scorer failures"),
+            "{err}"
+        );
+        assert!(err.contains("boom"), "{err}");
+        assert!(!work.exists(), "work dir is removed unless preserve-losers");
+        assert_eq!(consecutive, 1);
+        assert_eq!(
+            selector.history.get("a").map(|h| h.hard_fails),
+            Some(1),
+            "the focus carried the scorer failure"
+        );
+        let line = fs::read_to_string(&journal_path).unwrap();
+        let record: ExperimentRecord = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(record.scorer_error.as_deref(), Some("boom"));
+        assert!(!record.accepted);
+        assert_eq!(record.scorer_ms, 5);
     }
 
     #[test]

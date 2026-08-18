@@ -22,6 +22,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **One helper journals every scorer-batch failure (Issue #139).** Screen,
+  promote and the legacy full-corpus path encoded the same
+  increment/warn/dampen/journal/cleanup/abort sequence, including a ~35-field
+  rejected `ExperimentRecord`. A new journal field had to be copied onto all
+  three (and the screen-empty write). `ExperimentRecord::unaccepted` defaults
+  the rejected outcome fields; `handle_scorer_failure` is the one policy call.
+  Accept-verification failures stay on their own path — they do not journal a
+  rejected experiment.
+
 - **`--failed-cache` stays off by default after the #158 45-minute pair.**
   Seed 1 at production knobs (`2700` s, same GRQ creature and corpus as #8)
   recorded **2 accepts on both arms** and the same full-corpus Δ
