@@ -30,6 +30,7 @@ pub mod scorer_cost;
 pub mod screen_calibration;
 pub mod structural;
 pub mod tags;
+pub mod width;
 
 pub use analysis::{
     PostFocusScan, PreFocusScan, reset_training_scan_count, scan_post_focus, scan_pre_focus,
@@ -105,4 +106,8 @@ pub use screen_calibration::{
 pub use tags::{
     CreatureMeta, CreatureTag, LamarckProgress, serialize_creature_with_meta,
     serialize_creature_with_meta_compact,
+};
+pub use width::{
+    assert_same_width, assert_written_width, checked_creature_json, checked_creature_json_pretty,
+    load_creature, validate_creature_width, written_width,
 };

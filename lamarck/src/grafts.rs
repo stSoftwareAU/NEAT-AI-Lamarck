@@ -13,7 +13,8 @@ use crate::combos::{
 use crate::log;
 use crate::scorer::{DirectoryScorer, ScoreResult, accepts_improvement, improvement};
 use crate::structural::{insert_index_for_hidden, is_forward_edge, is_input_source};
-use neat_core::{CreatureExport, NeuronExport, SynapseExport, creature_to_json_pretty};
+use crate::width::checked_creature_json_pretty;
+use neat_core::{CreatureExport, NeuronExport, SynapseExport};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -533,8 +534,10 @@ fn sanitize_stem(id: &str) -> String {
         .collect()
 }
 
+/// Write a creature for the scorer — refused unless the written text carries
+/// a `>= 1` observation width (issue #165).
 fn write_creature_json(path: &Path, creature: &CreatureExport) -> Result<(), String> {
-    let json = creature_to_json_pretty(creature).map_err(|e| e.to_string())?;
+    let json = checked_creature_json_pretty(creature)?;
     fs::write(path, json).map_err(|e| e.to_string())
 }
 

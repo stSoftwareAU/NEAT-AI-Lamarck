@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`input < 1` / `output < 1` creatures are refused on load and on write
+  (Issue #165).** The top-level `input` / `output` integers are the observation
+  width and cannot be re-derived — `neurons` lists only non-input neurons — so
+  an `input: 0` creature used to reach `TrainingDataConfig::new(input, output)`
+  and mis-frame the corpus silently. New `lamarck/src/width.rs`:
+  `load_creature` (parse + reject with the NEAT-AI TS `CreatureValidate.ts`
+  wording, "Must have at least one input neurons was: 0") guards every load
+  path — the run loads the source before it creates the output directory, so
+  a rejected creature writes nothing, and the CLI exits non-zero — and the
+  accepted-winner reload asserts the width is unchanged; every write path
+  (`best.json` / `winners/` check-in documents, scorer batch files, combo and
+  graft work dirs, accept-verify and Phase-0 baselines) asserts the written
+  creature carries the source's `>= 1` width. Local guard, independent of
+  NEAT-AI-core#550. Regression tests in `width.rs`, `tags.rs`,
+  `candidates.rs`, `run.rs` and `lamarck/tests/creature_width.rs`.
 - **README repository-layout tree omitted five `lamarck/src/` modules (Issue
   #133).** `baseline.rs`, `cancel.rs`, `chunks.rs`, `memo.rs` and
   `promote_gate.rs` were in the tree on disk — and three of them already cited

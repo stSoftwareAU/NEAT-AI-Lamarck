@@ -10,7 +10,8 @@ use crate::structural::{
     suggested_weight_scaled, with_previous_hidden_first,
 };
 use crate::tags::{CreatureMeta, serialize_creature_with_meta_compact};
-use neat_core::{CreatureExport, creature_to_json};
+use crate::width::{assert_same_width, checked_creature_json};
+use neat_core::CreatureExport;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -1231,6 +1232,11 @@ fn pick_best_incoming<'a>(
 /// consumer, and on the production creature the pretty-printer's indentation is
 /// about a third of the ~90 MB a batch writes and the scorer then parses.
 /// Human-facing artefacts — `best.json`, `winners/` — stay pretty.
+///
+/// Every file is refused unless it carries the incumbent's (`>= 1`)
+/// observation width (issue #165): a candidate is a mutation of the incumbent,
+/// never a differently shaped creature, and `input` / `output` cannot be
+/// re-derived by the scorer.
 pub fn write_candidate_batch(
     dir: &Path,
     incumbent: &CreatureExport,
@@ -1244,14 +1250,15 @@ pub fn write_candidate_batch(
     let baseline = if let Some(meta) = meta {
         serialize_creature_with_meta_compact(incumbent, meta)?
     } else {
-        creature_to_json(incumbent).map_err(|e| e.to_string())?
+        checked_creature_json(incumbent)?
     };
     fs::write(dir.join("baseline.json"), baseline).map_err(|e| e.to_string())?;
 
     let mut stems = vec!["baseline".to_string()];
     for (i, candidate) in candidates.iter().enumerate() {
         let stem = format!("candidate-{i:03}");
-        let json = creature_to_json(&candidate.creature).map_err(|e| e.to_string())?;
+        assert_same_width(incumbent, &candidate.creature).map_err(|e| format!("{stem}: {e}"))?;
+        let json = checked_creature_json(&candidate.creature)?;
         fs::write(dir.join(format!("{stem}.json")), json).map_err(|e| e.to_string())?;
         stems.push(stem);
     }
@@ -2706,5 +2713,77 @@ mod tests {
         assert_eq!(value["tags"][0]["name"], "score");
         assert_eq!(value["tags"][0]["value"], "0.1");
         assert_eq!(parse_creature_json(&text).unwrap(), incumbent);
+    }
+
+    /// Issue #165: a batch file is refused when its creature does not carry
+    /// the incumbent's (`>= 1`) observation width — a candidate is a mutation
+    /// of the incumbent, never a differently shaped creature.
+    #[test]
+    fn write_candidate_batch_refuses_width_mismatch_and_zero_width() {
+        let incumbent = parse_creature_json(TINY).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Candidate width differs from the incumbent's.
+        let mut candidates = one_candidate(&incumbent);
+        candidates[0].creature.input = 2;
+        let batch = dir.path().join("mismatch");
+        let err = write_candidate_batch(&batch, &incumbent, &candidates, None).unwrap_err();
+        assert!(err.contains("candidate-000"), "{err}");
+        assert!(err.contains("2/1") && err.contains("1/1"), "{err}");
+        assert!(
+            !batch.join("candidate-000.json").exists(),
+            "the mismatched candidate must not be written"
+        );
+
+        // Candidate has no width at all.
+        let mut candidates = one_candidate(&incumbent);
+        candidates[0].creature.output = 0;
+        let batch = dir.path().join("zero-candidate");
+        let err = write_candidate_batch(&batch, &incumbent, &candidates, None).unwrap_err();
+        assert!(err.contains("output neurons was: 0"), "{err}");
+        assert!(!batch.join("candidate-000.json").exists());
+
+        // Incumbent has no width — nothing is written, tagged or not.
+        let mut widthless = incumbent.clone();
+        widthless.input = 0;
+        let candidates = one_candidate(&incumbent);
+        for (label, meta) in [("plain", None), ("tagged", Some(CreatureMeta::default()))] {
+            let batch = dir.path().join(format!("zero-incumbent-{label}"));
+            let err =
+                write_candidate_batch(&batch, &widthless, &candidates, meta.as_ref()).unwrap_err();
+            assert!(err.contains("input neurons was: 0"), "{label}: {err}");
+            assert!(!batch.join("baseline.json").exists(), "{label}");
+            assert!(!batch.join("candidate-000.json").exists(), "{label}");
+        }
+    }
+
+    /// Issue #165: valid widths reach every batch file byte-identically.
+    #[test]
+    fn write_candidate_batch_preserves_width() {
+        let wide = TINY
+            .replacen("\"input\": 1", "\"input\": 2511", 1)
+            .replacen("\"output\": 1", "\"output\": 3", 1);
+        let incumbent = parse_creature_json(&wide).unwrap();
+        assert_eq!(
+            (incumbent.input, incumbent.output),
+            (2511, 3),
+            "fixture edit"
+        );
+        let candidates = one_candidate(&incumbent);
+        let dir = tempfile::tempdir().unwrap();
+        let batch = dir.path().join("wide");
+        let stems = write_candidate_batch(&batch, &incumbent, &candidates, None).unwrap();
+        for stem in &stems {
+            let text = fs::read_to_string(batch.join(format!("{stem}.json"))).unwrap();
+            assert!(
+                text.starts_with("{\"input\":2511,\"output\":3,"),
+                "{stem}: {text}"
+            );
+            assert_eq!(
+                crate::width::written_width(&text).unwrap(),
+                (2511, 3),
+                "{stem}"
+            );
+        }
     }
 }

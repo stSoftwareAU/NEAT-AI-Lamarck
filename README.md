@@ -1267,6 +1267,7 @@ NEAT-AI-Lamarck/
     ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
+    ├── width.rs             # input/output observation-width guard (issue #165)
     └── log.rs
 ```
 

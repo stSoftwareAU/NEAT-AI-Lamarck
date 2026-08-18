@@ -31,8 +31,10 @@ use std::time::{Duration, Instant};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::StatsMode;
 use neat_ai_lamarck::scorer::{DirectoryScorer, ScoreResult, ScoreSample, ScorerError};
-use neat_ai_lamarck::{LamarckConfig, compute_local_mse, report_from_journal, run_optimisation};
-use neat_core::{compile_creature, parse_creature_json};
+use neat_ai_lamarck::{
+    LamarckConfig, compute_local_mse, load_creature, report_from_journal, run_optimisation,
+};
+use neat_core::compile_creature;
 
 /// Scores a directory by local MSE, over the sample corpus for a screen call
 /// and the full corpus for a promote call.
@@ -63,8 +65,7 @@ impl DirectoryScorer for TieredMseScorer {
             };
             let text = std::fs::read_to_string(entry.path())
                 .map_err(|e| ScorerError::Json(e.to_string()))?;
-            let creature =
-                parse_creature_json(&text).map_err(|e| ScorerError::Json(e.to_string()))?;
+            let creature = load_creature(&text).map_err(ScorerError::Json)?;
             let mut network =
                 compile_creature(&creature).map_err(|e| ScorerError::Invalid(e.to_string()))?;
             let (mse, _) =

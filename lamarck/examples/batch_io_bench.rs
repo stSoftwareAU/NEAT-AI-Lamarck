@@ -56,7 +56,7 @@ fn main() -> Result<(), String> {
     let incumbent = match args.next() {
         Some(path) => {
             let text = fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
-            parse_creature_json(&text).map_err(|e| e.to_string())?
+            neat_ai_lamarck::load_creature(&text).map_err(|e| format!("{path}: {e}"))?
         }
         None => production_shaped_creature(),
     };
