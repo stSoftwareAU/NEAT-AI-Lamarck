@@ -6,6 +6,7 @@
 //! summary for GRQ check-in (`worker/Lamarck/run.sh` reads the tag as-is).
 
 use crate::candidates::CandidateStrategy;
+use crate::width::{assert_written_width, validate_creature_width, value_width};
 use neat_core::{CreatureExport, creature_to_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -198,10 +199,15 @@ fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
 }
 
 /// Creature JSON with `uuid` / `tags` re-attached, before it is printed.
+///
+/// Refused unless the document about to be written carries the source
+/// creature's `input` / `output` and both are `>= 1` (issue #165): a check-in
+/// creature without its observation width cannot be re-derived downstream.
 fn creature_value_with_meta(
     creature: &CreatureExport,
     meta: &CreatureMeta,
 ) -> Result<Value, String> {
+    validate_creature_width(creature)?;
     let body = creature_to_json(creature).map_err(|e| e.to_string())?;
     let mut value: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if let Some(uuid) = &meta.uuid {
@@ -210,6 +216,7 @@ fn creature_value_with_meta(
     if !meta.tags.is_empty() {
         value["tags"] = serde_json::to_value(&meta.tags).map_err(|e| e.to_string())?;
     }
+    assert_written_width(creature, value_width(&value)?)?;
     Ok(value)
 }
 
@@ -263,6 +270,44 @@ mod tests {
         {"name":"score","value":"0.1"}
       ]
     }"#;
+
+    /// Issue #165: the check-in document carries the source's `input` /
+    /// `output` byte-identically, and a source without a width is refused.
+    #[test]
+    fn serialize_preserves_source_width_byte_identically() {
+        let src = TINY_TAGGED
+            .replacen("\"input\": 1", "\"input\": 2511", 1)
+            .replacen("\"output\": 1", "\"output\": 3", 1);
+        let creature = parse_creature_json(&src).unwrap();
+        let meta = CreatureMeta::from_creature_json(&src);
+        for text in [
+            serialize_creature_with_meta(&creature, &meta).unwrap(),
+            serialize_creature_with_meta_compact(&creature, &meta).unwrap(),
+        ] {
+            let value: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["input"], 2511);
+            assert_eq!(value["output"], 3);
+            let round = parse_creature_json(&text).unwrap();
+            assert_eq!(
+                (round.input, round.output),
+                (creature.input, creature.output)
+            );
+        }
+    }
+
+    #[test]
+    fn serialize_refuses_zero_width_source() {
+        let meta = CreatureMeta::from_creature_json(TINY_TAGGED);
+        let mut creature = parse_creature_json(TINY_TAGGED).unwrap();
+        creature.input = 0;
+        let err = serialize_creature_with_meta(&creature, &meta).unwrap_err();
+        assert_eq!(err, "Must have at least one input neurons was: 0");
+        assert!(serialize_creature_with_meta_compact(&creature, &meta).is_err());
+        let mut creature = parse_creature_json(TINY_TAGGED).unwrap();
+        creature.output = 0;
+        let err = serialize_creature_with_meta(&creature, &meta).unwrap_err();
+        assert_eq!(err, "Must have at least one output neurons was: 0");
+    }
 
     #[test]
     fn extract_preserves_uuid_and_tags() {

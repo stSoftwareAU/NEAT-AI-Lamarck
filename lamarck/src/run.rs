@@ -46,9 +46,8 @@ use crate::scorer::{
 use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
 use crate::structural::{is_input_source, rank_unused_sources};
 use crate::tags::{CreatureMeta, LamarckProgress, serialize_creature_with_meta};
-use neat_core::{
-    TrainingDataConfig, compile_creature, creature_to_json_pretty, parse_creature_json,
-};
+use crate::width::{assert_same_width, checked_creature_json_pretty, load_creature};
+use neat_core::{TrainingDataConfig, compile_creature};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
@@ -952,6 +951,15 @@ pub fn run_optimisation_cancellable(
     let analysis_threads = config.analysis_threads()?;
     let focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
+    // Load and validate the creature before anything is written (issue #165):
+    // an `input < 1` / `output < 1` creature has no observation width, cannot
+    // frame a training record, and must stop the run here — no output dir, no
+    // best.json copy, no journal.
+    let original_text = fs::read_to_string(&config.creature).map_err(|e| e.to_string())?;
+    let mut incumbent =
+        load_creature(&original_text).map_err(|e| format!("{}: {e}", config.creature.display()))?;
+    // Tags/uuid are stripped by CreatureExport — keep them for check-in writes.
+    let mut creature_meta = CreatureMeta::from_creature_json(&original_text);
     // Measure every scorer call at the boundary (issue #112): the wrapper sees
     // Phase-0, Phase-G, screen, promote and combo batches alike, so the journal
     // can never be fitted to a subset of the calls a run actually made.
@@ -975,10 +983,6 @@ pub fn run_optimisation_cancellable(
         )),
     }
 
-    let original_text = fs::read_to_string(&config.creature).map_err(|e| e.to_string())?;
-    let mut incumbent = parse_creature_json(&original_text).map_err(|e| e.to_string())?;
-    // Tags/uuid are stripped by CreatureExport — keep them for check-in writes.
-    let mut creature_meta = CreatureMeta::from_creature_json(&original_text);
     // Never modify the supplied file — work from in-memory / output copies.
     fs::write(&best_path, &original_text).map_err(|e| e.to_string())?;
 
@@ -2340,7 +2344,12 @@ pub fn run_optimisation_cancellable(
             ));
             let winner_json = fs::read_to_string(&sel.creature_path).map_err(|e| e.to_string())?;
             let previous = incumbent.clone();
-            incumbent = parse_creature_json(&winner_json).map_err(|e| e.to_string())?;
+            incumbent = load_creature(&winner_json)
+                .map_err(|e| format!("{}: {e}", sel.creature_path.display()))?;
+            // An accepted winner is a mutation of the incumbent: its
+            // observation width must be the one the run started with (#165).
+            assert_same_width(&previous, &incumbent)
+                .map_err(|e| format!("{}: {e}", sel.creature_path.display()))?;
             // The analysis the memo holds describes the creature we just
             // replaced — every entry is stale from here (issue #106). So is the
             // remembered baseline: it scores the old incumbent, and the next
@@ -3101,7 +3110,7 @@ fn verify_accept_pair(
         fs::remove_dir_all(work_dir).map_err(|e| e.to_string())?;
     }
     fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
-    let json = creature_to_json_pretty(incumbent).map_err(|e| e.to_string())?;
+    let json = checked_creature_json_pretty(incumbent)?;
     fs::write(work_dir.join("baseline.json"), json).map_err(|e| e.to_string())?;
     fs::copy(winner_path, work_dir.join("winner.json"))
         .map_err(|e| format!("copy winner from {} failed: {e}", winner_path.display()))?;
@@ -3127,7 +3136,7 @@ pub fn score_single_creature_dir(
     work_dir: &Path,
 ) -> Result<ScoreResult, String> {
     fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
-    let json = creature_to_json_pretty(creature).map_err(|e| e.to_string())?;
+    let json = checked_creature_json_pretty(creature)?;
     fs::write(work_dir.join("baseline.json"), json).map_err(|e| e.to_string())?;
     let results = scorer
         .score_directory(work_dir, training_data)
@@ -3142,6 +3151,7 @@ pub fn score_single_creature_dir(
 mod tests {
     use super::*;
     use crate::scorer::ScoreResult;
+    use neat_core::parse_creature_json;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -3283,6 +3293,75 @@ mod tests {
             analysis_threads: crate::chunks::DEFAULT_ANALYSIS_THREADS,
             ..LamarckConfig::default()
         }
+    }
+
+    /// Issue #165: an `input: 0` / `output: 0` creature has no observation
+    /// width. The run must refuse it before anything is written — no output
+    /// directory, no `best.json` copy, no journal — with the TS wording.
+    #[test]
+    fn rejects_zero_width_creature_before_writing_anything() {
+        for (input, output, expected) in [
+            (
+                0usize,
+                1usize,
+                "Must have at least one input neurons was: 0",
+            ),
+            (1, 0, "Must have at least one output neurons was: 0"),
+            (0, 0, "Must have at least one input neurons was: 0"),
+        ] {
+            let dir = tempdir().unwrap();
+            let (creature_path, training) = tiny_setup(dir.path());
+            let text = fs::read_to_string(&creature_path).unwrap();
+            let text = text
+                .replacen("\"input\":1", &format!("\"input\":{input}"), 1)
+                .replacen("\"output\":1", &format!("\"output\":{output}"), 1);
+            fs::write(&creature_path, text).unwrap();
+            let out = dir.path().join("out");
+            let config = base_config(creature_path, training, out.clone());
+            let scorer = ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            };
+            let err = run_optimisation(&config, &scorer)
+                .expect_err("zero-width creature must be refused");
+            assert!(
+                err.contains(expected),
+                "input={input} output={output}: {err}"
+            );
+            assert!(
+                !out.exists(),
+                "input={input} output={output}: nothing may be written after a width rejection"
+            );
+            assert_eq!(
+                *scorer.calls.lock().unwrap(),
+                0,
+                "scorer must not be called"
+            );
+        }
+    }
+
+    /// Issue #165: a valid source's `input` / `output` reach `best.json`
+    /// byte-identically after a full run (check-in write path).
+    #[test]
+    fn best_json_preserves_source_width() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            max_experiments: Some(2),
+            ..base_config(creature_path.clone(), training, out)
+        };
+        let scorer = ScriptedScorer {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let result = run_optimisation(&config, &scorer).unwrap();
+        let source: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&creature_path).unwrap()).unwrap();
+        let best: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result.best_path).unwrap()).unwrap();
+        assert_eq!(best["input"], source["input"]);
+        assert_eq!(best["output"], source["output"]);
+        assert_eq!(best["input"], 1);
+        assert_eq!(best["output"], 1);
     }
 
     #[test]
