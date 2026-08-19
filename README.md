@@ -1380,8 +1380,13 @@ tracks the checked-out NEAT-AI-core path dependency (workers otherwise
 rewrite the lock on every `cargo build` and `model_fetch` resets it). If the
 working tree changes, the fix is committed and pushed back. The job
 deliberately does **not** bump `neat-core.expected-version` — the
-breaking-bump gate stays a human acknowledgement. The workflow is validated
-by `scripts/check-auto-format-workflow.sh` (invoked from `quality.sh`).
+breaking-bump gate stays a human acknowledgement. It fires on PRs into
+`Develop` **and** `milestone/**`, so milestone sub-issue PRs are formatted
+before they merge into the milestone branch rather than only at the rollup
+PR (Issue #168). The workflow is validated by
+`scripts/check-auto-format-workflow.sh` (invoked from `quality.sh`), whose own
+behaviour — including the milestone filter rule — is exercised by
+`scripts/test-check-auto-format-workflow.sh`.
 
 A second PR job (`.github/workflows/version-increment.yml`) bumps the
 `lamarck/Cargo.toml` patch version on source changes so remote `runlib`-style

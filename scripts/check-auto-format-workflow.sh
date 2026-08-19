@@ -10,6 +10,8 @@
 #   6. Refuse to push onto a fork's PR branch.
 #   7. Use strict bash (`set -euo pipefail`).
 #   8. Authenticate the push with ACTIONS_PUSH (GITHUB_TOKEN fallback).
+#   9. Include a `milestone/<slug>` glob in the branch filter so milestone
+#      sub-issue PRs are gated too (Issue #168).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +47,22 @@ if grep -qE '^[[:space:]]*pull_request:' "$WORKFLOW"; then
   ok "pull_request trigger present"
 else
   fail "no pull_request trigger — auto-format must only run on PRs"
+fi
+
+# A milestone glob must appear as a real branch entry — either a block
+# sequence item (`- "milestone/**"`) or inside an inline flow sequence
+# (`branches: [Develop, "milestone/**"]`). A prose mention in a comment does
+# not gate anything, so comments deliberately do not satisfy this rule.
+milestone_branch_filter_present() {
+  grep -qE '^[[:space:]]*-[[:space:]]*"?'"'"'?milestone/\*\*?"?'"'"'?[[:space:]]*$' "$WORKFLOW" && return 0
+  grep -qE '^[[:space:]]*branches:[[:space:]]*\[[^]]*milestone/\*' "$WORKFLOW" && return 0
+  return 1
+}
+
+if milestone_branch_filter_present; then
+  ok "milestone branch filter present — milestone/<slug> PRs are gated"
+else
+  fail "no 'milestone/*' branch filter — milestone sub-issue PRs skip this gate (Issue #168)"
 fi
 
 if grep -qE '^[[:space:]]*permissions:[[:space:]]*write-all' "$WORKFLOW"; then
