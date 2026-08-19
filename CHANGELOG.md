@@ -43,9 +43,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   costs that `docs/scorer-call-cost.md` measured on 2026-08-12 and that the
   README itself cites further down the page. The inline figures are gone and
   the step points at that document, the source of truth for both phases. New
-  tests in `lamarck/tests/readme_contract.rs` fail if the scoring steps regrow
-  a timing or drop the link, and if any per-creature cost the README quotes
-  anywhere drifts from the doc's own Result table.
+  `lamarck/tests/readme_scorer_cost_consistency.rs` re-derives the per-phase
+  fits from that document's own Result table and fails if Phase 5 drops the
+  link or states any timing the measurement does not support — whichever side
+  drifts next.
 
 - **`docs/architecture.md` is a pointer instead of a rival architecture doc
   (Issue #173).** Its *Responsibilities*, *Iteration lifecycle* and *Locked
