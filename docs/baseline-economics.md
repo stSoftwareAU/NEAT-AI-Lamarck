@@ -29,7 +29,8 @@ Issue [#8](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/8) — strateg
 Command shape:
 
 ```bash
-# Prefer a private train-data copy (see .run-baseline-economics.sh).
+# Prefer a private train-data copy (or hold .in-use.lock): GRQ node.sh can
+# delete .trainData-binary_* mid-run.
 neat_ai_lamarck \
   ../GRQ-cluster/network.json \
   .lamarck-baseline-45/train-data \
