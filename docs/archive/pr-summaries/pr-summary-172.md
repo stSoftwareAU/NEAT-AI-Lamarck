@@ -1,95 +1,101 @@
-# README Phase 5 scoring costs now defer to the measurement (Issue #172)
+# Phase 5 links the measured scorer costs instead of restating them (Issue #172)
 
 ## Summary
 
-`README.md`'s Phase 5 walkthrough stated the screen call costs "≈0.7–1s/creature
-on GRQ against ≈11s full". Those figures were written in PR #76, before
-issue #112's fixed/marginal cost decomposition existed, and are roughly double the
-measured marginal costs in `docs/scorer-call-cost.md` — **452 ms/creature** for
-the screen phase and **5 490 ms/creature** for the full-corpus promote phase —
-the document the README itself cites as authoritative two sections later.
+`README.md`'s Phase 5 screen step quoted "≈0.7–1s/creature on GRQ against ≈11s
+full". That line was written in PR #76, before the #112 fixed/marginal
+decomposition existed, and was never reconciled against it: the measured
+marginal costs in [`docs/scorer-call-cost.md`](../../scorer-call-cost.md) —
+which the README itself cites as the source of truth further down the page —
+are **452 ms/creature** screening and **5 490 ms/creature** promoting. Both
+inline figures were roughly double the measurement, so a reader anchored on
+whichever they met first was out by ~2× either way.
 
-The inline figures are removed. Phase 5 now describes what the screen call *is*
-(a sampled slice of the corpus rather than all of it) and links
-`docs/scorer-call-cost.md` as the source of truth for what each call costs,
-matching the "link, do not restate" convention the README follows for its other
-measurement documents. Closes #172.
-
-Out of scope and filed separately: `docs/promote-gate.md` carries the same
-pre-#112 figures ("~1 s at 5%", "~11 s/creature") — stSoftwareAU/NEAT-AI-Lamarck#183.
-
-## Evidence
-
-This is a documentation change with no web interface, so there is no screenshot
-to capture. The evidence is the new test, which fails against the old README
-wording and passes against the new one.
-
-Against the pre-fix README (the contradiction the issue reports):
-
-```text
----- phase_five_states_no_timing_the_measurement_contradicts stdout ----
-README Phase 5 states scorer timings docs/scorer-call-cost.md does not measure:
-["`0.7` (= 700 ms)", "`1` (= 1000 ms)", "`11` (= 11000 ms)"]
- — measured ms: [9898.0, 452.0, 1977.0, 5490.0].
-Cite the document rather than restating its numbers.
-
----- phase_five_cites_the_measured_scorer_call_cost_document stdout ----
-README Phase 5 does not link docs/scorer-call-cost.md as the source of scoring costs
-
-test result: FAILED. 9 passed; 2 failed
-```
-
-After the fix:
-
-```text
-cargo test --test readme_scorer_cost_consistency
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-```
-
-Full workspace suite: `cargo test --workspace --all-features -- --test-threads=2`
-— all suites green (405 unit tests plus every integration suite). `cargo fmt
---check`, `cargo clippy` (with `-D warnings`), `cargo deny check` and
-`RUSTDOCFLAGS="-D warnings" cargo doc` all pass. `./quality.sh` stops earlier
-than that on this container because `codespell` is not installed and cannot be
-installed (no `pip`/`pipx` present); CI runs that step for real, and the change
-adds no unusual vocabulary.
-
-Where the numbers come from, and what the test now enforces:
+Following the README's own "link, do not restate" convention, the inline
+figures are dropped and the step points at the measured document instead.
+Closes #172.
 
 ```mermaid
 flowchart LR
-    JOURNAL["run journal<br/>scorerCalls"] --> FIT["least-squares fit<br/>lamarck/src/scorer_cost.rs"]
-    FIT --> DOC["docs/scorer-call-cost.md<br/>Result table<br/>452 ms screen · 5 490 ms promote"]
-    DOC -->|"linked as source of truth"| README["README.md Phase 5"]
-    DOC -->|"parsed at test time"| TEST["readme_scorer_cost_consistency"]
-    README -->|"every timing it states"| TEST
-    TEST -->|"unsupported figure"| FAIL["test fails"]
-
-    classDef source fill:#1f3a5f,stroke:#8ab4f8,color:#ffffff
-    classDef doc fill:#264d3b,stroke:#7ddba3,color:#ffffff
-    classDef gate fill:#5c3a1e,stroke:#f0b37e,color:#ffffff
-    class JOURNAL,FIT source
-    class DOC,README doc
-    class TEST,FAIL gate
+    R["README Phase 5<br/>screen step"] -->|before: restated<br/>≈0.7–1s vs ≈11s| X["two contradicting<br/>numbers"]
+    R2["README Phase 5<br/>screen step"] -->|after: links| D["docs/scorer-call-cost.md<br/>452 ms / 5 490 ms"]
+    R3["README economics<br/>section"] --> D
+    style X fill:#7f1d1d,color:#ffffff
+    style D fill:#14532d,color:#ffffff
 ```
+
+## Evidence
+
+Documentation change with no web interface to screenshot. The evidence is the
+test suite: the three new contract tests fail against the README as it stood
+and pass after the edit.
+
+Before the README edit (`cargo test --test readme_contract`):
+
+```text
+---- phase_five_scoring_steps_restate_no_scorer_timings stdout ----
+the Phase 5 scoring steps restate scorer timings ["0.7–1s", "11s"] —
+link `docs/scorer-call-cost.md` instead of copying its numbers
+
+---- phase_five_scoring_steps_link_the_measured_scorer_call_cost stdout ----
+the Phase 5 scoring steps no longer point at the measured screen/promote costs
+
+---- every_per_creature_cost_the_readme_quotes_matches_the_measurement stdout ----
+README quotes "le-phase <n> …` (≈0.7–1s" (0.7 s/creature), which matches neither
+measured marginal cost in docs/scorer-call-cost.md: [("screen", 0.452), ("promote", 5.49)]
+
+test result: FAILED. 47 passed; 3 failed
+```
+
+After:
+
+```text
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Full workspace suite: `cargo test --workspace --all-features` — 405 + 158
+tests, 0 failures.
+
+### Quality gate
+
+`./quality.sh` stops at the codespell preflight because the container has no
+`pip`/`pipx` to install `codespell` (`spell-check: codespell is not
+installed.`). Every other stage was run individually and passes: bash syntax,
+shellcheck, the TypeScript and workflow gates, `cargo deny check`
+(`advisories ok, bans ok, licenses ok, sources ok`), `cargo fmt --check`,
+`cargo clippy … -D warnings`, `cargo test --workspace --all-features`,
+`cargo doc` with `RUSTDOCFLAGS="-D warnings"`, plus
+`markdownlint-cli2@0.23.2` over all 55 markdown files (0 issues). CI runs the
+codespell stage for real.
 
 ## Test Plan
 
-New `lamarck/tests/readme_scorer_cost_consistency.rs` (11 tests). It parses the
-Result table out of `docs/scorer-call-cost.md` and the Phase 5 body out of
-`README.md` at test time, so it keeps working whichever side changes next.
+New tests in `lamarck/tests/readme_contract.rs`:
 
-- `phase_five_states_no_timing_the_measurement_contradicts` — the regression
-  test. Every duration Phase 5 states must be within 5% of a measured `fixedMs`
-  or `marginalMsPerCreature` from the document's Result table. Reproduces the
-  issue against the old wording (see Evidence above).
-- `phase_five_cites_the_measured_scorer_call_cost_document` — Phase 5 links the
-  measurement rather than leaving a reader to guess.
-- `the_measured_result_table_still_parses_into_per_phase_fits` — guards the
-  check above from passing vacuously if the table is renamed or restructured.
-- Helper coverage (happy path, edges, failure): `section` on a requested,
-  nested and missing heading; `measured_costs` on bolded space-grouped cells and
-  on a table-less section; `durations` on the pre-fix Phase 5 wording (asserting
-  it reads 700 / 1 000 / 11 000 ms), on both `ms` and `s` units mixed with bare
-  numbers and percentages, and on text where a unit letter only starts a word
-  (`0.05 sample`, `1e-6`) plus empty input.
+- `phase_five_scoring_steps_restate_no_scorer_timings` — the Phase 5
+  three-step scoring list contains no `s`/`ms` time figure at all, so the
+  removed numbers cannot creep back in another form.
+- `phase_five_scoring_steps_link_the_measured_scorer_call_cost` — dropping the
+  numbers only helps if the reader is sent somewhere, so the steps must link
+  `docs/scorer-call-cost.md`.
+- `every_per_creature_cost_the_readme_quotes_matches_the_measurement` — the
+  general guard: **every** per-creature cost the README quotes anywhere must be
+  within 25% of a marginal cost parsed out of `docs/scorer-call-cost.md`'s own
+  Result table. The bar is read from the doc rather than hard-coded, so
+  re-measuring the doc moves the bar with it.
+
+Helper unit tests covering the parsing these rest on (happy path, edge cases
+and the error path): `ordered_list_after_returns_items_and_their_continuations`,
+`ordered_list_after_panics_when_no_list_follows`,
+`time_figures_finds_units_and_ignores_bare_numbers` (`0.05`, `5e-2`, `k^-0.5`
+and `#111` are not timings), `trailing_seconds_reads_ranges_and_units`,
+`per_creature_cost_claims_reads_both_phrasings_and_skips_other_creatures`,
+`per_creature_cost_claims_is_empty_without_a_figure`, and
+`measured_marginal_seconds_per_creature_reads_the_result_table`.
+
+## Scope note
+
+The same pre-#112 figures survive in `lamarck/src/config.rs` doc comments and
+in several `docs/*.md` files. `docs/promote-gate.md` is already tracked by
+issue #183; the rest are outside this issue's stated scope and were left
+untouched.

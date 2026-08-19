@@ -36,17 +36,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **The README's Phase 5 scoring costs no longer contradict the measured ones
-  (Issue #172).** Phase 5 quoted "≈0.7–1s/creature on GRQ against ≈11s full",
-  written in PR #76 before the fixed/marginal decomposition of issue #112
-  existed and roughly double the 452 ms screen and 5 490 ms promote marginal
-  costs `docs/scorer-call-cost.md` measures — the document the README itself
-  cites as authoritative two sections later. The inline figures are gone and
-  Phase 5 now links that document as the source of truth, matching the "link,
-  do not restate" convention the README follows for its other measurement docs.
-  New `lamarck/tests/readme_scorer_cost_consistency.rs` re-derives the measured
-  fits from the document's own Result table and fails on any Phase 5 timing
-  they do not support, whichever side drifts next.
+- **Phase 5 links the measured scorer costs instead of restating them (Issue
+  #172).** The README's screen step quoted "≈0.7–1s/creature on GRQ against
+  ≈11s full", written in #76 before the #112 fixed/marginal decomposition
+  existed — roughly double the 452 ms screen and 5 490 ms promote marginal
+  costs that `docs/scorer-call-cost.md` measured on 2026-08-12 and that the
+  README itself cites further down the page. The inline figures are gone and
+  the step points at that document, the source of truth for both phases. New
+  tests in `lamarck/tests/readme_contract.rs` fail if the scoring steps regrow
+  a timing or drop the link, and if any per-creature cost the README quotes
+  anywhere drifts from the doc's own Result table.
+
+- **`docs/architecture.md` is a pointer instead of a rival architecture doc
+  (Issue #173).** Its *Responsibilities*, *Iteration lifecycle* and *Locked
+  contracts* sections restated — thinner, undiagrammed and linked from nowhere
+  — what the README's *Related repositories*, *How a run works* and *Safety
+  invariants* already own, so the two copies drifted with nothing to catch it.
+  The two notes that lived only there (generic code may migrate to NEAT-AI-core
+  once its interfaces stabilise; Lamarck must not duplicate the scorer's
+  authority) and the design-bias framing are folded into the README, the file
+  is now a one-paragraph pointer, and the README's *Repository layout* links
+  it. New `lamarck/tests/architecture_pointer.rs` fails if the pointer regrows
+  sections, loses its README link, if the folded notes disappear, or if any
+  top-level `docs/*.md` becomes orphaned again.
 
 - **Archived PR summary 86's diagram screenshots resolve again (Issue #137).**
   `docs/archive/pr-summaries/pr-summary-86.md` embedded the light/dark Mermaid

@@ -639,12 +639,11 @@ wall-clock null result — is measured in
 Scoring runs in three steps:
 
 1. **Screen** the full candidate directory with
-   `rust_scorer --sample-rate 0.05 --sample-phase <n> …`, which scores a
-   sampled slice of the corpus rather than all of it. The sample phase rotates
-   per experiment. What a screen call costs against a full-corpus one — split
-   into the fixed per-call cost and the marginal per-creature cost — is measured
-   in [`docs/scorer-call-cost.md`](docs/scorer-call-cost.md); that document is
-   the source of truth for these numbers, so they are not restated here.
+   `rust_scorer --sample-rate 0.05 --sample-phase <n> …`. The sample phase
+   rotates per experiment. What a screen call costs against a full-corpus one —
+   fixed per call, marginal per creature — is measured in
+   [`docs/scorer-call-cost.md`](docs/scorer-call-cost.md), the source of truth
+   for both.
 2. **Promote** only stems the promote gate admits into a full-corpus batch, so
    full-corpus time is not spent on sample noise. An empty screen ends the
    experiment without a full-corpus call. Which gate is in force is
