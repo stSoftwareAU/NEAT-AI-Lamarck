@@ -36,6 +36,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`docs/architecture.md` is a pointer instead of a rival architecture doc
+  (Issue #173).** Its *Responsibilities*, *Iteration lifecycle* and *Locked
+  contracts* sections restated — thinner, undiagrammed and linked from nowhere
+  — what the README's *Related repositories*, *How a run works* and *Safety
+  invariants* already own, so the two copies drifted with nothing to catch it.
+  The two notes that lived only there (generic code may migrate to NEAT-AI-core
+  once its interfaces stabilise; Lamarck must not duplicate the scorer's
+  authority) and the design-bias framing are folded into the README, the file
+  is now a one-paragraph pointer, and the README's *Repository layout* links
+  it. New `lamarck/tests/architecture_pointer.rs` fails if the pointer regrows
+  sections, loses its README link, if the folded notes disappear, or if any
+  top-level `docs/*.md` becomes orphaned again.
+
 - **Archived PR summary 86's diagram screenshots resolve again (Issue #137).**
   `docs/archive/pr-summaries/pr-summary-86.md` embedded the light/dark Mermaid
   renderings with repo-root paths (`docs/evidence/…`), which resolve against
