@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **CI installs are pinned to an exact version (Issue #169).**
+  `.github/workflows/markdown-lint.yml` installed `markdownlint-cli2` with no
+  version, so the job ran whatever the registry served at that instant — a
+  hijacked release would have executed on the runner with the workflow's
+  `GITHUB_TOKEN` in scope, with no quarantine window (`uses:` SHA-pinning does
+  not cover `run:` blocks). The install is now pinned to
+  `markdownlint-cli2@0.23.2`, and the new
+  `scripts/check-workflow-npm-pins.sh` gate fails any workflow that installs a
+  package without an exact version, allowing a deliberate float only behind an
+  in-source `# best-practice-ignore: BP-CI-INSTALL-PIN-…` comment. It runs from
+  `./quality.sh` and the CI **Project Validation** job;
+  `scripts/test-check-workflow-npm-pins.sh` pins the gate's own behaviour.
+
 ### Added
 
 - **TypeScript basic-validity gate (Issue #167).** CI never type-checked the

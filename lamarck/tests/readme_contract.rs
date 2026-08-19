@@ -31,8 +31,11 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--test",
     "--user",
     "--workspace",
-    // helper scripts under scripts/ (spell-check.sh, typescript-check.sh)
+    // helper scripts under scripts/ (spell-check.sh, typescript-check.sh,
+    // check-workflow-npm-pins.sh)
     "--root",
+    "--dir",
+    "--verbose",
 ];
 
 /// Text of the README section introduced by `heading`, up to the next `## `.

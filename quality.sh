@@ -54,6 +54,12 @@ echo "Validating auto-format PR workflow (Issue #33)..."
 echo "Validating version-increment PR workflow (runlib / GRQ-taxation)..."
 ./scripts/check-version-increment-workflow.sh
 
+echo "WHAT: workflow install pin gate behaviour (Issue #169)..."
+./scripts/test-check-workflow-npm-pins.sh
+
+echo "Refusing floating package installs in workflow run: blocks (Issue #169)..."
+./scripts/check-workflow-npm-pins.sh
+
 echo "WHAT: lamarck version order (no downgrade vs base)..."
 ./scripts/test-check-lamarck-version-order.sh
 

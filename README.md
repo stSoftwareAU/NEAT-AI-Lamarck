@@ -1345,8 +1345,9 @@ above installed:
 ```
 
 It runs shellcheck, the TypeScript validity gate, the auto-format and
-version-increment workflow validators, codespell, cargo-deny, fmt `--check`,
-clippy with warnings denied, the tests, and rustdoc.
+version-increment workflow validators, the workflow install-pin gate,
+codespell, cargo-deny, fmt `--check`, clippy with warnings denied, the tests,
+and rustdoc.
 
 CI runs on pull requests to `Develop` and includes fmt/clippy/tests/docs,
 cargo-deny, gitleaks, cargo-audit, dependency-review, Semgrep, markdownlint,
@@ -1372,6 +1373,51 @@ or Deno is not installed, `2` invalid invocation. The gate runs locally from
 `./quality.sh` and in CI as the **TypeScript Validity** job, which is part of
 the **CI Required Checks** aggregator. `scripts/test-typescript-check.sh`
 exercises the gate itself against throwaway fixtures.
+
+### Workflow install-pin gate (Issue #169)
+
+`uses:` references are SHA-pinned by policy (Issues #24 and #100), but a `run:`
+block is not a manifest, so no dependency-quarantine tool covers it. A floating
+`npm install -g markdownlint-cli2` would run whatever the registry serves at
+that instant — a hijacked release executes on the runner, with the workflow's
+`GITHUB_TOKEN` in scope, the moment it is published.
+`scripts/check-workflow-npm-pins.sh` therefore requires every package installed
+from a `run:` block to carry an exact version, so a compromised upload cannot
+reach CI until a human bumps the pin in a reviewed PR.
+
+```bash
+./scripts/check-workflow-npm-pins.sh              # .github/workflows
+./scripts/check-workflow-npm-pins.sh --verbose    # list every install found
+./scripts/check-workflow-npm-pins.sh --dir <dir>  # a different directory
+```
+
+Exact SemVer (`markdownlint-cli2@0.23.2`, `@scope/pkg@2.6.1`) passes; ranges
+(`^0.23.0`), dist-tags (`@latest`), workflow expressions and bare package names
+fail. `npm ci` and a bare `npm install` are lockfile installs and are left
+alone. A deliberate float is suppressed in-source, on or above the line:
+
+```yaml
+# best-practice-ignore: BP-CI-INSTALL-PIN-npm-<package> — <reason>
+```
+
+Exit codes: `0` everything pinned, `1` a floating install was found, `2`
+invalid invocation. The gate runs from `./quality.sh` and from the CI
+**Project Validation** job; `scripts/test-check-workflow-npm-pins.sh` pins its
+behaviour against throwaway workflow fixtures.
+
+```mermaid
+flowchart LR
+    A["run: npm install -g pkg"] --> B{"exact pkg@x.y.z?"}
+    B -- yes --> C["pass — reviewed bump only"]
+    B -- no --> D{"best-practice-ignore<br/>comment?"}
+    D -- yes --> C
+    D -- no --> E["fail loud — CI blocked"]
+```
+
+Bumping the pin is an ordinary dependency change: update the version in
+`.github/workflows/markdown-lint.yml`, re-run `./quality.sh`, and land it in a
+reviewed PR. The repository runs no Renovate app, so nothing bumps the pin
+behind your back.
 
 PRs also run an auto-format / housekeeping job
 (`.github/workflows/auto-format.yml`, Issue #33). The job runs
