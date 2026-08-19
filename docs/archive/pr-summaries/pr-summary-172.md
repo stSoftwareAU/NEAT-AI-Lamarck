@@ -3,8 +3,8 @@
 ## Summary
 
 `README.md`'s Phase 5 walkthrough stated the screen call costs "≈0.7–1s/creature
-on GRQ against ≈11s full". Those figures were written in PR #76, before issue
-#112's fixed/marginal cost decomposition existed, and are roughly double the
+on GRQ against ≈11s full". Those figures were written in PR #76, before
+issue #112's fixed/marginal cost decomposition existed, and are roughly double the
 measured marginal costs in `docs/scorer-call-cost.md` — **452 ms/creature** for
 the screen phase and **5 490 ms/creature** for the full-corpus promote phase —
 the document the README itself cites as authoritative two sections later.
