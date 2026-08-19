@@ -91,8 +91,8 @@ the creature.
 ## Related repositories
 
 - [NEAT-AI](https://github.com/stSoftwareAU/NEAT-AI) — TypeScript evolutionary trainer and current backpropagation implementation.
-- [NEAT-AI-core](https://github.com/stSoftwareAU/NEAT-AI-core) — shared Rust creature/network implementation used by this project.
-- [NEAT-AI-scorer](https://github.com/stSoftwareAU/NEAT-AI-scorer) — authoritative Rust scorer. Its directory/batch scoring path evaluates Lamarck candidate populations.
+- [NEAT-AI-core](https://github.com/stSoftwareAU/NEAT-AI-core) — shared Rust creature/network implementation used by this project. Generic Lamarck code may migrate there later, but only after the experiment proves useful and its interfaces stabilise.
+- [NEAT-AI-scorer](https://github.com/stSoftwareAU/NEAT-AI-scorer) — authoritative Rust scorer. Its directory/batch scoring path evaluates Lamarck candidate populations, and it alone decides whether a candidate is fitter: Lamarck must not duplicate this authority.
 
 This repository follows the Rust workspace/tooling conventions of
 NEAT-AI-scorer where practical.
@@ -123,7 +123,9 @@ Lamarck runs alongside the normal evolutionary system on other machines, so the
 supplied creature is **perishable**: while Lamarck works, evolution may discover
 a new global champion elsewhere. The default wall-clock budget is therefore
 **45 minutes** (`--timeout-seconds 2700`), and cheap repeatable experiments are
-preferred over one expensive analysis that eats the window.
+preferred over one expensive analysis that eats the window. That is the design
+bias throughout: an analysis earns its place only when its expected value
+justifies the share of the run budget it consumes.
 
 ### Production scale target
 
@@ -1283,6 +1285,11 @@ NEAT-AI-Lamarck/
     ├── width.rs             # input/output observation-width guard (issue #165)
     └── log.rs
 ```
+
+`docs/` holds the measurement write-ups linked throughout this README; the one
+exception is [`docs/architecture.md`](docs/architecture.md), a pointer back
+here, because this README is the single source of truth for the architecture
+(Issue #173).
 
 ## Development rules
 
