@@ -167,6 +167,12 @@ jobs:
       - name: Gate on unhandled breaking neat-core bump
         run: ./scripts/check-neat-core-version.sh
 
+      - name: WHAT — workflow install pin gate behaviour (Issue #169)
+        run: ./scripts/test-check-workflow-npm-pins.sh
+
+      - name: Refuse floating package installs in workflow steps (Issue #169)
+        run: ./scripts/check-workflow-npm-pins.sh
+
   shell-checks:
     name: Shell Script Quality
     runs-on: ubuntu-latest

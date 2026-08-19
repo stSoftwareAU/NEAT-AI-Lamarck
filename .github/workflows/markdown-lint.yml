@@ -57,8 +57,13 @@ jobs:
         with:
           node-version: "lts/*"
 
+      # Issue #169: pinned to an exact version. A `run:` block is not a
+      # manifest, so no dependency-quarantine tool covers it — a floating
+      # install would execute whatever the registry serves at that instant,
+      # with this workflow's token in scope. `scripts/check-workflow-npm-pins.sh`
+      # enforces the pin; bump the version here in a reviewed PR.
       - name: Install markdownlint-cli2
-        run: npm install -g markdownlint-cli2
+        run: npm install -g markdownlint-cli2@0.23.2
 
       - name: Run markdownlint-cli2
         run: markdownlint-cli2
