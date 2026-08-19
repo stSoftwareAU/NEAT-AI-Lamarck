@@ -1313,6 +1313,8 @@ the build work.
 - **shellcheck** — lints bash scripts
 - **cargo-deny** — `cargo install cargo-deny --locked`
 - **codespell** — `pip install --user codespell`
+- **Deno** — type-checks the repository's TypeScript helper scripts
+  (`curl -fsSL https://deno.land/install.sh | sh`)
 
 ### Cargo profiles (Issue #153)
 
@@ -1342,14 +1344,34 @@ above installed:
 ./quality.sh < /dev/null
 ```
 
-It runs shellcheck, the auto-format and version-increment workflow validators,
-codespell, cargo-deny, fmt `--check`, clippy with warnings denied, the tests,
-and rustdoc.
+It runs shellcheck, the TypeScript validity gate, the auto-format and
+version-increment workflow validators, codespell, cargo-deny, fmt `--check`,
+clippy with warnings denied, the tests, and rustdoc.
 
 CI runs on pull requests to `Develop` and includes fmt/clippy/tests/docs,
 cargo-deny, gitleaks, cargo-audit, dependency-review, Semgrep, markdownlint,
 actionlint, SBOM, shellcheck, and codespell. Branch protection should require
 the aggregator check **CI Required Checks**.
+
+### TypeScript validity gate (Issue #167)
+
+The repository is Rust-first, but it carries TypeScript helper scripts (for
+example [`scripts/generate_backprop_parity_fixtures.ts`](./scripts/generate_backprop_parity_fixtures.ts)).
+`scripts/typescript-check.sh` type-checks every `.ts` source with `deno check`
+so a syntax or type error cannot land on `Develop` unnoticed — basic validity
+only, not style or lint. It skips `target/`, `node_modules/` and `.git/`, and
+fails loudly when Deno is missing rather than reporting a vacuous pass.
+
+```bash
+./scripts/typescript-check.sh                 # repository root
+./scripts/typescript-check.sh --root <dir>    # a different directory
+```
+
+Exit codes: `0` valid (or nothing to check), `1` a source failed `deno check`
+or Deno is not installed, `2` invalid invocation. The gate runs locally from
+`./quality.sh` and in CI as the **TypeScript Validity** job, which is part of
+the **CI Required Checks** aggregator. `scripts/test-typescript-check.sh`
+exercises the gate itself against throwaway fixtures.
 
 PRs also run an auto-format / housekeeping job
 (`.github/workflows/auto-format.yml`, Issue #33). The job runs
