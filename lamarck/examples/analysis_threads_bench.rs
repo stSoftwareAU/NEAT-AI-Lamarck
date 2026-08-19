@@ -11,7 +11,6 @@
 //! cargo run --release --example analysis_threads_bench -- [RECORDS] [INPUTS] [HIDDEN] [REPEATS] [THREADS,...]
 //! ```
 
-use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
@@ -22,55 +21,10 @@ use neat_core::{CreatureExport, compile_creature, parse_creature_json};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
+mod support;
+use support::{creature_json, write_sample};
+
 const FOCUS: &str = "o1";
-
-/// Synthetic creature: `inputs` inputs, `hidden` TANH hiddens, one output.
-fn creature_json(inputs: usize, hidden: usize) -> String {
-    let mut neurons = String::new();
-    let mut synapses = String::new();
-    for h in 0..hidden {
-        if h > 0 {
-            neurons.push(',');
-        }
-        let bias = (h as f64 % 7.0) * 0.01 - 0.03;
-        neurons.push_str(&format!(
-            r#"{{"type":"hidden","uuid":"h{h}","bias":{bias},"squash":"TANH"}}"#
-        ));
-        for k in 0..4 {
-            let i = (h * 4 + k) % inputs;
-            let weight = 0.05 + ((h + k) as f64 % 11.0) * 0.01;
-            synapses.push_str(&format!(
-                r#"{{"fromUUID":"input-{i}","toUUID":"h{h}","weight":{weight}}},"#
-            ));
-        }
-        synapses.push_str(&format!(
-            r#"{{"fromUUID":"h{h}","toUUID":"o1","weight":{}}},"#,
-            0.02 + (h as f64 % 5.0) * 0.01
-        ));
-    }
-    let synapses = synapses.trim_end_matches(',');
-    format!(
-        r#"{{"semanticVersion":"4.0.0","forwardOnly":true,"input":{inputs},"output":1,
-           "neurons":[{neurons},{{"type":"output","uuid":"o1","bias":0.01,"squash":"IDENTITY"}}],
-           "synapses":[{synapses}]}}"#
-    )
-}
-
-/// Deterministic xorshift sample: `inputs` inputs + one target per record.
-fn write_sample(dir: &Path, records: usize, inputs: usize) {
-    let mut file = std::io::BufWriter::new(std::fs::File::create(dir.join("0.bin")).unwrap());
-    let mut state = 0x2545_F491_4F6C_DD1Du64;
-    for _ in 0..records {
-        for _ in 0..=inputs {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let v = ((state >> 11) as f64 / (1u64 << 53) as f64) as f32 * 2.0 - 1.0;
-            file.write_all(&v.to_le_bytes()).unwrap();
-        }
-    }
-    file.flush().unwrap();
-}
 
 /// One timed analysis phase: both fused scans at `threads` workers.
 fn analysis(

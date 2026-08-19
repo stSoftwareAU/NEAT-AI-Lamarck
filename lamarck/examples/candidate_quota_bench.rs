@@ -27,42 +27,10 @@ use neat_core::{CreatureExport, parse_creature_json};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-const FOCUS: &str = "o1";
+mod support;
+use support::creature_json;
 
-/// Synthetic creature: `inputs` inputs, `hidden` TANH hiddens, one output.
-///
-/// Only the hiddens feed the output, so every input is an unused ranked source
-/// the generator may propose — the production shape the ceiling was measured on.
-fn creature_json(inputs: usize, hidden: usize) -> String {
-    let mut neurons = String::new();
-    let mut synapses = String::new();
-    for h in 0..hidden {
-        if h > 0 {
-            neurons.push(',');
-        }
-        let bias = (h as f64 % 7.0) * 0.01 - 0.03;
-        neurons.push_str(&format!(
-            r#"{{"type":"hidden","uuid":"h{h}","bias":{bias},"squash":"TANH"}}"#
-        ));
-        for k in 0..4 {
-            let i = (h * 4 + k) % inputs;
-            let weight = 0.05 + ((h + k) as f64 % 11.0) * 0.01;
-            synapses.push_str(&format!(
-                r#"{{"fromUUID":"input-{i}","toUUID":"h{h}","weight":{weight}}},"#
-            ));
-        }
-        synapses.push_str(&format!(
-            r#"{{"fromUUID":"h{h}","toUUID":"o1","weight":{}}},"#,
-            0.02 + (h as f64 % 5.0) * 0.01
-        ));
-    }
-    let synapses = synapses.trim_end_matches(',');
-    format!(
-        r#"{{"semanticVersion":"4.0.0","forwardOnly":true,"input":{inputs},"output":1,
-           "neurons":[{neurons},{{"type":"output","uuid":"o1","bias":0.01,"squash":"IDENTITY"}}],
-           "synapses":[{synapses}]}}"#
-    )
-}
+const FOCUS: &str = "o1";
 
 fn scalar() -> ScalarStats {
     ScalarStats {

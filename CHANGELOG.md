@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The synthetic bench fixture is defined once instead of six times (Issue
+  #138).** `creature_json()` was copy-pasted into six example benches,
+  `write_sample()` into five and the in-process `LocalMseScorer` into two, so a
+  change to the measured creature or to the deterministic xorshift corpus had
+  to land identically on every copy or the arms compared in
+  `docs/followup-economics.md`, `docs/baseline-reuse.md` and the README's
+  thread-scaling table would silently stop being comparable. All three now live
+  in `lamarck/examples/support/mod.rs`, which each bench pulls in with
+  `mod support;`. New `lamarck/tests/bench_support.rs` pins the fixture's
+  output — the creature shape and the corpus bytes — so drift fails a test
+  rather than the numbers.
+
 - **`CONTRIBUTING.md` no longer maintains the build/gate instructions a second
   time (Issue #136).** The sibling-clone layout, prerequisites, `./quality.sh`
   gate, cargo profiles and the Auto Format / Version Increment workflow
