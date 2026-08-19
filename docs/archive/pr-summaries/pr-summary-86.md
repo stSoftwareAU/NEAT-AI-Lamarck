@@ -27,11 +27,11 @@ GitHub uses), which also proves the block parses:
 
 Light theme:
 
-![Core principle flowchart, light theme](docs/evidence/core-principle-mermaid-light.png)
+![Core principle flowchart, light theme](../../evidence/core-principle-mermaid-light.png)
 
 Dark theme (`-t dark -b #0d1117`):
 
-![Core principle flowchart, dark theme](docs/evidence/core-principle-mermaid-dark.png)
+![Core principle flowchart, dark theme](../../evidence/core-principle-mermaid-dark.png)
 
 `./quality.sh` passes (fmt, clippy, cargo-deny, codespell, full test suite), and
 `markdownlint-cli2` reports 0 errors across the 16 markdown files.

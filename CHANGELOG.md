@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Archived PR summary 86's diagram screenshots resolve again (Issue #137).**
+  `docs/archive/pr-summaries/pr-summary-86.md` embedded the light/dark Mermaid
+  renderings with repo-root paths (`docs/evidence/…`), which resolve against
+  the summary's own directory and so pointed at a non-existent
+  `docs/archive/pr-summaries/docs/evidence/…`; both are now `../../evidence/…`.
+  New `lamarck/tests/docs_link_targets.rs` walks every markdown file in the
+  repo and fails on any relative link or image target that does not resolve
+  from its own file.
+
 - **The synthetic bench fixture is defined once instead of six times (Issue
   #138).** `creature_json()` was copy-pasted into six example benches,
   `write_sample()` into five and the in-process `LocalMseScorer` into two, so a
