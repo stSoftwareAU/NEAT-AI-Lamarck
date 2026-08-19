@@ -1290,6 +1290,10 @@ NEAT-AI-Lamarck/
 
 ## Build and quality gate
 
+This section is the single source of truth for building and gating the
+repository; [`CONTRIBUTING.md`](./CONTRIBUTING.md) links here rather than
+keeping a second copy (Issue #136).
+
 Clone **NEAT-AI-core** beside this repository:
 
 ```text
@@ -1297,6 +1301,17 @@ parent/
   NEAT-AI-core/
   NEAT-AI-Lamarck/
 ```
+
+The `neat-core` path dependency in [`lamarck/Cargo.toml`](./lamarck/Cargo.toml)
+resolves to `../../NEAT-AI-core/neat-core`, so the sibling layout is what makes
+the build work.
+
+### Prerequisites
+
+- **Rust** — pinned in [`rust-toolchain.toml`](./rust-toolchain.toml)
+- **shellcheck** — lints bash scripts
+- **cargo-deny** — `cargo install cargo-deny --locked`
+- **codespell** — `pip install --user codespell`
 
 ### Cargo profiles (Issue #153)
 
@@ -1319,14 +1334,16 @@ cargo build                  # fast rebuilds while developing
 cargo build --release        # production / GRQ host binary
 ```
 
-Local gate (mirrors CI):
+Local gate (mirrors CI) — run it before opening a PR, with the prerequisites
+above installed:
 
 ```bash
 ./quality.sh < /dev/null
 ```
 
-Requires **shellcheck**, **cargo-deny** (`cargo install cargo-deny --locked`),
-and **codespell** (`pip install --user codespell`).
+It runs shellcheck, the auto-format and version-increment workflow validators,
+codespell, cargo-deny, fmt `--check`, clippy with warnings denied, the tests,
+and rustdoc.
 
 CI runs on pull requests to `Develop` and includes fmt/clippy/tests/docs,
 cargo-deny, gitleaks, cargo-audit, dependency-review, Semgrep, markdownlint,
