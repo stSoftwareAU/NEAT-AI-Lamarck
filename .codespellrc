@@ -2,4 +2,4 @@
 # (`scripts/spell-check.sh`). Keep this file as the single source of truth.
 [codespell]
 skip = ./target,./.git,./Cargo.lock
-ignore-words-list = lamarck
+ignore-words-list = lamarck,xorshift,hiddens,unparseable
