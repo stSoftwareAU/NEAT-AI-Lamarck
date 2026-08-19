@@ -45,6 +45,9 @@ else
   echo "sibling ../NEAT-AI-core not found — skipping neat-core version gate (CI runs this for real)"
 fi
 
+echo "WHAT: auto-format workflow validator behaviour (Issue #168)..."
+./scripts/test-check-auto-format-workflow.sh
+
 echo "Validating auto-format PR workflow (Issue #33)..."
 ./scripts/check-auto-format-workflow.sh
 

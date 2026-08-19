@@ -18,6 +18,10 @@ on:
     types: [opened, synchronize, reopened]
     branches:
       - Develop
+      # Milestone sub-issue PRs target a shared `milestone/<slug>` branch and
+      # merge without ever touching Develop, so without this glob they skip
+      # auto-format entirely (Issue #168). `**` matches nested names too.
+      - "milestone/**"
     paths-ignore:
       - "**.md"
       - "docs/**"
