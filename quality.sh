@@ -32,6 +32,12 @@ if [[ "$SHELLCHECK_FAILED" -ne 0 ]]; then
 fi
 echo "shellcheck: all scripts passed"
 
+echo "WHAT: TypeScript validity gate behaviour (Issue #167)..."
+./scripts/test-typescript-check.sh
+
+echo "Type-checking TypeScript sources (Issue #167)..."
+./scripts/typescript-check.sh
+
 if [ -f "./../NEAT-AI-core/Cargo.toml" ]; then
   echo "Gating on unhandled breaking neat-core bump..."
   ./scripts/check-neat-core-version.sh

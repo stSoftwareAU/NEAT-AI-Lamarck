@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **TypeScript basic-validity gate (Issue #167).** CI never type-checked the
+  repository's TypeScript helper scripts, so a syntax or type error in
+  `scripts/generate_backprop_parity_fixtures.ts` could land on `Develop`
+  unnoticed. New `scripts/typescript-check.sh` runs `deno check` over every
+  `.ts` source (skipping `target/`, `node_modules/` and `.git/`) and fails
+  loudly when Deno is absent instead of reporting a vacuous pass. It runs from
+  `./quality.sh` and from the new **TypeScript Validity** CI job, which is
+  gated by the **CI Required Checks** aggregator.
+  `scripts/test-typescript-check.sh` pins the gate's own behaviour — broken
+  sources fail, valid sources pass.
+
 ### Fixed
 
 - **Archived PR summary 86's diagram screenshots resolve again (Issue #137).**
