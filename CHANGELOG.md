@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`CONTRIBUTING.md` no longer maintains the build/gate instructions a second
+  time (Issue #136).** The sibling-clone layout, prerequisites, `./quality.sh`
+  gate, cargo profiles and the Auto Format / Version Increment workflow
+  descriptions lived in both `CONTRIBUTING.md` and the README's *Build and
+  quality gate* section, with nothing keeping the two in step. The README is
+  now the single copy — it absorbed the `neat-core` path-dependency resolution
+  and the prerequisites list — and `CONTRIBUTING.md` links into it, keeping
+  only the contributor-specific version-bump and CHANGELOG habits. New
+  `lamarck/tests/contributing_contract.rs` fails on any restated prose, shared
+  fenced block, README-owned build fact or dangling README anchor.
 - **`input < 1` / `output < 1` creatures are refused on load and on write
   (Issue #165).** The top-level `input` / `output` integers are the observation
   width and cannot be re-derived — `neurons` lists only non-input neurons — so
