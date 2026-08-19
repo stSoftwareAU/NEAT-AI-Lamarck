@@ -1248,6 +1248,7 @@ NEAT-AI-Lamarck/
 ├── .github/workflows/   # scorer-aligned quality gates
 ├── scripts/
 ├── docs/                # … measurement docs — see links throughout this README
+├── lamarck/examples/    # paired benches; support/mod.rs is their shared fixture (issue #138)
 └── lamarck/src/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
