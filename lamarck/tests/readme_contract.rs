@@ -580,6 +580,94 @@ fn outstanding_work_no_longer_lists_the_stopping_rules_gap() {
     );
 }
 
+/// The README preamble — everything before the first `## ` heading.
+fn preamble(readme: &str) -> &str {
+    match readme.find("\n## ") {
+        Some(end) => &readme[..end],
+        None => readme,
+    }
+}
+
+/// The blank-line-delimited paragraph holding the first occurrence of `needle`.
+fn paragraph_containing<'a>(text: &'a str, needle: &str) -> &'a str {
+    let at = text
+        .find(needle)
+        .unwrap_or_else(|| panic!("text has no occurrence of `{needle}`"));
+    let start = text[..at].rfind("\n\n").map_or(0, |i| i + 2);
+    let end = text[at..].find("\n\n").map_or(text.len(), |i| at + i);
+    &text[start..end]
+}
+
+/// NEAT is the algorithm this optimiser builds on, so the acronym must be
+/// expanded — and linked — before any section uses it (Issue #135).
+#[test]
+fn readme_expands_neat_before_the_first_section() {
+    let readme = readme_text();
+    let preamble = preamble(&readme).to_lowercase();
+    assert!(
+        preamble.contains("neuroevolution of augmenting topologies"),
+        "README.md never expands the NEAT acronym in its opening section"
+    );
+    assert!(
+        preamble.contains("en.wikipedia.org/wiki/neuroevolution_of_augmenting_topologies"),
+        "the NEAT expansion is not linked to its reference page"
+    );
+}
+
+/// GRQ is a private system named nowhere else in this repository, so its first
+/// use has to say what it is (Issue #135).
+#[test]
+fn readme_glosses_grq_where_it_is_first_used() {
+    let readme = readme_text();
+    let paragraph = paragraph_containing(&readme, "GRQ").to_lowercase();
+    for phrase in ["private", "production system"] {
+        assert!(
+            paragraph.contains(phrase),
+            "the paragraph first using GRQ omits {phrase:?} — a reader is left to guess what GRQ is"
+        );
+    }
+}
+
+/// `squash` is neat-core's name for a neuron's activation function, so its
+/// first use has to gloss it (Issue #135).
+#[test]
+fn readme_glosses_squash_where_it_is_first_used() {
+    let readme = readme_text();
+    let paragraph = paragraph_containing(&readme, "squash").to_lowercase();
+    for phrase in ["activation", "squashing"] {
+        assert!(
+            paragraph.contains(phrase),
+            "the paragraph first using `squash` omits {phrase:?} — the term is never glossed"
+        );
+    }
+}
+
+#[test]
+fn preamble_stops_at_the_first_section() {
+    let readme = "# T\n\nintro\n\n## A\n\nalpha\n";
+    assert!(preamble(readme).contains("intro"));
+    assert!(!preamble(readme).contains("alpha"));
+}
+
+#[test]
+fn preamble_returns_everything_when_there_are_no_sections() {
+    assert_eq!(preamble("# T\n\nintro\n"), "# T\n\nintro\n");
+}
+
+#[test]
+fn paragraph_containing_returns_only_the_matching_paragraph() {
+    let text = "alpha one\n\nbeta two\nbeta three\n\ngamma four\n";
+    assert_eq!(paragraph_containing(text, "alpha"), "alpha one");
+    assert_eq!(paragraph_containing(text, "beta"), "beta two\nbeta three");
+    assert_eq!(paragraph_containing(text, "gamma"), "gamma four\n");
+}
+
+#[test]
+#[should_panic(expected = "no occurrence of `missing`")]
+fn paragraph_containing_panics_when_the_term_is_absent() {
+    paragraph_containing("alpha\n", "missing");
+}
+
 #[test]
 fn section_returns_only_the_requested_section() {
     let readme = "# T\n\n## A\n\nalpha\n\n## B\n\nbeta\n";

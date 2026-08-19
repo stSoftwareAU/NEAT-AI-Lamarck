@@ -5,6 +5,9 @@
 > Experimental: teaching evolved NEAT-AI creatures that what they learn in life can be inherited. Adventurous mutations, sceptical scorer — Lamarck would be proud.
 
 NEAT-AI-Lamarck is an experimental Rust optimiser for already-fit [NEAT-AI](https://github.com/stSoftwareAU/NEAT-AI) creatures.
+NEAT is [NeuroEvolution of Augmenting Topologies](https://en.wikipedia.org/wiki/Neuroevolution_of_augmenting_topologies),
+the algorithm that evolves a network's weights *and* its topology; NEAT-AI is
+the TypeScript trainer that implements it here.
 
 It does **not** replace normal NEAT evolution. It takes the current fittest
 creature, studies how that creature behaves across the training data, generates
@@ -18,8 +21,10 @@ adventurous, but acceptance is not.
 ## Status
 
 The optimiser described below is **built and running** against production
-GRQ-scale creatures. The whole spine exists — Phase-0 parity gate, observations
-cache, focus selection, backprop learning signals, nine candidate strategies,
+GRQ-scale creatures — GRQ is the private production system whose evolved
+trading models (the *creatures* here) this optimiser tunes; nothing in this
+repository needs access to it. The whole spine exists — Phase-0 parity gate,
+observations cache, focus selection, backprop learning signals, nine candidate strategies,
 two-phase screen/promote scoring, candidate combos, structural graft memory,
 the experiment journal and the `report` subcommand.
 
@@ -506,6 +511,9 @@ A hidden neuron has no natural target — blame comes from the propagated learni
 signal, never an invented `expected_hidden - actual_hidden`.
 
 #### Aggregate neurons (MINIMUM / MAXIMUM / IF)
+
+A neuron's *squash* is its activation ("squashing") function — `TANH` on a
+typical hidden neuron; `MINIMUM`, `MAXIMUM` and `IF` are squashes too.
 
 neat-core's reverse-topological loop hands aggregate squashes back as
 `PropagateOutcome::Special` and stops there — the TypeScript trainer runs a
