@@ -36,6 +36,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The README's Phase 5 scoring costs no longer contradict the measured ones
+  (Issue #172).** Phase 5 quoted "≈0.7–1s/creature on GRQ against ≈11s full",
+  written in PR #76 before the fixed/marginal decomposition of issue #112
+  existed and roughly double the 452 ms screen and 5 490 ms promote marginal
+  costs `docs/scorer-call-cost.md` measures — the document the README itself
+  cites as authoritative two sections later. The inline figures are gone and
+  Phase 5 now links that document as the source of truth, matching the "link,
+  do not restate" convention the README follows for its other measurement docs.
+  New `lamarck/tests/readme_scorer_cost_consistency.rs` re-derives the measured
+  fits from the document's own Result table and fails on any Phase 5 timing
+  they do not support, whichever side drifts next.
+
 - **Archived PR summary 86's diagram screenshots resolve again (Issue #137).**
   `docs/archive/pr-summaries/pr-summary-86.md` embedded the light/dark Mermaid
   renderings with repo-root paths (`docs/evidence/…`), which resolve against
