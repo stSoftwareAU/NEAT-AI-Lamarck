@@ -5,20 +5,24 @@
 //! that decays: the tooling it points at going away, the report fields it
 //! quotes being renamed, and — the review-time gate against a confident
 //! recommendation drawn from two accepts — its limits section being deleted.
+//!
+//! *The two gates* also used to price the two scorer calls inline, at figures
+//! predating issue #112's fixed/marginal decomposition (Issue #183), so the
+//! same "no timing the measurement contradicts" contract the README carries is
+//! asserted here over that section.
 
+mod common;
+
+use common::{measured_scorer_costs_ms, read, repo_path, section, timings_contradicting};
 use neat_ai_lamarck::report::JournalReport;
-use std::path::{Path, PathBuf};
-
-fn repo_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(relative)
-}
 
 fn doc() -> String {
-    let path = repo_path("docs/promote-gate.md");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+    read("docs/promote-gate.md")
+}
+
+/// The section that introduces the screen-versus-promote economics.
+fn two_gates_section() -> String {
+    section(&doc(), "\n## The two gates").to_string()
 }
 
 /// The document tells the reader to run these, so they have to exist.
@@ -104,6 +108,32 @@ fn the_document_states_what_the_replay_cannot_support() {
             "docs/promote-gate.md dropped the limit: {claim}"
         );
     }
+}
+
+/// Every timing *The two gates* states must be one `docs/scorer-call-cost.md`
+/// measured — prose and Mermaid labels alike (Issue #183).
+#[test]
+fn the_two_gates_section_states_no_timing_the_measurement_contradicts() {
+    let supported = measured_scorer_costs_ms();
+    let contradicted = timings_contradicting(&two_gates_section(), &supported);
+
+    assert!(
+        contradicted.is_empty(),
+        "docs/promote-gate.md `## The two gates` states scorer timings \
+         docs/scorer-call-cost.md does not measure: {contradicted:?} — measured ms: \
+         {supported:?}. Cite the document rather than restating its numbers."
+    );
+}
+
+/// The section exists to explain why a full-corpus score is worth screening
+/// for, so it has to point at what that call actually costs.
+#[test]
+fn the_two_gates_section_cites_the_measured_scorer_call_cost_document() {
+    assert!(
+        two_gates_section().contains("scorer-call-cost.md"),
+        "docs/promote-gate.md `## The two gates` does not link docs/scorer-call-cost.md \
+         as the source of the screen-versus-promote cost"
+    );
 }
 
 /// A `report` over no experiments at all — the shape check above needs one.

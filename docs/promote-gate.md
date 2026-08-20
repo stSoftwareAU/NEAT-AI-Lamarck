@@ -10,8 +10,9 @@ say it would have done, and what the paired benchmark measured.
 ## The two gates
 
 The screen phase scores the candidate batch on a 5% stratified subsample and
-decides which stems earn a full-corpus score — the expensive call, ~11 s per
-creature against ~1 s at 5%.
+decides which stems earn a full-corpus score — the expensive call. What each
+one costs, fixed per call and marginal per creature, is measured in
+[`docs/scorer-call-cost.md`](scorer-call-cost.md), the source of truth for both.
 
 ```mermaid
 flowchart LR
@@ -19,7 +20,7 @@ flowchart LR
     GATE -->|"absolute (default)"| ABS["Δ > 1e-6"]
     GATE -->|"noise-aware"| SIG["σ̂ = q25(|Δ|) / 0.3186"]
     SIG --> NA["Δ > max(k · σ̂, 1e-6)"]
-    ABS --> FULL[["full-corpus score<br/>~11 s/creature"]]
+    ABS --> FULL[["full-corpus score"]]
     NA --> FULL
     ABS -.-> DROP["dropped"]
     NA -.-> DROP

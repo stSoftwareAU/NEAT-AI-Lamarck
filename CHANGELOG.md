@@ -36,6 +36,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`docs/promote-gate.md` links the measured scorer costs instead of
+  restating them (Issue #183).** *The two gates* priced the full-corpus call at
+  "~11 s per creature against ~1 s at 5%" and its Mermaid diagram labelled the
+  full-corpus node `~11 s/creature` — both pre-#112 figures, roughly double the
+  452 ms screen and 5 490 ms promote marginal costs `docs/scorer-call-cost.md`
+  measured on 2026-08-12. The inline figures are gone and the section points at
+  that document, as #172 did for the README's Phase 5. The same "no timing the
+  measurement contradicts" check now guards this section from
+  `lamarck/tests/promote_gate_doc.rs`, sharing its Result-table parsing with
+  `lamarck/tests/readme_scorer_cost_consistency.rs` through the new
+  `lamarck/tests/common/mod.rs`.
+
 - **Phase 5 links the measured scorer costs instead of restating them (Issue
   #172).** The README's screen step quoted "≈0.7–1s/creature on GRQ against
   ≈11s full", written in #76 before the #112 fixed/marginal decomposition
