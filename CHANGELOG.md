@@ -36,6 +36,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Phase 5 links the measured scorer costs instead of restating them (Issue
+  #172).** The README's screen step quoted "≈0.7–1s/creature on GRQ against
+  ≈11s full", written in #76 before the #112 fixed/marginal decomposition
+  existed — roughly double the 452 ms screen and 5 490 ms promote marginal
+  costs that `docs/scorer-call-cost.md` measured on 2026-08-12 and that the
+  README itself cites further down the page. The inline figures are gone and
+  the step points at that document, the source of truth for both phases. New
+  `lamarck/tests/readme_scorer_cost_consistency.rs` re-derives the per-phase
+  fits from that document's own Result table and fails if Phase 5 drops the
+  link or states any timing the measurement does not support — whichever side
+  drifts next.
+
 - **`docs/architecture.md` is a pointer instead of a rival architecture doc
   (Issue #173).** Its *Responsibilities*, *Iteration lifecycle* and *Locked
   contracts* sections restated — thinner, undiagrammed and linked from nowhere
