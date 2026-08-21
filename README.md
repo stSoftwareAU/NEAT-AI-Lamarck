@@ -815,6 +815,30 @@ with the creature's `uuid`/`tags` re-attached and a run-summary `lamarck` tag,
 a copy is kept under `winners/`, structural accepts are recorded into the graft
 store, and creature-specific analysis is recomputed next iteration.
 
+**Provenance survives the write.** `CreatureExport` carries neither the
+creature's `tags` nor `neurons[].tags`, so both are read off the source JSON
+once at start-up and re-attached to every check-in document Lamarck writes —
+`best.json`, `winners/`, and the scorer-facing `baseline.json` of each batch.
+Per-neuron tags are keyed by neuron `uuid`, never by position, because growth
+inserts and reorders neurons between writes; a neuron the source never tagged
+gains no `tags` key. Neurons **Lamarck itself grows** have no source provenance
+to keep, so they carry their own `lamarck` tag naming the strategy that grew
+them, the focus neuron they were grown for and the experiment that accepted
+them — e.g. `🦒 Lamarck · grown by 🧩 structural_add_neuron · 🎯 o1 · exp 42`.
+Neurons inherited from the source are never restamped: another program's
+`discovered` / `discovery-comment` / `intelligentDesign` tags are its own.
+
+```mermaid
+flowchart LR
+    S["source creature.json<br/>tags + neurons[].tags"] --> M["CreatureMeta<br/>tags + neuron_tags{uuid → tags}"]
+    S --> C["CreatureExport<br/>(tags stripped)"]
+    C --> G["growth adds a neuron"]
+    G -->|stamp origin| M
+    C --> W["serialize_creature_with_meta"]
+    M -->|re-attach by uuid| W
+    W --> B["best.json / winners/"]
+```
+
 ### Phase 6 — repeat until a stopping rule fires
 
 The loop keeps selecting neurons and testing candidates until the first of four

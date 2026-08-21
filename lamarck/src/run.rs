@@ -45,7 +45,7 @@ use crate::scorer::{
 };
 use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
 use crate::structural::{is_input_source, rank_unused_sources};
-use crate::tags::{CreatureMeta, LamarckProgress, serialize_creature_with_meta};
+use crate::tags::{CreatureMeta, LamarckProgress, NeuronOrigin, serialize_creature_with_meta};
 use crate::width::{assert_same_width, checked_creature_json_pretty, load_creature};
 use neat_core::{TrainingDataConfig, compile_creature};
 use rand::SeedableRng;
@@ -1220,7 +1220,18 @@ pub fn run_optimisation_cancellable(
             Ok(replay) => {
                 let mut graft_accepted = false;
                 if replay.grafts_applied > 0 {
-                    incumbent = replay.creature;
+                    let pre_graft = std::mem::replace(&mut incumbent, replay.creature);
+                    // A replayed graft's neurons are Lamarck's own growth, so
+                    // they carry their own provenance tag (issue #187).
+                    creature_meta.stamp_new_neurons(
+                        &pre_graft,
+                        &incumbent,
+                        &NeuronOrigin {
+                            strategy: CandidateStrategy::StructuralAdd,
+                            focus_neuron: "(graft-replay)",
+                            experiment: experiments,
+                        },
+                    );
                     // Phase-G rewrites the incumbent before the loop starts —
                     // anything cached against the pre-graft creature is stale.
                     analysis_memo.invalidate();
@@ -2369,6 +2380,17 @@ pub fn run_optimisation_cancellable(
                 strategy,
                 experiments,
             });
+            // Neurons the winner grew are Lamarck's, so they get their own
+            // provenance tag; the ones it inherited keep theirs (issue #187).
+            creature_meta.stamp_new_neurons(
+                &previous,
+                &incumbent,
+                &NeuronOrigin {
+                    strategy,
+                    focus_neuron: &winner_focus,
+                    experiment: experiments,
+                },
+            );
             let tagged = serialize_creature_with_meta(&incumbent, &creature_meta)?;
             log::detail(&format!(
                 "🏷️  {}",
@@ -3362,6 +3384,208 @@ mod tests {
         assert_eq!(best["output"], source["output"]);
         assert_eq!(best["input"], 1);
         assert_eq!(best["output"], 1);
+    }
+
+    /// `tiny_setup` with discovery / intelligentDesign provenance on both
+    /// neurons — the shape a GRQ-sampler creature arrives in (issue #187).
+    fn tiny_neuron_tagged_setup(dir: &Path) -> (PathBuf, PathBuf) {
+        let (creature_path, training) = tiny_setup(dir);
+        fs::write(
+            &creature_path,
+            r#"{
+              "semanticVersion":"4.0.0","forwardOnly":true,"input":1,"output":1,
+              "neurons":[
+                {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY","tags":[
+                  {"name":"discovered","value":"2026-07-01"},
+                  {"name":"discovery-comment","value":"split of input-0"}
+                ]},
+                {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY","tags":[
+                  {"name":"intelligentDesign","value":"Tacit Knowledge"}
+                ]}
+              ],
+              "synapses":[
+                {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+                {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+              ],
+              "tags":[{"name":"name","value":"Yara Richardson"}]
+            }"#,
+        )
+        .unwrap();
+        (creature_path, training)
+    }
+
+    /// Tags of the neuron `uuid` in a written creature document.
+    fn written_neuron_tags(text: &str, uuid: &str) -> Vec<(String, String)> {
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        value["neurons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["uuid"] == uuid)
+            .unwrap_or_else(|| panic!("no neuron {uuid} in written creature"))
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .map(|tags| {
+                tags.iter()
+                    .map(|t| {
+                        (
+                            t["name"].as_str().unwrap().to_string(),
+                            t["value"].as_str().unwrap().to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Issue #187: an accept rewrites `best.json` and the `winners/` copy from
+    /// the `CreatureExport`, which carries no per-neuron tags — the source's
+    /// discovery / intelligentDesign provenance must still be there.
+    #[test]
+    fn best_json_and_winners_preserve_per_neuron_tags() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_neuron_tagged_setup(dir.path());
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            max_experiments: Some(2),
+            ..base_config(creature_path, training, out.clone())
+        };
+        let scorer = ScriptedScorer {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let result = run_optimisation(&config, &scorer).unwrap();
+        assert!(
+            result.acceptances >= 1,
+            "the run must accept, or best.json is only the verbatim source copy"
+        );
+
+        let best = fs::read_to_string(&result.best_path).unwrap();
+        assert_eq!(
+            written_neuron_tags(&best, "h1"),
+            vec![
+                ("discovered".to_string(), "2026-07-01".to_string()),
+                (
+                    "discovery-comment".to_string(),
+                    "split of input-0".to_string()
+                ),
+            ],
+        );
+        assert_eq!(
+            written_neuron_tags(&best, "o1"),
+            vec![(
+                "intelligentDesign".to_string(),
+                "Tacit Knowledge".to_string()
+            )],
+        );
+        // Creature-level tags are still upserted alongside them.
+        let value: serde_json::Value = serde_json::from_str(&best).unwrap();
+        let tags = value["tags"].as_array().unwrap();
+        assert!(tags.iter().any(|t| t["name"] == "lamarck"));
+        assert!(tags.iter().any(|t| t["name"] == "name"));
+
+        let winner = fs::read_dir(out.join("winners"))
+            .unwrap()
+            .flatten()
+            .next()
+            .expect("an accept writes a winners/ copy");
+        let winner_text = fs::read_to_string(winner.path()).unwrap();
+        assert_eq!(written_neuron_tags(&winner_text, "h1").len(), 2);
+        assert_eq!(
+            written_neuron_tags(&winner_text, "o1")[0].0,
+            "intelligentDesign"
+        );
+    }
+
+    /// Rewards structural growth: a candidate with more neurons than the
+    /// baseline scores better, so the accepted winner is one Lamarck grew.
+    struct GrowthScorer;
+
+    impl GrowthScorer {
+        fn neuron_count(path: &Path) -> usize {
+            let text = fs::read_to_string(path).unwrap_or_default();
+            parse_creature_json(&text)
+                .map(|c| c.neurons.len())
+                .unwrap_or(0)
+        }
+    }
+
+    impl DirectoryScorer for GrowthScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            const BASE_SCORE: f64 = 0.64;
+            let baseline_neurons = Self::neuron_count(&candidates_dir.join("baseline.json"));
+            let mut map = BTreeMap::new();
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(stem) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                let grew = Self::neuron_count(&entry.path()) > baseline_neurons;
+                let score = if grew { BASE_SCORE + 1e-3 } else { BASE_SCORE };
+                map.insert(
+                    stem.to_string(),
+                    ScoreResult {
+                        score,
+                        error: 1.0 - score,
+                        complexity_penalty: 0.0,
+                    },
+                );
+            }
+            Ok(map)
+        }
+    }
+
+    /// Issue #187: a neuron Lamarck grew has no source provenance to keep, so
+    /// it carries its own — which strategy grew it, for which focus, and at
+    /// which experiment.
+    #[test]
+    fn grown_neurons_carry_their_own_origin_tag() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_neuron_tagged_setup(dir.path());
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            max_experiments: Some(4),
+            timeout: Duration::from_secs(5),
+            ..base_config(creature_path, training, out)
+        };
+        let result = run_optimisation(&config, &GrowthScorer).unwrap();
+        assert!(result.acceptances >= 1, "growth must be accepted");
+
+        let best = fs::read_to_string(&result.best_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&best).unwrap();
+        let grown: Vec<String> = value["neurons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["uuid"].as_str().unwrap().to_string())
+            .filter(|uuid| uuid != "h1" && uuid != "o1")
+            .collect();
+        assert!(
+            !grown.is_empty(),
+            "the accepted winner should have grown a neuron: {best}"
+        );
+        for uuid in &grown {
+            let tags = written_neuron_tags(&best, uuid);
+            let origin = tags
+                .iter()
+                .find(|(name, _)| name == "lamarck")
+                .unwrap_or_else(|| panic!("grown neuron {uuid} has no origin tag: {tags:?}"));
+            assert!(origin.1.contains("grown by"), "{}", origin.1);
+            assert!(origin.1.contains("🎯"), "{}", origin.1);
+            assert!(origin.1.contains("exp "), "{}", origin.1);
+        }
+        // The inherited neurons keep their source provenance, unstamped.
+        assert_eq!(written_neuron_tags(&best, "h1").len(), 2);
+        assert!(
+            !written_neuron_tags(&best, "o1")
+                .iter()
+                .any(|(name, _)| name == "lamarck"),
+            "an inherited neuron must not be restamped as Lamarck's own"
+        );
     }
 
     #[test]

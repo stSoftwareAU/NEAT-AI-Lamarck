@@ -36,6 +36,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Per-neuron tags survive the check-in write (Issue #187).** `best.json`,
+  the `winners/` copies and the scorer-facing batch baseline were rebuilt from
+  `neat_core::CreatureExport`, which carries no `NeuronExport.tags`, so a
+  source creature's per-neuron `discovered` / `discovery-comment` /
+  `intelligentDesign` provenance was silently dropped — a GRQ-sampler creature
+  with two tagged neurons came back out of Lamarck with none. `CreatureMeta`
+  now keeps `neurons[].tags` keyed by neuron `uuid` (never by position, since
+  growth inserts and reorders neurons) and `serialize_creature_with_meta` /
+  `…_compact` re-attach them on every write; a neuron the source never tagged
+  gains no `tags` key. Neurons **Lamarck itself grows** — a `structural_add` /
+  `structural_add_neuron` accept, or a Phase-G graft replay — are stamped with
+  their own `lamarck` origin tag naming the strategy, the focus neuron and the
+  experiment (`🦒 Lamarck · grown by 🧩 structural_add_neuron · 🎯 o1 · exp 42`),
+  while inherited neurons are never restamped.
+
 - **`docs/promote-gate.md` links the measured scorer costs instead of
   restating them (Issue #183).** *The two gates* priced the full-corpus call at
   "~11 s per creature against ~1 s at 5%" and its Mermaid diagram labelled the
