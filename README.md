@@ -1470,8 +1470,31 @@ behaviour — including the milestone filter rule — is exercised by
 
 A second PR job (`.github/workflows/version-increment.yml`) bumps the
 `lamarck/Cargo.toml` patch version on source changes so remote `runlib`-style
-installs rebuild; `scripts/check-version-increment-workflow.sh` validates it
-from `quality.sh`.
+installs rebuild. Like auto-format it fires on PRs into `Develop` **and**
+`milestone/**`, and it diffs against the branch the PR actually targets rather
+than a hardcoded `origin/Develop` — otherwise the second and later sub-issue
+PRs on a milestone branch read "already ahead of base" and merge under an
+unchanged version, leaving remotes on the stale binary (Issue #190). A version
+*behind* the base is a downgrade and fails the job (Issue #152), and re-running
+after a bump is a no-op. `scripts/check-version-increment-workflow.sh` validates
+the workflow from `quality.sh`; its own behaviour is exercised by
+`scripts/test-check-version-increment-workflow.sh`, and
+`scripts/test-bump-lamarck-version.sh` runs
+`scripts/bump-lamarck-version.sh` against throwaway repositories to prove the
+bump works off any base branch.
+
+```mermaid
+flowchart TD
+    PR["PR touches lamarck/src/**"] --> Filter{"base branch is<br/>Develop or milestone/**?"}
+    Filter -->|no| Skip["workflow does not run"]
+    Filter -->|yes| Fetch["fetch origin/&lt;PR base ref&gt;<br/>(fails loud if missing)"]
+    Fetch --> Bump["bump-lamarck-version.sh<br/>--base-ref origin/&lt;PR base ref&gt;"]
+    Bump -->|behind base| Fail["exit 2 — downgrade refused"]
+    Bump -->|already ahead / no src change| Noop["exit 1 — skip, idempotent"]
+    Bump -->|equal to base| Patch["patch++ in Cargo.toml + Cargo.lock"]
+    Patch --> Push["commit + push to the PR head branch"]
+    Push --> Remote["remote runlib install sees a new version → rebuilds"]
+```
 
 ### neat-core breaking-bump gate
 

@@ -2,10 +2,16 @@
 # (GRQ-taxation version-increment / runlib.sh contract).
 #
 # Remotes rebuild neat_ai_lamarck when the crate version changes. This job
-# bumps the patch on PRs that touch source if the branch is equal to
-# Develop (not already ahead). A version *behind* Develop fails the job
+# bumps the patch on PRs that touch source if the branch is equal to its
+# base branch (not already ahead). A version *behind* the base fails the job
 # (Issue #152) — that is a downgrade, not an intentional bump. Re-running
 # after a successful bump is a no-op (idempotent).
+#
+# The comparison base is the branch the PR actually targets (Issue #190):
+# milestone sub-issue PRs merge into `milestone/<slug>` and never touch
+# Develop, so a hardcoded `origin/Develop` both skipped them (branch filter)
+# and, once the milestone branch carried one bump, read "already ahead of
+# base" for every later sub-issue PR.
 #
 # Push auth matches auto-format.yml (App token → ACTIONS_PUSH → GITHUB_TOKEN).
 name: Version Increment
@@ -15,6 +21,11 @@ on:
     types: [opened, synchronize, reopened]
     branches:
       - Develop
+      # Milestone sub-issue PRs target a shared `milestone/<slug>` branch and
+      # merge without ever touching Develop, so without this glob they ship
+      # source changes under an unchanged crate version (Issue #190).
+      # `**` matches nested names too.
+      - "milestone/**"
     paths:
       - "lamarck/src/**"
       - "lamarck/Cargo.toml"
@@ -47,16 +58,27 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Fail loud when the base branch cannot be resolved: a swallowed fetch
+      # would leave the bump comparing against nothing and look like a pass.
       - name: Fetch base branch
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          git fetch origin Develop:Develop || git fetch origin Develop || true
+          if git rev-parse --verify --quiet "refs/remotes/origin/${PR_BASE_REF}" >/dev/null; then
+            echo "OK   origin/${PR_BASE_REF} already fetched"
+            exit 0
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
 
       - name: Bump lamarck patch version when src changed
         id: bump
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          if ./scripts/bump-lamarck-version.sh --base-ref origin/Develop; then
+          if ./scripts/bump-lamarck-version.sh --base-ref "origin/${PR_BASE_REF}"; then
             echo "changed=true" >>"$GITHUB_OUTPUT"
           else
             status=$?

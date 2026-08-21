@@ -248,6 +248,9 @@ pub fn merge_candidate_deltas(
                 out.neurons.insert(
                     insert_at,
                     NeuronExport {
+                        // Faithful copy of the variant's neuron — keep whatever
+                        // runtime id it arrived with (neat-core 0.9.9).
+                        id: vn.id,
                         neuron_type: vn.neuron_type.clone(),
                         uuid: vn.uuid.clone(),
                         bias: vn.bias,
@@ -713,6 +716,47 @@ mod tests {
                 .iter()
                 .any(|s| s.from_uuid == "input-0" && s.to_uuid == "o1")
         );
+    }
+
+    /// neat-core 0.9.9 added `NeuronExport::id`. Merging a variant's new
+    /// neuron onto the base is a faithful copy, so whatever runtime id the
+    /// variant carried survives the merge rather than being dropped.
+    #[test]
+    fn merge_preserves_the_runtime_id_of_a_copied_neuron() {
+        let base = tiny();
+        let mut a = base.clone();
+        a.neurons.insert(
+            0,
+            NeuronExport {
+                id: Some(42),
+                neuron_type: "hidden".into(),
+                uuid: "h-new".into(),
+                bias: 0.25,
+                squash: Some("TANH".into()),
+            },
+        );
+        a.synapses.push(SynapseExport {
+            from_uuid: "input-1".into(),
+            to_uuid: "h-new".into(),
+            weight: 0.05,
+            synapse_type: None,
+        });
+        a.synapses.push(SynapseExport {
+            from_uuid: "h-new".into(),
+            to_uuid: "o1".into(),
+            weight: 0.05,
+            synapse_type: None,
+        });
+
+        let merged = merge_candidate_deltas(&base, &[&a]).unwrap();
+        let copied = merged
+            .neurons
+            .iter()
+            .find(|n| n.uuid == "h-new")
+            .expect("the variant's new neuron is merged in");
+        assert_eq!(copied.id, Some(42));
+        assert_eq!(copied.bias, 0.25);
+        assert_eq!(copied.squash.as_deref(), Some("TANH"));
     }
 
     #[test]

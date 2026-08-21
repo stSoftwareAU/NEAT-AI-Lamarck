@@ -325,6 +325,7 @@ fn production_shaped_creature() -> CreatureExport {
     let mut neurons = Vec::with_capacity(PROD_HIDDEN + 1);
     for i in 0..PROD_HIDDEN {
         neurons.push(NeuronExport {
+            id: None,
             neuron_type: "hidden".into(),
             uuid: format!("neuron-{i:07}"),
             bias: pseudo_weight(i as u64),
@@ -332,6 +333,7 @@ fn production_shaped_creature() -> CreatureExport {
         });
     }
     neurons.push(NeuronExport {
+        id: None,
         neuron_type: "output".into(),
         uuid: "output-0".into(),
         bias: 0.0,
@@ -371,6 +373,7 @@ fn production_shaped_creature() -> CreatureExport {
         synapses,
         semantic_version: Some("4.0.0".into()),
         forward_only: true,
+        memetic: None,
     }
 }
 
