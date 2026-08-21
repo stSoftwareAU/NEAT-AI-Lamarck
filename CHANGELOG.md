@@ -36,6 +36,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Every source-changing PR gets a version bump, milestone PRs included
+  (Issue #190).** `.github/workflows/version-increment.yml` fired only on PRs
+  into `Develop` and always diffed against `origin/Develop`, so milestone
+  sub-issue PRs — which merge into `milestone/<slug>` and never touch Develop
+  — shipped source changes under an unchanged `neat_ai_lamarck` version, and
+  remote `runlib`-style installs kept serving the stale binary. The workflow
+  now also runs on `milestone/**` and compares against the branch the PR
+  actually targets (`github.event.pull_request.base.ref`), so the second and
+  later sub-issue PRs on a milestone branch no longer read "already ahead of
+  base" and skip the bump. The base-branch fetch fails loudly instead of
+  swallowing the error behind `|| true`.
+  `scripts/check-version-increment-workflow.sh` gates both rules;
+  `scripts/test-check-version-increment-workflow.sh` and
+  `scripts/test-bump-lamarck-version.sh` pin the validator's and the bump
+  script's own behaviour.
+
 - **Per-neuron tags survive the check-in write (Issue #187).** `best.json`,
   the `winners/` copies and the scorer-facing batch baseline were rebuilt from
   `neat_core::CreatureExport`, which carries no `NeuronExport.tags`, so a

@@ -51,8 +51,14 @@ echo "WHAT: auto-format workflow validator behaviour (Issue #168)..."
 echo "Validating auto-format PR workflow (Issue #33)..."
 ./scripts/check-auto-format-workflow.sh
 
+echo "WHAT: version-increment workflow validator behaviour (Issue #190)..."
+./scripts/test-check-version-increment-workflow.sh
+
 echo "Validating version-increment PR workflow (runlib / GRQ-taxation)..."
 ./scripts/check-version-increment-workflow.sh
+
+echo "WHAT: lamarck version bump against the PR base branch (Issue #190)..."
+./scripts/test-bump-lamarck-version.sh
 
 echo "WHAT: workflow install pin gate behaviour (Issue #169)..."
 ./scripts/test-check-workflow-npm-pins.sh

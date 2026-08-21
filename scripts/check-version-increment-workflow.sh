@@ -8,6 +8,10 @@
 #   4. Gate commit/push behind a change-detection output (idempotent).
 #   5. Refuse to push onto a fork's PR branch.
 #   6. Use strict bash (`set -euo pipefail`).
+#   7. Include a `milestone/<slug>` glob in the branch filter so milestone
+#      sub-issue PRs are bumped too (Issue #190).
+#   8. Diff against the PR's own base branch rather than a hardcoded
+#      `origin/Develop` (Issue #190).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +61,36 @@ if grep -qE 'bump-lamarck-version\.sh' "$WORKFLOW"; then
   ok "bump-lamarck-version.sh invocation present"
 else
   fail "no bump-lamarck-version.sh invocation"
+fi
+
+# A milestone glob must appear as a real branch entry — either a block
+# sequence item (`- "milestone/**"`) or inside an inline flow sequence
+# (`branches: [Develop, "milestone/**"]`). A prose mention in a comment does
+# not gate anything, so comments deliberately do not satisfy this rule.
+milestone_branch_filter_present() {
+  grep -qE '^[[:space:]]*-[[:space:]]*"?'"'"'?milestone/\*\*?"?'"'"'?[[:space:]]*$' "$WORKFLOW" && return 0
+  grep -qE '^[[:space:]]*branches:[[:space:]]*\[[^]]*milestone/\*' "$WORKFLOW" && return 0
+  return 1
+}
+
+if milestone_branch_filter_present; then
+  ok "milestone branch filter present — milestone/<slug> PRs are bumped"
+else
+  fail "no 'milestone/*' branch filter — milestone sub-issue PRs merge with a stale crate version, so remote runlib installs keep the old binary (Issue #190)"
+fi
+
+# The bump must diff against the branch the PR actually targets. Hardcoding
+# `origin/Develop` skips every milestone PR after the first bump on that
+# milestone branch: the head already reads "ahead of Develop".
+base_ref_is_dynamic() {
+  grep -qE 'github\.(base_ref|event\.pull_request\.base\.ref)' "$WORKFLOW" || return 1
+  ! grep -qE -- '--base-ref[[:space:]]+"?origin/[Dd]evelop"?' "$WORKFLOW"
+}
+
+if base_ref_is_dynamic; then
+  ok "bump diffs against the PR's own base branch (github.base_ref)"
+else
+  fail "base ref is hardcoded to origin/Develop — milestone PRs would read 'already ahead of base' and skip the bump (Issue #190)"
 fi
 
 if grep -qE '^[[:space:]]*if:[[:space:]]*steps\.[A-Za-z0-9_-]+\.outputs\.' "$WORKFLOW"; then
