@@ -69,6 +69,15 @@ flowchart TD
     Push --> Remote["remote runlib install sees a new version → rebuilds"]
 ```
 
+**The fixed workflow demonstrated itself on this PR.** The first push carried
+no `lamarck/src/**` change, so **Auto-increment Versions** correctly skipped.
+The build-fix push above does change `lamarck/src/**`, and the job bumped the
+crate without being asked — commit `3b76416`
+`chore: auto-increment versions for changed projects`, `0.1.23` → `0.1.24` in
+both `lamarck/Cargo.toml` and `Cargo.lock`. That is exactly the behaviour the
+issue asks for: source ships under a new version, so a remote `runlib` install
+rebuilds instead of serving the stale binary.
+
 Gate output (`./quality.sh`, new sections):
 
 ```text
