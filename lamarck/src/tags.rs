@@ -10,6 +10,7 @@ use crate::width::{assert_written_width, validate_creature_width, value_width};
 use neat_core::{CreatureExport, creature_to_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashSet};
 
 /// One creature tag (NEAT-AI / `@stsoftware/tags` shape).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +21,36 @@ pub struct CreatureTag {
     pub value: String,
 }
 
+/// Parse a `{ name, value }[]` tag array off a JSON node (missing → empty).
+fn parse_tag_array(node: Option<&Value>) -> Vec<CreatureTag> {
+    node.and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let name = t.get("name")?.as_str()?.to_string();
+                    let value = match t.get("value")? {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    Some(CreatureTag { name, value })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Insert or replace a tag by name, preserving order of first insert.
+fn upsert_tag(tags: &mut Vec<CreatureTag>, name: &str, value: String) {
+    if let Some(existing) = tags.iter_mut().find(|t| t.name == name) {
+        existing.value = value;
+    } else {
+        tags.push(CreatureTag {
+            name: name.to_string(),
+            value,
+        });
+    }
+}
+
 /// Top-level fields stripped by `parse_creature_json` that we must keep.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreatureMeta {
@@ -27,10 +58,18 @@ pub struct CreatureMeta {
     pub uuid: Option<String>,
     /// Ordered tags (upserts replace by name, preserving order of first insert).
     pub tags: Vec<CreatureTag>,
+    /// Per-neuron tags keyed by neuron UUID (issue #187).
+    ///
+    /// `NeuronExport` carries no `tags`, so the discovery / intelligentDesign
+    /// provenance of each neuron is stripped on parse and would be lost from
+    /// every check-in write. Keyed by uuid rather than position because
+    /// structural growth inserts and reorders neurons between writes.
+    pub neuron_tags: BTreeMap<String, Vec<CreatureTag>>,
 }
 
 impl CreatureMeta {
-    /// Parse `uuid` + `tags` from raw creature JSON (missing → empty).
+    /// Parse `uuid` + creature `tags` + `neurons[].tags` from raw creature JSON
+    /// (missing → empty).
     pub fn from_creature_json(text: &str) -> Self {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return Self::default();
@@ -39,35 +78,58 @@ impl CreatureMeta {
             .get("uuid")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let tags = value
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|t| {
-                        let name = t.get("name")?.as_str()?.to_string();
-                        let value = match t.get("value")? {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        Some(CreatureTag { name, value })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self { uuid, tags }
+        let tags = parse_tag_array(value.get("tags"));
+        let mut neuron_tags = BTreeMap::new();
+        if let Some(neurons) = value.get("neurons").and_then(|v| v.as_array()) {
+            for neuron in neurons {
+                let Some(uuid) = neuron.get("uuid").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let tags = parse_tag_array(neuron.get("tags"));
+                if !tags.is_empty() {
+                    neuron_tags.insert(uuid.to_string(), tags);
+                }
+            }
+        }
+        Self {
+            uuid,
+            tags,
+            neuron_tags,
+        }
     }
 
     /// Insert or replace a tag by name.
     pub fn upsert(&mut self, name: &str, value: impl Into<String>) {
-        let value = value.into();
-        if let Some(existing) = self.tags.iter_mut().find(|t| t.name == name) {
-            existing.value = value;
-        } else {
-            self.tags.push(CreatureTag {
-                name: name.to_string(),
-                value,
-            });
+        upsert_tag(&mut self.tags, name, value.into());
+    }
+
+    /// Insert or replace one neuron's tag by name (issue #187).
+    pub fn upsert_neuron(&mut self, neuron_uuid: &str, name: &str, value: impl Into<String>) {
+        upsert_tag(
+            self.neuron_tags.entry(neuron_uuid.to_string()).or_default(),
+            name,
+            value.into(),
+        );
+    }
+
+    /// Tag every neuron `current` has that `previous` did not (issue #187).
+    ///
+    /// Structural growth invents neurons no source JSON described, so their
+    /// provenance is Lamarck's to record: the strategy that grew them, the
+    /// focus neuron they were grown for, and the experiment that accepted
+    /// them. Neurons that were already there keep the tags they arrived with.
+    pub fn stamp_new_neurons(
+        &mut self,
+        previous: &CreatureExport,
+        current: &CreatureExport,
+        origin: &NeuronOrigin<'_>,
+    ) {
+        let before: HashSet<&str> = previous.neurons.iter().map(|n| n.uuid.as_str()).collect();
+        let message = lamarck_neuron_origin_message(origin);
+        for neuron in &current.neurons {
+            if !before.contains(neuron.uuid.as_str()) {
+                self.upsert_neuron(&neuron.uuid, "lamarck", message.clone());
+            }
         }
     }
 
@@ -123,6 +185,30 @@ pub fn lamarck_progress_message(progress: &LamarckProgress<'_>) -> String {
     format!(
         "🦒 Lamarck · {} {accept_word} / {} {exp_word} · last: {strat_emoji} {strat_label} · 🎯 {} · {score_clause}",
         progress.acceptances, progress.experiments, progress.focus_neuron,
+    )
+}
+
+/// Where a neuron Lamarck grew came from (issue #187).
+#[derive(Debug, Clone, Copy)]
+pub struct NeuronOrigin<'a> {
+    /// Candidate strategy that proposed the neuron.
+    pub strategy: CandidateStrategy,
+    /// Focus neuron the growth was proposed for.
+    pub focus_neuron: &'a str,
+    /// Experiment number that accepted it.
+    pub experiment: u64,
+}
+
+/// Per-neuron provenance blurb for a neuron Lamarck grew.
+///
+/// Deliberately shaped like the creature-level run summary so a reader of a
+/// check-in creature sees one voice, but scoped to the single neuron: it names
+/// the strategy, the focus and the experiment that produced *this* neuron.
+pub fn lamarck_neuron_origin_message(origin: &NeuronOrigin<'_>) -> String {
+    let (strat_emoji, strat_label) = strategy_emoji(origin.strategy);
+    format!(
+        "🦒 Lamarck · grown by {strat_emoji} {strat_label} · 🎯 {} · exp {}",
+        origin.focus_neuron, origin.experiment
     )
 }
 
@@ -198,7 +284,8 @@ fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
     }
 }
 
-/// Creature JSON with `uuid` / `tags` re-attached, before it is printed.
+/// Creature JSON with `uuid` / `tags` / `neurons[].tags` re-attached, before it
+/// is printed.
 ///
 /// Refused unless the document about to be written carries the source
 /// creature's `input` / `output` and both are `>= 1` (issue #165): a check-in
@@ -216,8 +303,38 @@ fn creature_value_with_meta(
     if !meta.tags.is_empty() {
         value["tags"] = serde_json::to_value(&meta.tags).map_err(|e| e.to_string())?;
     }
+    reattach_neuron_tags(&mut value, meta)?;
     assert_written_width(creature, value_width(&value)?)?;
     Ok(value)
+}
+
+/// Re-attach `neurons[].tags` by neuron uuid (issue #187).
+///
+/// Keyed by uuid, never by position: growth inserts neurons mid-list, so a
+/// positional re-attach would hand one neuron's discovery provenance to
+/// another. A neuron with no remembered tags is left exactly as exported —
+/// no empty `tags` key is invented for it.
+fn reattach_neuron_tags(value: &mut Value, meta: &CreatureMeta) -> Result<(), String> {
+    if meta.neuron_tags.is_empty() {
+        return Ok(());
+    }
+    let Some(neurons) = value.get_mut("neurons").and_then(|v| v.as_array_mut()) else {
+        return Ok(());
+    };
+    for neuron in neurons.iter_mut() {
+        let uuid = neuron
+            .get("uuid")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let Some(tags) = uuid.as_deref().and_then(|u| meta.neuron_tags.get(u)) else {
+            continue;
+        };
+        if tags.is_empty() {
+            continue;
+        }
+        neuron["tags"] = serde_json::to_value(tags).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Pretty-print a creature with `uuid` / `tags` re-attached for check-in.
@@ -478,5 +595,232 @@ mod tests {
         assert_eq!(format_g(0.345153229634, 6), "0.345153");
         assert_eq!(format_g(3.2e-6, 3), "3.2e-06");
         assert_eq!(format_g(0.1, 6), "0.1");
+    }
+
+    /// Issue #187: a GRQ-sampler creature carrying per-neuron discovery /
+    /// intelligentDesign provenance.
+    const NEURON_TAGGED: &str = r#"{
+      "uuid": "creature-3",
+      "input": 2,
+      "output": 1,
+      "forwardOnly": true,
+      "neurons": [
+        {"type":"hidden","uuid":"h1","bias":0.5,"squash":"TANH","tags":[
+          {"name":"discovered","value":"2026-07-01"},
+          {"name":"discovery-comment","value":"split of input-0 → o1"}
+        ]},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY","tags":[
+          {"name":"intelligentDesign","value":"💍  Tacit Knowledge"}
+        ]}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+        {"fromUUID":"h1","toUUID":"o1","weight":1.0},
+        {"fromUUID":"input-1","toUUID":"o1","weight":0.25}
+      ],
+      "tags": [{"name":"name","value":"Yara Richardson"}]
+    }"#;
+
+    fn neuron_tags_of<'a>(value: &'a Value, uuid: &str) -> Option<&'a Vec<Value>> {
+        value["neurons"]
+            .as_array()?
+            .iter()
+            .find(|n| n["uuid"] == uuid)?
+            .get("tags")?
+            .as_array()
+    }
+
+    /// Issue #187: `neurons[].tags` are parsed off the source and keyed by uuid.
+    #[test]
+    fn extract_preserves_neuron_tags_keyed_by_uuid() {
+        let meta = CreatureMeta::from_creature_json(NEURON_TAGGED);
+        let h1 = meta.neuron_tags.get("h1").expect("h1 tags");
+        assert_eq!(h1.len(), 2);
+        assert_eq!(h1[0].name, "discovered");
+        assert_eq!(h1[0].value, "2026-07-01");
+        assert_eq!(h1[1].name, "discovery-comment");
+        let o1 = meta.neuron_tags.get("o1").expect("o1 tags");
+        assert_eq!(o1[0].name, "intelligentDesign");
+        assert_eq!(o1[0].value, "💍  Tacit Knowledge");
+        assert!(!meta.neuron_tags.contains_key("missing"));
+    }
+
+    /// Issue #187: the check-in document re-attaches them by uuid, in both forms.
+    #[test]
+    fn serialize_reattaches_neuron_tags_by_uuid() {
+        let creature = parse_creature_json(NEURON_TAGGED).unwrap();
+        let meta = CreatureMeta::from_creature_json(NEURON_TAGGED);
+        for text in [
+            serialize_creature_with_meta(&creature, &meta).unwrap(),
+            serialize_creature_with_meta_compact(&creature, &meta).unwrap(),
+        ] {
+            let value: Value = serde_json::from_str(&text).unwrap();
+            let h1 = neuron_tags_of(&value, "h1").expect("h1 keeps its tags");
+            assert_eq!(h1.len(), 2);
+            assert_eq!(h1[0]["name"], "discovered");
+            assert_eq!(h1[1]["value"], "split of input-0 → o1");
+            let o1 = neuron_tags_of(&value, "o1").expect("o1 keeps its tags");
+            assert_eq!(o1[0]["name"], "intelligentDesign");
+            // Creature-level tags are untouched by the per-neuron re-attach.
+            assert_eq!(value["tags"][0]["name"], "name");
+            // Still a valid creature after the round trip.
+            assert_eq!(parse_creature_json(&text).unwrap(), creature);
+        }
+    }
+
+    /// Issue #187: a neuron the source never tagged gains no empty `tags` key.
+    #[test]
+    fn serialize_leaves_untagged_neurons_alone() {
+        let creature = parse_creature_json(TINY_TAGGED).unwrap();
+        let meta = CreatureMeta::from_creature_json(TINY_TAGGED);
+        let text = serialize_creature_with_meta(&creature, &meta).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert!(value["neurons"][0].get("tags").is_none());
+    }
+
+    /// Issue #187: weight/bias edits keep the surviving neurons' provenance —
+    /// re-attachment is by uuid, not by position.
+    #[test]
+    fn neuron_tags_survive_edits_that_reorder_neurons() {
+        let mut creature = parse_creature_json(NEURON_TAGGED).unwrap();
+        let meta = CreatureMeta::from_creature_json(NEURON_TAGGED);
+        creature.neurons.reverse();
+        creature.neurons[1].bias = 9.5;
+        let text = serialize_creature_with_meta(&creature, &meta).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["neurons"][0]["uuid"], "o1");
+        assert_eq!(
+            neuron_tags_of(&value, "o1").unwrap()[0]["name"],
+            "intelligentDesign"
+        );
+        assert_eq!(neuron_tags_of(&value, "h1").unwrap().len(), 2);
+    }
+
+    /// Issue #187: neurons Lamarck grows carry their own origin tag, and only
+    /// those — the neurons that were already there are not restamped.
+    #[test]
+    fn stamp_new_neurons_tags_only_the_neurons_lamarck_added() {
+        let previous = parse_creature_json(NEURON_TAGGED).unwrap();
+        let mut current = previous.clone();
+        current.neurons.insert(
+            1,
+            neat_core::NeuronExport {
+                neuron_type: "hidden".into(),
+                uuid: "h-new".into(),
+                bias: 0.0,
+                squash: Some("TANH".into()),
+            },
+        );
+        let mut meta = CreatureMeta::from_creature_json(NEURON_TAGGED);
+        meta.stamp_new_neurons(
+            &previous,
+            &current,
+            &NeuronOrigin {
+                strategy: CandidateStrategy::StructuralAddNeuron,
+                focus_neuron: "o1",
+                experiment: 42,
+            },
+        );
+
+        let grown = meta.neuron_tags.get("h-new").expect("new neuron is tagged");
+        assert_eq!(grown.len(), 1);
+        assert_eq!(grown[0].name, "lamarck");
+        assert!(grown[0].value.contains("🦒"));
+        assert!(grown[0].value.contains("structural_add_neuron"));
+        assert!(grown[0].value.contains("o1"));
+        assert!(grown[0].value.contains("exp 42"));
+
+        // Pre-existing neurons keep exactly the provenance they arrived with.
+        assert_eq!(meta.neuron_tags.get("h1").unwrap().len(), 2);
+        assert_eq!(meta.neuron_tags.get("o1").unwrap().len(), 1);
+        assert_eq!(
+            meta.neuron_tags.get("o1").unwrap()[0].name,
+            "intelligentDesign"
+        );
+    }
+
+    /// Issue #187: a second accept re-stamps the same neuron rather than
+    /// stacking duplicate `lamarck` tags on it.
+    #[test]
+    fn stamp_new_neurons_upserts_its_own_tag() {
+        let previous = parse_creature_json(NEURON_TAGGED).unwrap();
+        let mut current = previous.clone();
+        current.neurons.push(neat_core::NeuronExport {
+            neuron_type: "hidden".into(),
+            uuid: "h-new".into(),
+            bias: 0.0,
+            squash: None,
+        });
+        let mut meta = CreatureMeta::from_creature_json(NEURON_TAGGED);
+        for experiment in [7, 9] {
+            meta.stamp_new_neurons(
+                &previous,
+                &current,
+                &NeuronOrigin {
+                    strategy: CandidateStrategy::StructuralAdd,
+                    focus_neuron: "o1",
+                    experiment,
+                },
+            );
+        }
+        let grown = meta.neuron_tags.get("h-new").unwrap();
+        assert_eq!(grown.len(), 1);
+        assert!(grown[0].value.contains("exp 9"));
+    }
+
+    /// Issue #187: the grown neuron's origin tag reaches the written document.
+    #[test]
+    fn serialize_writes_the_origin_tag_of_a_grown_neuron() {
+        let previous = parse_creature_json(NEURON_TAGGED).unwrap();
+        let mut current = previous.clone();
+        current.neurons.insert(
+            0,
+            neat_core::NeuronExport {
+                neuron_type: "hidden".into(),
+                uuid: "h-new".into(),
+                bias: 0.25,
+                squash: Some("TANH".into()),
+            },
+        );
+        current.synapses.push(neat_core::SynapseExport {
+            from_uuid: "input-0".into(),
+            to_uuid: "h-new".into(),
+            weight: 1.0,
+            synapse_type: None,
+        });
+        current.synapses.push(neat_core::SynapseExport {
+            from_uuid: "h-new".into(),
+            to_uuid: "o1".into(),
+            weight: 1.0,
+            synapse_type: None,
+        });
+        let mut meta = CreatureMeta::from_creature_json(NEURON_TAGGED);
+        meta.stamp_new_neurons(
+            &previous,
+            &current,
+            &NeuronOrigin {
+                strategy: CandidateStrategy::StructuralAddNeuron,
+                focus_neuron: "o1",
+                experiment: 11,
+            },
+        );
+        let text = serialize_creature_with_meta(&current, &meta).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let grown = neuron_tags_of(&value, "h-new").expect("grown neuron is tagged");
+        assert_eq!(grown[0]["name"], "lamarck");
+        assert!(grown[0]["value"].as_str().unwrap().contains("🧩"));
+        assert_eq!(neuron_tags_of(&value, "h1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn neuron_origin_message_names_strategy_focus_and_experiment() {
+        assert_eq!(
+            lamarck_neuron_origin_message(&NeuronOrigin {
+                strategy: CandidateStrategy::StructuralAddNeuron,
+                focus_neuron: "neuron-1343748843",
+                experiment: 75,
+            }),
+            "🦒 Lamarck · grown by 🧩 structural_add_neuron · 🎯 neuron-1343748843 · exp 75"
+        );
     }
 }

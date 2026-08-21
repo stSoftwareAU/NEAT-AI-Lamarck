@@ -104,8 +104,8 @@ pub use screen_calibration::{
     ScreenCalibrationAccumulator, ScreenNoise, ScreenPair, spearman_rank_correlation,
 };
 pub use tags::{
-    CreatureMeta, CreatureTag, LamarckProgress, serialize_creature_with_meta,
-    serialize_creature_with_meta_compact,
+    CreatureMeta, CreatureTag, LamarckProgress, NeuronOrigin, lamarck_neuron_origin_message,
+    serialize_creature_with_meta, serialize_creature_with_meta_compact,
 };
 pub use width::{
     assert_same_width, assert_written_width, checked_creature_json, checked_creature_json_pretty,
