@@ -52,6 +52,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `scripts/test-bump-lamarck-version.sh` pin the validator's and the bump
   script's own behaviour.
 
+- **Lamarck builds again against neat-core 0.9.9 (Issue #190).** neat-core
+  0.9.9 added `NeuronExport::id` and `CreatureExport::memetic` (its Issue
+  #559), and because Lamarck builds both types with struct literals every
+  target stopped compiling — `cargo clippy` and `./quality.sh` failed on
+  `E0063: missing field` before any check could run, so no PR could go green.
+  Neurons Lamarck grows (`structural`, `grafts`) are identified by `uuid` and
+  now set `id: None`, which serialises away entirely; merging a variant's
+  neuron onto the base (`combos`) is a faithful copy and carries the variant's
+  `id` through instead of dropping it.
+
 - **Per-neuron tags survive the check-in write (Issue #187).** `best.json`,
   the `winners/` copies and the scorer-facing batch baseline were rebuilt from
   `neat_core::CreatureExport`, which carries no `NeuronExport.tags`, so a

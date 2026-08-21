@@ -705,6 +705,7 @@ mod tests {
         current.neurons.insert(
             1,
             neat_core::NeuronExport {
+                id: None,
                 neuron_type: "hidden".into(),
                 uuid: "h-new".into(),
                 bias: 0.0,
@@ -746,6 +747,7 @@ mod tests {
         let previous = parse_creature_json(NEURON_TAGGED).unwrap();
         let mut current = previous.clone();
         current.neurons.push(neat_core::NeuronExport {
+            id: None,
             neuron_type: "hidden".into(),
             uuid: "h-new".into(),
             bias: 0.0,
@@ -776,6 +778,7 @@ mod tests {
         current.neurons.insert(
             0,
             neat_core::NeuronExport {
+                id: None,
                 neuron_type: "hidden".into(),
                 uuid: "h-new".into(),
                 bias: 0.25,

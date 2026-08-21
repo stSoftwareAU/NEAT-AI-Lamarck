@@ -852,6 +852,8 @@ pub fn add_neuron_bridge(
     creature.neurons.insert(
         insert_at,
         NeuronExport {
+            // Newly grown neuron — identified by uuid, no runtime id.
+            id: None,
             neuron_type: "hidden".into(),
             uuid: new_uuid.clone(),
             bias,
@@ -1210,6 +1212,49 @@ mod tests {
             .unwrap();
         assert!(pos_new < pos_out);
         compile_creature(&creature).expect("bridged creature must compile");
+    }
+
+    /// neat-core 0.9.9 added `NeuronExport::id`. A neuron Lamarck grows has no
+    /// runtime id — it is identified by its uuid — so the field stays `None`
+    /// and the written document carries no `id` key for it.
+    #[test]
+    fn bridged_neuron_carries_no_runtime_id() {
+        let mut creature = parse_creature_json(TINY).unwrap();
+        let mut rng = StdRng::seed_from_u64(11);
+        let uuid = random_uuid_v4(&mut rng);
+        add_neuron_bridge(
+            &mut creature,
+            NeuronBridgeSpec {
+                from_uuid: "input-1",
+                focus_uuid: "o1",
+                new_uuid: uuid.clone(),
+                squash: "TANH",
+                bias: 0.0,
+                w_in: 0.001,
+                w_out: 0.05,
+            },
+        )
+        .unwrap();
+
+        let grown = creature
+            .neurons
+            .iter()
+            .find(|n| n.uuid == uuid)
+            .expect("bridged neuron is present");
+        assert_eq!(grown.id, None);
+
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&creature).unwrap()).unwrap();
+        let grown_json = written["neurons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["uuid"] == uuid.as_str())
+            .expect("bridged neuron is written");
+        assert!(
+            grown_json.get("id").is_none(),
+            "a grown neuron must not write an id key: {grown_json}"
+        );
     }
 
     fn focus_with_mean_error(mean_error: f64) -> FocusNeuronStats {

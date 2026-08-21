@@ -375,6 +375,8 @@ pub fn apply_graft(host: &CreatureExport, graft: &Graft) -> Result<CreatureExpor
         out.neurons.insert(
             insert_at,
             NeuronExport {
+                // Newly grown neuron — identified by uuid, no runtime id.
+                id: None,
                 neuron_type: "hidden".into(),
                 uuid: neuron.uuid.clone(),
                 bias: neuron.bias,
