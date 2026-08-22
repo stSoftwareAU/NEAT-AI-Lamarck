@@ -1362,7 +1362,7 @@ here, because this README is the single source of truth for the architecture
 ## Development rules
 
 - Rust edition 2024.
-- Pin the Rust toolchain, matching NEAT-AI-scorer initially (`1.95.0`).
+- Pin the Rust toolchain, matching NEAT-AI-scorer (`1.98.0`).
 - Use TDD for behaviour changes.
 - Keep dependencies modest and justified.
 - Prefer streaming training-data analysis; the corpus is large.

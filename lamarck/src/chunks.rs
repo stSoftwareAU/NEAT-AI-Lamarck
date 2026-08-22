@@ -285,19 +285,23 @@ fn decode_record(bytes: &[u8], num_inputs: usize, record: &mut TrainingRecord) {
     let split = (num_inputs * std::mem::size_of::<f32>()).min(bytes.len());
     let (input_bytes, output_bytes) = bytes.split_at(split);
     record.inputs.clear();
+    // Rust 1.98's clippy::chunks_exact_to_as_chunks: a constant chunk size is
+    // better served by `as_chunks`, which yields `[u8; 4]` directly — that is
+    // also what lets `f32_from_le` take a sized array instead of indexing a
+    // slice four times.
     record
         .inputs
-        .extend(input_bytes.chunks_exact(4).map(f32_from_le));
+        .extend(input_bytes.as_chunks::<4>().0.iter().map(f32_from_le));
     record.outputs.clear();
     record
         .outputs
-        .extend(output_bytes.chunks_exact(4).map(f32_from_le));
+        .extend(output_bytes.as_chunks::<4>().0.iter().map(f32_from_le));
 }
 
 /// Decode one little-endian `f32` from a 4-byte chunk.
 #[inline]
-fn f32_from_le(chunk: &[u8]) -> f32 {
-    f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+fn f32_from_le(chunk: &[u8; 4]) -> f32 {
+    f32::from_le_bytes(*chunk)
 }
 
 /// Run `work` over every chunk on up to `threads` workers, results in chunk order.
