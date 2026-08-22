@@ -791,15 +791,43 @@ pub fn random_uuid_v4(rng: &mut impl Rng) -> String {
     )
 }
 
+/// Compiled index of every uuid the creature carries, for one bulk pass.
+///
+/// [`compiled_index`] scans the neuron list, so resolving a whole synapse list
+/// one uuid at a time is quadratic. Inputs are not listed as neurons; they own
+/// indices `0..input` and are resolved by name at lookup time.
+fn compiled_index_map(creature: &CreatureExport) -> std::collections::HashMap<&str, usize> {
+    creature
+        .neurons
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.uuid.as_str(), creature.input + i))
+        .collect()
+}
+
 /// Sort key for a synapse: the compiled `(from, to)` index pair.
 ///
 /// An endpoint the creature does not carry sorts last (`usize::MAX`) so the
 /// insert stays total; the output gate then rejects the dangling edge loudly
 /// rather than this function guessing a position for it.
-fn synapse_sort_key(creature: &CreatureExport, from_uuid: &str, to_uuid: &str) -> (usize, usize) {
+fn synapse_sort_key(
+    creature: &CreatureExport,
+    indices: &std::collections::HashMap<&str, usize>,
+    from_uuid: &str,
+    to_uuid: &str,
+) -> (usize, usize) {
+    let resolve = |uuid: &str| {
+        if let Some(i) = uuid
+            .strip_prefix("input-")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            return (i < creature.input).then_some(i);
+        }
+        indices.get(uuid).copied()
+    };
     (
-        compiled_index(creature, from_uuid).unwrap_or(usize::MAX),
-        compiled_index(creature, to_uuid).unwrap_or(usize::MAX),
+        resolve(from_uuid).unwrap_or(usize::MAX),
+        resolve(to_uuid).unwrap_or(usize::MAX),
     )
 }
 
@@ -812,11 +840,12 @@ fn synapse_sort_key(creature: &CreatureExport, from_uuid: &str, to_uuid: &str) -
 /// compiled indices uniformly, which preserves the relative order of the edges
 /// already present — so an ordered insert is enough to hold the invariant.
 pub fn insert_synapse_ordered(creature: &mut CreatureExport, synapse: SynapseExport) {
-    let key = synapse_sort_key(creature, &synapse.from_uuid, &synapse.to_uuid);
+    let indices = compiled_index_map(creature);
+    let key = synapse_sort_key(creature, &indices, &synapse.from_uuid, &synapse.to_uuid);
     let at = creature
         .synapses
         .iter()
-        .position(|s| synapse_sort_key(creature, &s.from_uuid, &s.to_uuid) > key)
+        .position(|s| synapse_sort_key(creature, &indices, &s.from_uuid, &s.to_uuid) > key)
         .unwrap_or(creature.synapses.len());
     creature.synapses.insert(at, synapse);
 }
@@ -1242,6 +1271,97 @@ mod tests {
         let creature = parse_creature_json(TINY).unwrap();
         assert!(!is_forward_edge(&creature, "o1", "h1"));
         assert!(is_forward_edge(&creature, "input-1", "o1"));
+    }
+
+    /// `(from, to)` compiled indices for the whole synapse list.
+    fn order_of(creature: &CreatureExport) -> Vec<(usize, usize)> {
+        creature
+            .synapses
+            .iter()
+            .map(|s| {
+                (
+                    compiled_index(creature, &s.from_uuid).unwrap_or(usize::MAX),
+                    compiled_index(creature, &s.to_uuid).unwrap_or(usize::MAX),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ordered_insert_places_an_edge_mid_list() {
+        let mut creature = parse_creature_json(TINY).unwrap();
+        // input-1 (1) -> h1 (2) sorts between input-0 -> h1 and h1 -> o1.
+        add_synapse(&mut creature, "input-1".into(), "h1", 0.5);
+        assert_eq!(order_of(&creature), vec![(0, 2), (1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn ordered_insert_appends_the_greatest_key() {
+        let mut creature = parse_creature_json(TINY).unwrap();
+        // h1 (2) -> o1 (3) is already last; input-1 -> o1 sorts before it.
+        add_synapse(&mut creature, "input-1".into(), "o1", 0.5);
+        assert_eq!(order_of(&creature), vec![(0, 2), (1, 3), (2, 3)]);
+
+        // A second edge out of h1 would need a later target; with none
+        // available, the highest key present stays at the end.
+        assert_eq!(creature.synapses.last().unwrap().from_uuid, "h1");
+    }
+
+    #[test]
+    fn ordered_insert_keeps_a_run_of_same_source_sorted_by_target() {
+        let mut creature = parse_creature_json(TINY).unwrap();
+        add_synapse(&mut creature, "input-0".into(), "o1", 0.2);
+        add_synapse(&mut creature, "input-0".into(), "h1", 0.3);
+        let order = order_of(&creature);
+        assert!(
+            order.windows(2).all(|w| w[0] <= w[1]),
+            "list must stay sorted: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ordered_insert_sorts_a_dangling_endpoint_last() {
+        // A missing endpoint has no index; it sorts last so the insert stays
+        // total and the output gate reports the dangling edge.
+        let mut creature = parse_creature_json(TINY).unwrap();
+        add_synapse(&mut creature, "ghost".into(), "o1", 0.1);
+        assert_eq!(creature.synapses.last().unwrap().from_uuid, "ghost");
+        assert!(
+            crate::validate::validate_creature(&creature, "unit").is_err(),
+            "a dangling edge must not be certified"
+        );
+    }
+
+    #[test]
+    fn refused_bridge_rolls_the_whole_insert_back() {
+        // A creature the shared validator rejects for a reason the bridge
+        // cannot repair: the edit must be refused *and* leave nothing behind.
+        let mut creature = parse_creature_json(TINY).unwrap();
+        add_synapse(&mut creature, "ghost".into(), "o1", 0.1);
+        let before = creature.clone();
+
+        let err = add_neuron_bridge(
+            &mut creature,
+            NeuronBridgeSpec {
+                from_uuid: "input-1",
+                focus_uuid: "h1",
+                new_uuid: "bridge-1".into(),
+                squash: "IDENTITY",
+                bias: 0.0,
+                w_in: 0.02,
+                w_out: 0.03,
+            },
+        )
+        .expect_err("an uncertifiable creature must not be returned");
+        assert!(err.contains("bridge input-1 -> bridge-1 -> h1"), "{err}");
+        assert_eq!(
+            creature.neurons, before.neurons,
+            "neuron insert rolled back"
+        );
+        assert_eq!(
+            creature.synapses, before.synapses,
+            "both bridge edges rolled back"
+        );
     }
 
     #[test]

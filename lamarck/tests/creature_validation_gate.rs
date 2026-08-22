@@ -96,7 +96,7 @@ fn graft_growing_an_unreachable_hidden_is_refused() {
         stats: stats_now(),
     };
 
-    let err = apply_graft(&host, &graft).expect_err("an unreadable hidden must not escape");
+    let err = apply_graft(&host, &graft).expect_err("an unreachable hidden must not escape");
     assert!(err.contains("neuron:b1"), "error names the graft: {err}");
     assert!(
         err.contains("NO_INWARD_CONNECTIONS"),
