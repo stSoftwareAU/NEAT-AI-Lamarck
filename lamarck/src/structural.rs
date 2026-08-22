@@ -791,19 +791,84 @@ pub fn random_uuid_v4(rng: &mut impl Rng) -> String {
     )
 }
 
+/// Compiled index of every uuid the creature carries, for one bulk pass.
+///
+/// [`compiled_index`] scans the neuron list, so resolving a whole synapse list
+/// one uuid at a time is quadratic. Inputs are not listed as neurons; they own
+/// indices `0..input` and are resolved by name at lookup time.
+fn compiled_index_map(creature: &CreatureExport) -> std::collections::HashMap<&str, usize> {
+    creature
+        .neurons
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.uuid.as_str(), creature.input + i))
+        .collect()
+}
+
+/// Sort key for a synapse: the compiled `(from, to)` index pair.
+///
+/// An endpoint the creature does not carry sorts last (`usize::MAX`) so the
+/// insert stays total; the output gate then rejects the dangling edge loudly
+/// rather than this function guessing a position for it.
+fn synapse_sort_key(
+    creature: &CreatureExport,
+    indices: &std::collections::HashMap<&str, usize>,
+    from_uuid: &str,
+    to_uuid: &str,
+) -> (usize, usize) {
+    let resolve = |uuid: &str| {
+        if let Some(i) = uuid
+            .strip_prefix("input-")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            return (i < creature.input).then_some(i);
+        }
+        indices.get(uuid).copied()
+    };
+    (
+        resolve(from_uuid).unwrap_or(usize::MAX),
+        resolve(to_uuid).unwrap_or(usize::MAX),
+    )
+}
+
+/// Insert `synapse` at the position that keeps `creature.synapses` sorted by
+/// the compiled `(from, to)` index pair.
+///
+/// `neat_core::creature_validate` rule 25 requires that order, so appending a
+/// new edge at the end of the list produces a creature the shared validator
+/// rejects with `SORT_FAILURE` (issue #192). Inserting a neuron shifts later
+/// compiled indices uniformly, which preserves the relative order of the edges
+/// already present — so an ordered insert is enough to hold the invariant.
+pub fn insert_synapse_ordered(creature: &mut CreatureExport, synapse: SynapseExport) {
+    let indices = compiled_index_map(creature);
+    let key = synapse_sort_key(creature, &indices, &synapse.from_uuid, &synapse.to_uuid);
+    let at = creature
+        .synapses
+        .iter()
+        .position(|s| synapse_sort_key(creature, &indices, &s.from_uuid, &s.to_uuid) > key)
+        .unwrap_or(creature.synapses.len());
+    creature.synapses.insert(at, synapse);
+}
+
 /// Add a direct synapse `from -> focus` with the given weight.
+///
+/// The edge lands in canonical `(from, to)` order — see
+/// [`insert_synapse_ordered`].
 pub fn add_synapse(
     creature: &mut CreatureExport,
     from_uuid: String,
     focus_uuid: &str,
     weight: f64,
 ) {
-    creature.synapses.push(SynapseExport {
-        from_uuid,
-        to_uuid: focus_uuid.to_string(),
-        weight,
-        synapse_type: None,
-    });
+    insert_synapse_ordered(
+        creature,
+        SynapseExport {
+            from_uuid,
+            to_uuid: focus_uuid.to_string(),
+            weight,
+            synapse_type: None,
+        },
+    );
 }
 
 /// Parameters for inserting a hidden neuron on `from -> new -> focus`.
@@ -827,7 +892,9 @@ pub struct NeuronBridgeSpec<'a> {
 /// Insert a hidden neuron on a path `from -> new -> focus`.
 ///
 /// Returns the new neuron UUID. Fails closed when insertion would break
-/// forward-only ordering or the focus cannot host a hidden predecessor.
+/// forward-only ordering, when the focus cannot host a hidden predecessor, or
+/// when the rewired creature fails `neat_core::creature_validate` — the last
+/// case rolls the insert back and reports the violated rule (issue #192).
 pub fn add_neuron_bridge(
     creature: &mut CreatureExport,
     spec: NeuronBridgeSpec<'_>,
@@ -872,25 +939,47 @@ pub fn add_neuron_bridge(
         ));
     }
 
-    creature.synapses.push(SynapseExport {
-        from_uuid: from_uuid.to_string(),
-        to_uuid: new_uuid.clone(),
-        weight: w_in,
-        synapse_type: None,
-    });
-    creature.synapses.push(SynapseExport {
-        from_uuid: new_uuid.clone(),
-        to_uuid: focus_uuid.to_string(),
-        weight: w_out,
-        synapse_type: None,
-    });
+    insert_synapse_ordered(
+        creature,
+        SynapseExport {
+            from_uuid: from_uuid.to_string(),
+            to_uuid: new_uuid.clone(),
+            weight: w_in,
+            synapse_type: None,
+        },
+    );
+    insert_synapse_ordered(
+        creature,
+        SynapseExport {
+            from_uuid: new_uuid.clone(),
+            to_uuid: focus_uuid.to_string(),
+            weight: w_out,
+            synapse_type: None,
+        },
+    );
+
+    // The structure is final — certify it before the caller sees it. Roll the
+    // whole bridge back on failure so a refused edit leaves no partial rewire.
+    if let Err(message) = crate::validate::validate_creature(
+        creature,
+        &format!("bridge {from_uuid} -> {new_uuid} -> {focus_uuid}"),
+    ) {
+        creature
+            .synapses
+            .retain(|s| s.from_uuid != new_uuid && s.to_uuid != new_uuid);
+        creature.neurons.retain(|n| n.uuid != new_uuid);
+        return Err(message);
+    }
+
     Ok(new_uuid)
 }
 
 /// Split an existing incoming synapse through a new hidden neuron.
 ///
 /// Removes the direct `from -> focus` edge and replaces it with
-/// `from -> new (w=1)` and `new -> focus (w=old)`.
+/// `from -> new (w=1)` and `new -> focus (w=old)`. The rewired creature is
+/// certified by [`add_neuron_bridge`]; a refused split restores the original
+/// edge so the caller is never handed a half-rewired creature (issue #192).
 pub fn split_incoming_synapse(
     creature: &mut CreatureExport,
     incoming: &IncomingSourceStats,
@@ -908,7 +997,7 @@ pub fn split_incoming_synapse(
     }
     let old_w = old.weight;
     creature.synapses.remove(syn_idx);
-    add_neuron_bridge(
+    let bridged = add_neuron_bridge(
         creature,
         NeuronBridgeSpec {
             from_uuid: &incoming.from_uuid,
@@ -919,7 +1008,11 @@ pub fn split_incoming_synapse(
             w_in: 1.0,
             w_out: old_w,
         },
-    )
+    );
+    if bridged.is_err() {
+        creature.synapses.insert(syn_idx, old);
+    }
+    bridged
 }
 
 /// Squashes tried when growing a hidden into the focus.
@@ -1178,6 +1271,97 @@ mod tests {
         let creature = parse_creature_json(TINY).unwrap();
         assert!(!is_forward_edge(&creature, "o1", "h1"));
         assert!(is_forward_edge(&creature, "input-1", "o1"));
+    }
+
+    /// `(from, to)` compiled indices for the whole synapse list.
+    fn order_of(creature: &CreatureExport) -> Vec<(usize, usize)> {
+        creature
+            .synapses
+            .iter()
+            .map(|s| {
+                (
+                    compiled_index(creature, &s.from_uuid).unwrap_or(usize::MAX),
+                    compiled_index(creature, &s.to_uuid).unwrap_or(usize::MAX),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ordered_insert_places_an_edge_mid_list() {
+        let mut creature = parse_creature_json(TINY).unwrap();
+        // input-1 (1) -> h1 (2) sorts between input-0 -> h1 and h1 -> o1.
+        add_synapse(&mut creature, "input-1".into(), "h1", 0.5);
+        assert_eq!(order_of(&creature), vec![(0, 2), (1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn ordered_insert_appends_the_greatest_key() {
+        let mut creature = parse_creature_json(TINY).unwrap();
+        // h1 (2) -> o1 (3) is already last; input-1 -> o1 sorts before it.
+        add_synapse(&mut creature, "input-1".into(), "o1", 0.5);
+        assert_eq!(order_of(&creature), vec![(0, 2), (1, 3), (2, 3)]);
+
+        // A second edge out of h1 would need a later target; with none
+        // available, the highest key present stays at the end.
+        assert_eq!(creature.synapses.last().unwrap().from_uuid, "h1");
+    }
+
+    #[test]
+    fn ordered_insert_keeps_a_run_of_same_source_sorted_by_target() {
+        let mut creature = parse_creature_json(TINY).unwrap();
+        add_synapse(&mut creature, "input-0".into(), "o1", 0.2);
+        add_synapse(&mut creature, "input-0".into(), "h1", 0.3);
+        let order = order_of(&creature);
+        assert!(
+            order.windows(2).all(|w| w[0] <= w[1]),
+            "list must stay sorted: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ordered_insert_sorts_a_dangling_endpoint_last() {
+        // A missing endpoint has no index; it sorts last so the insert stays
+        // total and the output gate reports the dangling edge.
+        let mut creature = parse_creature_json(TINY).unwrap();
+        add_synapse(&mut creature, "ghost".into(), "o1", 0.1);
+        assert_eq!(creature.synapses.last().unwrap().from_uuid, "ghost");
+        assert!(
+            crate::validate::validate_creature(&creature, "unit").is_err(),
+            "a dangling edge must not be certified"
+        );
+    }
+
+    #[test]
+    fn refused_bridge_rolls_the_whole_insert_back() {
+        // A creature the shared validator rejects for a reason the bridge
+        // cannot repair: the edit must be refused *and* leave nothing behind.
+        let mut creature = parse_creature_json(TINY).unwrap();
+        add_synapse(&mut creature, "ghost".into(), "o1", 0.1);
+        let before = creature.clone();
+
+        let err = add_neuron_bridge(
+            &mut creature,
+            NeuronBridgeSpec {
+                from_uuid: "input-1",
+                focus_uuid: "h1",
+                new_uuid: "bridge-1".into(),
+                squash: "IDENTITY",
+                bias: 0.0,
+                w_in: 0.02,
+                w_out: 0.03,
+            },
+        )
+        .expect_err("an uncertifiable creature must not be returned");
+        assert!(err.contains("bridge input-1 -> bridge-1 -> h1"), "{err}");
+        assert_eq!(
+            creature.neurons, before.neurons,
+            "neuron insert rolled back"
+        );
+        assert_eq!(
+            creature.synapses, before.synapses,
+            "both bridge edges rolled back"
+        );
     }
 
     #[test]

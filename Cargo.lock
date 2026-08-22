@@ -193,7 +193,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "neat-core"
-version = "0.9.9"
+version = "0.10.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "neat_ai_lamarck"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "clap",
  "neat-core",

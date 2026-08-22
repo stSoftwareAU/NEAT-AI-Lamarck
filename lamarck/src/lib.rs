@@ -30,6 +30,7 @@ pub mod scorer_cost;
 pub mod screen_calibration;
 pub mod structural;
 pub mod tags;
+pub mod validate;
 pub mod width;
 
 pub use analysis::{

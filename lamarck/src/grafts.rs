@@ -12,7 +12,10 @@ use crate::combos::{
 };
 use crate::log;
 use crate::scorer::{DirectoryScorer, ScoreResult, accepts_improvement, improvement};
-use crate::structural::{insert_index_for_hidden, is_forward_edge, is_input_source};
+use crate::structural::{
+    insert_index_for_hidden, insert_synapse_ordered, is_forward_edge, is_input_source,
+};
+use crate::validate::validate_creature;
 use crate::width::checked_creature_json_pretty;
 use neat_core::{CreatureExport, NeuronExport, SynapseExport};
 use serde::{Deserialize, Serialize};
@@ -330,6 +333,18 @@ pub fn classify_graft(creature: &CreatureExport, graft: &Graft) -> GraftStatus {
 }
 
 /// Apply a single graft onto a clone of `host`.
+///
+/// The assembled creature is certified by `neat_core::creature_validate` before
+/// it is returned (issue #192): a graft that produces a creature breaking a
+/// shared rule is a bug in that graft, so it fails loudly with the violated
+/// reason rather than handing back an invalid creature. [`apply_grafts`]
+/// inherits the gate per step, so a violation is attributed to the graft that
+/// caused it.
+///
+/// # Errors
+///
+/// Returns the assembly failure, or the validation failure prefixed with the
+/// graft id.
 pub fn apply_graft(host: &CreatureExport, graft: &Graft) -> Result<CreatureExport, String> {
     for req in &graft.requires {
         if !uuid_exists(host, req) {
@@ -338,6 +353,9 @@ pub fn apply_graft(host: &CreatureExport, graft: &Graft) -> Result<CreatureExpor
     }
     let mut out = host.clone();
     if is_present(&out, graft) {
+        // Nothing was built: the host passes straight through. The gate belongs
+        // where Lamarck *creates* structure, so an externally supplied host's
+        // own defect is not reported here as a graft failure (issue #189).
         return Ok(out);
     }
 
@@ -401,17 +419,31 @@ pub fn apply_graft(host: &CreatureExport, graft: &Graft) -> Result<CreatureExpor
                 graft.id, syn.from_uuid, syn.to_uuid
             ));
         }
-        out.synapses.push(SynapseExport {
-            from_uuid: syn.from_uuid.clone(),
-            to_uuid: syn.to_uuid.clone(),
-            weight: syn.weight,
-            synapse_type: syn.synapse_type.clone(),
-        });
+        insert_synapse_ordered(
+            &mut out,
+            SynapseExport {
+                from_uuid: syn.from_uuid.clone(),
+                to_uuid: syn.to_uuid.clone(),
+                weight: syn.weight,
+                synapse_type: syn.synapse_type.clone(),
+            },
+        );
     }
+
+    // Structure is final — certify before the creature escapes.
+    validate_creature(&out, &format!("graft {}", graft.id))?;
     Ok(out)
 }
 
 /// Apply multiple grafts in order onto `host`.
+///
+/// Each step goes through [`apply_graft`], so the shared validator runs after
+/// every graft and the first violation names the graft that caused it rather
+/// than the whole stack.
+///
+/// # Errors
+///
+/// Returns the first step that failed to apply or to validate.
 pub fn apply_grafts(host: &CreatureExport, grafts: &[&Graft]) -> Result<CreatureExport, String> {
     let mut out = host.clone();
     for g in grafts {

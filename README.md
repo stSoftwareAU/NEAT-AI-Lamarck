@@ -309,6 +309,50 @@ grafts are retired. New structural accepts are recorded back into the store —
 for a combo accept, each structural member is recorded at its **solo** weights,
 never the dampened merge, so replay cannot double-dampen.
 
+### Creature validation gate
+
+`neat_core::creature_validate` is the single definition of a valid creature —
+shared with NEAT-AI over WASM and called natively here. Lamarck changes creature
+structure, so it certifies its **own** output: every creature it assembles is
+validated after the structure is final and before the value escapes, so a
+violation is attributed to the graft or edit that caused it rather than to a
+later consumer.
+
+```mermaid
+flowchart LR
+    H[host creature] --> A["apply_graft / apply_grafts<br/>structural::add_neuron_bridge<br/>structural::split_incoming_synapse"]
+    A --> V{"neat_core::creature_validate<br/>forward_only = true"}
+    V -->|Ok| OUT([certified creature returned])
+    V -->|ValidationFailure| ERR([Err: graft id + reason + message + index])
+
+    classDef step fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef gate fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef good fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef bad fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+
+    class H,A step
+    class V gate
+    class OUT good
+    class ERR bad
+```
+
+The gate runs **at output, never on load**: an externally supplied host creature
+is not this repo's bug to report, and load-time validation would cost on every
+read. A failure is folded into the existing `Result<_, String>` channel carrying
+the `ValidationFailure` reason, message and neuron / synapse index — never
+swallowed, never degraded to a debug log. A refused structural edit rolls itself
+back, so no caller is handed a half-rewired creature.
+
+`ValidateOptions` are chosen deliberately (`lamarck/src/validate.rs`):
+`forward_only: true`, because Lamarck only ever emits feed-forward creatures and
+already refuses a backward edge at the point of insertion; `neurons` and
+`connections` stay `None`, because Lamarck grows structure and has no fixed
+expected counts.
+
+Rule 25 of the shared rules requires synapses sorted by their compiled
+`(from, to)` index pair, so new edges are **inserted in canonical order** rather
+than appended (`structural::insert_synapse_ordered`).
+
 ### Phase 2 — select the focus neurons
 
 Each iteration focuses on `--focus-count` non-input neurons (default 1). The
@@ -1305,6 +1349,7 @@ NEAT-AI-Lamarck/
     ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
+    ├── validate.rs          # neat_core::creature_validate output gate (issue #192)
     ├── width.rs             # input/output observation-width guard (issue #165)
     └── log.rs
 ```
