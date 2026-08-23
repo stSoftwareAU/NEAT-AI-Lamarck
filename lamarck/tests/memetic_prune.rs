@@ -225,7 +225,7 @@ fn appending_structure_keeps_the_whole_memetic_record() {
 }
 
 #[test]
-fn a_tags_only_write_leaves_memetic_and_uuid_untouched() {
+fn a_tags_only_write_leaves_the_memetic_record_untouched() {
     let tagged = ROWS.replacen('{', r#"{"uuid":"creature-1","#, 1);
     let creature = parse_creature_json(&tagged).unwrap();
     let meta = CreatureMeta::from_creature_json(&tagged);
@@ -238,9 +238,11 @@ fn a_tags_only_write_leaves_memetic_and_uuid_untouched() {
         value["memetic"], source["memetic"],
         "a tags-only pass is not structural: memetic stays byte-identical"
     );
-    assert_eq!(
-        value["uuid"], source["uuid"],
-        "the creature uuid is preserved"
+    // The creature-level uuid is a content hash and is deliberately never
+    // written back (issue #196) — pruning memetic must not resurrect it.
+    assert!(
+        value.get("uuid").is_none(),
+        "no creature uuid is re-stamped on a check-in write: {written}"
     );
 }
 

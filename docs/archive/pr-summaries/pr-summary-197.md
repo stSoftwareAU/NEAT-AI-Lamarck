@@ -28,8 +28,8 @@ all. Closes #197.
   `best.json`, `winners/` or a scorer batch.
 - **Untouched, deliberately.** Append paths (`add_synapse`, `apply_graft`,
   combo merges) keep the whole record — adding structure leaves every key
-  resolvable — and a tags-only pass leaves both `memetic` and `uuid`
-  byte-identical.
+  resolvable — and a tags-only pass leaves `memetic` byte-identical (the
+  creature-level `uuid` stays unwritten, per issue #196).
 
 ```mermaid
 flowchart LR
@@ -111,8 +111,8 @@ the creature handed back:
 - `a_refused_split_restores_the_memetic_it_pruned` — rollback is a true no-op.
 - `appending_structure_keeps_the_whole_memetic_record` — over-correction guard
   for `add_synapse` and `apply_graft`.
-- `a_tags_only_write_leaves_memetic_and_uuid_untouched` — over-correction guard
-  for the tags pass.
+- `a_tags_only_write_leaves_the_memetic_record_untouched` — over-correction
+  guard for the tags pass (and the write still emits no creature `uuid`).
 - `the_write_boundary_refuses_a_dangling_memetic` /
   `the_write_boundary_accepts_a_pruned_creature`.
 
