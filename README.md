@@ -353,7 +353,7 @@ Rule 25 of the shared rules requires synapses sorted by their compiled
 `(from, to)` index pair, so new edges are **inserted in canonical order** rather
 than appended (`structural::insert_synapse_ordered`).
 
-### Memetic records survive structure changes (issue #197)
+### Memetic records survive structure changes (issues #197, #199)
 
 A creature's optional `memetic` record holds per-neuron bias deltas and
 per-synapse weight deltas keyed to a **specific** structure — it is what a
@@ -374,11 +374,21 @@ Pruning drops only what dangles: `MemeticExport::extra` (`generation`, `score`,
 survives are kept, so `memetic = None` is never the fix. A rolled-back edit
 restores the record it pruned.
 
+Both boundaries are thin wrappers over `neat_core`'s
+`CreatureExport::prune_memetic` / `MemeticExport::prune_to`, which live beside
+rule 31 itself — so what Lamarck prunes and what Lamarck refuses cannot drift
+from what the rule accepts. That matters for the one key shape Lamarck could
+not resolve on its own: a neuron declaring no `id` still has one, the
+deterministic hash of its uuid folded into `[1_000_000, 2_000_000_000)`. Lamarck
+used to treat every numeric key in that range as unverifiable — neither pruned
+nor refused — which left the original silent-candidate-loss reachable for a
+memetic keyed by a derived id. Delegating closes that gap.
+
 ```mermaid
 flowchart LR
-    R["synapses.remove()"] --> P["memetic::prune_memetic<br/>drop dangling keys, keep extra"]
+    R["synapses.remove()"] --> P["memetic::prune_memetic<br/>→ neat_core CreatureExport::prune_memetic"]
     P --> V{"neat_core::creature_validate<br/>rule 31 MEMETIC"}
-    V -->|Ok| W["memetic::assert_memetic_resolves<br/>on every write path"]
+    V -->|Ok| W["memetic::assert_memetic_resolves<br/>→ same prune, names what it would drop"]
     V -->|refused| RB([roll back edge + memetic])
     W -->|resolves| D([best.json / batch files])
     W -->|dangling| E([Err: names the reference])
@@ -1410,7 +1420,7 @@ NEAT-AI-Lamarck/
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
     ├── validate.rs          # neat_core::creature_validate output gate (issue #192)
-    ├── memetic.rs           # memetic prune + write-path guard (issue #197)
+    ├── memetic.rs           # memetic prune + write-path guard (issues #197, #199)
     ├── width.rs             # input/output observation-width guard (issue #165)
     └── log.rs
 ```
