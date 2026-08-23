@@ -903,7 +903,7 @@ Projected onto a production run with the per-call costs #112 fitted, that is
 ≈6% of scorer time.
 
 An accepted winner becomes the incumbent immediately: `best.json` is rewritten
-with the creature's `uuid`/`tags` re-attached and a run-summary `lamarck` tag,
+with the creature's `tags` re-attached and a run-summary `lamarck` tag,
 a copy is kept under `winners/`, structural accepts are recorded into the graft
 store, and creature-specific analysis is recomputed next iteration.
 
@@ -920,15 +920,27 @@ them — e.g. `🦒 Lamarck · grown by 🧩 structural_add_neuron · 🎯 o1 ·
 Neurons inherited from the source are never restamped: another program's
 `discovered` / `discovery-comment` / `intelligentDesign` tags are its own.
 
+**The creature-level `uuid` does not survive the write** (issue #196). That uuid
+is a v5 content hash over the neurons and synapses, and restructuring the
+creature is Lamarck's entire job — add a neuron, split a synapse or nudge a
+weight and the source's uuid no longer describes the creature it is attached to.
+Because NEAT-AI's `makeUUID` short-circuits on a uuid that is already present,
+a stale one is never recomputed and would let a restructured creature inherit a
+score it never earned through uuid-keyed dedupe. So Lamarck writes **no**
+creature `uuid` and lets the consumer derive it from the content it actually
+received. Per-neuron `uuid` is a different concept — a stable identity label and
+the key per-neuron tags are stored under — and is preserved exactly.
+
 ```mermaid
 flowchart LR
-    S["source creature.json<br/>tags + neurons[].tags"] --> M["CreatureMeta<br/>tags + neuron_tags{uuid → tags}"]
-    S --> C["CreatureExport<br/>(tags stripped)"]
+    S["source creature.json<br/>uuid + tags + neurons[].tags"] --> M["CreatureMeta<br/>tags + neuron_tags{uuid → tags}"]
+    S -.->|creature uuid dropped| X(["no creature uuid written<br/>(consumer re-derives it)"])
+    S --> C["CreatureExport<br/>(uuid + tags stripped)"]
     C --> G["growth adds a neuron"]
     G -->|stamp origin| M
     C --> W["serialize_creature_with_meta"]
     M -->|re-attach by uuid| W
-    W --> B["best.json / winners/"]
+    W --> B["best.json / winners/ / baseline.json"]
 ```
 
 ### Phase 6 — repeat until a stopping rule fires
