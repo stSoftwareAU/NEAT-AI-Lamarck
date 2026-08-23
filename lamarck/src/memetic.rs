@@ -1,5 +1,5 @@
 //! Keep a creature's `memetic` record pointing at structure it still has
-//! (issue #197).
+//! (issues #197, #199).
 //!
 //! `memetic` holds per-neuron bias deltas and per-synapse weight deltas keyed
 //! to a **specific** structure, so the rule is: any pass that removes a neuron
@@ -24,173 +24,19 @@
 //! fine-tuning history. A tags-only pass is not structural either — it must
 //! leave both `memetic` and `uuid` untouched.
 //!
-//! Resolution follows rule 31: a key is a runtime neuron id first — implicit
-//! inputs by their index, outputs by `-(outputIndex + 1)` whatever the file
-//! declares, everything else by its declared id — then a wire uuid, where
-//! implicit inputs are `input-N`. An id-keyed entry's `toId` resolves by
-//! runtime id only.
-//!
-//! That mirrors the *derivable* half of the rule; rule 31 additionally accepts
-//! a deterministic hash of a neuron's uuid as its id, and that hash lives in
-//! `neat-core`. This module is therefore deliberately conservative about the
-//! keys it cannot verify: a numeric key inside that hash's range which matches
-//! no declared id is neither pruned nor refused. The shared
-//! home for the whole rule is `neat-core`'s `CreatureExport::prune_memetic` /
-//! `MemeticExport::prune_to`, raised alongside this fix; issue #199 tracks
-//! replacing this module's body with a call to it once that release lands.
+//! **Resolution is `neat-core`'s, not Lamarck's.** Both boundaries run
+//! `CreatureExport::prune_memetic` / `MemeticExport::prune_to`, which live
+//! beside rule 31 in `neat_core::creature_validate`, so what Lamarck prunes and
+//! what Lamarck refuses cannot drift from what the rule accepts. That matters
+//! because a key resolves by runtime id first — implicit inputs by index,
+//! outputs forced to `-(outputIndex + 1)`, everything else by its declared id
+//! **or a deterministic hash of its uuid** — and only then by wire uuid. The
+//! hash half is NEAT-AI's `deterministicIdFromUuid`; Lamarck used to treat any
+//! numeric key in its `[1_000_000, 2_000_000_000)` range as unverifiable, which
+//! left the original silent-candidate-loss reachable for a memetic keyed by a
+//! derived id. Delegating removes that last gap.
 
-use neat_core::{CreatureExport, MemeticExport, MemeticWeightExport, MemeticWeightRowExport};
-use std::collections::{HashMap, HashSet};
-
-/// The half-open range NEAT-AI folds a uuid-derived runtime id into
-/// (`deterministicIdFromUuid`), chosen so a derived id can collide with neither
-/// an input id (`0..input`) nor an output id (negative).
-///
-/// Lamarck cannot reproduce the hash itself — it is `neat-core`'s to own — so a
-/// numeric key in this range that matches no declared id is treated as
-/// *unverifiable* rather than dangling — neither pruned nor refused.
-const DERIVED_ID_RANGE: std::ops::Range<i64> = 1_000_000..2_000_000_000;
-
-/// What a memetic key resolves to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyTarget {
-    /// The compiled walk index of the neuron it names.
-    Index(usize),
-    /// A numeric key that could be a uuid-derived runtime id. Neither pruned
-    /// nor refused: this half of rule 31's resolution needs the hash that lives
-    /// in `neat-core`, and guessing wrong would throw away valid fine-tuning
-    /// history or refuse a sound creature. Erring here costs at worst the old
-    /// behaviour for that one key; erring the other way loses data.
-    Unverifiable,
-    /// The key names nothing this creature carries.
-    Missing,
-}
-
-/// Everything a memetic key can name, resolved once per creature.
-struct StructureIndex<'a> {
-    /// Listed neurons by wire uuid, at their compiled walk index.
-    uuid_to_index: HashMap<&'a str, usize>,
-    /// Neurons by the runtime id the shared rules give them, at their compiled
-    /// walk index — implicit inputs by their own index, outputs by
-    /// `-(outputIndex + 1)` whatever the file declares, everything else by its
-    /// declared id.
-    id_to_index: HashMap<i64, usize>,
-    /// Declared observation width — the implicit `input-N` range.
-    input: usize,
-    /// Live `(from, to)` compiled index pairs.
-    pairs: HashSet<(usize, usize)>,
-}
-
-impl<'a> StructureIndex<'a> {
-    fn build(creature: &'a CreatureExport) -> Self {
-        let mut uuid_to_index = HashMap::with_capacity(creature.neurons.len());
-        let mut id_to_index = HashMap::with_capacity(creature.input + creature.neurons.len());
-        for index in 0..creature.input {
-            id_to_index.insert(index as i64, index);
-        }
-        let mut output_index: i64 = 0;
-        for (i, neuron) in creature.neurons.iter().enumerate() {
-            let index = creature.input + i;
-            uuid_to_index.insert(neuron.uuid.as_str(), index);
-            if neuron.neuron_type == "output" {
-                id_to_index.insert(-(output_index + 1), index);
-                output_index += 1;
-            } else if let Some(id) = neuron.id {
-                id_to_index.insert(id, index);
-            }
-        }
-        let mut index = Self {
-            uuid_to_index,
-            id_to_index,
-            input: creature.input,
-            pairs: HashSet::with_capacity(creature.synapses.len()),
-        };
-        for synapse in &creature.synapses {
-            if let (Some(from), Some(to)) = (
-                index.resolve_wire(&synapse.from_uuid),
-                index.resolve_wire(&synapse.to_uuid),
-            ) {
-                index.pairs.insert((from, to));
-            }
-        }
-        index
-    }
-
-    /// The neuron a wire uuid names — a listed neuron, or an implicit input.
-    fn resolve_wire(&self, uuid: &str) -> Option<usize> {
-        if let Some(index) = self.uuid_to_index.get(uuid) {
-            return Some(*index);
-        }
-        let index: usize = uuid.strip_prefix("input-")?.parse().ok()?;
-        (index < self.input).then_some(index)
-    }
-
-    /// The neuron a memetic key names — runtime id first, then wire uuid.
-    fn resolve_key(&self, key: &str) -> KeyTarget {
-        if let Ok(id) = key.parse::<i64>() {
-            if let Some(index) = self.id_to_index.get(&id) {
-                return KeyTarget::Index(*index);
-            }
-            if let Some(index) = self.resolve_wire(key) {
-                return KeyTarget::Index(index);
-            }
-            return self.unmatched_id(id);
-        }
-        match self.resolve_wire(key) {
-            Some(index) => KeyTarget::Index(index),
-            None => KeyTarget::Missing,
-        }
-    }
-
-    /// A runtime id no neuron declares: dangling, unless it could be one of the
-    /// uuid-derived ids only `neat-core` can compute.
-    fn unmatched_id(&self, id: i64) -> KeyTarget {
-        if DERIVED_ID_RANGE.contains(&id) {
-            KeyTarget::Unverifiable
-        } else {
-            KeyTarget::Missing
-        }
-    }
-
-    /// Whether the edge between two resolved endpoints is gone. Unverifiable at
-    /// either end means the question cannot be answered — treated as live.
-    fn edge_dangles(&self, from: KeyTarget, to: KeyTarget) -> bool {
-        match (from, to) {
-            (KeyTarget::Missing, _) | (_, KeyTarget::Missing) => true,
-            (KeyTarget::Index(from), KeyTarget::Index(to)) => !self.pairs.contains(&(from, to)),
-            _ => false,
-        }
-    }
-
-    /// Whether a bias key names a neuron the creature no longer carries.
-    fn bias_dangles(&self, key: &str) -> bool {
-        self.resolve_key(key) == KeyTarget::Missing
-    }
-
-    /// Whether a row names an endpoint or an edge the creature no longer
-    /// carries. A row missing a field is malformed rather than dangling — rule
-    /// 31 reports that as the input defect it is, and pruning it would hide it.
-    fn row_dangles(&self, row: &MemeticWeightRowExport) -> bool {
-        let (Some(from_uuid), Some(to_uuid)) = (row.from_uuid.as_deref(), row.to_uuid.as_deref())
-        else {
-            return false;
-        };
-        self.edge_dangles(self.resolve_key(from_uuid), self.resolve_key(to_uuid))
-    }
-
-    /// Whether an id-keyed entry names an edge the creature no longer carries.
-    /// `toId` resolves by runtime id only, exactly as rule 31 reads it.
-    fn entry_dangles(&self, from: KeyTarget, entry: &MemeticWeightExport) -> bool {
-        let Some(to_id) = entry.to_id else {
-            return false;
-        };
-        let to = match self.id_to_index.get(&to_id) {
-            Some(&index) => KeyTarget::Index(index),
-            None => self.unmatched_id(to_id),
-        };
-        self.edge_dangles(from, to)
-    }
-}
+use neat_core::{CreatureExport, MemeticWeights};
 
 /// Drop every memetic key that no longer resolves against `creature`.
 ///
@@ -203,30 +49,7 @@ impl<'a> StructureIndex<'a> {
 /// edge survives, and the record itself (an emptied record is still the fact
 /// that the creature was fine-tuned).
 pub fn prune_memetic(creature: &mut CreatureExport) {
-    let Some(mut memetic) = creature.memetic.take() else {
-        return;
-    };
-    let index = StructureIndex::build(creature);
-    prune_record(&mut memetic, &index);
-    creature.memetic = Some(memetic);
-}
-
-/// [`prune_memetic`]'s body, against an already-built index.
-fn prune_record(memetic: &mut MemeticExport, index: &StructureIndex<'_>) {
-    memetic.biases.retain(|key, _| !index.bias_dangles(key));
-    match &mut memetic.weights {
-        neat_core::MemeticWeights::Rows(rows) => rows.retain(|row| !index.row_dangles(row)),
-        neat_core::MemeticWeights::ById(by_id) => {
-            by_id.retain(|key, entries| {
-                let from = index.resolve_key(key);
-                if from == KeyTarget::Missing {
-                    return false;
-                }
-                entries.retain(|entry| !index.entry_dangles(from, entry));
-                true
-            });
-        }
-    }
+    creature.prune_memetic();
 }
 
 /// Refuse a creature whose memetic record names structure it no longer carries.
@@ -235,6 +58,11 @@ fn prune_record(memetic: &mut MemeticExport, index: &StructureIndex<'_>) {
 /// being *built*, this stops one being *written*. Called from every creature
 /// write path (`width::checked_creature_json*`, the `tags` check-in
 /// serialisers), so the failure points at the writer, not at a later reader.
+///
+/// The check *is* the prune: whatever `MemeticExport::prune_to` would drop is
+/// exactly what rule 31 would refuse, so the guard asks the shared resolution
+/// what it would remove and names the first casualty rather than re-deriving
+/// the vocabulary itself.
 ///
 /// # Errors
 ///
@@ -246,9 +74,14 @@ pub fn assert_memetic_resolves(creature: &CreatureExport) -> Result<(), String> 
     let Some(memetic) = creature.memetic.as_ref() else {
         return Ok(());
     };
-    let index = StructureIndex::build(creature);
+    let mut pruned = memetic.clone();
+    pruned.prune_to(creature);
 
-    if let Some(key) = memetic.biases.keys().find(|key| index.bias_dangles(key)) {
+    if let Some(key) = memetic
+        .biases
+        .keys()
+        .find(|key| !pruned.biases.contains_key(key.as_str()))
+    {
         return Err(format!(
             "refusing to write creature: memetic bias {key} names no neuron in the creature \
              — a removal did not prune the memetic record"
@@ -261,28 +94,24 @@ pub fn assert_memetic_resolves(creature: &CreatureExport) -> Result<(), String> 
              creature — a removal did not prune the memetic record"
         )
     };
-    match &memetic.weights {
-        neat_core::MemeticWeights::Rows(rows) => {
-            if let Some(row) = rows.iter().find(|row| index.row_dangles(row)) {
+    match (&memetic.weights, &pruned.weights) {
+        (MemeticWeights::Rows(rows), MemeticWeights::Rows(kept)) => {
+            if let Some(row) = first_dropped(rows, kept) {
                 return Err(dangling_edge(
                     row.from_uuid.clone().unwrap_or_default(),
                     row.to_uuid.clone().unwrap_or_default(),
                 ));
             }
         }
-        neat_core::MemeticWeights::ById(by_id) => {
+        (MemeticWeights::ById(by_id), MemeticWeights::ById(kept)) => {
             for (key, entries) in by_id {
-                let from = index.resolve_key(key);
-                if from == KeyTarget::Missing {
+                let Some(kept_entries) = kept.get(key) else {
                     return Err(format!(
                         "refusing to write creature: memetic weight key {key} names no neuron in \
                          the creature — a removal did not prune the memetic record"
                     ));
-                }
-                if let Some(entry) = entries
-                    .iter()
-                    .find(|entry| index.entry_dangles(from, entry))
-                {
+                };
+                if let Some(entry) = first_dropped(entries, kept_entries) {
                     return Err(dangling_edge(
                         key.clone(),
                         entry.to_id.map(|id| id.to_string()).unwrap_or_default(),
@@ -290,14 +119,41 @@ pub fn assert_memetic_resolves(creature: &CreatureExport) -> Result<(), String> 
                 }
             }
         }
+        // `prune_to` never rewrites one wire form as the other. Reaching here
+        // means the shared contract changed under us — say so rather than
+        // reporting a record that was never checked as sound.
+        _ => {
+            return Err(
+                "refusing to write creature: neat_core::MemeticExport::prune_to changed the \
+                 memetic weights wire form — the memetic guard cannot be trusted"
+                    .to_string(),
+            );
+        }
     }
     Ok(())
+}
+
+/// The first element of `before` that the prune dropped, or `None` when it kept
+/// them all.
+///
+/// `retain` preserves order, so `after` is a subsequence of `before` and one
+/// forward walk finds the first gap.
+fn first_dropped<'a, T: PartialEq>(before: &'a [T], after: &[T]) -> Option<&'a T> {
+    let mut kept = after.iter();
+    let mut next = kept.next();
+    for item in before {
+        match next {
+            Some(candidate) if candidate == item => next = kept.next(),
+            _ => return Some(item),
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neat_core::{MemeticWeights, parse_creature_json};
+    use neat_core::parse_creature_json;
 
     const ROWS: &str = r#"{
       "semanticVersion":"4.0.0","forwardOnly":true,"input":2,"output":1,
@@ -350,9 +206,42 @@ mod tests {
       ],
       "memetic":{
         "biases":{"0":0.05,"2":0.01},
-        "weights":{"2":[{"toId":-1,"weight":1.1}],"1500000":[{"toId":-1,"weight":0.7}]}
+        "weights":{"2":[{"toId":-1,"weight":1.1}]}
       }
     }"#;
+
+    /// `h1` declares no `id`, so its runtime id is NEAT-AI's deterministic hash
+    /// of its uuid (`deterministicIdFromUuid`, folded into
+    /// `[1_000_000, 2_000_000_000)`). `1500000` is in the same range and names
+    /// nothing — the distinction Lamarck could not draw before issue #199.
+    const HASHED_IDS: &str = r#"{
+      "semanticVersion":"4.0.0","forwardOnly":true,"input":2,"output":1,
+      "neurons":[
+        {"type":"hidden","uuid":"h1","bias":0.25,"squash":"IDENTITY"},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+      ],
+      "synapses":[
+        {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+        {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+      ],
+      "memetic":{
+        "biases":{"1003273":0.01,"1500000":0.02},
+        "weights":{"1003273":[{"toId":-1,"weight":1.1}],"1500000":[{"toId":-1,"weight":0.7}]}
+      }
+    }"#;
+
+    /// `deterministicIdFromUuid("h1")` — the runtime id rule 31 gives the
+    /// `HASHED_IDS` hidden neuron.
+    const H1_DERIVED_ID: &str = "1003273";
+
+    fn by_id(
+        creature: &CreatureExport,
+    ) -> &std::collections::BTreeMap<String, Vec<neat_core::MemeticWeightExport>> {
+        match &creature.memetic.as_ref().unwrap().weights {
+            MemeticWeights::ById(by_id) => by_id,
+            MemeticWeights::Rows(_) => panic!("fixture is the map form"),
+        }
+    }
 
     /// A bias keyed by an input's runtime id (an input's id *is* its index) is
     /// a live reference — dropping it would throw away fine-tuning history the
@@ -373,37 +262,58 @@ mod tests {
         let mut kept = parse_creature_json(DERIVED_IDS).unwrap();
         prune_memetic(&mut kept);
         assert_memetic_resolves(&kept).expect("h1 -> o1 is still there");
-        match &kept.memetic.as_ref().unwrap().weights {
-            MemeticWeights::ById(by_id) => assert_eq!(by_id["2"].len(), 1),
-            MemeticWeights::Rows(_) => panic!("fixture is the map form"),
-        }
+        assert_eq!(by_id(&kept)["2"].len(), 1);
 
         let mut removed = parse_creature_json(DERIVED_IDS).unwrap();
         removed.synapses.retain(|s| s.to_uuid != "o1");
         prune_memetic(&mut removed);
-        match &removed.memetic.as_ref().unwrap().weights {
-            MemeticWeights::ById(by_id) => {
-                assert!(by_id["2"].is_empty(), "the removed edge's entry is pruned")
-            }
-            MemeticWeights::Rows(_) => panic!("fixture is the map form"),
-        }
+        assert!(
+            by_id(&removed)["2"].is_empty(),
+            "the removed edge's entry is pruned"
+        );
     }
 
-    /// A numeric key in NEAT-AI's uuid-derived id range names a neuron only
-    /// `neat-core` can identify. Lamarck neither prunes it nor refuses it: a
-    /// wrong guess would destroy valid history or block a sound write.
+    /// A neuron declaring no `id` still has one — the hash of its uuid — so a
+    /// key naming it is live. Lamarck used to call this "unverifiable" and
+    /// guess; the shared resolution knows.
     #[test]
-    fn prune_keeps_a_key_that_could_be_a_uuid_derived_id() {
-        let mut creature = parse_creature_json(DERIVED_IDS).unwrap();
+    fn prune_keeps_a_key_that_is_a_neurons_uuid_derived_id() {
+        let mut creature = parse_creature_json(HASHED_IDS).unwrap();
         prune_memetic(&mut creature);
-        match &creature.memetic.as_ref().unwrap().weights {
-            MemeticWeights::ById(by_id) => assert!(
-                by_id.contains_key("1500000"),
-                "an unverifiable key must survive: {by_id:?}"
-            ),
-            MemeticWeights::Rows(_) => panic!("fixture is the map form"),
-        }
-        assert_memetic_resolves(&creature).expect("an unverifiable key must not block a write");
+        let memetic = creature.memetic.as_ref().unwrap();
+        assert_eq!(
+            memetic.biases.get(H1_DERIVED_ID),
+            Some(&0.01),
+            "h1's bias delta, keyed by its uuid-derived id: {memetic:?}"
+        );
+        assert_eq!(
+            by_id(&creature)[H1_DERIVED_ID].len(),
+            1,
+            "h1 -> o1 is still there"
+        );
+        assert_memetic_resolves(&creature).expect("a hash-keyed live reference must be writable");
+    }
+
+    /// The other half of the same distinction: a numeric key in the derived-id
+    /// range that hashes to no neuron is dangling, and is now both pruned and
+    /// refused rather than waved through.
+    #[test]
+    fn prune_drops_a_derived_range_key_that_names_nothing() {
+        let unpruned = parse_creature_json(HASHED_IDS).unwrap();
+        let err = assert_memetic_resolves(&unpruned).expect_err("1500000 names no neuron");
+        assert!(err.contains("memetic bias 1500000"), "{err}");
+
+        let mut creature = parse_creature_json(HASHED_IDS).unwrap();
+        prune_memetic(&mut creature);
+        let memetic = creature.memetic.as_ref().unwrap();
+        assert!(
+            !memetic.biases.contains_key("1500000"),
+            "the dangling bias is dropped: {memetic:?}"
+        );
+        assert!(
+            !by_id(&creature).contains_key("1500000"),
+            "the dangling weight key is dropped: {memetic:?}"
+        );
     }
 
     #[test]
@@ -436,14 +346,10 @@ mod tests {
     fn prune_drops_an_unresolvable_key_and_a_dangling_entry() {
         let mut creature = parse_creature_json(BY_ID).unwrap();
         prune_memetic(&mut creature);
-        let by_id = match &creature.memetic.as_ref().unwrap().weights {
-            MemeticWeights::ById(by_id) => by_id,
-            MemeticWeights::Rows(_) => panic!("the map form must be written back as a map"),
-        };
         // Key "77" names no neuron; entry `toId: 99` names no neuron.
-        assert_eq!(by_id.len(), 1);
-        assert_eq!(by_id["2"].len(), 1);
-        assert_eq!(by_id["2"][0].to_id, Some(-1));
+        assert_eq!(by_id(&creature).len(), 1);
+        assert_eq!(by_id(&creature)["2"].len(), 1);
+        assert_eq!(by_id(&creature)["2"][0].to_id, Some(-1));
     }
 
     #[test]
@@ -521,5 +427,20 @@ mod tests {
         }
         let err = assert_memetic_resolves(&creature).expect_err("key 77 names no neuron");
         assert!(err.contains("key 77"), "{err}");
+    }
+
+    /// A malformed row is a defect in the record as supplied, not something a
+    /// removal caused — the shared prune leaves it for rule 31 to report, so
+    /// the guard must not claim it dangles either.
+    #[test]
+    fn assert_leaves_a_malformed_row_to_rule_31() {
+        let malformed = ROWS.replacen(
+            r#"{"fromUUID":"ghost","toUUID":"o1","weight":0.5}"#,
+            r#"{"toUUID":"o1","weight":0.5}"#,
+            1,
+        );
+        let mut creature = parse_creature_json(&malformed).unwrap();
+        creature.memetic.as_mut().unwrap().biases.clear();
+        assert_memetic_resolves(&creature).expect("malformed is not dangling");
     }
 }

@@ -36,6 +36,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Memetic pruning is now neat-core's, so it cannot drift from rule 31
+  (Issue #199).** `lamarck/src/memetic.rs` re-derived rule 31's resolution
+  vocabulary, but it could only reproduce the derivable half: a neuron
+  declaring no `id` still has one — the deterministic hash of its uuid folded
+  into `[1_000_000, 2_000_000_000)` — and that hash lives in neat-core. Lamarck
+  therefore treated every numeric key in that range as *unverifiable*, neither
+  pruning nor refusing it, which left the Issue #197 silent-candidate-loss
+  reachable for a memetic keyed by a derived id. `prune_memetic` and
+  `assert_memetic_resolves` now delegate to neat-core 0.10.5's
+  `CreatureExport::prune_memetic` / `MemeticExport::prune_to`, which sit beside
+  rule 31, so such a key is resolved exactly: kept when it names a neuron,
+  pruned and refused when it names nothing. `StructureIndex` and `KeyTarget`
+  are gone; `neat-core.expected-version` records 0.10.5.
+
 - **Check-in writes no longer re-stamp the input creature's `uuid` onto a
   restructured incumbent (Issue #196).** The creature-level `uuid` is a v5
   content hash over the neurons and synapses, but `creature_value_with_meta`
