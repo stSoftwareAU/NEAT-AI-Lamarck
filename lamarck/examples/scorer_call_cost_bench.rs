@@ -156,7 +156,7 @@ fn main() {
             call.phase.label(),
             call.creatures,
             call.elapsed_ms,
-            call.sample_rate.map_or(1.0, |r| r),
+            call.sample_rate.unwrap_or(1.0),
             call.failed
         );
     }
