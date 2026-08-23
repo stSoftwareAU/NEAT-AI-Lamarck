@@ -296,12 +296,18 @@ fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
 ///
 /// Refused unless the document about to be written carries the source
 /// creature's `input` / `output` and both are `>= 1` (issue #165): a check-in
-/// creature without its observation width cannot be re-derived downstream.
+/// creature without its observation width cannot be re-derived downstream. Also
+/// refused when its `memetic` record names structure the creature no longer
+/// carries (issue #197).
+///
+/// This is a tags pass, not a structural one: `uuid`, `tags` and `memetic` are
+/// carried through exactly as they arrived.
 fn creature_value_with_meta(
     creature: &CreatureExport,
     meta: &CreatureMeta,
 ) -> Result<Value, String> {
     validate_creature_width(creature)?;
+    crate::memetic::assert_memetic_resolves(creature)?;
     let body = creature_to_json(creature).map_err(|e| e.to_string())?;
     let mut value: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if !meta.tags.is_empty() {

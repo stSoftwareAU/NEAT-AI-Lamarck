@@ -18,6 +18,7 @@ pub mod focus;
 pub mod grafts;
 pub mod learning;
 pub mod log;
+pub mod memetic;
 pub mod memo;
 pub mod observations;
 pub mod parity;
@@ -71,6 +72,7 @@ pub use grafts::{
     Graft, GraftKind, GraftReplayError, GraftReplayRequest, GraftStore, MAX_GRAFT_COMBO_CANDIDATES,
     classify_graft, extract_structural_graft, is_present, replay_grafts,
 };
+pub use memetic::{assert_memetic_resolves, prune_memetic};
 pub use memo::{
     AnalysisMemo, DEFAULT_ANALYSIS_MEMO_ENTRIES, MemoScope, MemoStats, creature_fingerprint,
 };

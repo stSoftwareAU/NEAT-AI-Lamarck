@@ -980,6 +980,13 @@ pub fn add_neuron_bridge(
 /// `from -> new (w=1)` and `new -> focus (w=old)`. The rewired creature is
 /// certified by [`add_neuron_bridge`]; a refused split restores the original
 /// edge so the caller is never handed a half-rewired creature (issue #192).
+///
+/// This is Lamarck's only real removal, so it is the one edit that must prune
+/// the creature's `memetic` record: a weight delta naming the edge just removed
+/// is a dangling reference, which rule 31 (`MEMETIC`) refuses — and the refusal
+/// used to take the whole `structural_add_neuron` strategy down with it,
+/// silently, on exactly the fine-tuned creatures that carry a memetic record
+/// (issue #197). The rollback restores the record alongside the edge.
 pub fn split_incoming_synapse(
     creature: &mut CreatureExport,
     incoming: &IncomingSourceStats,
@@ -996,7 +1003,9 @@ pub fn split_incoming_synapse(
         return Err("incoming synapse does not match focus/source".into());
     }
     let old_w = old.weight;
+    let old_memetic = creature.memetic.clone();
     creature.synapses.remove(syn_idx);
+    crate::memetic::prune_memetic(creature);
     let bridged = add_neuron_bridge(
         creature,
         NeuronBridgeSpec {
@@ -1011,6 +1020,7 @@ pub fn split_incoming_synapse(
     );
     if bridged.is_err() {
         creature.synapses.insert(syn_idx, old);
+        creature.memetic = old_memetic;
     }
     bridged
 }
