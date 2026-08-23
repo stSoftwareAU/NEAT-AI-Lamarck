@@ -1,15 +1,19 @@
 //! Creature JSON tags (`{ name, value }[]`) for check-in / GRQ compatibility.
 //!
-//! `neat_core::CreatureExport` does not round-trip `tags` / `uuid`, so Lamarck
-//! keeps them in [`CreatureMeta`] and re-attaches on write — preserving the
-//! original pedigree (name, version, …) while stamping a **run-level** Lamarck
-//! summary for GRQ check-in (`worker/Lamarck/run.sh` reads the tag as-is).
+//! `neat_core::CreatureExport` does not round-trip `tags`, so Lamarck keeps
+//! them in [`CreatureMeta`] and re-attaches on write — preserving the original
+//! pedigree (name, version, …) while stamping a **run-level** Lamarck summary
+//! for GRQ check-in (`worker/Lamarck/run.sh` reads the tag as-is).
+//!
+//! The creature-level `uuid` is **not** kept: it is a content hash over the
+//! neurons and synapses, so a restructured incumbent must be written without
+//! one and let the consumer re-derive it (issue #196).
 
 use crate::candidates::CandidateStrategy;
 use crate::width::{assert_written_width, validate_creature_width, value_width};
 use neat_core::{CreatureExport, creature_to_json};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 
 /// One creature tag (NEAT-AI / `@stsoftware/tags` shape).
@@ -54,8 +58,6 @@ fn upsert_tag(tags: &mut Vec<CreatureTag>, name: &str, value: String) {
 /// Top-level fields stripped by `parse_creature_json` that we must keep.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreatureMeta {
-    /// Optional creature UUID from the source JSON.
-    pub uuid: Option<String>,
     /// Ordered tags (upserts replace by name, preserving order of first insert).
     pub tags: Vec<CreatureTag>,
     /// Per-neuron tags keyed by neuron UUID (issue #187).
@@ -68,16 +70,16 @@ pub struct CreatureMeta {
 }
 
 impl CreatureMeta {
-    /// Parse `uuid` + creature `tags` + `neurons[].tags` from raw creature JSON
+    /// Parse creature `tags` + `neurons[].tags` from raw creature JSON
     /// (missing → empty).
+    ///
+    /// The source's creature-level `uuid` is deliberately not kept: it is
+    /// content-derived and Lamarck restructures the creature, so nothing here
+    /// may re-stamp it on a write (issue #196).
     pub fn from_creature_json(text: &str) -> Self {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return Self::default();
         };
-        let uuid = value
-            .get("uuid")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
         let tags = parse_tag_array(value.get("tags"));
         let mut neuron_tags = BTreeMap::new();
         if let Some(neurons) = value.get("neurons").and_then(|v| v.as_array()) {
@@ -91,11 +93,7 @@ impl CreatureMeta {
                 }
             }
         }
-        Self {
-            uuid,
-            tags,
-            neuron_tags,
-        }
+        Self { tags, neuron_tags }
     }
 
     /// Insert or replace a tag by name.
@@ -284,8 +282,17 @@ fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
     }
 }
 
-/// Creature JSON with `uuid` / `tags` / `neurons[].tags` re-attached, before it
-/// is printed.
+/// Creature JSON with `tags` / `neurons[].tags` re-attached, before it is
+/// printed.
+///
+/// No creature-level `uuid` is written (issue #196). That uuid is a v5 hash
+/// over the neurons and synapses, and Lamarck's whole job is to restructure —
+/// re-stamping the input file's uuid onto a mutated incumbent would hand
+/// downstream a content hash that no longer describes the content, and
+/// `makeUUID` short-circuits on a present uuid so the lie never gets corrected.
+/// Emitting none lets the consumer derive it from what it actually received.
+/// Per-neuron `uuid` is a different concept — a stable identity label — and is
+/// preserved exactly (issue #187).
 ///
 /// Refused unless the document about to be written carries the source
 /// creature's `input` / `output` and both are `>= 1` (issue #165): a check-in
@@ -297,9 +304,6 @@ fn creature_value_with_meta(
     validate_creature_width(creature)?;
     let body = creature_to_json(creature).map_err(|e| e.to_string())?;
     let mut value: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    if let Some(uuid) = &meta.uuid {
-        value["uuid"] = json!(uuid);
-    }
     if !meta.tags.is_empty() {
         value["tags"] = serde_json::to_value(&meta.tags).map_err(|e| e.to_string())?;
     }
@@ -372,6 +376,7 @@ pub fn serialize_creature_with_meta_compact(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structural::{NeuronBridgeSpec, add_neuron_bridge};
     use neat_core::parse_creature_json;
 
     const TINY_TAGGED: &str = r#"{
@@ -426,10 +431,11 @@ mod tests {
         assert_eq!(err, "Must have at least one output neurons was: 0");
     }
 
+    /// Creature tags are kept; the content-derived creature `uuid` is not
+    /// (issue #196).
     #[test]
-    fn extract_preserves_uuid_and_tags() {
+    fn extract_preserves_tags() {
         let meta = CreatureMeta::from_creature_json(TINY_TAGGED);
-        assert_eq!(meta.uuid.as_deref(), Some("creature-1"));
         assert_eq!(meta.tags[0].name, "name");
         assert_eq!(meta.tags[0].value, "Yara Richardson");
     }
@@ -449,7 +455,8 @@ mod tests {
         });
         let json = serialize_creature_with_meta(&creature, &meta).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["uuid"], "creature-1");
+        // Issue #196: tags ride through, the source's creature uuid does not.
+        assert!(value.get("uuid").is_none());
         let tags = value["tags"].as_array().unwrap();
         let name = tags.iter().find(|t| t["name"] == "name").unwrap();
         assert_eq!(name["value"], "Yara Richardson");
@@ -498,12 +505,13 @@ mod tests {
             parse_creature_json(&compact).unwrap(),
             parse_creature_json(&pretty).unwrap()
         );
-        // Same meta: uuid and every tag, including the score/error/lamarck
-        // stamps `stamp_acceptance` attaches.
+        // Same meta: every tag, including the score/error/lamarck stamps
+        // `stamp_acceptance` attaches — and neither form invents a creature
+        // uuid (issue #196).
         let compact_value: Value = serde_json::from_str(&compact).unwrap();
         let pretty_value: Value = serde_json::from_str(&pretty).unwrap();
         assert_eq!(compact_value, pretty_value);
-        assert_eq!(compact_value["uuid"], "creature-1");
+        assert!(compact_value.get("uuid").is_none());
         for tag in ["name", "version", "score", "error", "lamarck"] {
             assert!(
                 compact_value["tags"]
@@ -813,6 +821,121 @@ mod tests {
         assert_eq!(grown[0]["name"], "lamarck");
         assert!(grown[0]["value"].as_str().unwrap().contains("🧩"));
         assert_eq!(neuron_tags_of(&value, "h1").unwrap().len(), 2);
+    }
+
+    /// Issue #196: a tagged creature with a spare input, so a hidden neuron can
+    /// be bridged into the output without breaking synapse ordering.
+    const GROWABLE_TAGGED: &str = r#"{
+      "uuid": "creature-4",
+      "input": 2,
+      "output": 1,
+      "forwardOnly": true,
+      "neurons": [
+        {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY","tags":[
+          {"name":"discovered","value":"2026-07-01"}
+        ]},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+        {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+      ],
+      "tags": [{"name":"name","value":"Yara Richardson"}]
+    }"#;
+
+    /// Issue #196: the creature-level `uuid` is a content hash over the neurons
+    /// and synapses, so a restructured incumbent must never be written wearing
+    /// the input file's uuid. Lamarck emits none and lets the consumer derive
+    /// it from the content it actually received.
+    #[test]
+    fn serialize_omits_the_creature_uuid_after_a_structural_change() {
+        let source = parse_creature_json(GROWABLE_TAGGED).unwrap();
+        let mut grown = source.clone();
+        add_neuron_bridge(
+            &mut grown,
+            NeuronBridgeSpec {
+                from_uuid: "input-1",
+                focus_uuid: "o1",
+                new_uuid: "h-grown".into(),
+                squash: "TANH",
+                bias: 0.0,
+                w_in: 1.0,
+                w_out: 0.5,
+            },
+        )
+        .expect("bridge insert");
+
+        // Non-vacuous: the emitted creature really is a different structure.
+        assert_ne!(grown.neurons.len(), source.neurons.len());
+        assert_ne!(grown.synapses.len(), source.synapses.len());
+
+        let meta = CreatureMeta::from_creature_json(GROWABLE_TAGGED);
+        for text in [
+            serialize_creature_with_meta(&grown, &meta).unwrap(),
+            serialize_creature_with_meta_compact(&grown, &meta).unwrap(),
+        ] {
+            let value: Value = serde_json::from_str(&text).unwrap();
+            assert!(
+                value.get("uuid").is_none(),
+                "a restructured creature must carry no stale creature uuid: {text}"
+            );
+        }
+    }
+
+    /// Issue #196: and no uuid on an untouched creature either — a
+    /// structurally identical creature re-derives the same uuid downstream, so
+    /// omitting it unconditionally is simpler and always correct.
+    #[test]
+    fn serialize_omits_the_creature_uuid_even_without_a_change() {
+        let creature = parse_creature_json(TINY_TAGGED).unwrap();
+        let meta = CreatureMeta::from_creature_json(TINY_TAGGED);
+        let value: Value =
+            serde_json::from_str(&serialize_creature_with_meta(&creature, &meta).unwrap()).unwrap();
+        assert!(value.get("uuid").is_none());
+    }
+
+    /// Issue #196 over-correction guard: dropping the creature uuid must not
+    /// become "strip everything". A tags-only pass keeps creature tags, every
+    /// `neurons[].tags` entry, and every per-neuron `uuid` byte-identically
+    /// (issue #187).
+    #[test]
+    fn dropping_the_creature_uuid_keeps_tags_and_every_neuron_uuid() {
+        let creature = parse_creature_json(NEURON_TAGGED).unwrap();
+        let mut meta = CreatureMeta::from_creature_json(NEURON_TAGGED);
+        meta.stamp_acceptance(&progress());
+
+        let text = serialize_creature_with_meta(&creature, &meta).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+
+        // Creature-level tags survive, including the acceptance stamps.
+        let tags = value["tags"].as_array().unwrap();
+        for name in ["name", "score", "error", "lamarck"] {
+            assert!(
+                tags.iter().any(|t| t["name"] == name),
+                "the {name} tag must survive the write"
+            );
+        }
+
+        // Per-neuron tags survive.
+        assert_eq!(neuron_tags_of(&value, "h1").unwrap().len(), 2);
+        assert_eq!(
+            neuron_tags_of(&value, "o1").unwrap()[0]["name"],
+            "intelligentDesign"
+        );
+
+        // Per-neuron uuids are byte-identical to the source's.
+        let source: Value = serde_json::from_str(NEURON_TAGGED).unwrap();
+        let uuids = |v: &Value| -> Vec<String> {
+            let mut out: Vec<String> = v["neurons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["uuid"].as_str().unwrap().to_string())
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(uuids(&value), uuids(&source));
     }
 
     #[test]

@@ -1225,8 +1225,11 @@ fn pick_best_incoming<'a>(
 ///
 /// Recreates `dir` so leftover JSON from a prior larger batch cannot be scored.
 ///
-/// When `meta` is provided, `baseline.json` keeps original `uuid` / `tags`
-/// (candidates stay untagged — acceptance stamps the winner on write).
+/// When `meta` is provided, `baseline.json` keeps the original `tags`
+/// (candidates stay untagged — acceptance stamps the winner on write). No
+/// creature-level `uuid` is written: from experiment 2 onward the incumbent
+/// has already mutated, so the source's content-derived uuid would be a lie
+/// (issue #196).
 ///
 /// Every file here is **compact** JSON (issue #114): `rust_scorer` is its only
 /// consumer, and on the production creature the pretty-printer's indentation is
@@ -2680,10 +2683,12 @@ mod tests {
         );
     }
 
-    /// The compact baseline still carries the `uuid` / `tags` the scorer and the
-    /// check-in path read (issue #114).
+    /// The compact baseline still carries the `tags` the scorer and the
+    /// check-in path read (issue #114), and no creature `uuid` — from
+    /// experiment 2 onward the incumbent has already mutated, so the input
+    /// file's content-derived uuid would be a lie (issue #196).
     #[test]
-    fn compact_baseline_keeps_uuid_and_tags() {
+    fn compact_baseline_keeps_tags_and_drops_the_creature_uuid() {
         let tagged = r#"{
           "uuid": "creature-9",
           "semanticVersion": "4.0.0",
@@ -2709,10 +2714,61 @@ mod tests {
         let text = fs::read_to_string(batch.join("baseline.json")).unwrap();
         assert!(!text.contains('\n'), "baseline.json must be compact");
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["uuid"], "creature-9");
+        assert!(value.get("uuid").is_none(), "stale creature uuid: {text}");
         assert_eq!(value["tags"][0]["name"], "score");
         assert_eq!(value["tags"][0]["value"], "0.1");
         assert_eq!(parse_creature_json(&text).unwrap(), incumbent);
+    }
+
+    /// Issue #196: `baseline.json` is scorer input, and from experiment 2 on it
+    /// is a restructured incumbent — it must not wear the source uuid, which a
+    /// uuid-keyed cache or dedupe would then resolve to the wrong entry.
+    #[test]
+    fn compact_baseline_of_a_restructured_incumbent_has_no_uuid() {
+        let tagged = r#"{
+          "uuid": "creature-10",
+          "semanticVersion": "4.0.0",
+          "forwardOnly": true,
+          "input": 2,
+          "output": 1,
+          "neurons": [
+            {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY"},
+            {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+          ],
+          "synapses": [
+            {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+            {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+          ],
+          "tags": [{"name":"score","value":"0.1"}]
+        }"#;
+        let source = parse_creature_json(tagged).unwrap();
+        let meta = CreatureMeta::from_creature_json(tagged);
+        let mut incumbent = source.clone();
+        add_neuron_bridge(
+            &mut incumbent,
+            NeuronBridgeSpec {
+                from_uuid: "input-1",
+                focus_uuid: "o1",
+                new_uuid: "h-grown".into(),
+                squash: "TANH",
+                bias: 0.0,
+                w_in: 1.0,
+                w_out: 0.5,
+            },
+        )
+        .expect("bridge insert");
+        // Non-vacuous: the baseline written is genuinely a new structure.
+        assert_ne!(incumbent.neurons.len(), source.neurons.len());
+        assert_ne!(incumbent.synapses.len(), source.synapses.len());
+
+        let dir = tempfile::tempdir().unwrap();
+        let batch = dir.path().join("candidates-exp-2");
+        write_candidate_batch(&batch, &incumbent, &[], Some(&meta)).unwrap();
+
+        let text = fs::read_to_string(batch.join("baseline.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value.get("uuid").is_none(), "stale creature uuid: {text}");
+        assert_eq!(value["tags"][0]["name"], "score");
     }
 
     /// Issue #165: a batch file is refused when its creature does not carry

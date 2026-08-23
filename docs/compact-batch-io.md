@@ -29,7 +29,8 @@ flowchart LR
 
 - `write_candidate_batch` (`lamarck/src/candidates.rs`) writes `baseline.json`
   and every `candidate-NNN.json` compactly. The baseline still carries its
-  `uuid` / `tags` — `serialize_creature_with_meta_compact`
+  `tags` (but no creature `uuid` — it is content-derived and the incumbent has
+  already mutated, issue #196) — `serialize_creature_with_meta_compact`
   (`lamarck/src/tags.rs`) is the same document as the pretty form with the
   whitespace dropped, which the round-trip test in `lamarck/src/tags.rs` pins.
 - `write_promote_batch` (`lamarck/src/scorer.rs`) hard-links the promoted files

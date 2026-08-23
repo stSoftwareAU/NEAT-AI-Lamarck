@@ -36,6 +36,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Check-in writes no longer re-stamp the input creature's `uuid` onto a
+  restructured incumbent (Issue #196).** The creature-level `uuid` is a v5
+  content hash over the neurons and synapses, but `creature_value_with_meta`
+  re-attached the uuid read once off the input file to every check-in document
+  — `best.json`, `winners/winner-NNNN.json` and the scorer-facing
+  `candidates-exp-N/baseline.json` — long after growth, grafts and weight edits
+  had changed the content it describes. NEAT-AI's `makeUUID` short-circuits on
+  a present uuid so the stale value was never recomputed, and `Fitness`
+  deduplicates its evaluation queue by uuid, so a restructured creature could be
+  handed its parent's score without ever being evaluated. Lamarck now writes no
+  creature-level `uuid` at all and lets the consumer derive it from the content
+  it actually received, matching every other write path in the crate.
+  Creature `tags`, `neurons[].tags` and per-neuron `uuid` are untouched
+  (Issue #187).
+
 - **Every source-changing PR gets a version bump, milestone PRs included
   (Issue #190).** `.github/workflows/version-increment.yml` fired only on PRs
   into `Develop` and always diffed against `origin/Develop`, so milestone
