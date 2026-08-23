@@ -353,6 +353,54 @@ Rule 25 of the shared rules requires synapses sorted by their compiled
 `(from, to)` index pair, so new edges are **inserted in canonical order** rather
 than appended (`structural::insert_synapse_ordered`).
 
+### Memetic records survive structure changes (issue #197)
+
+A creature's optional `memetic` record holds per-neuron bias deltas and
+per-synapse weight deltas keyed to a **specific** structure — it is what a
+Backprop or fine-tuning stage leaves behind. Rule 31 (`MEMETIC`) of the shared
+rules checks referential integrity, not just shape, so a delta naming structure
+that is gone fails the whole creature.
+
+The rule Lamarck follows, in `lamarck/src/memetic.rs`:
+
+| Pass | `memetic` |
+|------|-----------|
+| Removes a neuron or a synapse (`structural::split_incoming_synapse`) | **pruned** — dangling keys dropped |
+| Appends structure (`add_synapse`, `apply_graft`, combo merges) | **kept** — every key still resolves |
+| Tags only (`tags::serialize_creature_with_meta`) | **untouched**, along with `uuid` |
+
+Pruning drops only what dangles: `MemeticExport::extra` (`generation`, `score`,
+`ancestry`), every bias whose neuron survives and every weight whose edge
+survives are kept, so `memetic = None` is never the fix. A rolled-back edit
+restores the record it pruned.
+
+```mermaid
+flowchart LR
+    R["synapses.remove()"] --> P["memetic::prune_memetic<br/>drop dangling keys, keep extra"]
+    P --> V{"neat_core::creature_validate<br/>rule 31 MEMETIC"}
+    V -->|Ok| W["memetic::assert_memetic_resolves<br/>on every write path"]
+    V -->|refused| RB([roll back edge + memetic])
+    W -->|resolves| D([best.json / batch files])
+    W -->|dangling| E([Err: names the reference])
+
+    classDef step fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0b2545
+    classDef gate fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef good fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef bad fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+
+    class R,P step
+    class V,W gate
+    class D good
+    class RB,E bad
+```
+
+Before this, the split removed an edge without pruning, rule 31 refused the
+bridge, and `candidates.rs` swallowed the error — so `structural_add_neuron`
+**silently produced nothing** on every creature carrying a memetic weight for
+the chosen edge. The write-path guard closes the other half: a dangling memetic
+is now impossible to *write*, not merely impossible to construct through one
+helper.
+
 ### Phase 2 — select the focus neurons
 
 Each iteration focuses on `--focus-count` non-input neurons (default 1). The
@@ -1350,6 +1398,7 @@ NEAT-AI-Lamarck/
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── tags.rs
     ├── validate.rs          # neat_core::creature_validate output gate (issue #192)
+    ├── memetic.rs           # memetic prune + write-path guard (issue #197)
     ├── width.rs             # input/output observation-width guard (issue #165)
     └── log.rs
 ```

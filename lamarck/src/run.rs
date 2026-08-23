@@ -3173,6 +3173,7 @@ pub fn score_single_creature_dir(
 mod tests {
     use super::*;
     use crate::scorer::ScoreResult;
+    use crate::validate::LAMARCK_VALIDATE_OPTIONS;
     use neat_core::parse_creature_json;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -3585,6 +3586,145 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name == "lamarck"),
             "an inherited neuron must not be restamped as Lamarck's own"
+        );
+    }
+
+    /// `tiny_setup`'s topology, fine-tuned: the creature carries a `memetic`
+    /// record whose weight row names the `input-0 -> h1` edge — the edge the
+    /// `structural_add_neuron` split removes (issue #197).
+    fn tiny_memetic_setup(dir: &Path) -> (PathBuf, PathBuf) {
+        let (creature_path, training) = tiny_setup(dir);
+        fs::write(
+            &creature_path,
+            r#"{
+              "semanticVersion":"4.0.0","forwardOnly":true,"input":1,"output":1,
+              "neurons":[
+                {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY"},
+                {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+              ],
+              "synapses":[
+                {"fromUUID":"input-0","toUUID":"h1","weight":1.0},
+                {"fromUUID":"h1","toUUID":"o1","weight":1.0}
+              ],
+              "memetic":{
+                "biases":{"h1":0.01},
+                "weights":[
+                  {"fromUUID":"input-0","toUUID":"h1","weight":0.9},
+                  {"fromUUID":"h1","toUUID":"o1","weight":1.1}
+                ],
+                "generation":7,
+                "ancestry":["backprop"]
+              }
+            }"#,
+        )
+        .unwrap();
+        (creature_path, training)
+    }
+
+    /// Rewards growth like [`GrowthScorer`], and certifies every creature file
+    /// it is handed against the shared rules — so any creature Lamarck writes
+    /// with a dangling memetic (or any other rule break) is caught on the bytes
+    /// that actually reached disk.
+    struct ValidatingGrowthScorer {
+        /// `file: failure` for every batch file the shared validator refused.
+        failures: Arc<Mutex<Vec<String>>>,
+        /// Creature files inspected, so a silent no-op run cannot pass.
+        seen: Arc<Mutex<usize>>,
+    }
+
+    impl DirectoryScorer for ValidatingGrowthScorer {
+        fn score_directory_sampled(
+            &self,
+            candidates_dir: &Path,
+            _training_data: &Path,
+            _sample: crate::scorer::ScoreSample,
+        ) -> Result<BTreeMap<String, ScoreResult>, crate::scorer::ScorerError> {
+            const BASE_SCORE: f64 = 0.64;
+            let baseline_neurons =
+                GrowthScorer::neuron_count(&candidates_dir.join("baseline.json"));
+            let mut map = BTreeMap::new();
+            for entry in fs::read_dir(candidates_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(stem) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                let text = fs::read_to_string(entry.path()).unwrap();
+                *self.seen.lock().unwrap() += 1;
+                match parse_creature_json(&text) {
+                    Ok(creature) => {
+                        if let Err(failure) =
+                            neat_core::creature_validate(&creature, &LAMARCK_VALIDATE_OPTIONS)
+                        {
+                            self.failures
+                                .lock()
+                                .unwrap()
+                                .push(format!("{name}: {failure}"));
+                        }
+                    }
+                    Err(e) => self.failures.lock().unwrap().push(format!("{name}: {e}")),
+                }
+                let grew = GrowthScorer::neuron_count(&entry.path()) > baseline_neurons;
+                let score = if grew { BASE_SCORE + 1e-3 } else { BASE_SCORE };
+                map.insert(
+                    stem.to_string(),
+                    ScoreResult {
+                        score,
+                        error: 1.0 - score,
+                        complexity_penalty: 0.0,
+                    },
+                );
+            }
+            Ok(map)
+        }
+    }
+
+    /// Issue #197: the write boundary. A full run over a fine-tuned creature
+    /// must write only creatures the shared validator accepts — every batch
+    /// file it hands the scorer, and `best.json` at the end. This is the test
+    /// that catches *any* future removal path that forgets to prune `memetic`,
+    /// not just the split that prompted it.
+    #[test]
+    fn every_creature_written_for_a_memetic_creature_is_valid() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_memetic_setup(dir.path());
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            max_experiments: Some(4),
+            timeout: Duration::from_secs(5),
+            ..base_config(creature_path, training, out)
+        };
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(0));
+        let scorer = ValidatingGrowthScorer {
+            failures: Arc::clone(&failures),
+            seen: Arc::clone(&seen),
+        };
+
+        let result = run_optimisation(&config, &scorer).unwrap();
+        assert!(
+            *seen.lock().unwrap() > 1,
+            "the run must have written creatures for the scorer to inspect"
+        );
+        assert!(
+            failures.lock().unwrap().is_empty(),
+            "every creature written must satisfy the shared rules: {:?}",
+            failures.lock().unwrap()
+        );
+        assert!(
+            result.acceptances >= 1,
+            "growth must be accepted, or best.json is only the verbatim source copy"
+        );
+
+        let best_text = fs::read_to_string(&result.best_path).unwrap();
+        let best = parse_creature_json(&best_text).unwrap();
+        neat_core::creature_validate(&best, &LAMARCK_VALIDATE_OPTIONS)
+            .expect("best.json must satisfy the shared rules, memetic rule 31 included");
+        // The fine-tuning history is still there — pruning is not clearing.
+        let memetic = best.memetic.as_ref().expect("best.json keeps memetic");
+        assert_eq!(
+            memetic.extra.get("generation").and_then(|v| v.as_i64()),
+            Some(7),
+            "a prune must keep every extra memetic key"
         );
     }
 

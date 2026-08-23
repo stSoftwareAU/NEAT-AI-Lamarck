@@ -11,6 +11,7 @@
 //! wording mirrors NEAT-AI TS `CreatureValidate.ts` so the fleet fails the same
 //! way.
 
+use crate::memetic::assert_memetic_resolves;
 use neat_core::{CreatureExport, creature_to_json, creature_to_json_pretty, parse_creature_json};
 use serde_json::Value;
 
@@ -74,18 +75,22 @@ pub fn assert_same_width(
 }
 
 /// Compact creature JSON, refused unless the written text carries the source's
-/// (`>= 1`) width. Use in place of `neat_core::creature_to_json` on write.
+/// (`>= 1`) width and a memetic record that still resolves (issue #197). Use in
+/// place of `neat_core::creature_to_json` on write.
 pub fn checked_creature_json(creature: &CreatureExport) -> Result<String, String> {
     validate_creature_width(creature)?;
+    assert_memetic_resolves(creature)?;
     let json = creature_to_json(creature).map_err(|e| e.to_string())?;
     assert_written_width(creature, written_width(&json)?)?;
     Ok(json)
 }
 
 /// Pretty creature JSON, refused unless the written text carries the source's
-/// (`>= 1`) width. Use in place of `neat_core::creature_to_json_pretty` on write.
+/// (`>= 1`) width and a memetic record that still resolves (issue #197). Use in
+/// place of `neat_core::creature_to_json_pretty` on write.
 pub fn checked_creature_json_pretty(creature: &CreatureExport) -> Result<String, String> {
     validate_creature_width(creature)?;
+    assert_memetic_resolves(creature)?;
     let json = creature_to_json_pretty(creature).map_err(|e| e.to_string())?;
     assert_written_width(creature, written_width(&json)?)?;
     Ok(json)
