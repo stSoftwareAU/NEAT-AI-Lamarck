@@ -16,7 +16,7 @@ use crate::log;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, accepts_improvement, accepts_improvement_delta, improvement,
 };
-use crate::structural::insert_index_for_hidden;
+use crate::structural::{insert_index_for_hidden, insert_synapse_ordered};
 use crate::width::checked_creature_json_pretty;
 use neat_core::{CreatureExport, NeuronExport, SynapseExport};
 use serde::{Deserialize, Serialize};
@@ -292,12 +292,24 @@ pub fn merge_candidate_deltas(
                 .iter()
                 .any(|s| s.from_uuid == key.0 && s.to_uuid == key.1)
             {
-                out.synapses.push(SynapseExport {
-                    from_uuid: vs.from_uuid.clone(),
-                    to_uuid: vs.to_uuid.clone(),
-                    weight: vs.weight,
-                    synapse_type: vs.synapse_type.clone(),
-                });
+                // Ordered insert, never a tail append: `creature_validate`
+                // rule 25 requires the compiled `(from, to)` order, and a
+                // merged creature that breaks it is refused by every Rust
+                // consumer while still loading and scoring elsewhere — which
+                // is how `GRQ-23-lamarck.json` was published with
+                // `SORT_FAILURE: 28564) synapses not sorted` and nobody
+                // noticed (GRQ #4428). The single-edit paths in
+                // `structural.rs` have used `insert_synapse_ordered` since
+                // #192; the combo merge was the one that still appended.
+                insert_synapse_ordered(
+                    &mut out,
+                    SynapseExport {
+                        from_uuid: vs.from_uuid.clone(),
+                        to_uuid: vs.to_uuid.clone(),
+                        weight: vs.weight,
+                        synapse_type: vs.synapse_type.clone(),
+                    },
+                );
             }
         }
     }
@@ -684,6 +696,50 @@ mod tests {
         let capped = combination_index_sets(5, 3);
         assert_eq!(capped.len(), 3);
         assert!(capped.iter().all(|s| s.len() == 2));
+    }
+
+    #[test]
+    fn merged_creature_keeps_synapses_in_canonical_order() {
+        // A combo merge tail-appended every new edge, so the merged creature
+        // broke `neat_core::creature_validate` rule 25 while every other gate
+        // stayed green. `GRQ-23-lamarck.json` was published that way and the
+        // shared validator refused it with
+        // `TopologyError(SORT_FAILURE): 28564) synapses not sorted`.
+        let base = tiny();
+        let mut a = base.clone();
+        a.synapses.push(SynapseExport {
+            from_uuid: "input-1".into(),
+            to_uuid: "h1".into(),
+            weight: 0.05,
+            synapse_type: None,
+        });
+        let mut b = base.clone();
+        b.synapses.push(SynapseExport {
+            from_uuid: "input-0".into(),
+            to_uuid: "o1".into(),
+            weight: 0.02,
+            synapse_type: None,
+        });
+
+        let merged = merge_candidate_deltas(&base, &[&a, &b]).unwrap();
+
+        // `input-0` = 0, `input-1` = 1, `h1` = 2, `o1` = 3.
+        let keys: Vec<(String, String)> = merged
+            .synapses
+            .iter()
+            .map(|s| (s.from_uuid.clone(), s.to_uuid.clone()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("input-0".to_string(), "h1".to_string()),
+                ("input-0".to_string(), "o1".to_string()),
+                ("input-1".to_string(), "h1".to_string()),
+                ("h1".to_string(), "o1".to_string()),
+            ],
+            "new edges must land in canonical (from, to) order, not at the tail"
+        );
+        crate::validate::validate_creature(&merged, "combo merge").unwrap();
     }
 
     #[test]

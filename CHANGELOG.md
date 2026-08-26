@@ -36,6 +36,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The combo merge tail-appended new synapses, so merged creatures broke rule
+  25 (GRQ #4428).** `structural.rs` has inserted every new edge in the compiled
+  `(from, to)` order since #192, but `combos::merge_candidate_deltas` still did
+  `out.synapses.push(...)`. A creature merged from two or more accepted variants
+  therefore left the optimiser with its new edges at the tail, which
+  `neat_core::creature_validate` refuses as
+  `TopologyError(SORT_FAILURE): N) synapses not sorted`. Nothing downstream
+  complained — the creature loads, scores, and carries its tags — so
+  `GRQ-23-lamarck.json` was published to GRQ-sampler in that state and sat there
+  until an unrelated `neat_ai_rebase` run validated the live samples. The merge
+  now calls `insert_synapse_ordered`, and
+  `combos::tests::merged_creature_keeps_synapses_in_canonical_order` certifies
+  the merged creature through `validate_creature` so a regression fails here
+  rather than three repos downstream.
+
 - **Memetic pruning is now neat-core's, so it cannot drift from rule 31
   (Issue #199).** `lamarck/src/memetic.rs` re-derived rule 31's resolution
   vocabulary, but it could only reproduce the derivable half: a neuron
