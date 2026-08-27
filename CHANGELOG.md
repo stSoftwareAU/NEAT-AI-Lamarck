@@ -23,6 +23,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **README cites the literature the project is named after (Issue #202).** The
+  README made the Lamarck joke without the citation, so a reader had no way to
+  learn that Lamarckian inheritance is a named forty-year-old research
+  programme with a known cost. A new **Where this sits in the literature**
+  section places each strand of the design — Lamarckian vs Baldwinian learning
+  (Hinton & Nowlan 1987; Whitley, Gordon & Mathias 1994), memetic algorithms
+  (Moscato 1989; Ong & Keane 2004; Krasnogor & Smith 2005),
+  backpropagation-informed variants (Such et al. 2017; Salimans et al. 2017),
+  EDAs (Larrañaga & Lozano 2002; Pelikan et al. 1999) and surrogate-assisted
+  EAs (Jin 2011) — and states the Whitley finding explicitly: Lamarckian
+  write-back converges faster but sheds diversity sooner. Lamarck is on the
+  Lamarckian side, so premature convergence around a single incumbent is named
+  as our exposure, together with the counterweights already in the generator.
+  `lamarck/tests/literature_citations.rs` pins the section, its citations and
+  the giraffe.
+
 - **TypeScript basic-validity gate (Issue #167).** CI never type-checked the
   repository's TypeScript helper scripts, so a syntax or type error in
   `scripts/generate_backprop_parity_fixtures.ts` could land on `Develop`
