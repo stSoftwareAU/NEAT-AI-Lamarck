@@ -88,6 +88,139 @@ experiment starts with an evolved creature, lets it "experience" its training
 environment, and converts useful acquired information into heritable changes to
 the creature.
 
+## Where this sits in the literature
+
+The joke is also the citation. Writing what a creature learns in life back into
+the creature its descendants inherit is *Lamarckian* evolution, and that is a
+named research programme in evolutionary computation with forty years of
+results behind it — not a metaphor this project invented. Each strand of the
+design below has a home in that literature, and naming the home is the honest
+way to say what is already known about the trade-off we have taken on.
+
+### Lamarckian vs Baldwinian learning
+
+The founding comparison is Hinton & Nowlan (1987),
+[*How Learning Can Guide Evolution*](https://www.complex-systems.com/abstracts/v01_i03_a06/)
+(*Complex Systems* 1, 495–502) — the **Baldwin effect**: lifetime learning
+reshapes the fitness landscape and so changes what evolution finds, without the
+learned values ever being written back into the genome. Whitley, Gordon &
+Mathias (1994),
+[*Lamarckian Evolution, the Baldwin Effect and Function Optimization*](https://doi.org/10.1007/3-540-58484-6_245)
+(PPSN III, LNCS 866, 5–15) is the decisive empirical study, and its headline
+finding is the one that matters here: **Lamarckian write-back usually converges
+faster, but loses population diversity sooner than Baldwinian learning.**
+
+Lamarck sits on the **Lamarckian side**, without hedging. An accepted candidate
+in Phase 5 *becomes* the incumbent (`lamarck/src/run.rs`), learned weights and
+all, and the next experiment's candidates are generated from that creature — the
+learning is inherited, not merely a guide. So we buy the fast convergence, and
+we buy the diversity loss along with it.
+
+For us that half of the finding is not an academic footnote. Every optimiser in
+this family is accept-only against a **single** incumbent: there is no
+population to keep diverse, so the diversity that Whitley et al. measured
+draining away is, here, already down to one creature before the run starts.
+**Premature convergence** — the run settling into a local optimum around the
+first incumbent and then proposing endless small changes it cannot accept — is
+therefore the failure mode we are most exposed to, and most of what looks like
+inefficiency in the generator is a deliberate counterweight to it:
+
+- `--focus-policy weighted` re-draws which neuron is worked on every experiment,
+  weighted by error influence and accept history, rather than sticking to the
+  strongest one (`lamarck/src/focus.rs`); `high-error` is the greedy policy and
+  the README tells you not to run it in production for exactly this reason.
+- Phase 4 walks its candidate grids in **weighted-random** order, so an unlikely
+  pairing keeps a nonzero chance of an early draw every batch, and the `random`
+  strategy has no quota to cut — random accidents are accepted if they win.
+- Structural grafts (`lamarck/src/grafts.rs`) replay changes that worked on a
+  *previous* incumbent, which is the closest thing this design has to
+  remembering a lineage rather than only its last member.
+
+That we cannot cite a Baldwinian arm of our own is a real gap, not a claim of
+superiority: the Whitley comparison was run against a population, and reproducing
+it here would mean building one.
+
+### Memetic algorithms
+
+Evolution plus local search is a **memetic algorithm** — Moscato (1989),
+*On Evolution, Search, Optimization, Genetic Algorithms and Martial Arts:
+Towards Memetic Algorithms* (Caltech Concurrent Computation Program, C3P Report
+826). That is what this repository is: NEAT-AI does the evolution elsewhere,
+Lamarck is the local search bolted onto its champion.
+
+Choosing *which* local search to apply is itself a studied problem — Ong & Keane
+(2004),
+[*Meta-Lamarckian Learning in Memetic Algorithms*](https://doi.org/10.1109/TEVC.2003.819944)
+(*IEEE Trans. Evol. Comput.* 8(2), 99–110) — and Krasnogor & Smith (2005),
+[*A Tutorial for Competent Memetic Algorithms: Model, Taxonomy, and Design
+Issues*](https://doi.org/10.1109/TEVC.2005.850260)
+(*IEEE Trans. Evol. Comput.* 9(5), 474–488), give the taxonomy. Lamarck's
+version of that choice is deliberately coarse: nine strategies round-robin under
+a shared budget and the journal records which of them earn their cost, so the
+selection is *measured* but not yet *adaptive*. The one place it does adapt is
+the focus selector, which boosts a focus that produced a winner and dampens the
+sterile ones — meta-Lamarckian in spirit, over focuses rather than over
+operators.
+
+### Backpropagation-informed variants
+
+Seeding evolutionary proposals with gradient information is mainstream
+memetic/hybrid EA territory rather than a novelty; the interesting question is
+how much authority the gradient is given. The modern comparison points are Such
+et al. (2017), [*Deep Neuroevolution: Genetic Algorithms Are a Competitive
+Alternative for Training Deep Neural Networks for Reinforcement
+Learning*](https://arxiv.org/abs/1712.06567), and Salimans et al. (2017),
+[*Evolution Strategies as a Scalable Alternative to Reinforcement
+Learning*](https://arxiv.org/abs/1703.03864) — the gradient-free direction the
+field largely moved to.
+
+Lamarck gives the gradient the least authority it can: the learning signal
+(`lamarck/src/backprop.rs`) only *proposes*, capped at a `0.01` absolute weight
+delta, and the `backprop` strategy is skipped outright when no blame reached the
+focus. Nothing a gradient suggests is accepted without a full-corpus score.
+
+### Statistically informed variants
+
+Building offspring from measured statistics rather than from crossover is the
+**estimation-of-distribution algorithm** (EDA) family — Larrañaga & Lozano
+(2002), [*Estimation of Distribution Algorithms: A New Tool for Evolutionary
+Computation*](https://doi.org/10.1007/978-1-4615-1539-5) (Kluwer), with Pelikan,
+Goldberg & Cantú-Paz (1999), *BOA: The Bayesian Optimization Algorithm*
+(GECCO-99, 525–532) as the canonical model-building instance.
+
+The `stats_*` strategies are an EDA move in shape: the observations cache
+(`lamarck/src/observations.rs`) measures the distribution the creature is
+actually operating in, and candidates are drawn from those moments — mean,
+standard deviation, skewness, kurtosis, correlation with the error — rather than
+from arbitrary deltas. It is fair to borrow the framing and unfair to claim the
+algorithm: an EDA fits a probabilistic model over a *population* of good
+solutions and samples the next population from it, with BOA learning the
+variable linkages as well. Lamarck fits marginals of one incumbent's behaviour,
+changes one neuron at a time, and models no linkage at all.
+
+### Adventurous proposal, sceptical acceptance
+
+Cheap proxy proposes, expensive true evaluation accepts: that is the
+**surrogate-assisted EA** pattern, surveyed in Jin (2011),
+[*Surrogate-assisted evolutionary computation: Recent advances and future
+challenges*](https://doi.org/10.1016/j.swevo.2011.05.001) (*Swarm and
+Evolutionary Computation* 1(2), 61–70). The two-phase screen/promote gate
+(`lamarck/src/promote_gate.rs`) is exactly that shape — the screen scores a
+subsample and may only *drop* a candidate, while the full-corpus promote score is
+the sole thing allowed to declare a winner.
+
+Our surrogate is a low-fidelity evaluation of the true objective rather than a
+learned model of it, which makes its error measurable directly instead of
+estimable: [`docs/screen-calibration.md`](docs/screen-calibration.md) is the
+screen-Δ-versus-full-Δ calibration that a surrogate-assisted design owes its
+reader, and the noise-aware gate is what that measurement bought.
+
+The same framing describes the sibling optimisers — [NEAT-AI-Forests](https://github.com/stSoftwareAU/NEAT-AI-Forests),
+[NEAT-AI-Ockham](https://github.com/stSoftwareAU/NEAT-AI-Ockham) and
+[NEAT-AI-Rebase](https://github.com/stSoftwareAU/NEAT-AI-Rebase) — each proposes
+adventurously by its own cheap criterion and defers acceptance to the same
+authoritative scorer.
+
 ## Related repositories
 
 - [NEAT-AI](https://github.com/stSoftwareAU/NEAT-AI) — TypeScript evolutionary trainer and current backpropagation implementation.
