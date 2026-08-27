@@ -327,6 +327,7 @@ Leaving these unset changes behaviour.
 | `--max-experiments` | Stop after this many experiments, whichever of it and `--timeout-seconds` comes first. Unset = wall-clock bounded only. |
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
+| `--no-mirrored-sampling` | Score signed perturbation candidates alone instead of beside their `−δ` mirror (issue #203). Mirrored pairs are **on** by default; this is the A/B arm the journal's `mirrorWinRate` is read against. See [Mirrored (antithetic) sampling](#mirrored-antithetic-sampling). |
 | `--fixed-candidate-quotas` | Use the legacy fixed per-phase quotas instead of scaling them with `--candidates` (issue #108). Caps a batch at ~33 distinct candidates on the production creature whatever `--candidates` says; kept only for A/B benchmarking against pre-#108 runs. Scaled quotas are the default (`--scale-candidate-quotas` is accepted as a no-op for older scripts), so the budget binds until the generator is genuinely exhausted. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
 | `--compute-correlations` | Compute the expensive input×input correlation matrix in observations. |
@@ -850,6 +851,72 @@ a single estimated optimum.
 Every candidate records the strategy, a full-precision description of the exact
 mutation, and the old/new value for scalar changes.
 
+### Mirrored (antithetic) sampling
+
+Salimans et al. 2017 evaluates every perturbation `ε` together with its negation
+`−ε`. The two evaluations are negatively correlated, so their difference prices
+the local slope with far less noise than two independent draws — which matters
+here, where a fleet win lands around `1e-04` and an unpaired estimate at that
+scale is as likely to discard a win as to find one. Mirrored pairs are **on** by
+default; `--no-mirrored-sampling` is the arm they are measured against.
+
+A candidate qualifies when it moves **exactly one scalar** of the incumbent —
+one neuron bias or one synapse weight — and changes nothing else. That is the
+whole signed-perturbation family: `backprop`, `mean_error_bias`, `stats_weight`,
+`stats_bias`, `stats_skew_bias`, `structural_weaken` and the scalar half of
+`random`. Structural candidates (a grown neuron, an added synapse, a grafted
+subtree) change the shape of the creature, have no meaningful negation, and are
+never mirrored.
+
+The `−δ` twin joins the **same** batch, so both halves are written into one
+scoring directory and priced by one scorer call against identical records — the
+only comparison [Phase 5](#phase-5--authoritative-candidate-scoring) permits. A
+twin the hard bias/weight limit would clamp is not emitted at all: a clamped
+`−δ` is no longer the antithesis of `+δ`, and a pair that is not exactly
+opposite cannot cancel the noise it exists to cancel. Both halves carry a
+`mirror` provenance entry naming the `axis` (`bias:<uuid>` or
+`weight:<from>-><to>`), the signed `delta` and the `role` (`original` /
+`mirror`), which is what lets `report` re-pair them from a journal alone.
+
+```mermaid
+flowchart TD
+    PROP["strategy proposes a candidate"] --> ONE{"moves exactly<br/>one scalar?"}
+    ONE -- "no (structural)" --> SOLO(["batch: unpaired"])
+    ONE -- yes --> DEAD{"axis retired<br/>this incumbent?"}
+    DEAD -- yes --> HOLD["held back"]
+    HOLD --> SHORT{"budget unmet<br/>at the end?"}
+    SHORT -- yes --> PAIR
+    SHORT -- no --> DROP(["not proposed"])
+    DEAD -- no --> PAIR["emit −δ twin"]
+    PAIR --> SCORE["one scorer call,<br/>one baseline, same records"]
+    SCORE --> BOTH{"did either<br/>direction win?"}
+    BOTH -- yes --> WIN(["the winner competes to accept"])
+    BOTH -- no --> RETIRE(["axis retired:<br/>journalled as mirrorAxisFailures"])
+
+    classDef stage fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef stop fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef warn fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+
+    class PROP,PAIR,SCORE,HOLD stage
+    class SOLO,WIN stop
+    class DROP,RETIRE warn
+```
+
+A pair where **both** sides lose is a measurement, not a non-result: both
+directions were priced against identical records and neither improved, so the
+incumbent sits at a local optimum along that axis. The axis is journalled as a
+`mirrorAxisFailures` entry and the generator stops leading with it until an
+accept moves the incumbent, which re-opens every axis at once. Retirement
+**deprioritises** an axis rather than banning it: a held-back proposal is
+admitted at the end of generation if the rest of the generator could not fill
+the budget, because an empty batch slot buys nothing at all. Turning mirroring
+off retires nothing — with no pair there is no evidence to retire an axis on.
+
+Note that mirroring suppresses re-proposals at the source, which is the same
+work the opt-in [failed-candidate cache](#failed-candidate-cache-economics) does
+one experiment later. On a run with both on, the cache sees fewer repeats to
+skip; its stand-down guardrail prices that and disables it if it stops paying.
+
 ### Phase 5 — authoritative candidate scoring
 
 The incumbent plus all candidates are written to a temporary directory:
@@ -1204,7 +1271,8 @@ Every following line is one experiment:
 | `focusNeuron` | Primary focus neuron UUID (the first of `focusNeurons`). |
 | `focusNeurons` | Every focus this experiment proposed against (issue #109). Omitted for a single-focus experiment — `focusNeuron` already says it — and absent from journals written before the field existed. Each entry of `candidates[]` names its own `focusNeuron`, so a winner is attributable to one member of this set. |
 | `focusStats` | The focus scan of the **primary** focus (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
-| `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`. |
+| `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`, and `mirror` on each half of an antithetic pair (issue #203) — `axis`, the signed `delta` and the `role` (`original` / `mirror`). Omitted for structural candidates, for a perturbation whose twin could not join the batch, and from journals written before the field existed; in each of those the candidate stood alone. |
+| `mirrorAxisFailures` | Perturbation axes whose mirrored pair lost in **both** directions this experiment (issue #203). Both halves were scored in one call against identical records and neither improved, so the incumbent is at a local optimum along the axis and the generator stops leading with it until it accepts. Omitted when the experiment retired no axis, and absent from journals written before the field existed. See [Mirrored (antithetic) sampling](#mirrored-antithetic-sampling). |
 | `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — only under `--fixed-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
 | `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Absent when no screen phase ran, and from journals written before the field existed. |
@@ -1274,6 +1342,18 @@ The `baselineReuse` bucket prices the remembered baseline (issue #113):
 `netCreatureScoresSaved`, which subtracts the second from the first so the
 saving is never over-claimed. A pre-#113 journal, or a run left at
 `--baseline-reverify-interval 0`, reports every promote call as `fresh`.
+
+The `mirror` bucket is what mirrored sampling is judged on (issue #203):
+`pairsScored` (pairs whose halves were both priced by one call), `originalLost`,
+`mirrorWonWhenOriginalLost`, `bothLost`, `axesRetired` (journalled
+`mirrorAxisFailures` entries) and — the headline —
+`mirrorWinRate = mirrorWonWhenOriginalLost / originalLost`, the share of losing
+proposals whose `−δ` twin improved instead. That is improvement an unmirrored
+run would have had to draw independently, later, if at all. Pairs are read from
+`screenScores` where a screen ran and from `scores` otherwise, so both halves
+always come from one scorer call; a half that reached only the promote map is
+not paired with a screen-phase score. A `--no-mirrored-sampling` journal, or one
+written before the field existed, reports zeros — it scored no pairs.
 
 The `analysisMemo` report bucket totals the memo columns — `hits`, `misses`,
 `msSaved`, `hitRate` and `analysisMsSavedFraction` (saved milliseconds as a share
@@ -1541,6 +1621,7 @@ NEAT-AI-Lamarck/
     ├── learning.rs
     ├── propagate_layout.rs
     ├── candidates.rs
+    ├── mirror.rs             # mirrored (antithetic) ±δ pairs (issue #203)
     ├── structural.rs        # graph mutation primitives + residual ranking
     ├── combos.rs            # candidate merging and stacked-synapse dampening
     ├── grafts.rs            # structural graft store and phase-G replay

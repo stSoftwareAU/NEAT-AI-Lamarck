@@ -23,6 +23,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Mirrored (antithetic) sampling for signed perturbations (Issue #203).**
+  A weight nudge or bias shift was scored only in the direction the strategy
+  guessed, so half of every local slope went unmeasured and the estimate
+  carried the full noise of a single unpaired draw — at effect sizes around
+  `1e-04` that is the difference between finding a win and discarding it.
+  Following Salimans et al. 2017, every candidate that moves exactly one scalar
+  now enters the batch beside its `−δ` twin (`lamarck/src/mirror.rs`), so both
+  halves are priced by **one** scorer call against identical records.
+  Structural candidates have no meaningful negation and are never mirrored, and
+  a twin the hard bias/weight limit would clamp is not emitted at all. Both
+  halves carry a `mirror` provenance entry (`axis`, signed `delta`, `role`); a
+  pair that loses in **both** directions is journalled as a
+  `mirrorAxisFailures` axis-level failure and the generator stops leading with
+  that axis until an accept moves the incumbent — while still admitting a
+  held-back proposal rather than leaving a batch slot empty. `report` gains a
+  `mirror` bucket whose `mirrorWinRate` states how often the twin won a batch
+  its original lost. On by default; `--no-mirrored-sampling` is the A/B arm.
+  `lamarck/tests/mirrored_sampling.rs` drives a real run and reads the journal
+  back for each of those claims.
+
 - **README cites the literature the project is named after (Issue #202).** The
   README made the Lamarck joke without the citation, so a reader had no way to
   learn that Lamarckian inheritance is a named forty-year-old research
