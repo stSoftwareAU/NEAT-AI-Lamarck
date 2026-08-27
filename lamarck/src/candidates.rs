@@ -627,6 +627,11 @@ enum Proposal {
     /// Structurally identical to a candidate the batch already holds.
     Duplicate,
     /// Both directions of this axis already lost for this incumbent (#203).
+    ///
+    /// Held back rather than discarded: it is admitted at
+    /// [`Batch::finish`] if the rest of the generator could not fill the
+    /// budget, so a retired axis costs a batch slot only when there is nothing
+    /// fresher to spend it on.
     DeadAxis,
     /// The strategy had nothing to offer, or the batch was already full.
     Nothing,
@@ -647,6 +652,8 @@ impl Proposal {
 /// batch — and therefore in the same scorer call, against identical records.
 struct Batch<'a> {
     out: Vec<Candidate>,
+    /// Proposals on a retired axis, in proposal order (issue #203).
+    deferred: Vec<(Candidate, SignedPerturbation)>,
     seen: HashSet<u64>,
     incumbent_uuids: HashSet<String>,
     count: usize,
@@ -659,6 +666,7 @@ impl<'a> Batch<'a> {
     fn new(ctx: &CandidateGenContext<'a>, count: usize) -> Self {
         Self {
             out: Vec::with_capacity(count.min(1024)),
+            deferred: Vec::new(),
             seen: HashSet::new(),
             incumbent_uuids: ctx
                 .incumbent
@@ -696,13 +704,18 @@ impl<'a> Batch<'a> {
             .is_active()
             .then(|| crate::mirror::signed_perturbation(self.incumbent, &candidate.creature))
             .flatten();
+        if !self.seen.insert(self.fingerprint(&candidate.creature)) {
+            return Proposal::Duplicate;
+        }
         if let Some(perturbation) = &perturbation
             && self.mirror.is_dead(&perturbation.axis)
         {
+            // Held, not dropped: a retired axis loses its priority, not its
+            // right to a slot the rest of the generator could not fill (#203).
+            if self.deferred.len() < self.count {
+                self.deferred.push((candidate, perturbation.clone()));
+            }
             return Proposal::DeadAxis;
-        }
-        if !self.seen.insert(self.fingerprint(&candidate.creature)) {
-            return Proposal::Duplicate;
         }
         self.out.push(candidate);
         if self.mirror.enabled
@@ -766,7 +779,33 @@ impl<'a> Batch<'a> {
         hasher.finish()
     }
 
-    fn finish(self, limit: BatchLimit) -> CandidateBatch {
+    /// Admit held-back retired-axis proposals while the batch is short (#203).
+    ///
+    /// An axis both directions of which already lost is a poor question, but a
+    /// batch slot nothing else can fill is worse: an empty slot buys nothing at
+    /// all, and the generator has already run out of fresher hypotheses.
+    fn admit_deferred(&mut self) {
+        while !self.is_full() {
+            if self.deferred.is_empty() {
+                return;
+            }
+            let (candidate, perturbation) = self.deferred.remove(0);
+            self.out.push(candidate);
+            if self.mirror.enabled {
+                self.push_mirror(self.out.len() - 1, &perturbation);
+            }
+        }
+    }
+
+    fn finish(mut self, limit: BatchLimit) -> CandidateBatch {
+        self.admit_deferred();
+        // Slots the deferred proposals filled are budget met, not a generator
+        // that ran dry or a quota that bit.
+        let limit = if self.is_full() {
+            BatchLimit::Budget
+        } else {
+            limit
+        };
         CandidateBatch {
             candidates: self.out,
             limit,
@@ -2935,5 +2974,168 @@ mod tests {
                 "{stem}"
             );
         }
+    }
+
+    /// A batch generated with `mirror` on, for the issue #203 tests.
+    fn mirrored_batch(policy: MirrorPolicy<'_>, count: usize) -> super::CandidateBatch {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+            mirror: policy,
+        };
+        scaled_batch(&ctx, count, 5)
+    }
+
+    /// The axes a batch's mirrored pairs straddle, one entry per pair.
+    fn paired_axes(batch: &super::CandidateBatch) -> Vec<String> {
+        use crate::mirror::MirrorRole;
+        let mut axes = Vec::new();
+        for original in &batch.candidates {
+            let Some(pair) = &original.provenance.mirror else {
+                continue;
+            };
+            if pair.role != MirrorRole::Original {
+                continue;
+            }
+            // The twin has to be in *this* batch: that is what makes the pair
+            // scorable in one call against identical records.
+            let twin = batch.candidates.iter().find(|c| {
+                c.provenance.mirror.as_ref().is_some_and(|m| {
+                    m.role == MirrorRole::Mirror
+                        && m.axis == pair.axis
+                        && (m.delta + pair.delta).abs() < 1e-12
+                })
+            });
+            assert!(twin.is_some(), "{} has no −δ twin in the batch", pair.axis);
+            axes.push(pair.axis.clone());
+        }
+        axes
+    }
+
+    /// Issue #203 acceptance: a signed perturbation is generated with its `−δ`
+    /// twin beside it, and the twin straddles the incumbent exactly.
+    #[test]
+    fn signed_perturbations_are_generated_as_mirrored_pairs() {
+        let incumbent = wide_creature(24);
+        let batch = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &[],
+            },
+            29,
+        );
+        let axes = paired_axes(&batch);
+        assert!(
+            !axes.is_empty(),
+            "a mixed batch proposes weight and bias nudges, so it must carry pairs"
+        );
+        for candidate in &batch.candidates {
+            let Some(pair) = &candidate.provenance.mirror else {
+                continue;
+            };
+            let perturbation = crate::mirror::signed_perturbation(&incumbent, &candidate.creature)
+                .expect("a paired candidate moves exactly one scalar");
+            assert_eq!(perturbation.axis, pair.axis);
+            assert!((perturbation.delta() - pair.delta).abs() < 1e-12);
+        }
+        // Structural candidates have no negation and must never be paired.
+        for candidate in &batch.candidates {
+            if matches!(
+                candidate.provenance.strategy,
+                CandidateStrategy::StructuralAdd | CandidateStrategy::StructuralAddNeuron
+            ) {
+                assert!(
+                    candidate.provenance.mirror.is_none(),
+                    "a structural candidate was mirrored: {}",
+                    candidate.provenance.mutation
+                );
+            }
+        }
+    }
+
+    /// Issue #203: mirroring is opt-out, and with it off the generator behaves
+    /// exactly as it did before — no pair metadata anywhere.
+    #[test]
+    fn mirroring_off_emits_no_pairs() {
+        let batch = mirrored_batch(MirrorPolicy::default(), 29);
+        assert!(
+            batch
+                .candidates
+                .iter()
+                .all(|c| c.provenance.mirror.is_none())
+        );
+    }
+
+    /// Issue #203: an axis whose pair lost in both directions loses its
+    /// priority — the batch spends its slots on axes that are still open.
+    #[test]
+    fn a_retired_axis_yields_its_slot_to_a_live_one() {
+        let live = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &[],
+            },
+            29,
+        );
+        let retired = paired_axes(&live);
+        let retired: Vec<String> = retired.into_iter().take(1).collect();
+        assert!(!retired.is_empty(), "the live batch must propose an axis");
+
+        let after = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &retired,
+            },
+            29,
+        );
+        let remaining = paired_axes(&after);
+        assert!(
+            !remaining.contains(&retired[0]),
+            "the retired axis was re-proposed ahead of live ones: {remaining:?}"
+        );
+    }
+
+    /// Issue #203: retirement must never starve the batch. A slot the rest of
+    /// the generator cannot fill is worth more to a re-asked question than to
+    /// nothing at all, so held-back proposals are admitted at the end.
+    #[test]
+    fn retirement_never_shrinks_the_batch_below_the_budget() {
+        let live = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &[],
+            },
+            29,
+        );
+        // Retire everything this incumbent has to offer, then ask again: the
+        // generator has nothing fresh left, so the budget must still be met.
+        let all_axes = paired_axes(&live);
+        assert!(!all_axes.is_empty());
+        let after = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &all_axes,
+            },
+            29,
+        );
+        assert_eq!(
+            after.candidates.len(),
+            live.candidates.len(),
+            "retiring every axis shrank the batch from {} to {}",
+            live.candidates.len(),
+            after.candidates.len()
+        );
     }
 }

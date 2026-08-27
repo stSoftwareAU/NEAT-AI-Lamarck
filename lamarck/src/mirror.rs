@@ -219,7 +219,9 @@ pub fn mirror_candidate(
     let mut creature = candidate.creature.clone();
     match perturbation.scalar {
         PerturbedScalar::Bias { neuron } => creature.neurons.get_mut(neuron)?.bias = mirrored,
-        PerturbedScalar::Weight { synapse } => creature.synapses.get_mut(synapse)?.weight = mirrored,
+        PerturbedScalar::Weight { synapse } => {
+            creature.synapses.get_mut(synapse)?.weight = mirrored
+        }
     }
     Some(Candidate {
         creature,
@@ -293,6 +295,12 @@ impl PairOutcome {
     }
 }
 
+/// Axis plus step magnitude — what both halves of one pair share.
+type PairKey<'a> = (&'a str, u64);
+
+/// The `(index, score − baseline)` of each half of a pair, once scored.
+type PairHalves = (Option<(usize, f64)>, Option<(usize, f64)>);
+
 /// Re-pair the mirrored candidates of one experiment and score both halves.
 ///
 /// A pair is reported only when **both** halves appear in `scores`, so a
@@ -307,8 +315,7 @@ pub fn pair_outcomes(
     };
     // Key on the axis and the step magnitude: the two halves of a pair are the
     // only candidates that share both, whichever focus proposed them.
-    let mut halves: BTreeMap<(&str, u64), (Option<(usize, f64)>, Option<(usize, f64)>)> =
-        BTreeMap::new();
+    let mut halves: BTreeMap<PairKey<'_>, PairHalves> = BTreeMap::new();
     for (index, provenance) in candidates.iter().enumerate() {
         let Some(pair) = &provenance.mirror else {
             continue;
@@ -377,9 +384,20 @@ pub struct MirrorStats {
     pub both_lost: u64,
     /// `mirror_won_when_original_lost / original_lost` (0 with no losing pairs).
     pub mirror_win_rate: f64,
+    /// Axis retirements journalled as `mirrorAxisFailures` (issue #203).
+    ///
+    /// Counted from the journal field rather than recomputed, so it reports
+    /// what the run actually acted on. It exceeds [`Self::both_lost`] whenever
+    /// one axis was retired by several experiments in a row.
+    pub axes_retired: u64,
 }
 
 impl MirrorStats {
+    /// Fold one experiment's journalled axis retirements in.
+    pub fn push_axis_failures(&mut self, axes: &[String]) {
+        self.axes_retired += axes.len() as u64;
+    }
+
     /// Fold one scored pair in.
     pub fn push(&mut self, outcome: &PairOutcome) {
         self.pairs_scored += 1;

@@ -2211,7 +2211,7 @@ pub fn run_optimisation_cancellable(
                 incumbent: &incumbent,
                 candidates: &candidates,
                 scores: &scores,
-                            baseline: &baseline,
+                baseline: &baseline,
                 min_improvement: config.min_improvement,
                 source_dir,
                 combo_work_dir: &combo_dir,
@@ -2585,7 +2585,7 @@ pub fn run_optimisation_cancellable(
                 candidates_requested: Some(config.candidates),
                 batch_limit: Some(batch_limit),
                 scores: score_map,
-                            mirror_axis_failures: (!mirror_axis_failures.is_empty())
+                mirror_axis_failures: (!mirror_axis_failures.is_empty())
                     .then_some(mirror_axis_failures),
                 screen_scores: screen_score_map,
                 screen_tiers,
@@ -2850,7 +2850,7 @@ impl ExperimentRecord {
             candidates_requested: journal.candidates_requested,
             batch_limit: journal.batch_limit,
             scores: BTreeMap::new(),
-                    mirror_axis_failures: outcome.mirror_axis_failures,
+            mirror_axis_failures: outcome.mirror_axis_failures,
             screen_scores: outcome.screen_scores,
             screen_tiers: outcome.screen_tiers,
             baseline_source: None,
