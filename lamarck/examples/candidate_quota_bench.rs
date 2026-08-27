@@ -22,6 +22,7 @@ use neat_ai_lamarck::backprop::BackpropConfig;
 use neat_ai_lamarck::candidates::generate_candidate_batch;
 use neat_ai_lamarck::candidates::{CandidateBatch, CandidateBudget, CandidateGenContext};
 use neat_ai_lamarck::focus::{FocusNeuronStats, IncomingSourceStats};
+use neat_ai_lamarck::mirror::MirrorPolicy;
 use neat_ai_lamarck::observations::{ObservationsStatistics, ScalarStats, StatsMode};
 use neat_core::{CreatureExport, parse_creature_json};
 use rand::SeedableRng;
@@ -91,6 +92,7 @@ fn generate(
         learning: None,
         backprop: &cfg,
         structural_only: false,
+        mirror: MirrorPolicy::default(),
     };
     let mut rng = StdRng::seed_from_u64(5);
     let start = Instant::now();

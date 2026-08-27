@@ -32,6 +32,7 @@ use crate::grafts::{
 };
 use crate::log;
 use crate::memo::{AnalysisMemo, MemoScope};
+use crate::mirror::{MirrorPolicy, axis_failures};
 use crate::observations::ensure_statistics;
 use crate::parity::{check_phase0_parity, compute_local_mse};
 #[cfg(test)]
@@ -102,6 +103,15 @@ pub struct ExperimentRecord {
     pub batch_limit: Option<BatchLimit>,
     /// Authoritative (full-corpus) scores by stem when a promote/full score ran.
     pub scores: std::collections::BTreeMap<String, f64>,
+    /// Perturbation axes whose mirrored pair lost in **both** directions (#203).
+    ///
+    /// Both halves were scored in one call against identical records and
+    /// neither improved, so the incumbent is at a local optimum along the axis
+    /// and the run stops proposing there until it accepts. Omitted when the
+    /// experiment retired no axis, and absent from journals written before the
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_axis_failures: Option<Vec<String>>,
     /// Screen-phase (subsample) scores by stem when two-phase scoring is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_scores: Option<std::collections::BTreeMap<String, f64>>,
@@ -1157,6 +1167,11 @@ pub fn run_optimisation_cancellable(
     let mut acceptances = 0u64;
     let mut consecutive_scorer_failures = 0u32;
     let mut best_score = opening_baseline_score.unwrap_or(f64::NEG_INFINITY);
+    // Axes whose mirrored pair lost in both directions against the *current*
+    // incumbent (issue #203). Both directions were measured on identical
+    // records and neither improved, so the incumbent sits at a local optimum
+    // along them; an accept moves the incumbent and re-opens every one of them.
+    let mut dead_axes: Vec<String> = Vec::new();
     // Last-accept details for the final run-summary stamp (Issue #35).
     let mut last_accept_focus = String::new();
     let mut last_accept_strategy = CandidateStrategy::Random;
@@ -1659,6 +1674,10 @@ pub fn run_optimisation_cancellable(
                 learning: Some(&learning),
                 backprop: &backprop,
                 structural_only: config.structural_only,
+                mirror: MirrorPolicy {
+                    enabled: config.mirrored_sampling,
+                    dead_axes: &dead_axes,
+                },
             };
             let gen_start = Instant::now();
             let batch = generate_candidate_batch(
@@ -1760,6 +1779,10 @@ pub fn run_optimisation_cancellable(
                 learning: Some(&learning),
                 backprop: &backprop,
                 structural_only: config.structural_only,
+                mirror: MirrorPolicy {
+                    enabled: config.mirrored_sampling,
+                    dead_axes: &dead_axes,
+                },
             };
             let filtered = filter_and_backfill(
                 cache,
@@ -1958,6 +1981,13 @@ pub fn run_optimisation_cancellable(
                     experiments,
                     cache_cost,
                 );
+                // Nothing cleared the screen, so every mirrored pair in this
+                // batch lost twice: their axes are retired (issue #203).
+                let mirror_axis_failures = screen_score_map
+                    .as_ref()
+                    .map(|scores| axis_failures(&unaccepted.candidates, scores))
+                    .unwrap_or_default();
+                retire_dead_axes(&mut dead_axes, &mirror_axis_failures, false);
                 append_journal(
                     &journal_path,
                     &ExperimentRecord::unaccepted(
@@ -1967,6 +1997,8 @@ pub fn run_optimisation_cancellable(
                                 .get("baseline")
                                 .map(|b| b.score)
                                 .unwrap_or(best_score),
+                            mirror_axis_failures: (!mirror_axis_failures.is_empty())
+                                .then_some(mirror_axis_failures),
                             screen_scores: screen_score_map,
                             screen_tiers,
                             scorer_ms: screen_ms,
@@ -2530,6 +2562,14 @@ pub fn run_optimisation_cancellable(
         let mut score_map: std::collections::BTreeMap<String, f64> =
             scores.iter().map(|(k, v)| (k.clone(), v.score)).collect();
         score_map.insert("baseline".to_string(), baseline.score);
+        // Both halves of a mirrored pair must be priced by one call: the screen
+        // map covers the whole batch, the promote map only what it promoted, so
+        // the screen map is preferred wherever it exists (issue #203).
+        let mirror_axis_failures = axis_failures(
+            &unaccepted.candidates,
+            screen_score_map.as_ref().unwrap_or(&score_map),
+        );
+        retire_dead_axes(&mut dead_axes, &mirror_axis_failures, accepted);
         append_journal(
             &journal_path,
             &ExperimentRecord {
@@ -2545,6 +2585,8 @@ pub fn run_optimisation_cancellable(
                 candidates_requested: Some(config.candidates),
                 batch_limit: Some(batch_limit),
                 scores: score_map,
+                mirror_axis_failures: (!mirror_axis_failures.is_empty())
+                    .then_some(mirror_axis_failures),
                 screen_scores: screen_score_map,
                 screen_tiers,
                 baseline_source: Some(baseline_source),
@@ -2780,6 +2822,7 @@ struct UnacceptedJournal {
 /// Fields that differ across unaccepted journal writes (issue #139).
 struct UnacceptedOutcome {
     baseline_score: f64,
+    mirror_axis_failures: Option<Vec<String>>,
     screen_scores: Option<BTreeMap<String, f64>>,
     screen_tiers: Option<ScreenTierRecord>,
     scorer_ms: u128,
@@ -2807,6 +2850,7 @@ impl ExperimentRecord {
             candidates_requested: journal.candidates_requested,
             batch_limit: journal.batch_limit,
             scores: BTreeMap::new(),
+            mirror_axis_failures: outcome.mirror_axis_failures,
             screen_scores: outcome.screen_scores,
             screen_tiers: outcome.screen_tiers,
             baseline_source: None,
@@ -2836,6 +2880,23 @@ impl ExperimentRecord {
             cache_net_cumulative_ms: outcome.economics.map(|e| e.net_cumulative_ms),
             cache_resident_bytes: outcome.economics.map(|e| e.resident_bytes),
             cache_rebuild_ms: outcome.cache_rebuild_ms,
+        }
+    }
+}
+
+/// Retire the axes whose mirrored pair lost in both directions (issue #203).
+///
+/// `accepted` says the incumbent changed this experiment: every retired axis
+/// was measured against the creature that has just been replaced — including
+/// the ones this batch found — so the set is cleared rather than extended.
+fn retire_dead_axes(dead_axes: &mut Vec<String>, failures: &[String], accepted: bool) {
+    if accepted {
+        dead_axes.clear();
+        return;
+    }
+    for axis in failures {
+        if !dead_axes.contains(axis) {
+            dead_axes.push(axis.clone());
         }
     }
 }
@@ -2897,6 +2958,8 @@ fn handle_scorer_failure(failure: ScorerFailure<'_>) -> Result<(), String> {
             failure.journal,
             UnacceptedOutcome {
                 baseline_score: failure.journal.baseline_score,
+                // A batch that never scored measured no pair (issue #203).
+                mirror_axis_failures: None,
                 screen_scores: failure.screen_scores,
                 screen_tiers: failure.screen_tiers,
                 scorer_ms: failure.scorer_ms,
@@ -5533,6 +5596,7 @@ mod tests {
                     mutation: "test".into(),
                     old_value: None,
                     new_value: None,
+                    mirror: None,
                 },
             })
             .collect()
@@ -5669,6 +5733,7 @@ mod tests {
             &unaccepted_journal(7),
             UnacceptedOutcome {
                 baseline_score: 0.42,
+                mirror_axis_failures: None,
                 screen_scores: None,
                 screen_tiers: None,
                 scorer_ms: 99,

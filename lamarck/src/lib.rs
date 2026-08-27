@@ -20,6 +20,7 @@ pub mod learning;
 pub mod log;
 pub mod memetic;
 pub mod memo;
+pub mod mirror;
 pub mod observations;
 pub mod parity;
 pub mod promote_gate;
@@ -75,6 +76,10 @@ pub use grafts::{
 pub use memetic::{assert_memetic_resolves, prune_memetic};
 pub use memo::{
     AnalysisMemo, DEFAULT_ANALYSIS_MEMO_ENTRIES, MemoScope, MemoStats, creature_fingerprint,
+};
+pub use mirror::{
+    MirrorPair, MirrorPolicy, MirrorRole, MirrorStats, PairOutcome, PerturbedScalar,
+    SignedPerturbation, axis_failures, mirror_candidate, pair_outcomes, signed_perturbation,
 };
 pub use parity::{
     PHASE0_ERROR_ABS_TOL, PHASE0_ERROR_REL_TOL, PHASE0_SCORE_ABS_TOL, PHASE0_SCORE_REL_TOL,

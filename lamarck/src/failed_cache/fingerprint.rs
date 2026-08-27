@@ -182,6 +182,7 @@ mod tests {
             mutation: "weight input-0->h1 1.0 -> 1.5".into(),
             old_value: Some(1.0),
             new_value,
+            mirror: None,
         }
     }
 

@@ -456,6 +456,7 @@ mod tests {
                 mutation: mutation.into(),
                 old_value: Some(0.0),
                 new_value,
+                mirror: None,
             },
         )
     }

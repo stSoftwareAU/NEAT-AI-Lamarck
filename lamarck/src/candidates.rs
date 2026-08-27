@@ -2,6 +2,7 @@
 
 use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::focus::{FocusNeuronStats, IncomingSourceStats};
+use crate::mirror::{MirrorPolicy, SignedPerturbation, mirror_candidate, original_pair};
 use crate::observations::ObservationsStatistics;
 use crate::structural::{
     NeuronBridgeSpec, OLS_WEIGHT_FRACTION, RankedSource, add_neuron_bridge, add_synapse,
@@ -73,6 +74,14 @@ pub struct CandidateProvenance {
     pub old_value: Option<f64>,
     /// New value when a scalar field changed.
     pub new_value: Option<f64>,
+    /// Mirrored-pair membership when this candidate is half of an antithetic
+    /// `±δ` pair (issue #203).
+    ///
+    /// Omitted for structural candidates, for a signed perturbation whose twin
+    /// could not join the batch, and from journals written before the field
+    /// existed — in every one of those cases the candidate stands alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<crate::mirror::MirrorPair>,
 }
 
 /// One generated candidate plus provenance.
@@ -229,6 +238,11 @@ pub struct CandidateGenContext<'a> {
     pub backprop: &'a BackpropConfig,
     /// When true, only emit synapse/neuron growth candidates.
     pub structural_only: bool,
+    /// Mirrored (antithetic) sampling policy (issue #203).
+    ///
+    /// [`MirrorPolicy::default`] is the pre-#203 generator: no `−δ` twin is
+    /// emitted and no axis is off limits.
+    pub mirror: MirrorPolicy<'a>,
 }
 
 /// Generate a candidate population under the pre-#108 fixed quotas.
@@ -271,7 +285,7 @@ pub fn generate_candidate_batch(
     budget: CandidateBudget,
     rng: &mut impl Rng,
 ) -> CandidateBatch {
-    let mut batch = Batch::new(ctx.incumbent, budget.count);
+    let mut batch = Batch::new(ctx, budget.count);
     if budget.count == 0 {
         return batch.finish(BatchLimit::Budget);
     }
@@ -612,6 +626,13 @@ enum Proposal {
     Accepted,
     /// Structurally identical to a candidate the batch already holds.
     Duplicate,
+    /// Both directions of this axis already lost for this incumbent (#203).
+    ///
+    /// Held back rather than discarded: it is admitted at
+    /// [`Batch::finish`] if the rest of the generator could not fill the
+    /// budget, so a retired axis costs a batch slot only when there is nothing
+    /// fresher to spend it on.
+    DeadAxis,
     /// The strategy had nothing to offer, or the batch was already full.
     Nothing,
 }
@@ -625,20 +646,38 @@ impl Proposal {
 
 /// Accumulator that enforces the budget and rejects duplicate proposals, so a
 /// "filled" batch is never padded with repeats (issues #108, #119).
-struct Batch {
+///
+/// It also owns mirrored (antithetic) sampling (issue #203): an accepted signed
+/// perturbation immediately offers its `−δ` twin, so the pair lands in the same
+/// batch — and therefore in the same scorer call, against identical records.
+struct Batch<'a> {
     out: Vec<Candidate>,
+    /// Proposals on a retired axis, in proposal order (issue #203).
+    deferred: Vec<(Candidate, SignedPerturbation)>,
     seen: HashSet<u64>,
     incumbent_uuids: HashSet<String>,
     count: usize,
+    incumbent: &'a CreatureExport,
+    backprop: &'a BackpropConfig,
+    mirror: MirrorPolicy<'a>,
 }
 
-impl Batch {
-    fn new(incumbent: &CreatureExport, count: usize) -> Self {
+impl<'a> Batch<'a> {
+    fn new(ctx: &CandidateGenContext<'a>, count: usize) -> Self {
         Self {
             out: Vec::with_capacity(count.min(1024)),
+            deferred: Vec::new(),
             seen: HashSet::new(),
-            incumbent_uuids: incumbent.neurons.iter().map(|n| n.uuid.clone()).collect(),
+            incumbent_uuids: ctx
+                .incumbent
+                .neurons
+                .iter()
+                .map(|n| n.uuid.clone())
+                .collect(),
             count,
+            incumbent: ctx.incumbent,
+            backprop: ctx.backprop,
+            mirror: ctx.mirror,
         }
     }
 
@@ -658,11 +697,52 @@ impl Batch {
         if self.is_full() {
             return Proposal::Nothing;
         }
+        // Only a candidate that moves exactly one scalar has a negation, so
+        // this is also the test for the whole signed-perturbation family.
+        let perturbation = self
+            .mirror
+            .is_active()
+            .then(|| crate::mirror::signed_perturbation(self.incumbent, &candidate.creature))
+            .flatten();
         if !self.seen.insert(self.fingerprint(&candidate.creature)) {
             return Proposal::Duplicate;
         }
+        if let Some(perturbation) = &perturbation
+            && self.mirror.is_dead(&perturbation.axis)
+        {
+            // Held, not dropped: a retired axis loses its priority, not its
+            // right to a slot the rest of the generator could not fill (#203).
+            if self.deferred.len() < self.count {
+                self.deferred.push((candidate, perturbation.clone()));
+            }
+            return Proposal::DeadAxis;
+        }
         self.out.push(candidate);
+        if self.mirror.enabled
+            && let Some(perturbation) = perturbation
+        {
+            self.push_mirror(self.out.len() - 1, &perturbation);
+        }
         Proposal::Accepted
+    }
+
+    /// Offer the `−δ` twin of the signed perturbation just accepted at `index`.
+    ///
+    /// The `+δ` half is marked as a pair member only once its twin has actually
+    /// joined: a full batch, a clamped step or a twin the batch already holds
+    /// leaves an honest, unpaired candidate rather than a half-recorded pair.
+    fn push_mirror(&mut self, index: usize, perturbation: &SignedPerturbation) {
+        if self.is_full() {
+            return;
+        }
+        let Some(mirror) = mirror_candidate(&self.out[index], perturbation, self.backprop) else {
+            return;
+        };
+        if !self.seen.insert(self.fingerprint(&mirror.creature)) {
+            return;
+        }
+        self.out[index].provenance.mirror = Some(original_pair(perturbation));
+        self.out.push(mirror);
     }
 
     /// Structural fingerprint of a candidate creature.
@@ -699,7 +779,33 @@ impl Batch {
         hasher.finish()
     }
 
-    fn finish(self, limit: BatchLimit) -> CandidateBatch {
+    /// Admit held-back retired-axis proposals while the batch is short (#203).
+    ///
+    /// An axis both directions of which already lost is a poor question, but a
+    /// batch slot nothing else can fill is worse: an empty slot buys nothing at
+    /// all, and the generator has already run out of fresher hypotheses.
+    fn admit_deferred(&mut self) {
+        while !self.is_full() {
+            if self.deferred.is_empty() {
+                return;
+            }
+            let (candidate, perturbation) = self.deferred.remove(0);
+            self.out.push(candidate);
+            if self.mirror.enabled {
+                self.push_mirror(self.out.len() - 1, &perturbation);
+            }
+        }
+    }
+
+    fn finish(mut self, limit: BatchLimit) -> CandidateBatch {
+        self.admit_deferred();
+        // Slots the deferred proposals filled are budget met, not a generator
+        // that ran dry or a quota that bit.
+        let limit = if self.is_full() {
+            BatchLimit::Budget
+        } else {
+            limit
+        };
         CandidateBatch {
             candidates: self.out,
             limit,
@@ -765,6 +871,7 @@ fn build_structural_add_scaled_gated(
             ),
             old_value: None,
             new_value: Some(weight),
+            mirror: None,
         },
     })
 }
@@ -840,6 +947,7 @@ fn build_structural_add_neuron_combo(
             mutation,
             old_value: None,
             new_value: Some(w_a),
+            mirror: None,
         },
     })
 }
@@ -876,6 +984,7 @@ fn build_mean_error_bias(
             ),
             old_value: Some(old_bias),
             new_value: Some(new_bias),
+            mirror: None,
         },
     })
 }
@@ -940,6 +1049,7 @@ fn build_stats_skew_bias(ctx: &CandidateGenContext<'_>) -> Option<Candidate> {
             ),
             old_value: Some(old_bias),
             new_value: Some(new_bias),
+            mirror: None,
         },
     })
 }
@@ -996,6 +1106,7 @@ fn build_candidate(
                                 ),
                                 old_value: Some(old_w),
                                 new_value: Some(new_w),
+                                mirror: None,
                             },
                         });
                     }
@@ -1182,6 +1293,7 @@ fn build_candidate(
             mutation,
             old_value,
             new_value,
+            mirror: None,
         },
     })
 }
@@ -1359,6 +1471,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng_a = StdRng::seed_from_u64(42);
         let mut rng_b = StdRng::seed_from_u64(42);
@@ -1407,6 +1520,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(1);
         let candidates = generate_candidates(&ctx, 4, &mut rng);
@@ -1447,6 +1561,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(1);
         assert!(build_candidate(&ctx, CandidateStrategy::MeanErrorBias, &mut rng).is_none());
@@ -1478,6 +1593,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(3);
         assert!(build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng).is_none());
@@ -1522,6 +1638,7 @@ mod tests {
             learning: Some(&learning),
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(3);
         let candidate = build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng)
@@ -1580,6 +1697,7 @@ mod tests {
             learning: Some(&learning),
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(3);
         let candidate = build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng)
@@ -1849,6 +1967,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         for count in [12usize, 29, 60, 120] {
             let batch = scaled_batch(&ctx, count, 5);
@@ -1880,6 +1999,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: true,
+            mirror: MirrorPolicy::default(),
         };
         let batch = scaled_batch(&ctx, 500, 5);
         assert_eq!(batch.limit, BatchLimit::Exhausted);
@@ -1916,6 +2036,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let small = scaled_batch(&ctx, 29, 5).strategy_mix();
         let large = scaled_batch(&ctx, 120, 5).strategy_mix();
@@ -1966,6 +2087,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let batch = scaled_batch(&ctx, 120, 5);
         let mut seen = std::collections::BTreeSet::new();
@@ -2000,6 +2122,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(5);
         let batch = generate_candidates(&ctx, 29, &mut rng);
@@ -2033,6 +2156,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(5);
         let batch = generate_candidate_batch(
@@ -2071,6 +2195,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let batch = scaled_batch(&ctx, 240, 5);
         assert_eq!(batch.candidates.len(), 240);
@@ -2104,6 +2229,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(5);
         let legacy = generate_candidates(&ctx, 8, &mut rng);
@@ -2161,6 +2287,7 @@ mod tests {
             learning: None,
             backprop,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         }
     }
 
@@ -2360,6 +2487,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(3);
         let cand = build_candidate(&ctx, CandidateStrategy::StructuralAdd, &mut rng).unwrap();
@@ -2399,6 +2527,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(9);
         let cand = build_candidate(&ctx, CandidateStrategy::StructuralAddNeuron, &mut rng).unwrap();
@@ -2467,6 +2596,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(1);
         let candidates = generate_candidates(&ctx, 6, &mut rng);
@@ -2581,6 +2711,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: true,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(11);
         let structural = generate_candidates(&ctx, 12, &mut rng);
@@ -2619,6 +2750,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: true,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(2);
         let structural = generate_candidates(&ctx, 8, &mut rng);
@@ -2644,6 +2776,7 @@ mod tests {
                 mutation: "test bias nudge".into(),
                 old_value: Some(0.1),
                 new_value: Some(0.35),
+                mirror: None,
             },
         }]
     }
@@ -2841,5 +2974,168 @@ mod tests {
                 "{stem}"
             );
         }
+    }
+
+    /// A batch generated with `mirror` on, for the issue #203 tests.
+    fn mirrored_batch(policy: MirrorPolicy<'_>, count: usize) -> super::CandidateBatch {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+            mirror: policy,
+        };
+        scaled_batch(&ctx, count, 5)
+    }
+
+    /// The axes a batch's mirrored pairs straddle, one entry per pair.
+    fn paired_axes(batch: &super::CandidateBatch) -> Vec<String> {
+        use crate::mirror::MirrorRole;
+        let mut axes = Vec::new();
+        for original in &batch.candidates {
+            let Some(pair) = &original.provenance.mirror else {
+                continue;
+            };
+            if pair.role != MirrorRole::Original {
+                continue;
+            }
+            // The twin has to be in *this* batch: that is what makes the pair
+            // scorable in one call against identical records.
+            let twin = batch.candidates.iter().find(|c| {
+                c.provenance.mirror.as_ref().is_some_and(|m| {
+                    m.role == MirrorRole::Mirror
+                        && m.axis == pair.axis
+                        && (m.delta + pair.delta).abs() < 1e-12
+                })
+            });
+            assert!(twin.is_some(), "{} has no −δ twin in the batch", pair.axis);
+            axes.push(pair.axis.clone());
+        }
+        axes
+    }
+
+    /// Issue #203 acceptance: a signed perturbation is generated with its `−δ`
+    /// twin beside it, and the twin straddles the incumbent exactly.
+    #[test]
+    fn signed_perturbations_are_generated_as_mirrored_pairs() {
+        let incumbent = wide_creature(24);
+        let batch = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &[],
+            },
+            29,
+        );
+        let axes = paired_axes(&batch);
+        assert!(
+            !axes.is_empty(),
+            "a mixed batch proposes weight and bias nudges, so it must carry pairs"
+        );
+        for candidate in &batch.candidates {
+            let Some(pair) = &candidate.provenance.mirror else {
+                continue;
+            };
+            let perturbation = crate::mirror::signed_perturbation(&incumbent, &candidate.creature)
+                .expect("a paired candidate moves exactly one scalar");
+            assert_eq!(perturbation.axis, pair.axis);
+            assert!((perturbation.delta() - pair.delta).abs() < 1e-12);
+        }
+        // Structural candidates have no negation and must never be paired.
+        for candidate in &batch.candidates {
+            if matches!(
+                candidate.provenance.strategy,
+                CandidateStrategy::StructuralAdd | CandidateStrategy::StructuralAddNeuron
+            ) {
+                assert!(
+                    candidate.provenance.mirror.is_none(),
+                    "a structural candidate was mirrored: {}",
+                    candidate.provenance.mutation
+                );
+            }
+        }
+    }
+
+    /// Issue #203: mirroring is opt-out, and with it off the generator behaves
+    /// exactly as it did before — no pair metadata anywhere.
+    #[test]
+    fn mirroring_off_emits_no_pairs() {
+        let batch = mirrored_batch(MirrorPolicy::default(), 29);
+        assert!(
+            batch
+                .candidates
+                .iter()
+                .all(|c| c.provenance.mirror.is_none())
+        );
+    }
+
+    /// Issue #203: an axis whose pair lost in both directions loses its
+    /// priority — the batch spends its slots on axes that are still open.
+    #[test]
+    fn a_retired_axis_yields_its_slot_to_a_live_one() {
+        let live = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &[],
+            },
+            29,
+        );
+        let retired = paired_axes(&live);
+        let retired: Vec<String> = retired.into_iter().take(1).collect();
+        assert!(!retired.is_empty(), "the live batch must propose an axis");
+
+        let after = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &retired,
+            },
+            29,
+        );
+        let remaining = paired_axes(&after);
+        assert!(
+            !remaining.contains(&retired[0]),
+            "the retired axis was re-proposed ahead of live ones: {remaining:?}"
+        );
+    }
+
+    /// Issue #203: retirement must never starve the batch. A slot the rest of
+    /// the generator cannot fill is worth more to a re-asked question than to
+    /// nothing at all, so held-back proposals are admitted at the end.
+    #[test]
+    fn retirement_never_shrinks_the_batch_below_the_budget() {
+        let live = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &[],
+            },
+            29,
+        );
+        // Retire everything this incumbent has to offer, then ask again: the
+        // generator has nothing fresh left, so the budget must still be met.
+        let all_axes = paired_axes(&live);
+        assert!(!all_axes.is_empty());
+        let after = mirrored_batch(
+            MirrorPolicy {
+                enabled: true,
+                dead_axes: &all_axes,
+            },
+            29,
+        );
+        assert_eq!(
+            after.candidates.len(),
+            live.candidates.len(),
+            "retiring every axis shrank the batch from {} to {}",
+            live.candidates.len(),
+            after.candidates.len()
+        );
     }
 }

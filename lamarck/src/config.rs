@@ -114,6 +114,13 @@ pub struct LamarckConfig {
     pub phase0_parity: bool,
     /// When true, only generate synapse/neuron growth candidates (no weight/bias nudges).
     pub structural_only: bool,
+    /// Score every signed perturbation candidate beside its `−δ` mirror (#203).
+    ///
+    /// On by default: the pair is the variance-reduction device of Salimans et
+    /// al. 2017, and the mirror is free to construct. `--no-mirrored-sampling`
+    /// turns it off, which is the A/B arm the journal's mirror win rate is read
+    /// against.
+    pub mirrored_sampling: bool,
     /// When set in `(0, 1)`, screen the candidate batch on a scorer subsample first
     /// (issue #24). `None` or `Some(1.0)` = full-corpus score only.
     pub screen_sample_rate: Option<f64>,
@@ -323,6 +330,7 @@ impl Default for LamarckConfig {
             max_consecutive_scorer_failures: DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
             phase0_parity: true,
             structural_only: false,
+            mirrored_sampling: true,
             screen_sample_rate: Some(DEFAULT_SCREEN_SAMPLE_RATE),
             screen_promote_threshold: DEFAULT_SCREEN_PROMOTE_THRESHOLD,
             screen_promote_gate: PromoteGateMode::Absolute,

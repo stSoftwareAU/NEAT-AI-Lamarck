@@ -3,6 +3,7 @@
 use crate::baseline::BaselineSource;
 use crate::candidates::{BatchLimit, CandidateStrategy};
 use crate::log;
+use crate::mirror::{MirrorStats, pair_outcomes};
 use crate::promote_gate::{PromoteGateReplay, PromoteGateReplayAccumulator};
 use crate::run::{JournalLine, RunResult};
 use crate::scorer_cost::{ScorerCallCost, ScorerCallCostAccumulator};
@@ -480,6 +481,15 @@ pub struct JournalReport {
     /// scoring session could save; the slope is what it could not. Fitted from
     /// the journal's own `scorerCalls`, so any run reproduces the measurement.
     pub scorer_call_cost: ScorerCallCost,
+    /// What mirrored (antithetic) sampling bought (issue #203).
+    ///
+    /// `mirrorWinRate` is the number the feature is judged on: the share of
+    /// pairs whose `−δ` twin improved on a batch where the `+δ` proposal did
+    /// not — improvement that an unmirrored run would have had to draw
+    /// independently, later, if at all. A journal from a run with
+    /// `--no-mirrored-sampling`, or one written before the field existed,
+    /// reports zeros: it scored no pairs, which is exactly what zero means.
+    pub mirror: MirrorStats,
     /// Failed-candidate cache economics (issue #93). `None` on a cache-off journal.
     pub cache: Option<CacheReport>,
     /// What the noise-aware promote gate would have done to this journal (#111).
@@ -604,6 +614,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut focus_accepted = FocusStatsAccumulator::default();
     let mut focus_rejected = FocusStatsAccumulator::default();
     let mut cache = CacheAccumulator::default();
+    let mut mirror = MirrorStats::default();
 
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -693,6 +704,19 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             *appearances_total.entry(key).or_default() += 1;
         }
         cache.push_experiment(&record);
+
+        // Both halves of a pair have to come from one scorer call, so the pair
+        // is read off whichever map covered the whole batch: the screen map
+        // where two-phase scoring ran, the promote map otherwise (issue #203).
+        for outcome in pair_outcomes(
+            &record.candidates,
+            record.screen_scores.as_ref().unwrap_or(&record.scores),
+        ) {
+            mirror.push(&outcome);
+        }
+        if let Some(axes) = &record.mirror_axis_failures {
+            mirror.push_axis_failures(axes);
+        }
 
         batch_generated_total += record.candidates.len() as u64;
         batch_min = Some(batch_min.map_or(record.candidates.len(), |n: usize| {
@@ -972,6 +996,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         screen_calibration: screen_calibration.finish(),
         scorer_call_cost: scorer_call_cost.finish(),
         promote_gate_replay: promote_gate_replay.finish(),
+        mirror,
         cache: cache.finish(),
     })
 }
@@ -1318,6 +1343,7 @@ mod tests {
             mutation: "x".into(),
             old_value: Some(0.0),
             new_value: Some(0.1),
+            mirror: None,
         }
     }
 
@@ -1356,6 +1382,7 @@ mod tests {
             candidates_requested: None,
             batch_limit: None,
             scores: BTreeMap::new(),
+            mirror_axis_failures: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,
@@ -1700,6 +1727,7 @@ mod tests {
             candidates_requested: None,
             batch_limit: None,
             scores: BTreeMap::new(),
+            mirror_axis_failures: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,
@@ -2055,6 +2083,7 @@ mod tests {
                 m.insert("candidate-000".into(), 0.400002);
                 m
             },
+            mirror_axis_failures: None,
             screen_scores: Some({
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.4);
@@ -2109,6 +2138,7 @@ mod tests {
                 m.insert("candidate-000".into(), 0.400001);
                 m
             },
+            mirror_axis_failures: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,
@@ -2301,5 +2331,86 @@ mod tests {
         assert_eq!(memo.misses, 0);
         assert_eq!(memo.ms_saved, 0);
         assert_eq!(memo.hit_rate, 0.0);
+    }
+
+    /// One half of a mirrored pair, as the generator stamps it (issue #203).
+    fn mirrored(axis: &str, delta: f64, role: crate::mirror::MirrorRole) -> CandidateProvenance {
+        CandidateProvenance {
+            mirror: Some(crate::mirror::MirrorPair {
+                axis: axis.into(),
+                delta,
+                role,
+            }),
+            ..prov(CandidateStrategy::StatsBias)
+        }
+    }
+
+    /// An experiment whose batch is one mirrored pair, screened together.
+    fn paired_experiment(
+        number: u64,
+        axis: &str,
+        original_delta: f64,
+        mirror_delta: f64,
+    ) -> ExperimentRecord {
+        use crate::mirror::MirrorRole;
+        let mut record = experiment(number, false);
+        record.candidates = vec![
+            mirrored(axis, 0.05, MirrorRole::Original),
+            mirrored(axis, -0.05, MirrorRole::Mirror),
+        ];
+        record.screen_scores = Some(BTreeMap::from([
+            ("baseline".to_string(), 0.5),
+            ("candidate-000".to_string(), 0.5 + original_delta),
+            ("candidate-001".to_string(), 0.5 + mirror_delta),
+        ]));
+        record
+    }
+
+    /// Issue #203 acceptance: `report` states how often the `−δ` twin won a
+    /// batch the `+δ` proposal lost — the direct measure of what mirroring
+    /// bought, without which the change cannot be judged on its own evidence.
+    #[test]
+    fn report_states_the_mirror_win_rate_and_axis_retirements() {
+        // The mirror rescues the first pair; the second loses in both
+        // directions and retires its axis; the third is won outright by the
+        // original, so it is not a rescue opportunity at all.
+        let rescued = paired_experiment(1, "bias:h1", -0.01, 0.02);
+        let mut dead = paired_experiment(2, "weight:h1->o1", -0.01, -0.02);
+        dead.mirror_axis_failures = Some(vec!["weight:h1->o1".to_string()]);
+        let won = paired_experiment(3, "bias:o1", 0.03, -0.03);
+        let file = journal_of(&[rescued, dead, won]);
+
+        let mirror = report_from_journal(file.path()).unwrap().mirror;
+        assert_eq!(mirror.pairs_scored, 3);
+        assert_eq!(mirror.original_lost, 2);
+        assert_eq!(mirror.mirror_won_when_original_lost, 1);
+        assert_eq!(mirror.both_lost, 1);
+        assert!((mirror.mirror_win_rate - 0.5).abs() < 1e-12);
+        assert_eq!(mirror.axes_retired, 1);
+    }
+
+    /// A journal from `--no-mirrored-sampling` — or from before #203 — carries
+    /// no pair metadata, and must report zeros rather than fail to parse.
+    #[test]
+    fn report_reads_an_unmirrored_journal_as_zero_pairs() {
+        let line = serde_json::to_value(experiment(1, false)).unwrap();
+        let object = line.as_object().unwrap();
+        assert!(
+            object.get("mirrorAxisFailures").is_none(),
+            "an experiment that retired no axis must not write the field"
+        );
+        assert!(
+            !object["candidates"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("mirror"),
+            "an unpaired candidate must not write pair metadata"
+        );
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{line}").unwrap();
+
+        let mirror = report_from_journal(file.path()).unwrap().mirror;
+        assert_eq!(mirror, crate::mirror::MirrorStats::default());
+        assert_eq!(mirror.mirror_win_rate, 0.0);
     }
 }

@@ -125,6 +125,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     structural_only: bool,
 
+    /// Score signed perturbation candidates alone instead of beside their −δ
+    /// mirror (issue #203). The mirrored pair is on by default.
+    #[arg(long, default_value_t = false)]
+    no_mirrored_sampling: bool,
+
     /// Screen candidates on a scorer subsample before full-corpus promote scoring
     /// (issue #24). Values in `(0, 1)` enable screening; `1` (or `>=1`) disables
     /// and scores the full batch on the full corpus only.
@@ -343,6 +348,7 @@ fn main() -> ExitCode {
         max_consecutive_scorer_failures: neat_ai_lamarck::DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
         phase0_parity: !cli.skip_phase0,
         structural_only: cli.structural_only,
+        mirrored_sampling: !cli.no_mirrored_sampling,
         screen_sample_rate: if cli.screen_sample_rate > 0.0 && cli.screen_sample_rate < 1.0 {
             Some(cli.screen_sample_rate)
         } else {

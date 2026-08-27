@@ -17,6 +17,10 @@
 //!    next strategy, so the fifth candidate is a `stats_bias` proposal instead.
 //!    Every other captured value is untouched, which is what keeps the fixture
 //!    a guard against unintended drift.
+//!
+//!    The run is pinned to `mirrored_sampling: false` for the same reason it is
+//!    pinned to the legacy quotas: mirrored sampling (issue #203) spends batch
+//!    slots on `−δ` twins that did not exist when the stream was captured.
 //! 2. At `K > 1` the creature-wide passes still run **once** per experiment.
 //!    An implementation that loops the whole analysis per focus would be
 //!    *slower*, not faster, and would otherwise look correct.
@@ -139,6 +143,11 @@ fn config(dir: &Path, out: &str) -> LamarckConfig {
         // The k1 fixture was captured under the legacy fixed quotas; pin them
         // so the scaled default's extra rng draws can't drift the stream.
         scale_candidate_quotas: false,
+        // Likewise for mirrored sampling (issue #203): a `−δ` twin takes a
+        // batch slot, so the default-on pair would reshape a stream captured
+        // before pairs existed. `mirrored_sampling` has its own end-to-end
+        // guard in `tests/mirrored_sampling.rs`.
+        mirrored_sampling: false,
         min_improvement: 1e-6,
         seed: Some(42),
         scorer_path: PathBuf::from("rust_scorer"),
