@@ -377,6 +377,7 @@ mod tests {
             mutation: mutation.into(),
             old_value: Some(0.0),
             new_value,
+            mirror: None,
         }
     }
 
@@ -408,6 +409,7 @@ mod tests {
             candidates_requested: None,
             batch_limit: None,
             scores,
+            mirror_axis_failures: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,

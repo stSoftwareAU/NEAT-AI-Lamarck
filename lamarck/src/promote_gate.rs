@@ -660,12 +660,14 @@ mod tests {
                     mutation: "x".into(),
                     old_value: None,
                     new_value: None,
+                    mirror: None,
                 };
                 8
             ],
             candidates_requested: None,
             batch_limit: None,
             scores: BTreeMap::new(),
+            mirror_axis_failures: None,
             screen_scores: Some(
                 screen
                     .iter()

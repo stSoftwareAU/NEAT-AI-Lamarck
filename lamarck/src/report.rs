@@ -1318,6 +1318,7 @@ mod tests {
             mutation: "x".into(),
             old_value: Some(0.0),
             new_value: Some(0.1),
+            mirror: None,
         }
     }
 
@@ -1356,6 +1357,7 @@ mod tests {
             candidates_requested: None,
             batch_limit: None,
             scores: BTreeMap::new(),
+            mirror_axis_failures: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,
@@ -1700,6 +1702,7 @@ mod tests {
             candidates_requested: None,
             batch_limit: None,
             scores: BTreeMap::new(),
+            mirror_axis_failures: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,
@@ -2055,6 +2058,7 @@ mod tests {
                 m.insert("candidate-000".into(), 0.400002);
                 m
             },
+            mirror_axis_failures: None,
             screen_scores: Some({
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.4);
@@ -2109,6 +2113,7 @@ mod tests {
                 m.insert("candidate-000".into(), 0.400001);
                 m
             },
+            mirror_axis_failures: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,

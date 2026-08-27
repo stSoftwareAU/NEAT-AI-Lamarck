@@ -2,6 +2,7 @@
 
 use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::focus::{FocusNeuronStats, IncomingSourceStats};
+use crate::mirror::{MirrorPolicy, SignedPerturbation, mirror_candidate, original_pair};
 use crate::observations::ObservationsStatistics;
 use crate::structural::{
     NeuronBridgeSpec, OLS_WEIGHT_FRACTION, RankedSource, add_neuron_bridge, add_synapse,
@@ -73,6 +74,14 @@ pub struct CandidateProvenance {
     pub old_value: Option<f64>,
     /// New value when a scalar field changed.
     pub new_value: Option<f64>,
+    /// Mirrored-pair membership when this candidate is half of an antithetic
+    /// `±δ` pair (issue #203).
+    ///
+    /// Omitted for structural candidates, for a signed perturbation whose twin
+    /// could not join the batch, and from journals written before the field
+    /// existed — in every one of those cases the candidate stands alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<crate::mirror::MirrorPair>,
 }
 
 /// One generated candidate plus provenance.
@@ -229,6 +238,11 @@ pub struct CandidateGenContext<'a> {
     pub backprop: &'a BackpropConfig,
     /// When true, only emit synapse/neuron growth candidates.
     pub structural_only: bool,
+    /// Mirrored (antithetic) sampling policy (issue #203).
+    ///
+    /// [`MirrorPolicy::default`] is the pre-#203 generator: no `−δ` twin is
+    /// emitted and no axis is off limits.
+    pub mirror: MirrorPolicy<'a>,
 }
 
 /// Generate a candidate population under the pre-#108 fixed quotas.
@@ -271,7 +285,7 @@ pub fn generate_candidate_batch(
     budget: CandidateBudget,
     rng: &mut impl Rng,
 ) -> CandidateBatch {
-    let mut batch = Batch::new(ctx.incumbent, budget.count);
+    let mut batch = Batch::new(ctx, budget.count);
     if budget.count == 0 {
         return batch.finish(BatchLimit::Budget);
     }
@@ -612,6 +626,8 @@ enum Proposal {
     Accepted,
     /// Structurally identical to a candidate the batch already holds.
     Duplicate,
+    /// Both directions of this axis already lost for this incumbent (#203).
+    DeadAxis,
     /// The strategy had nothing to offer, or the batch was already full.
     Nothing,
 }
@@ -625,20 +641,35 @@ impl Proposal {
 
 /// Accumulator that enforces the budget and rejects duplicate proposals, so a
 /// "filled" batch is never padded with repeats (issues #108, #119).
-struct Batch {
+///
+/// It also owns mirrored (antithetic) sampling (issue #203): an accepted signed
+/// perturbation immediately offers its `−δ` twin, so the pair lands in the same
+/// batch — and therefore in the same scorer call, against identical records.
+struct Batch<'a> {
     out: Vec<Candidate>,
     seen: HashSet<u64>,
     incumbent_uuids: HashSet<String>,
     count: usize,
+    incumbent: &'a CreatureExport,
+    backprop: &'a BackpropConfig,
+    mirror: MirrorPolicy<'a>,
 }
 
-impl Batch {
-    fn new(incumbent: &CreatureExport, count: usize) -> Self {
+impl<'a> Batch<'a> {
+    fn new(ctx: &CandidateGenContext<'a>, count: usize) -> Self {
         Self {
             out: Vec::with_capacity(count.min(1024)),
             seen: HashSet::new(),
-            incumbent_uuids: incumbent.neurons.iter().map(|n| n.uuid.clone()).collect(),
+            incumbent_uuids: ctx
+                .incumbent
+                .neurons
+                .iter()
+                .map(|n| n.uuid.clone())
+                .collect(),
             count,
+            incumbent: ctx.incumbent,
+            backprop: ctx.backprop,
+            mirror: ctx.mirror,
         }
     }
 
@@ -658,11 +689,47 @@ impl Batch {
         if self.is_full() {
             return Proposal::Nothing;
         }
+        // Only a candidate that moves exactly one scalar has a negation, so
+        // this is also the test for the whole signed-perturbation family.
+        let perturbation = self
+            .mirror
+            .is_active()
+            .then(|| crate::mirror::signed_perturbation(self.incumbent, &candidate.creature))
+            .flatten();
+        if let Some(perturbation) = &perturbation
+            && self.mirror.is_dead(&perturbation.axis)
+        {
+            return Proposal::DeadAxis;
+        }
         if !self.seen.insert(self.fingerprint(&candidate.creature)) {
             return Proposal::Duplicate;
         }
         self.out.push(candidate);
+        if self.mirror.enabled
+            && let Some(perturbation) = perturbation
+        {
+            self.push_mirror(self.out.len() - 1, &perturbation);
+        }
         Proposal::Accepted
+    }
+
+    /// Offer the `−δ` twin of the signed perturbation just accepted at `index`.
+    ///
+    /// The `+δ` half is marked as a pair member only once its twin has actually
+    /// joined: a full batch, a clamped step or a twin the batch already holds
+    /// leaves an honest, unpaired candidate rather than a half-recorded pair.
+    fn push_mirror(&mut self, index: usize, perturbation: &SignedPerturbation) {
+        if self.is_full() {
+            return;
+        }
+        let Some(mirror) = mirror_candidate(&self.out[index], perturbation, self.backprop) else {
+            return;
+        };
+        if !self.seen.insert(self.fingerprint(&mirror.creature)) {
+            return;
+        }
+        self.out[index].provenance.mirror = Some(original_pair(perturbation));
+        self.out.push(mirror);
     }
 
     /// Structural fingerprint of a candidate creature.
@@ -765,6 +832,7 @@ fn build_structural_add_scaled_gated(
             ),
             old_value: None,
             new_value: Some(weight),
+            mirror: None,
         },
     })
 }
@@ -840,6 +908,7 @@ fn build_structural_add_neuron_combo(
             mutation,
             old_value: None,
             new_value: Some(w_a),
+            mirror: None,
         },
     })
 }
@@ -876,6 +945,7 @@ fn build_mean_error_bias(
             ),
             old_value: Some(old_bias),
             new_value: Some(new_bias),
+            mirror: None,
         },
     })
 }
@@ -940,6 +1010,7 @@ fn build_stats_skew_bias(ctx: &CandidateGenContext<'_>) -> Option<Candidate> {
             ),
             old_value: Some(old_bias),
             new_value: Some(new_bias),
+            mirror: None,
         },
     })
 }
@@ -996,6 +1067,7 @@ fn build_candidate(
                                 ),
                                 old_value: Some(old_w),
                                 new_value: Some(new_w),
+                                mirror: None,
                             },
                         });
                     }
@@ -1182,6 +1254,7 @@ fn build_candidate(
             mutation,
             old_value,
             new_value,
+            mirror: None,
         },
     })
 }
@@ -1359,6 +1432,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng_a = StdRng::seed_from_u64(42);
         let mut rng_b = StdRng::seed_from_u64(42);
@@ -1407,6 +1481,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(1);
         let candidates = generate_candidates(&ctx, 4, &mut rng);
@@ -1447,6 +1522,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(1);
         assert!(build_candidate(&ctx, CandidateStrategy::MeanErrorBias, &mut rng).is_none());
@@ -1478,6 +1554,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(3);
         assert!(build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng).is_none());
@@ -1522,6 +1599,7 @@ mod tests {
             learning: Some(&learning),
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(3);
         let candidate = build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng)
@@ -1580,6 +1658,7 @@ mod tests {
             learning: Some(&learning),
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(3);
         let candidate = build_candidate(&ctx, CandidateStrategy::Backprop, &mut rng)
@@ -1849,6 +1928,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         for count in [12usize, 29, 60, 120] {
             let batch = scaled_batch(&ctx, count, 5);
@@ -1880,6 +1960,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: true,
+            mirror: MirrorPolicy::default(),
         };
         let batch = scaled_batch(&ctx, 500, 5);
         assert_eq!(batch.limit, BatchLimit::Exhausted);
@@ -1916,6 +1997,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let small = scaled_batch(&ctx, 29, 5).strategy_mix();
         let large = scaled_batch(&ctx, 120, 5).strategy_mix();
@@ -1966,6 +2048,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let batch = scaled_batch(&ctx, 120, 5);
         let mut seen = std::collections::BTreeSet::new();
@@ -2000,6 +2083,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(5);
         let batch = generate_candidates(&ctx, 29, &mut rng);
@@ -2033,6 +2117,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(5);
         let batch = generate_candidate_batch(
@@ -2071,6 +2156,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let batch = scaled_batch(&ctx, 240, 5);
         assert_eq!(batch.candidates.len(), 240);
@@ -2104,6 +2190,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(5);
         let legacy = generate_candidates(&ctx, 8, &mut rng);
@@ -2161,6 +2248,7 @@ mod tests {
             learning: None,
             backprop,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         }
     }
 
@@ -2360,6 +2448,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(3);
         let cand = build_candidate(&ctx, CandidateStrategy::StructuralAdd, &mut rng).unwrap();
@@ -2399,6 +2488,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(9);
         let cand = build_candidate(&ctx, CandidateStrategy::StructuralAddNeuron, &mut rng).unwrap();
@@ -2467,6 +2557,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: false,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(1);
         let candidates = generate_candidates(&ctx, 6, &mut rng);
@@ -2581,6 +2672,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: true,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(11);
         let structural = generate_candidates(&ctx, 12, &mut rng);
@@ -2619,6 +2711,7 @@ mod tests {
             learning: None,
             backprop: &cfg,
             structural_only: true,
+            mirror: MirrorPolicy::default(),
         };
         let mut rng = StdRng::seed_from_u64(2);
         let structural = generate_candidates(&ctx, 8, &mut rng);
@@ -2644,6 +2737,7 @@ mod tests {
                 mutation: "test bias nudge".into(),
                 old_value: Some(0.1),
                 new_value: Some(0.35),
+                mirror: None,
             },
         }]
     }

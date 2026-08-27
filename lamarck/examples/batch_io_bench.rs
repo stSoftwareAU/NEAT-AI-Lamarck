@@ -400,6 +400,7 @@ fn perturbed_candidates(incumbent: &CreatureExport, count: usize) -> Vec<Candida
                     mutation: format!("bench bias nudge {i}"),
                     old_value: None,
                     new_value: None,
+                    mirror: None,
                 },
             }
         })
