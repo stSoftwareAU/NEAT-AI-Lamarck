@@ -16,7 +16,8 @@ use crate::log;
 use crate::scorer::{
     DirectoryScorer, ScoreResult, accepts_improvement, accepts_improvement_delta, improvement,
 };
-use crate::structural::insert_index_for_hidden;
+use crate::structural::{insert_index_for_hidden, insert_synapse_ordered};
+use crate::validate::validate_creature;
 use crate::width::checked_creature_json_pretty;
 use neat_core::{CreatureExport, NeuronExport, SynapseExport};
 use serde::{Deserialize, Serialize};
@@ -206,8 +207,14 @@ fn synapse_key(s: &SynapseExport) -> (String, String) {
 
 /// Merge mutation deltas from `variants` (each a near-clone of `base`) onto `base`.
 ///
+/// New neurons are inserted before their focus and new synapses in canonical
+/// compiled `(from, to)` order, so the merged creature holds
+/// `neat_core::creature_validate` rule 25 — and the result is certified against
+/// the shared rules before it is returned (issue #192).
+///
 /// Conflicts (two variants changing the same neuron/edge to different values)
-/// return `Err` so that combo is skipped.
+/// and a merged creature the shared rules refuse both return `Err` so that
+/// combo is skipped.
 pub fn merge_candidate_deltas(
     base: &CreatureExport,
     variants: &[&CreatureExport],
@@ -292,15 +299,27 @@ pub fn merge_candidate_deltas(
                 .iter()
                 .any(|s| s.from_uuid == key.0 && s.to_uuid == key.1)
             {
-                out.synapses.push(SynapseExport {
-                    from_uuid: vs.from_uuid.clone(),
-                    to_uuid: vs.to_uuid.clone(),
-                    weight: vs.weight,
-                    synapse_type: vs.synapse_type.clone(),
-                });
+                // Ordered, never appended. `creature_validate` rule 25 requires
+                // the compiled `(from, to)` order, and a merged-in edge whose
+                // new neuron sorts mid-list does NOT belong at the end — see
+                // [`insert_synapse_ordered`] and GRQ issue #4446.
+                insert_synapse_ordered(
+                    &mut out,
+                    SynapseExport {
+                        from_uuid: vs.from_uuid.clone(),
+                        to_uuid: vs.to_uuid.clone(),
+                        weight: vs.weight,
+                        synapse_type: vs.synapse_type.clone(),
+                    },
+                );
             }
         }
     }
+    // The structure is final here: certify it before it escapes, the way every
+    // other producer in this crate does (issue #192). A combo the shared rules
+    // refuse is skipped by the caller, exactly as a conflicting one is — what
+    // must never happen is that it reaches the scorer, wins, and is published.
+    validate_creature(&out, "combo merge")?;
     Ok(out)
 }
 
@@ -538,10 +557,17 @@ pub fn select_best_with_combinations(
         if variants.len() != idxs.len() {
             continue;
         }
-        let Ok(mut merged) = merge_candidate_deltas(incumbent, &variants) else {
-            continue;
-        };
         let stem = format!("combo-{ci:03}-k{}", idxs.len());
+        let mut merged = match merge_candidate_deltas(incumbent, &variants) {
+            Ok(merged) => merged,
+            Err(why) => {
+                // A skipped combo is normal — a conflict, or a merge the shared
+                // rules refuse — but it is never silent: an unexplained gap in
+                // the combo list reads as "there was nothing to try".
+                log::warn(&format!("combo {stem}: skipped — {why}"));
+                continue;
+            }
+        };
         let contributors = new_synapse_contributor_counts(incumbent, &variants);
         let dampen = dampen_stacked_new_synapses(incumbent, &mut merged, &contributors);
         if let Some(msg) = format_dampen_report(&format!("combo dampen {stem}"), &dampen) {
@@ -685,6 +711,91 @@ mod tests {
         let capped = combination_index_sets(5, 3);
         assert_eq!(capped.len(), 3);
         assert!(capped.iter().all(|s| s.len() == 2));
+    }
+
+    /// `(from, to)` compiled indices for the whole synapse list — the key
+    /// `neat_core::creature_validate` rule 25 requires the list to be sorted by.
+    fn order_of(creature: &CreatureExport) -> Vec<(usize, usize)> {
+        creature
+            .synapses
+            .iter()
+            .map(|s| {
+                (
+                    crate::structural::compiled_index(creature, &s.from_uuid).unwrap_or(usize::MAX),
+                    crate::structural::compiled_index(creature, &s.to_uuid).unwrap_or(usize::MAX),
+                )
+            })
+            .collect()
+    }
+
+    /// A `structural_add` variant: a new hidden neuron bridging
+    /// `from -> new -> focus`, built the way the optimiser builds it.
+    fn bridged(base: &CreatureExport, from: &str, focus: &str) -> CreatureExport {
+        let mut variant = base.clone();
+        crate::structural::add_neuron_bridge(
+            &mut variant,
+            crate::structural::NeuronBridgeSpec {
+                from_uuid: from,
+                focus_uuid: focus,
+                new_uuid: "h-new".into(),
+                squash: "TANH",
+                bias: 0.0,
+                w_in: 1.0,
+                w_out: 0.25,
+            },
+        )
+        .expect("the bridge is legal on this creature");
+        variant
+    }
+
+    /// GRQ issue #4446: `GRQ-23-lamarck.json` reached the general population
+    /// with `TopologyError(SORT_FAILURE): 28564) synapses not sorted`.
+    ///
+    /// The three offending edges were one `structural_add` — a new hidden
+    /// neuron whose compiled index sorts in the MIDDLE of the neuron list — sat
+    /// at the very end of a 28,567-entry synapse list. The variant that grew
+    /// them was itself in canonical order ([`insert_synapse_ordered`], issue
+    /// #192); this merge appended them with `Vec::push`, and nothing on the
+    /// combo path validated the result before it was scored and published.
+    #[test]
+    fn merged_new_edges_land_in_canonical_order() {
+        let base = tiny();
+        // h-new sorts BEFORE h1 and o1, so appending its edges breaks the order
+        // exactly as it did on the live artefact.
+        let variant = bridged(&base, "input-1", "h1");
+        crate::validate::validate_creature(&variant, "variant")
+            .expect("the variant the optimiser grew is itself in order");
+
+        let merged = merge_candidate_deltas(&base, &[&variant]).unwrap();
+
+        let order = order_of(&merged);
+        assert!(
+            order.windows(2).all(|w| w[0] <= w[1]),
+            "merged synapses must stay in canonical (from, to) order: {order:?}"
+        );
+        crate::validate::validate_creature(&merged, "combo")
+            .expect("the merged creature passes neat-core rule 25");
+    }
+
+    /// The same append, seen through the gate rather than the order: a merge
+    /// that produces a creature neat-core refuses must fail loud rather than
+    /// hand the caller something the scorer will happily measure.
+    #[test]
+    fn a_merge_that_breaks_a_rule_is_refused() {
+        let base = tiny();
+        let mut dangling = base.clone();
+        dangling.synapses.push(SynapseExport {
+            from_uuid: "input-1".into(),
+            to_uuid: "ghost".into(),
+            weight: 0.05,
+            synapse_type: None,
+        });
+        let err = merge_candidate_deltas(&base, &[&dangling])
+            .expect_err("a merged creature neat-core refuses must not be returned as Ok");
+        assert!(
+            err.contains("combo merge"),
+            "the refusal names the merge that produced it: {err}"
+        );
     }
 
     #[test]

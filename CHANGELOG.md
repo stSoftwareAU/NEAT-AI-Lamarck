@@ -72,6 +72,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The combo merge appended new synapses, so a published creature could break
+  rule 25 (GRQ Issue #4446).** `merge_candidate_deltas` inserted a variant's new
+  neuron before its focus but pushed the variant's new synapses onto the end of
+  the list. When the new neuron's compiled index sorts mid-list — every
+  `structural_add` onto a hidden focus — those edges landed after edges that
+  sort above them, and `neat_core::creature_validate` rule 25 refuses that
+  order. Nothing on the combo path validated the merge, so the creature was
+  scored, won, and was published: GRQ's `samples/GRQ-23-lamarck.json` reached
+  the general population as `TopologyError(SORT_FAILURE): 28564) synapses not
+  sorted`, three appended edges at the tail of a 28,567-entry list, and every
+  Rust consumer refused it. New edges now go in through
+  `structural::insert_synapse_ordered`, and the merged creature is certified
+  with `validate::validate_creature` before it escapes — a combo the shared
+  rules refuse is skipped and **logged**, where it used to be dropped silently.
+  `combos::tests::merged_new_edges_land_in_canonical_order` reproduces the
+  artefact's shape and `a_merge_that_breaks_a_rule_is_refused` pins the gate.
+
 - **Memetic pruning is now neat-core's, so it cannot drift from rule 31
   (Issue #199).** `lamarck/src/memetic.rs` re-derived rule 31's resolution
   vocabulary, but it could only reproduce the derivable half: a neuron
