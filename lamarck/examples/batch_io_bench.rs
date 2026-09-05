@@ -401,6 +401,7 @@ fn perturbed_candidates(incumbent: &CreatureExport, count: usize) -> Vec<Candida
                     old_value: None,
                     new_value: None,
                     mirror: None,
+                    follow_up: None,
                 },
             }
         })

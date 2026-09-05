@@ -331,6 +331,8 @@ Leaving these unset changes behaviour.
 | `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
 | `--no-mirrored-sampling` | Score signed perturbation candidates alone instead of beside their `−δ` mirror (issue #203). Mirrored pairs are **on** by default; this is the A/B arm the journal's `mirrorWinRate` is read against. See [Mirrored (antithetic) sampling](#mirrored-antithetic-sampling). |
+| `--followup-candidates` | Follow-up candidates one accepted win may spend probing its own neighbourhood (issue #219). Default `0` — **off**, the arm the burst is measured against. The probes join the ordinary batch and face the same screen and full-corpus gate; `report` prices them against the ordinary trials they ran beside. See [Local follow-up search after an accept](#local-follow-up-search-after-an-accept). |
+| `--followup-experiments` | Experiments one follow-up burst may span before it is dropped (issue #219). Default `2`; the candidate cap is spread across them, so this is what bounds a burst's wall-clock. Must be `>= 1` when `--followup-candidates` is set — `0` aborts the run rather than silently disabling the arm it was set for. |
 | `--fixed-candidate-quotas` | Use the legacy fixed per-phase quotas instead of scaling them with `--candidates` (issue #108). Caps a batch at ~33 distinct candidates on the production creature whatever `--candidates` says; kept only for A/B benchmarking against pre-#108 runs. Scaled quotas are the default (`--scale-candidate-quotas` is accepted as a no-op for older scripts), so the budget binds until the generator is genuinely exhausted. |
 | `--quick` | Use the sampled `observations-quick.statistics` cache and cap focus/learning scans. Acceptance still uses the full corpus. |
 | `--compute-correlations` | Compute the expensive input×input correlation matrix in observations. |
@@ -926,7 +928,11 @@ whole signed-perturbation family: `backprop`, `mean_error_bias`, `stats_weight`,
 `stats_bias`, `stats_skew_bias`, `structural_weaken` and the scalar half of
 `random`. Structural candidates (a grown neuron, an added synapse, a grafted
 subtree) change the shape of the creature, have no meaningful negation, and are
-never mirrored.
+never mirrored. Follow-up probes (issue #219) are the one further exemption:
+they join the batch after generation and are already planned in both directions
+— a step further along the winning move and a partial back-off — so mirroring
+them would spend the burst's own cap on a twin it has effectively already
+proposed. They do respect a retired axis, exactly as the generator does.
 
 The `−δ` twin joins the **same** batch, so both halves are written into one
 scoring directory and priced by one scorer call against identical records — the
@@ -976,6 +982,74 @@ Note that mirroring suppresses re-proposals at the source, which is the same
 work the opt-in [failed-candidate cache](#failed-candidate-cache-economics) does
 one experiment later. On a run with both on, the cache sees fewer repeats to
 skip; its stand-down guardrail prices that and disables it if it stops paying.
+
+### Local follow-up search after an accept
+
+> **Not to be confused** with the #75 *follow-up economics campaign*
+> ([`docs/followup-economics.md`](docs/followup-economics.md),
+> `scripts/run-followup-economics.sh`), which is a set of measurement arms run
+> from the shell. This section is the in-run search described below; the two
+> share only the English word.
+
+An accepted candidate is stronger evidence than a merely useful focus: the
+authoritative scorer has just confirmed real gradient or structure at one place
+in the creature. With `--followup-candidates` set, that win emits a **bounded
+local search plan** — nearby weight scales around the winning move, an alternate
+squash for a neuron it grew, a partial back-off of the winning step — which the
+next experiment adds to its ordinary batch. Off by default: the probes occupy
+scorer slots the ordinary batch would otherwise not have paid for, and whether
+they earn them is exactly what the on/off A/B measures.
+
+The burst is exploitation, not acceptance. A probe is an ordinary member of the
+batch: written into the same scoring directory, screened by the same gate, and
+accepted only by the same full-corpus scorer call. There is no path from a
+follow-up to an acceptance that any other candidate does not take.
+
+```mermaid
+flowchart TD
+    WIN(["accepted winner"]) --> DIFF["diff vs the creature it replaced:<br/>new synapses, grown neurons, moved scalars"]
+    DIFF --> PLAN["bounded plan:<br/>weight scales, squashes, bias steps"]
+    PLAN --> NEXT["next experiment's batch"]
+    MIX["ordinary strategy mix<br/>(random controls included)"] --> NEXT
+    NEXT --> DEDUP{"already proposed,<br/>or known-failed?"}
+    DEDUP -- yes --> DROP(["dropped, slot not spent"])
+    DEDUP -- no --> GATE["same screen + full-corpus gate"]
+    GATE --> ACCEPT(["accept, or reject"])
+    PLAN --> CAP{"cap spent, or<br/>burst expired?"}
+    CAP -- yes --> BROAD(["back to the broad mix"])
+
+    classDef stage fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    classDef stop fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#052e16
+    classDef warn fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+
+    class DIFF,PLAN,NEXT,GATE,MIX stage
+    class WIN,ACCEPT,BROAD stop
+    class DROP warn
+```
+
+Four guardrails bound it:
+
+- **Hard caps.** `--followup-candidates` caps the probes one win may spend and
+  `--followup-experiments` caps the experiments its burst may span; whichever
+  binds first ends the burst. The next accept plans its own, replacing whatever
+  is left of the old one — its parent is no longer the incumbent.
+- **Exploration is retained.** Probes are *added* to the batch rather than
+  displacing it, so the broad strategy mix — random controls included — is still
+  proposed. They raise the batch target by their own count, so a `--failed-cache`
+  run still backfills the ordinary batch to the full `--candidates` width beside
+  them. A winner's neighbourhood is not assumed smooth.
+- **Deduplicated.** A probe reproducing a candidate the generator already put in
+  the batch is dropped before it costs a scorer slot; a probe on an axis
+  [mirrored sampling](#mirrored-antithetic-sampling) has retired is not
+  proposed at all, because both its directions already lost against this
+  incumbent; and the opt-in
+  [failed-candidate cache](#failed-candidate-cache-economics) filters probes
+  exactly as it filters everything else. A probe whose target has since gone, or
+  whose step would breach the hard bias/weight limit, is dropped rather than
+  clamped into a different hypothesis.
+- **Separately reported.** Probes carry the `follow_up` strategy and a
+  `followUp` provenance link naming the parent winner, so the journal and
+  `report` price the burst apart from the ordinary trials it ran beside.
 
 ### Phase 5 — authoritative candidate scoring
 
@@ -1292,7 +1366,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`, `strategyAllocation`, `strategyExplorationFloor`, `strategyEvidenceDecay`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `followupCandidates`, `followupExperiments` (`0` on the off arm), `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`, `strategyAllocation`, `strategyExplorationFloor`, `strategyEvidenceDecay`. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -1329,9 +1403,10 @@ Every following line is one experiment:
 | `incumbentId` | Incumbent shape identity (`in…-out…-n…-s…`). |
 | `baselineScore` | Authoritative baseline for this experiment. |
 | `focusNeuron` | Primary focus neuron UUID (the first of `focusNeurons`). |
-| `focusNeurons` | Every focus this experiment proposed against (issue #109). Omitted for a single-focus experiment — `focusNeuron` already says it — and absent from journals written before the field existed. Each entry of `candidates[]` names its own `focusNeuron`, so a winner is attributable to one member of this set. |
+| `focusNeurons` | Every focus this experiment proposed against (issue #109). Omitted for a single-focus experiment — `focusNeuron` already says it — and absent from journals written before the field existed. Each entry of `candidates[]` names its own `focusNeuron`, so a winner is attributable to one member of this set — with one exception: a follow-up probe (issue #219) carries the focus of the win it explores, which this experiment need not have drawn, so a follow-up winner's focus can lie outside this set. |
 | `focusStats` | The focus scan of the **primary** focus (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
-| `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`, and `mirror` on each half of an antithetic pair (issue #203) — `axis`, the signed `delta` and the `role` (`original` / `mirror`). Omitted for structural candidates, for a perturbation whose twin could not join the batch, and from journals written before the field existed; in each of those the candidate stood alone. |
+| `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`, `followUp` on a follow-up probe (issue #219) — `parentExperiment`, `parentWinner`, `parentStrategy` and the `probe` it tests — and `mirror` on each half of an antithetic pair (issue #203) — `axis`, the signed `delta` and the `role` (`original` / `mirror`). Omitted for structural candidates, for a perturbation whose twin could not join the batch, and from journals written before the field existed; in each of those the candidate stood alone. |
+| `followUp` | The follow-up burst this experiment carried (issue #219): `parentExperiment`, `parentWinner` (the accepted stem it explores around), `candidates` added to this batch and `remaining` budget. Present on every experiment a burst contributed to — including one whose probes all deduplicated away, so a burst that bought nothing is as visible as one that bought a win. Omitted with `--followup-candidates 0`, when no burst was live, and from journals written before the field existed. See [Local follow-up search after an accept](#local-follow-up-search-after-an-accept). |
 | `mirrorAxisFailures` | Perturbation axes whose mirrored pair lost in **both** directions this experiment (issue #203). Both halves were scored in one call against identical records and neither improved, so the incumbent is at a local optimum along the axis and the generator stops leading with it until it accepts. Omitted when the experiment retired no axis, and absent from journals written before the field existed. See [Mirrored (antithetic) sampling](#mirrored-antithetic-sampling). |
 | `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — only under `--fixed-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `strategyAllocation` | Candidate slots each strategy was allocated this experiment (issue #218): the `explorationFloor` in force, the `slots` per strategy, and the `value` — reward units per scorer second — each was worth when they were drawn. A multi-focus experiment records the slots summed across its focuses. Present only under `--strategy-allocation adaptive`, and absent from journals written before the field existed; in both cases the batch was split by the fixed quotas and the round-robin fill. See [Adaptive strategy allocation](#adaptive-strategy-allocation). |
@@ -1415,6 +1490,26 @@ run would have had to draw independently, later, if at all. Pairs are read from
 always come from one scorer call; a half that reached only the promote map is
 not paired with a screen-phase score. A `--no-mirrored-sampling` journal, or one
 written before the field existed, reports zeros — it scored no pairs.
+
+The `followUp` bucket is what a local follow-up burst is judged on
+(issue #219): `bursts` (accepted wins that emitted one, counted once each) and
+`burstExperiments` (the experiments they spanned), `followupCandidates` against
+`ordinaryCandidates`,
+`followupAccepts` against `ordinaryAccepts`, and — the headline pair —
+`followupGainPerWallHour` against `ordinaryGainPerWallHour`. Every candidate an
+experiment scored belongs to one arm, and the experiment's measured work
+(`analysisMs` + `scorerMs`) is apportioned between them pro rata by candidate
+count. That charges probes for a focus scan they did not cause, which is
+deliberately conservative *against* the burst: a follow-up arm that still wins
+on this pair has not been flattered by the accounting. The whole-run question —
+whether a burst beats simply starting the next ordinary experiment — is the
+on/off `--followup-candidates` pair compared on `scoreImprovementPerWallHour`,
+the same way every other arm in this README is. An accept is credited to an arm only when **every** member of the
+winner came from it; a combo spanning both counts in `mixedAccepts` and its
+improvement is credited to neither. An arm that never ran reports `null` rather
+than `0.0`, because "not measured" is not "measured and worthless". A
+`--followup-candidates 0` journal, or one written before the field existed,
+reports the whole batch as ordinary.
 
 The `strategyAllocation` bucket is what adaptive allocation is judged on
 (issue #218), and it is emitted for **every** journal — fixed and adaptive alike
@@ -1699,6 +1794,7 @@ NEAT-AI-Lamarck/
     ├── candidates.rs
     ├── strategy_allocation.rs # adaptive candidate-budget allocation (issue #218)
     ├── mirror.rs             # mirrored (antithetic) ±δ pairs (issue #203)
+    ├── followup.rs          # bounded local search after an accept (issue #219)
     ├── structural.rs        # graph mutation primitives + residual ranking
     ├── combos.rs            # candidate merging and stacked-synapse dampening
     ├── grafts.rs            # structural graft store and phase-G replay

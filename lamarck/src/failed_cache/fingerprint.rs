@@ -183,6 +183,7 @@ mod tests {
             old_value: Some(1.0),
             new_value,
             mirror: None,
+            follow_up: None,
         }
     }
 

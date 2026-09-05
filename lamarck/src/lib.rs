@@ -15,6 +15,7 @@ pub mod combos;
 pub mod config;
 pub mod failed_cache;
 pub mod focus;
+pub mod followup;
 pub mod grafts;
 pub mod learning;
 pub mod log;
@@ -55,9 +56,10 @@ pub use combos::{
     new_synapse_contributor_counts, select_best_with_combinations, stack_dampen_scale,
 };
 pub use config::{
-    DEFAULT_CANDIDATE_COUNT, DEFAULT_FOCUS_COUNT, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
-    DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE,
-    DEFAULT_TIMEOUT_SECONDS, LamarckConfig,
+    DEFAULT_CANDIDATE_COUNT, DEFAULT_FOCUS_COUNT, DEFAULT_FOLLOWUP_CANDIDATES,
+    DEFAULT_FOLLOWUP_EXPERIMENTS, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES, DEFAULT_MIN_IMPROVEMENT,
+    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
+    LamarckConfig,
 };
 pub use failed_cache::{
     CacheEconomics, CacheEconomicsConfig, CacheHit, CandidateFingerprint, CeilingBite,
@@ -70,6 +72,10 @@ pub use failed_cache::{
     rebuild_from_journal, scored_candidate_indices, write_snapshot,
 };
 pub use focus::{FocusChoice, FocusPolicy, WeightedFocusSelector};
+pub use followup::{
+    FollowUpBudget, FollowUpBurst, FollowUpLink, FollowUpParent, FollowUpPlan, FollowUpProbe,
+    ProbeTarget, plan_probes, probe_candidate,
+};
 pub use grafts::{
     Graft, GraftKind, GraftReplayError, GraftReplayRequest, GraftStore, MAX_GRAFT_COMBO_CANDIDATES,
     classify_graft, extract_structural_graft, is_present, replay_grafts,

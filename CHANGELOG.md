@@ -23,6 +23,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Bounded local follow-up search after an accept (Issue #219).**
+  An accepted candidate identifies a local region and mutation family the
+  authoritative scorer has just confirmed, but the run returned straight to the
+  broad strategy mix and could only reach that neighbourhood again by chance.
+  With `--followup-candidates` set, an accept now emits a bounded plan of
+  neighbouring hypotheses (`lamarck/src/followup.rs`) — nearby weight scales
+  around the winning move, alternate squashes for a neuron it grew, a partial
+  back-off of the winning step — which the next experiment **adds** to its
+  ordinary batch. `--followup-experiments` bounds how long the burst may run;
+  the caps are hard, and the next accept replaces whatever is left. Probes are
+  ordinary batch members: same screen, same full-corpus gate, and no path to an
+  acceptance any other candidate does not take. They are deduplicated against
+  the batch and the failed-candidate cache, dropped rather than clamped when a
+  step would breach a hard bias/weight limit, and stamped with a `followUp`
+  provenance link naming the parent winner. `report` gains a `followUp` bucket
+  pricing the burst against the ordinary trials it ran beside —
+  `followupGainPerWallHour` against `ordinaryGainPerWallHour`, with an accept
+  credited to an arm only when every member of the winner came from it.
+  Off by default (`--followup-candidates 0`), which is the arm the on-run is
+  measured against.
+
 - **Adaptive candidate-budget allocation by measured strategy return
   (Issue #218).** Nine candidate strategies shared the budget through fixed
   opening quotas and a round-robin fill, however each performed — the journal

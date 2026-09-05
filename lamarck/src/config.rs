@@ -12,6 +12,7 @@ use crate::failed_cache::{
     DEFAULT_FAILED_CACHE_TOLERANCE_REL,
 };
 use crate::focus::FocusPolicy;
+use crate::followup::FollowUpBudget;
 use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use crate::promote_gate::{DEFAULT_SCREEN_PROMOTE_SIGMA_K, PromoteGate, PromoteGateMode};
@@ -33,6 +34,19 @@ pub const DEFAULT_TIMEOUT_SECONDS: u64 = 45 * 60;
 /// scorer stays saturated; promote cost is bounded by
 /// [`DEFAULT_SCREEN_PROMOTE_THRESHOLD`].
 pub const DEFAULT_CANDIDATE_COUNT: usize = 100;
+
+/// Default follow-up candidates per accepted win (issue #219).
+///
+/// `0` — follow-up bursts are opt-in. They spend scorer slots on a region the
+/// ordinary generator would have reached only by chance, and whether that trade
+/// pays is exactly what the on/off A/B measures.
+pub const DEFAULT_FOLLOWUP_CANDIDATES: usize = 0;
+
+/// Default experiments one follow-up burst may span (issue #219).
+///
+/// Two: the win's own neighbourhood is explored while the evidence is fresh,
+/// and the run is back on the broad strategy mix immediately afterwards.
+pub const DEFAULT_FOLLOWUP_EXPERIMENTS: usize = 2;
 
 /// Default absolute score improvement required for acceptance (strict `>`).
 ///
@@ -138,6 +152,22 @@ pub struct LamarckConfig {
     /// turns it off, which is the A/B arm the journal's mirror win rate is read
     /// against.
     pub mirrored_sampling: bool,
+    /// Follow-up candidates one accepted win may spend (issue #219).
+    ///
+    /// `0` — the default — is the pre-#219 run: an accept returns straight to
+    /// the broad strategy mix. A positive value lets each accepted winner emit
+    /// that many probes of its own neighbourhood, spread over
+    /// [`Self::followup_experiments`] experiments and scored by the ordinary
+    /// screen/promote path. Opt-in, because the probes occupy scorer slots the
+    /// ordinary batch would otherwise not have paid for, and the A/B this
+    /// on/off pair defines is what decides whether they earn them.
+    pub followup_candidates: usize,
+    /// Experiments a follow-up burst may span before it is dropped (issue #219).
+    ///
+    /// The candidate cap is spread across these experiments, so the burst is
+    /// bounded in wall-clock as well as in proposals. Ignored when
+    /// [`Self::followup_candidates`] is `0`.
+    pub followup_experiments: usize,
     /// When set in `(0, 1)`, screen the candidate batch on a scorer subsample first
     /// (issue #24). `None` or `Some(1.0)` = full-corpus score only.
     pub screen_sample_rate: Option<f64>,
@@ -241,6 +271,28 @@ impl LamarckConfig {
             return Err("--focus-count must be at least 1 (got 0)".to_string());
         }
         Ok(self.focus_count)
+    }
+
+    /// Follow-up budget for this run, validated (issue #219).
+    ///
+    /// `None` when follow-ups are off. A positive candidate cap with a zero
+    /// experiment span is a configuration fault, reported rather than clamped:
+    /// a burst that may span no experiment can never emit anything, and a run
+    /// that quietly ignored the flag would invalidate the A/B it was set for.
+    pub fn followup_budget(&self) -> Result<Option<FollowUpBudget>, String> {
+        if self.followup_candidates == 0 {
+            return Ok(None);
+        }
+        if self.followup_experiments == 0 {
+            return Err(
+                "--followup-experiments must be at least 1 when --followup-candidates is set (got 0)"
+                    .to_string(),
+            );
+        }
+        Ok(Some(FollowUpBudget {
+            candidates: self.followup_candidates,
+            experiments: self.followup_experiments,
+        }))
     }
 
     /// Promote gate for this run, validated (issue #111).
@@ -380,6 +432,10 @@ impl Default for LamarckConfig {
             phase0_parity: true,
             structural_only: false,
             mirrored_sampling: true,
+            // Opt-in: follow-up probes buy scorer slots the ordinary batch did
+            // not ask for, so the pre-#219 run is the default arm.
+            followup_candidates: DEFAULT_FOLLOWUP_CANDIDATES,
+            followup_experiments: DEFAULT_FOLLOWUP_EXPERIMENTS,
             screen_sample_rate: Some(DEFAULT_SCREEN_SAMPLE_RATE),
             screen_promote_threshold: DEFAULT_SCREEN_PROMOTE_THRESHOLD,
             screen_promote_gate: PromoteGateMode::Absolute,
@@ -430,6 +486,50 @@ mod tests {
         };
         let err = none.focus_count().expect_err("zero is rejected");
         assert!(err.contains("--focus-count"), "error names the flag: {err}");
+    }
+
+    /// Issue #219: follow-ups are off by default, and a burst that may span no
+    /// experiment is a fault rather than a silent disabling of the arm.
+    #[test]
+    fn the_follow_up_budget_is_off_by_default_and_rejects_a_zero_span() {
+        let off = LamarckConfig::default();
+        assert_eq!(off.followup_candidates, DEFAULT_FOLLOWUP_CANDIDATES);
+        assert_eq!(off.followup_budget(), Ok(None));
+
+        let on = LamarckConfig {
+            followup_candidates: 6,
+            followup_experiments: 3,
+            ..LamarckConfig::default()
+        };
+        assert_eq!(
+            on.followup_budget(),
+            Ok(Some(FollowUpBudget {
+                candidates: 6,
+                experiments: 3,
+            }))
+        );
+
+        // A zero span with a positive cap can emit nothing at all.
+        let broken = LamarckConfig {
+            followup_candidates: 6,
+            followup_experiments: 0,
+            ..LamarckConfig::default()
+        };
+        let err = broken
+            .followup_budget()
+            .expect_err("a zero span is a configuration fault");
+        assert!(
+            err.contains("--followup-experiments"),
+            "error names the flag: {err}"
+        );
+
+        // A zero cap disables the feature whatever the span says.
+        let disabled = LamarckConfig {
+            followup_candidates: 0,
+            followup_experiments: 0,
+            ..LamarckConfig::default()
+        };
+        assert_eq!(disabled.followup_budget(), Ok(None));
     }
 
     /// Issue #111: the opt-in property. With no new flag set the run gets the
