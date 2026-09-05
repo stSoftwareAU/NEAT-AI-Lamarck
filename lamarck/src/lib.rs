@@ -30,6 +30,7 @@ pub mod run;
 pub mod scorer;
 pub mod scorer_cost;
 pub mod screen_calibration;
+pub mod strategy_allocation;
 pub mod structural;
 pub mod tags;
 pub mod validate;
@@ -110,6 +111,12 @@ pub use scorer_cost::{
 pub use screen_calibration::{
     AcceptedScreenPoint, BaselineSampleGap, DeltaDistribution, ScreenCalibration,
     ScreenCalibrationAccumulator, ScreenNoise, ScreenPair, spearman_rank_correlation,
+};
+pub use strategy_allocation::{
+    AllocationPolicy, DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR,
+    EXPLORATION_BONUS_WEIGHT, INCUMBENT_CHANGE_RETENTION, OPTIMISM_REWARD_UNITS,
+    PRIOR_COST_SECONDS, PROMOTION_REWARD_UNITS, StrategyAllocation, StrategyAllocationMode,
+    StrategyEvidence, StrategyLedger, adaptive_strategies,
 };
 pub use tags::{
     CreatureMeta, CreatureTag, LamarckProgress, NeuronOrigin, lamarck_neuron_origin_message,

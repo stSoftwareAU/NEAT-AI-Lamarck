@@ -45,6 +45,7 @@ use crate::scorer::{
     write_promote_batch, write_promote_batch_without_baseline,
 };
 use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
+use crate::strategy_allocation::{StrategyAllocation, StrategyLedger};
 use crate::structural::{is_input_source, rank_unused_sources};
 use crate::tags::{CreatureMeta, LamarckProgress, NeuronOrigin, serialize_creature_with_meta};
 use crate::width::{assert_same_width, checked_creature_json_pretty, load_creature};
@@ -101,6 +102,14 @@ pub struct ExperimentRecord {
     /// Why the batch stopped growing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_limit: Option<BatchLimit>,
+    /// Candidate slots each strategy was allocated this experiment (#218).
+    ///
+    /// Present only under `--strategy-allocation adaptive`, and absent from
+    /// journals written before the knob existed — in both cases the batch was
+    /// split by the fixed quotas and the round-robin fill. A multi-focus
+    /// experiment records the slots summed across its focuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_allocation: Option<StrategyAllocation>,
     /// Authoritative (full-corpus) scores by stem when a promote/full score ran.
     pub scores: std::collections::BTreeMap<String, f64>,
     /// Perturbation axes whose mirrored pair lost in **both** directions (#203).
@@ -364,6 +373,25 @@ pub struct RunConfigRecord {
     pub max_experiments: Option<u64>,
     /// Candidates generated per experiment.
     pub candidates: usize,
+    /// Strategy allocation in force (`fixed` / `adaptive`, issue #218).
+    ///
+    /// `None` in journals written before the knob existed — those ran the
+    /// fixed round-robin split, which is still the default.
+    #[serde(default)]
+    pub strategy_allocation: Option<String>,
+    /// Exploration floor the adaptive allocator reserved; `None` under fixed,
+    /// where nothing is reserved because nothing is allocated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_exploration_floor: Option<f64>,
+    /// Per-experiment evidence decay in force.
+    ///
+    /// Recorded under **both** modes: the strategy ledger accumulates on a
+    /// fixed-allocation run too, so a report replaying that journal has to
+    /// decay it exactly as the run did or the two A/B arms are priced on
+    /// different estimators. `None` only in journals written before the knob
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_evidence_decay: Option<f64>,
     /// Absolute score delta required for acceptance.
     pub min_improvement: f64,
     /// Screen subsample rate (`None` = full-corpus scoring only).
@@ -482,6 +510,14 @@ impl RunConfigRecord {
             timeout_seconds: config.timeout.as_secs(),
             max_experiments: config.max_experiments,
             candidates: config.candidates,
+            strategy_allocation: Some(config.strategy_allocation.label().to_string()),
+            // Recorded only when they are actually in force, so a journal never
+            // implies a knob the run did not use.
+            strategy_exploration_floor: config
+                .strategy_allocation
+                .is_adaptive()
+                .then_some(config.strategy_exploration_floor),
+            strategy_evidence_decay: Some(config.strategy_evidence_decay),
             min_improvement: config.min_improvement,
             screen_sample_rate: config.screen_sample_rate,
             screen_promote_threshold: config.screen_promote_threshold,
@@ -928,7 +964,7 @@ fn merge_batch_limits(limits: &[BatchLimit]) -> BatchLimit {
 }
 
 /// Index of a `candidate-NNN` stem, or `None` for any other stem.
-fn candidate_stem_index(stem: &str) -> Option<usize> {
+pub(crate) fn candidate_stem_index(stem: &str) -> Option<usize> {
     stem.strip_prefix("candidate-")?.parse().ok()
 }
 
@@ -961,6 +997,7 @@ pub fn run_optimisation_cancellable(
     let analysis_threads = config.analysis_threads()?;
     let focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
+    let allocation_policy = config.strategy_allocation_policy()?;
     // Load and validate the creature before anything is written (issue #165):
     // an `input < 1` / `output < 1` creature has no observation width, cannot
     // frame a training record, and must stop the run here — no output dir, no
@@ -1172,6 +1209,11 @@ pub fn run_optimisation_cancellable(
     // records and neither improved, so the incumbent sits at a local optimum
     // along them; an accept moves the incumbent and re-opens every one of them.
     let mut dead_axes: Vec<String> = Vec::new();
+    // Measured per-strategy return, fed by every journalled experiment and
+    // consulted before each batch under `--strategy-allocation adaptive`
+    // (issue #218). The ledger accumulates under the fixed allocation too, so
+    // an A/B arm's journal carries the same evidence the adaptive arm acted on.
+    let mut strategy_ledger = allocation_policy.ledger(config.min_improvement);
     // Last-accept details for the final run-summary stamp (Issue #35).
     let mut last_accept_focus = String::new();
     let mut last_accept_strategy = CandidateStrategy::Random;
@@ -1551,6 +1593,28 @@ pub fn run_optimisation_cancellable(
             log::detail("structural-only: synapse/neuron growth candidates only");
         }
         let budgets = split_candidate_budget(config.candidates, focus_set.len());
+        // One allocation per focus share, from the evidence the run has now
+        // (issue #218). Under the fixed allocation this is `None` at every
+        // focus and the generator proposes exactly the pre-#218 batch.
+        let focus_allocations: Vec<Option<StrategyAllocation>> = budgets
+            .iter()
+            .map(|budget| {
+                allocation_policy.allocate(&strategy_ledger, config.structural_only, *budget)
+            })
+            .collect();
+        let mut experiment_allocation: Option<StrategyAllocation> = None;
+        for allocation in focus_allocations.iter().flatten() {
+            experiment_allocation
+                .get_or_insert_with(StrategyAllocation::default)
+                .merge(allocation);
+        }
+        if let Some(allocation) = &experiment_allocation {
+            log::detail(&format!(
+                "adaptive allocation (floor {:.0}%): {}",
+                allocation.exploration_floor * 100.0,
+                allocation.summary()
+            ));
+        }
         let mut candidates: Vec<Candidate> = Vec::with_capacity(config.candidates);
         let mut focus_limits: Vec<BatchLimit> = Vec::with_capacity(focus_set.len());
         let mut primary_focus_stats: Option<FocusNeuronStats> = None;
@@ -1685,6 +1749,7 @@ pub fn run_optimisation_cancellable(
                 CandidateBudget {
                     count: budgets[index],
                     scale_quotas: config.scale_candidate_quotas,
+                    allocation: focus_allocations[index].as_ref(),
                 },
                 &mut rng,
             );
@@ -1853,6 +1918,7 @@ pub fn run_optimisation_cancellable(
             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
             candidates_requested: Some(config.candidates),
             batch_limit: Some(batch_limit),
+            strategy_allocation: experiment_allocation.clone(),
             analysis_ms,
             memo_hits: memo_delta.hits,
             memo_misses: memo_delta.misses,
@@ -1893,6 +1959,7 @@ pub fn run_optimisation_cancellable(
                     Err(e) => {
                         handle_scorer_failure(ScorerFailure {
                             consecutive: &mut consecutive_scorer_failures,
+                            ledger: &mut strategy_ledger,
                             max_consecutive: config.max_consecutive_scorer_failures,
                             err: e.to_string(),
                             warn_label: "screen scorer failed",
@@ -1988,8 +2055,9 @@ pub fn run_optimisation_cancellable(
                     .map(|scores| axis_failures(&unaccepted.candidates, scores))
                     .unwrap_or_default();
                 retire_dead_axes(&mut dead_axes, &mirror_axis_failures, false);
-                append_journal(
+                journal_experiment(
                     &journal_path,
+                    &mut strategy_ledger,
                     &ExperimentRecord::unaccepted(
                         &unaccepted,
                         UnacceptedOutcome {
@@ -2071,6 +2139,7 @@ pub fn run_optimisation_cancellable(
                 Err(e) => {
                     handle_scorer_failure(ScorerFailure {
                         consecutive: &mut consecutive_scorer_failures,
+                        ledger: &mut strategy_ledger,
                         max_consecutive: config.max_consecutive_scorer_failures,
                         err: e.to_string(),
                         warn_label: "promote scorer failed",
@@ -2117,6 +2186,7 @@ pub fn run_optimisation_cancellable(
                 Err(e) => {
                     handle_scorer_failure(ScorerFailure {
                         consecutive: &mut consecutive_scorer_failures,
+                        ledger: &mut strategy_ledger,
                         max_consecutive: config.max_consecutive_scorer_failures,
                         err: e.to_string(),
                         warn_label: "scorer failed",
@@ -2570,8 +2640,9 @@ pub fn run_optimisation_cancellable(
             screen_score_map.as_ref().unwrap_or(&score_map),
         );
         retire_dead_axes(&mut dead_axes, &mirror_axis_failures, accepted);
-        append_journal(
+        journal_experiment(
             &journal_path,
+            &mut strategy_ledger,
             &ExperimentRecord {
                 experiment_number: experiments,
                 timestamp_unix: unix_now(),
@@ -2584,6 +2655,7 @@ pub fn run_optimisation_cancellable(
                 candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                 candidates_requested: Some(config.candidates),
                 batch_limit: Some(batch_limit),
+                strategy_allocation: experiment_allocation,
                 scores: score_map,
                 mirror_axis_failures: (!mirror_axis_failures.is_empty())
                     .then_some(mirror_axis_failures),
@@ -2809,6 +2881,7 @@ struct UnacceptedJournal {
     candidates: Vec<CandidateProvenance>,
     candidates_requested: Option<usize>,
     batch_limit: Option<BatchLimit>,
+    strategy_allocation: Option<StrategyAllocation>,
     analysis_ms: u128,
     memo_hits: u64,
     memo_misses: u64,
@@ -2849,6 +2922,7 @@ impl ExperimentRecord {
             candidates: journal.candidates.clone(),
             candidates_requested: journal.candidates_requested,
             batch_limit: journal.batch_limit,
+            strategy_allocation: journal.strategy_allocation.clone(),
             scores: BTreeMap::new(),
             mirror_axis_failures: outcome.mirror_axis_failures,
             screen_scores: outcome.screen_scores,
@@ -2904,6 +2978,7 @@ fn retire_dead_axes(dead_axes: &mut Vec<String>, failures: &[String], accepted: 
 /// Inputs to the one scorer-batch-failure policy (issue #139).
 struct ScorerFailure<'a> {
     consecutive: &'a mut u32,
+    ledger: &'a mut StrategyLedger,
     max_consecutive: u32,
     err: String,
     warn_label: &'a str,
@@ -2952,8 +3027,9 @@ fn handle_scorer_failure(failure: ScorerFailure<'_>) -> Result<(), String> {
         failure.journal.experiment_number,
         failure.cache_cost,
     );
-    append_journal(
+    journal_experiment(
         failure.journal_path,
+        failure.ledger,
         &ExperimentRecord::unaccepted(
             failure.journal,
             UnacceptedOutcome {
@@ -3078,6 +3154,22 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Journal one experiment and fold it into the strategy ledger (issue #218).
+///
+/// Every journalled experiment updates the ledger, including the ones that
+/// accepted nothing: scorer time spent for no return is evidence too, and a
+/// ledger fed only the experiments that promoted would price every strategy
+/// off its best day. One site, so a new journal write cannot quietly stop
+/// feeding the allocator.
+fn journal_experiment(
+    path: &Path,
+    ledger: &mut StrategyLedger,
+    record: &ExperimentRecord,
+) -> Result<(), String> {
+    ledger.observe(record);
+    append_journal(path, record)
 }
 
 fn append_journal(path: &Path, record: &ExperimentRecord) -> Result<(), String> {
@@ -3601,6 +3693,90 @@ mod tests {
             }
             Ok(map)
         }
+    }
+
+    /// Issue #218: an adaptive run journals the slots it allocated, and the
+    /// header records the knobs that drew them — so the A/B arm a journal came
+    /// from is identifiable from the journal alone.
+    #[test]
+    fn an_adaptive_run_journals_its_allocation_and_its_knobs() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_neuron_tagged_setup(dir.path());
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            max_experiments: Some(3),
+            timeout: Duration::from_secs(5),
+            candidates: 12,
+            strategy_allocation: crate::strategy_allocation::StrategyAllocationMode::Adaptive,
+            ..base_config(creature_path, training, out)
+        };
+        let result = run_optimisation(&config, &GrowthScorer).unwrap();
+
+        let header = journal_lines(&result.journal_path)
+            .into_iter()
+            .find_map(|line| match line {
+                JournalLine::Header(header) => Some(*header),
+                _ => None,
+            })
+            .expect("the journal carries a header");
+        assert_eq!(
+            header.config.strategy_allocation.as_deref(),
+            Some("adaptive")
+        );
+        assert_eq!(
+            header.config.strategy_exploration_floor,
+            Some(config.strategy_exploration_floor)
+        );
+        assert_eq!(
+            header.config.strategy_evidence_decay,
+            Some(config.strategy_evidence_decay)
+        );
+
+        let experiments: Vec<ExperimentRecord> = journal_lines(&result.journal_path)
+            .into_iter()
+            .filter_map(|line| match line {
+                JournalLine::Experiment(record) => Some(*record),
+                _ => None,
+            })
+            .collect();
+        assert!(!experiments.is_empty(), "the run journalled no experiment");
+        for record in &experiments {
+            let allocation = record.strategy_allocation.as_ref().unwrap_or_else(|| {
+                panic!("experiment {} has no allocation", record.experiment_number)
+            });
+            assert_eq!(
+                allocation.total_slots(),
+                config.candidates,
+                "the allocation must spend the whole budget"
+            );
+            assert!(
+                allocation.slots.len() >= 2,
+                "every enabled strategy is an arm: {:?}",
+                allocation.slots
+            );
+        }
+    }
+
+    /// Issue #218: the default run is untouched — no allocation is drawn, and
+    /// the journal says so rather than recording an empty one.
+    #[test]
+    fn a_fixed_run_journals_no_allocation_at_all() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_neuron_tagged_setup(dir.path());
+        let out = dir.path().join("out");
+        let config = LamarckConfig {
+            max_experiments: Some(2),
+            timeout: Duration::from_secs(5),
+            ..base_config(creature_path, training, out)
+        };
+        let result = run_optimisation(&config, &GrowthScorer).unwrap();
+        let record = first_experiment(&result.journal_path);
+        assert!(record.strategy_allocation.is_none());
+        let line = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(
+            !line.contains("strategyAllocation\":{"),
+            "a fixed run must journal no allocation object"
+        );
     }
 
     /// Issue #187: a neuron Lamarck grew has no source provenance to keep, so
@@ -5715,6 +5891,7 @@ mod tests {
             candidates: vec![],
             candidates_requested: Some(4),
             batch_limit: Some(BatchLimit::Budget),
+            strategy_allocation: None,
             analysis_ms: 10,
             memo_hits: 1,
             memo_misses: 2,
@@ -5775,8 +5952,10 @@ mod tests {
         let focus_set = vec!["a".to_string()];
         let mut rebuild = None;
         let journal = unaccepted_journal(1);
+        let mut ledger = StrategyLedger::totals(1e-6);
         let err = handle_scorer_failure(ScorerFailure {
             consecutive: &mut consecutive,
+            ledger: &mut ledger,
             max_consecutive: 1,
             err: "boom".into(),
             warn_label: "scorer failed",

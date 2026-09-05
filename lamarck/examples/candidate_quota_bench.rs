@@ -101,6 +101,7 @@ fn generate(
         CandidateBudget {
             count,
             scale_quotas,
+            allocation: None,
         },
         &mut rng,
     );

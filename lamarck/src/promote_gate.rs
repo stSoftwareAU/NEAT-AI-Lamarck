@@ -666,6 +666,7 @@ mod tests {
             ],
             candidates_requested: None,
             batch_limit: None,
+            strategy_allocation: None,
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
             screen_scores: Some(

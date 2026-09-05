@@ -23,6 +23,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Adaptive candidate-budget allocation by measured strategy return
+  (Issue #218).** Nine candidate strategies shared the budget through fixed
+  opening quotas and a round-robin fill, however each performed — the journal
+  measured which strategy earned its cost, but nothing acted on it.
+  `--strategy-allocation adaptive` (new module
+  `lamarck/src/strategy_allocation.rs`) now allocates each strategy slots from
+  its decayed measured return: accepted **full-corpus** score Δ (in multiples
+  of `--min-improvement`, split evenly across a combo's members) plus a small
+  screen→promote conversion credit, divided by the scorer seconds its own
+  candidates caused — screen time shared across the batch, promote and combo
+  time across what was promoted, all read from the experiment's own
+  `scorerCalls`. `--strategy-allocation fixed` remains the default and the A/B
+  arm it is measured against. Four guardrails stop it becoming a
+  `structural_add` monoculture: a `--strategy-exploration-floor` (default
+  `0.2`) reserved *before* value is consulted and spread evenly, its odd slots
+  rotating to the least-tried arms so the guarantee holds at any budget; a UCB
+  bonus priced against the pool's average measured cost, so it means the same
+  thing on a nine-candidate test batch and a hundred-candidate production one,
+  and is zero before anything has been tried (an unmeasured pool is split
+  evenly); `--strategy-evidence-decay` (default `0.9`) plus an extra ×`0.25`
+  whenever an accept replaces the incumbent the evidence was measured against,
+  reaching the allocation and not merely the ledger because value is shrunk by
+  a ten-scorer-second prior; and a generator that **holds back** an over-quota
+  proposal rather than dropping it — admitted at the end, least-over-share
+  first, if nothing fresher could fill the budget, so an allocation reorders a
+  batch and never scores a short one. A strategy the allocation does not name is uncapped, not
+  silenced. Slots and the value behind them are journalled per experiment as
+  `strategyAllocation`, the header records the knobs, and `report` gains a
+  `strategyAllocation` bucket — allocated slots, trials, promotions, accepts,
+  score gain, cost and estimated value per strategy — emitted for fixed and
+  adaptive journals alike so the two arms are read off the same numbers.
+  `scripts/run-strategy-allocation-ab.sh` /
+  `scripts/summarise-strategy-allocation.sh` run and fold the paired production
+  A/B on score improvement per wall hour; that A/B is **not yet run**, which
+  `docs/strategy-allocation.md` states and
+  `lamarck/tests/strategy_allocation_doc.rs` enforces.
+
 - **Mirrored (antithetic) sampling for signed perturbations (Issue #203).**
   A weight nudge or bias shift was scored only in the direction the strategy
   guessed, so half of every local slope went unmeasured and the estimate
