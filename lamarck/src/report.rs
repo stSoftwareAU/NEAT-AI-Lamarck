@@ -490,6 +490,14 @@ pub struct JournalReport {
     /// `--no-mirrored-sampling`, or one written before the field existed,
     /// reports zeros: it scored no pairs, which is exactly what zero means.
     pub mirror: MirrorStats,
+    /// What bounded local follow-up search bought (issue #219).
+    ///
+    /// The A/B this feature is judged on: score gain per wall hour for the
+    /// follow-up probes against the ordinary candidates they ran beside. A
+    /// journal from a run with `--followup-candidates 0`, or one written before
+    /// the field existed, reports the whole batch as ordinary and no follow-up
+    /// rate at all — it ran no probes, which is what that means.
+    pub follow_up: FollowUpStats,
     /// Failed-candidate cache economics (issue #93). `None` on a cache-off journal.
     pub cache: Option<CacheReport>,
     /// What the noise-aware promote gate would have done to this journal (#111).
@@ -498,6 +506,128 @@ pub struct JournalReport {
     /// σ̂ multiplier, so a gate change can be priced — and its effect on the
     /// accepts that were actually earned checked — without any box time.
     pub promote_gate_replay: PromoteGateReplay,
+}
+
+/// What local follow-up bursts bought against ordinary trials (issue #219).
+///
+/// The two arms are priced the same way. Every candidate an experiment scored
+/// is either a follow-up probe (its provenance names the parent winner) or an
+/// ordinary proposal, and the experiment's measured work — analysis plus scorer
+/// milliseconds — is apportioned between them **pro rata by candidate count**.
+/// Scorer time is the dominant, per-creature cost, and splitting the shared
+/// analysis the same way flatters neither arm: both carry identical per-
+/// candidate overhead, so [`Self::followup_gain_per_wall_hour`] and
+/// [`Self::ordinary_gain_per_wall_hour`] are comparable numbers.
+///
+/// An accept is credited to an arm only when **every** member of the winner
+/// came from it. A combo that merged a follow-up probe with an ordinary
+/// proposal counts in [`Self::mixed_accepts`] and its improvement is credited
+/// to neither: attributing it to one arm would over-claim for a win the other
+/// arm helped earn.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowUpStats {
+    /// Experiments a follow-up burst contributed candidates to.
+    pub bursts: u64,
+    /// Follow-up probes scored across the journal.
+    pub followup_candidates: u64,
+    /// Ordinary candidates scored across the journal.
+    pub ordinary_candidates: u64,
+    /// Accepts every member of which was a follow-up probe.
+    pub followup_accepts: u64,
+    /// Accepts every member of which was an ordinary candidate.
+    pub ordinary_accepts: u64,
+    /// Accepts whose members span both arms; credited to neither.
+    pub mixed_accepts: u64,
+    /// Accepts whose members could not be resolved (a pre-#74 journal).
+    pub unattributed_accepts: u64,
+    /// Score improvement earned by follow-up-only accepts.
+    pub followup_improvement: f64,
+    /// Score improvement earned by ordinary-only accepts.
+    pub ordinary_improvement: f64,
+    /// Milliseconds apportioned to follow-up probes.
+    pub followup_ms: f64,
+    /// Milliseconds apportioned to ordinary candidates.
+    pub ordinary_ms: f64,
+    /// Follow-up improvement per wall hour of the time it was apportioned.
+    ///
+    /// `None` when the arm was never exercised — reporting `0.0` for "not
+    /// measured" would read as a measured failure.
+    pub followup_gain_per_wall_hour: Option<f64>,
+    /// Ordinary improvement per wall hour of the time it was apportioned.
+    pub ordinary_gain_per_wall_hour: Option<f64>,
+}
+
+impl FollowUpStats {
+    /// Fold one experiment in.
+    fn push(&mut self, record: &crate::run::ExperimentRecord) {
+        if record.follow_up.is_some() {
+            self.bursts += 1;
+        }
+        let followups = record
+            .candidates
+            .iter()
+            .filter(|prov| prov.follow_up.is_some())
+            .count() as u64;
+        let ordinary = record.candidates.len() as u64 - followups;
+        self.followup_candidates += followups;
+        self.ordinary_candidates += ordinary;
+
+        // Apportion the experiment's measured work by candidate count.
+        let total = (followups + ordinary) as f64;
+        if total > 0.0 {
+            let work = (record.analysis_ms + record.scorer_ms) as f64;
+            self.followup_ms += work * followups as f64 / total;
+            self.ordinary_ms += work * ordinary as f64 / total;
+        }
+
+        if !record.accepted {
+            return;
+        }
+        let members = winner_member_indices(record);
+        let resolved: Vec<bool> = members
+            .iter()
+            .filter_map(|idx| record.candidates.get(*idx))
+            .map(|prov| prov.follow_up.is_some())
+            .collect();
+        if resolved.len() != members.len() || resolved.is_empty() {
+            self.unattributed_accepts += 1;
+            return;
+        }
+        let improvement = record.improvement.unwrap_or(0.0);
+        if resolved.iter().all(|is_followup| *is_followup) {
+            self.followup_accepts += 1;
+            self.followup_improvement += improvement;
+        } else if resolved.iter().all(|is_followup| !*is_followup) {
+            self.ordinary_accepts += 1;
+            self.ordinary_improvement += improvement;
+        } else {
+            self.mixed_accepts += 1;
+        }
+    }
+
+    /// Rates, once every experiment has been folded in.
+    fn finish(mut self) -> Self {
+        self.followup_gain_per_wall_hour = gain_per_wall_hour(
+            self.followup_improvement,
+            self.followup_ms,
+            self.followup_candidates,
+        );
+        self.ordinary_gain_per_wall_hour = gain_per_wall_hour(
+            self.ordinary_improvement,
+            self.ordinary_ms,
+            self.ordinary_candidates,
+        );
+        self
+    }
+}
+
+/// Score improvement per wall hour, or `None` when the arm was never run.
+fn gain_per_wall_hour(improvement: f64, ms: f64, candidates: u64) -> Option<f64> {
+    if candidates == 0 || ms <= 0.0 {
+        return None;
+    }
+    Some(improvement / (ms / 3_600_000.0))
 }
 
 /// Achieved candidate batch size across a journal (issue #108).
@@ -615,6 +745,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut focus_rejected = FocusStatsAccumulator::default();
     let mut cache = CacheAccumulator::default();
     let mut mirror = MirrorStats::default();
+    let mut follow_up = FollowUpStats::default();
 
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -717,6 +848,8 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         if let Some(axes) = &record.mirror_axis_failures {
             mirror.push_axis_failures(axes);
         }
+
+        follow_up.push(&record);
 
         batch_generated_total += record.candidates.len() as u64;
         batch_min = Some(batch_min.map_or(record.candidates.len(), |n: usize| {
@@ -997,6 +1130,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         scorer_call_cost: scorer_call_cost.finish(),
         promote_gate_replay: promote_gate_replay.finish(),
         mirror,
+        follow_up: follow_up.finish(),
         cache: cache.finish(),
     })
 }
@@ -1226,6 +1360,31 @@ pub fn print_run_summary(result: &RunResult) {
                 crate::combos::STACK_DAMPEN_EXPONENT
             ));
         }
+        let follow_up = &report.follow_up;
+        if follow_up.followup_candidates > 0 {
+            let rate = |gain: Option<f64>| match gain {
+                Some(gain) => format!("{gain:+.3e}/h"),
+                None => "n/a".to_string(),
+            };
+            log::detail(&format!(
+                "follow-up:     {} burst(s)  {} probe(s) vs {} ordinary  accepts {} vs {} \
+                 (mixed {}, unattributed {})",
+                follow_up.bursts,
+                follow_up.followup_candidates,
+                follow_up.ordinary_candidates,
+                follow_up.followup_accepts,
+                follow_up.ordinary_accepts,
+                follow_up.mixed_accepts,
+                follow_up.unattributed_accepts
+            ));
+            log::detail(&format!(
+                "follow-up A/B: gain/wall-hour {} (follow-up, {}) vs {} (ordinary, {})",
+                rate(follow_up.followup_gain_per_wall_hour),
+                format_ms(follow_up.followup_ms.round() as u128),
+                rate(follow_up.ordinary_gain_per_wall_hour),
+                format_ms(follow_up.ordinary_ms.round() as u128)
+            ));
+        }
         if let Some(cache) = &report.cache {
             log::detail(&format!(
                 "failed cache:  hits {}/{} ({:.1}%)  backfilled {}  dedup {}  entries {} (peak {})",
@@ -1344,6 +1503,7 @@ mod tests {
             old_value: Some(0.0),
             new_value: Some(0.1),
             mirror: None,
+            follow_up: None,
         }
     }
 
@@ -1383,6 +1543,7 @@ mod tests {
             batch_limit: None,
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
+            follow_up: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,
@@ -1728,6 +1889,7 @@ mod tests {
             batch_limit: None,
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
+            follow_up: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,
@@ -2084,6 +2246,7 @@ mod tests {
                 m
             },
             mirror_axis_failures: None,
+            follow_up: None,
             screen_scores: Some({
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.4);
@@ -2139,6 +2302,7 @@ mod tests {
                 m
             },
             mirror_axis_failures: None,
+            follow_up: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,
@@ -2387,6 +2551,119 @@ mod tests {
         assert_eq!(mirror.both_lost, 1);
         assert!((mirror.mirror_win_rate - 0.5).abs() < 1e-12);
         assert_eq!(mirror.axes_retired, 1);
+    }
+
+    /// A follow-up probe, as the plan stamps it (issue #219).
+    fn probe(parent_experiment: u64) -> CandidateProvenance {
+        CandidateProvenance {
+            follow_up: Some(crate::followup::FollowUpLink {
+                parent_experiment,
+                parent_winner: "candidate-000".into(),
+                parent_strategy: CandidateStrategy::StructuralAdd,
+                probe: "weight:h1->o1 step 1".into(),
+            }),
+            ..prov(CandidateStrategy::FollowUp)
+        }
+    }
+
+    /// Issue #219 acceptance: the report prices the burst against the ordinary
+    /// trials it ran beside, so the A/B can be read off one journal.
+    #[test]
+    fn report_separates_follow_up_trials_from_ordinary_ones() {
+        // Experiment 1: four ordinary candidates, one wins.
+        let mut ordinary = experiment(1, true);
+        ordinary.candidates = vec![prov(CandidateStrategy::Random); 4];
+        ordinary.improvement = Some(4e-6);
+        ordinary.analysis_ms = 100;
+        ordinary.scorer_ms = 300;
+
+        // Experiment 2: two ordinary candidates plus a two-probe burst, and a
+        // probe wins.
+        let mut burst = experiment(2, true);
+        burst.candidates = vec![
+            prov(CandidateStrategy::Random),
+            prov(CandidateStrategy::Random),
+            probe(1),
+            probe(1),
+        ];
+        burst.follow_up = Some(crate::followup::FollowUpBurst {
+            parent_experiment: 1,
+            parent_winner: "candidate-000".into(),
+            candidates: 2,
+            remaining: 0,
+        });
+        burst.winner = Some("candidate-002".into());
+        burst.combo_member_indices = Some(vec![2]);
+        burst.improvement = Some(1e-6);
+        burst.analysis_ms = 100;
+        burst.scorer_ms = 300;
+
+        let file = journal_of(&[ordinary, burst]);
+        let follow_up = report_from_journal(file.path()).unwrap().follow_up;
+
+        assert_eq!(follow_up.bursts, 1);
+        assert_eq!(follow_up.followup_candidates, 2);
+        assert_eq!(follow_up.ordinary_candidates, 6);
+        assert_eq!(follow_up.followup_accepts, 1);
+        assert_eq!(follow_up.ordinary_accepts, 1);
+        assert_eq!(follow_up.mixed_accepts, 0);
+        assert!((follow_up.followup_improvement - 1e-6).abs() < 1e-18);
+        assert!((follow_up.ordinary_improvement - 4e-6).abs() < 1e-18);
+        // Experiment 2 apportions its 400ms half and half; experiment 1's 400ms
+        // is all ordinary.
+        assert!((follow_up.followup_ms - 200.0).abs() < 1e-9);
+        assert!((follow_up.ordinary_ms - 600.0).abs() < 1e-9);
+        // The A/B: gain per wall hour, each arm against its own apportioned time.
+        let followup_rate = follow_up
+            .followup_gain_per_wall_hour
+            .expect("the follow-up arm ran");
+        let ordinary_rate = follow_up
+            .ordinary_gain_per_wall_hour
+            .expect("the ordinary arm ran");
+        assert!((followup_rate - 1e-6 / (200.0 / 3_600_000.0)).abs() < 1e-9);
+        assert!((ordinary_rate - 4e-6 / (600.0 / 3_600_000.0)).abs() < 1e-9);
+    }
+
+    /// A combo spanning both arms is credited to neither (issue #219).
+    #[test]
+    fn a_mixed_winner_is_credited_to_neither_arm() {
+        let mut mixed = experiment(1, true);
+        mixed.candidates = vec![prov(CandidateStrategy::Random), probe(0)];
+        mixed.winner = Some("combo-000-k2".into());
+        mixed.combo_member_indices = Some(vec![0, 1]);
+        mixed.improvement = Some(3e-6);
+
+        let follow_up = report_from_journal(journal_of(&[mixed]).path())
+            .unwrap()
+            .follow_up;
+        assert_eq!(follow_up.mixed_accepts, 1);
+        assert_eq!(follow_up.followup_accepts, 0);
+        assert_eq!(follow_up.ordinary_accepts, 0);
+        assert_eq!(follow_up.followup_improvement, 0.0);
+        assert_eq!(follow_up.ordinary_improvement, 0.0);
+    }
+
+    /// A journal from `--followup-candidates 0` — or from before #219 — reports
+    /// every candidate as ordinary and no follow-up rate at all.
+    #[test]
+    fn report_reads_a_journal_without_follow_ups_as_the_off_arm() {
+        let line = serde_json::to_value(experiment(1, true)).unwrap();
+        assert!(
+            line.get("followUp").is_none(),
+            "an off-arm experiment writes no followUp field"
+        );
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{line}").unwrap();
+
+        let follow_up = report_from_journal(file.path()).unwrap().follow_up;
+        assert_eq!(follow_up.bursts, 0);
+        assert_eq!(follow_up.followup_candidates, 0);
+        assert_eq!(follow_up.ordinary_candidates, 1);
+        assert_eq!(follow_up.ordinary_accepts, 1);
+        assert!(
+            follow_up.followup_gain_per_wall_hour.is_none(),
+            "an arm that never ran has no rate, not a zero one"
+        );
     }
 
     /// A journal from `--no-mirrored-sampling` — or from before #203 — carries

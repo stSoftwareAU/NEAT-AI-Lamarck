@@ -378,6 +378,7 @@ mod tests {
             old_value: Some(0.0),
             new_value,
             mirror: None,
+            follow_up: None,
         }
     }
 
@@ -410,6 +411,7 @@ mod tests {
             batch_limit: None,
             scores,
             mirror_axis_failures: None,
+            follow_up: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,

@@ -41,6 +41,13 @@ pub enum CandidateStrategy {
     StructuralWeaken,
     /// Random exploratory mutation.
     Random,
+    /// Local follow-up probe around an accepted winner (issue #219).
+    ///
+    /// Held apart from the family that produced the parent win: a follow-up is
+    /// exploitation of evidence the scorer has already given, so crediting its
+    /// wins to `structural_add` (or whatever won) would overstate what the
+    /// ordinary generator earns on its own.
+    FollowUp,
 }
 
 impl CandidateStrategy {
@@ -56,6 +63,7 @@ impl CandidateStrategy {
             CandidateStrategy::StructuralAddNeuron => "structural_add_neuron",
             CandidateStrategy::StructuralWeaken => "structural_weaken",
             CandidateStrategy::Random => "random",
+            CandidateStrategy::FollowUp => "follow_up",
         }
     }
 }
@@ -82,6 +90,13 @@ pub struct CandidateProvenance {
     /// existed — in every one of those cases the candidate stands alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<crate::mirror::MirrorPair>,
+    /// Link back to the accepted winner this candidate explores around (#219).
+    ///
+    /// Present only on a follow-up probe, so a journal reader can separate the
+    /// ordinary strategy mix from the exploitation burst that followed a win.
+    /// Absent from journals written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<crate::followup::FollowUpLink>,
 }
 
 /// One generated candidate plus provenance.
@@ -216,6 +231,46 @@ pub fn strategy_mix_summary(candidates: &[Candidate]) -> String {
         .map(|(strategy, n)| format!("{}={n}", strategy.label()))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Structural fingerprint of a candidate creature, as the batch dedup keys it.
+///
+/// Neurons a mutation grew carry a fresh random UUID, so they are keyed by
+/// position instead: two identical bridges must collide rather than pass as
+/// distinct proposals. `incumbent_uuids` is the neuron-uuid set of the creature
+/// the candidates were proposed against — the same set for every candidate of
+/// one batch, so two fingerprints are only ever compared on equal terms.
+///
+/// Public so a candidate built outside [`generate_candidate_batch`] — a
+/// follow-up probe (issue #219) — can be deduplicated against the batch it is
+/// joining rather than spending a scorer slot on a proposal already there.
+pub fn candidate_fingerprint(incumbent_uuids: &HashSet<String>, creature: &CreatureExport) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut grown: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, neuron) in creature.neurons.iter().enumerate() {
+        if !incumbent_uuids.contains(&neuron.uuid) {
+            grown.insert(neuron.uuid.as_str(), i);
+        }
+    }
+    let mut hasher = DefaultHasher::new();
+    let hash_uuid = |uuid: &str, hasher: &mut DefaultHasher| match grown.get(uuid) {
+        Some(position) => ("grown", position).hash(hasher),
+        None => ("existing", uuid).hash(hasher),
+    };
+    for neuron in &creature.neurons {
+        hash_uuid(&neuron.uuid, &mut hasher);
+        neuron.neuron_type.hash(&mut hasher);
+        neuron.squash.hash(&mut hasher);
+        neuron.bias.to_bits().hash(&mut hasher);
+    }
+    for synapse in &creature.synapses {
+        hash_uuid(&synapse.from_uuid, &mut hasher);
+        hash_uuid(&synapse.to_uuid, &mut hasher);
+        synapse.weight.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Inputs shared by candidate generation for one focus-neuron experiment.
@@ -746,37 +801,8 @@ impl<'a> Batch<'a> {
     }
 
     /// Structural fingerprint of a candidate creature.
-    ///
-    /// Neurons a mutation grew carry a fresh random UUID, so they are keyed by
-    /// position instead: two identical bridges must collide rather than pass as
-    /// distinct proposals.
     fn fingerprint(&self, creature: &CreatureExport) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut grown: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for (i, neuron) in creature.neurons.iter().enumerate() {
-            if !self.incumbent_uuids.contains(&neuron.uuid) {
-                grown.insert(neuron.uuid.as_str(), i);
-            }
-        }
-        let mut hasher = DefaultHasher::new();
-        let hash_uuid = |uuid: &str, hasher: &mut DefaultHasher| match grown.get(uuid) {
-            Some(position) => ("grown", position).hash(hasher),
-            None => ("existing", uuid).hash(hasher),
-        };
-        for neuron in &creature.neurons {
-            hash_uuid(&neuron.uuid, &mut hasher);
-            neuron.neuron_type.hash(&mut hasher);
-            neuron.squash.hash(&mut hasher);
-            neuron.bias.to_bits().hash(&mut hasher);
-        }
-        for synapse in &creature.synapses {
-            hash_uuid(&synapse.from_uuid, &mut hasher);
-            hash_uuid(&synapse.to_uuid, &mut hasher);
-            synapse.weight.to_bits().hash(&mut hasher);
-        }
-        hasher.finish()
+        candidate_fingerprint(&self.incumbent_uuids, creature)
     }
 
     /// Admit held-back retired-axis proposals while the batch is short (#203).
@@ -872,6 +898,7 @@ fn build_structural_add_scaled_gated(
             old_value: None,
             new_value: Some(weight),
             mirror: None,
+            follow_up: None,
         },
     })
 }
@@ -948,6 +975,7 @@ fn build_structural_add_neuron_combo(
             old_value: None,
             new_value: Some(w_a),
             mirror: None,
+            follow_up: None,
         },
     })
 }
@@ -985,6 +1013,7 @@ fn build_mean_error_bias(
             old_value: Some(old_bias),
             new_value: Some(new_bias),
             mirror: None,
+            follow_up: None,
         },
     })
 }
@@ -1050,6 +1079,7 @@ fn build_stats_skew_bias(ctx: &CandidateGenContext<'_>) -> Option<Candidate> {
             old_value: Some(old_bias),
             new_value: Some(new_bias),
             mirror: None,
+            follow_up: None,
         },
     })
 }
@@ -1107,6 +1137,7 @@ fn build_candidate(
                                 old_value: Some(old_w),
                                 new_value: Some(new_w),
                                 mirror: None,
+                                follow_up: None,
                             },
                         });
                     }
@@ -1283,6 +1314,10 @@ fn build_candidate(
                 )
             }
         }
+        // Follow-up probes are planned from an accepted winner rather than from
+        // a focus scan, so this generator never builds one (issue #219). See
+        // `crate::followup`.
+        CandidateStrategy::FollowUp => return None,
     };
 
     Some(Candidate {
@@ -1294,6 +1329,7 @@ fn build_candidate(
             old_value,
             new_value,
             mirror: None,
+            follow_up: None,
         },
     })
 }
@@ -2777,6 +2813,7 @@ mod tests {
                 old_value: Some(0.1),
                 new_value: Some(0.35),
                 mirror: None,
+                follow_up: None,
             },
         }]
     }

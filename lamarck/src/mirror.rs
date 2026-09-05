@@ -239,6 +239,7 @@ pub fn mirror_candidate(
                 delta: -delta,
                 role: MirrorRole::Mirror,
             }),
+            follow_up: None,
         },
     })
 }
@@ -448,6 +449,7 @@ mod tests {
                 old_value: None,
                 new_value: None,
                 mirror: None,
+                follow_up: None,
             },
         }
     }
@@ -460,6 +462,7 @@ mod tests {
             old_value: None,
             new_value: None,
             mirror,
+            follow_up: None,
         }
     }
 
