@@ -28,20 +28,24 @@
 //!   from the journal's own `scorerCalls`, so a report reproduces exactly what
 //!   the run computed.
 //!
-//! `value = reward units / cost seconds`. A strategy that has cost time and
-//! returned nothing is worth zero — never negative, because a rejection is
-//! evidence about one proposal, not a debt.
+//! `value = reward units / (cost seconds + `[`PRIOR_COST_SECONDS`]`)`. A
+//! strategy that has cost time and returned nothing is worth zero — never
+//! negative, because a rejection is evidence about one proposal, not a debt.
+//! The prior prices a thin sample honestly and, as [`StrategyEvidence::value`]
+//! explains, is what lets decay move an allocation at all.
 //!
 //! # Why it cannot become a monoculture
 //!
 //! Three things bound the reallocation, in the order they bind:
 //!
-//! 1. **The exploration floor.** Every enabled strategy is reserved an equal
-//!    share of [`crate::config::LamarckConfig::strategy_exploration_floor`] of
-//!    the budget before value is consulted at all.
-//! 2. **A UCB bonus.** Arms that have been tried least are lifted towards the
-//!    leader's value, scaled by the mean value of the pool, so a cold arm keeps
-//!    a real (not merely nonzero) chance of slots.
+//! 1. **The exploration floor.** Every enabled strategy is reserved a share of
+//!    [`crate::config::LamarckConfig::strategy_exploration_floor`] of the
+//!    budget before value is consulted at all — and where the budget is too
+//!    small to seat them all at once, that reserve rotates through the coldest
+//!    arms rather than stranding any of them.
+//! 2. **A UCB bonus.** Arms that have been tried least are lifted by
+//!    [`OPTIMISTIC_VALUE`], so a cold arm keeps a real (not merely nonzero)
+//!    chance of slots.
 //! 3. **Decay.** Evidence is multiplied by
 //!    [`crate::config::LamarckConfig::strategy_evidence_decay`] each experiment
 //!    and again by [`INCUMBENT_CHANGE_RETENTION`] whenever an accept replaces
@@ -83,8 +87,35 @@ pub const INCUMBENT_CHANGE_RETENTION: f64 = 0.25;
 /// real improvement, which is exactly the weighting intended.
 pub const PROMOTION_REWARD_UNITS: f64 = 0.05;
 
-/// Weight of the UCB exploration bonus, in units of the pool's mean value.
+/// Weight of the UCB exploration bonus, in units of [`OPTIMISTIC_VALUE`].
 pub const EXPLORATION_BONUS_WEIGHT: f64 = 0.5;
+
+/// Scorer seconds of assumed silence every arm's value is measured against.
+///
+/// Value is `reward / (cost + prior)` rather than `reward / cost`, for two
+/// reasons. It prices a thin sample honestly — one accept on two seconds of
+/// scorer time is not a rate anybody should act on — and, more importantly, it
+/// is what makes decay bite at all: a bare ratio is scale-invariant, so
+/// discounting an arm's whole ledger would leave its value, and its slots,
+/// exactly where they were.
+///
+/// Ten seconds is about one full-corpus creature score on the production
+/// creature (`docs/scorer-call-cost.md`): an arm must earn against roughly one
+/// promote call's worth of assumed silence before it starts to outrank a cold
+/// one.
+pub const PRIOR_COST_SECONDS: f64 = 10.0;
+
+/// What an untried arm is optimistically assumed to be worth, in the units of
+/// [`StrategyEvidence::value`]: one improvement at the accept bar over the
+/// prior window.
+///
+/// The exploration bonus is scaled by this **fixed** optimism rather than by
+/// the pool's own mean value. A bonus proportional to the pool would shrink in
+/// step with a decaying leader, leaving the split between them unchanged — the
+/// same scale-invariance trap [`PRIOR_COST_SECONDS`] exists to close, one level
+/// up. Against a fixed reference, a leader that stops earning really does fall
+/// back towards the cold arms.
+pub const OPTIMISTIC_VALUE: f64 = 1.0 / PRIOR_COST_SECONDS;
 
 /// Strategies the adaptive allocator may fund (issue #218).
 ///
@@ -178,17 +209,27 @@ impl StrategyEvidence {
         gain_units.max(0.0) + PROMOTION_REWARD_UNITS * self.promotions
     }
 
-    /// Reward units per second of measured scorer cost.
+    /// Reward units per second of measured scorer cost, shrunk towards zero by
+    /// [`PRIOR_COST_SECONDS`].
     ///
-    /// Zero while the strategy has cost nothing: an arm with no measured cost
-    /// has no measured return either, and the exploration floor — not an
-    /// invented value — is what keeps it reachable.
+    /// The prior is what makes decay *bite*. A bare `reward / cost` ratio is
+    /// scale-invariant: multiplying an arm's whole ledger by `0.25` after an
+    /// incumbent change would leave its value — and therefore its slots —
+    /// exactly where they were, so the discount would be a no-op on the very
+    /// decision it exists to influence. Dividing by `cost + prior` instead
+    /// makes a decayed arm converge on zero, which is where an arm with no
+    /// evidence already sits, so stale evidence really does return the pool
+    /// towards the even split.
+    ///
+    /// It is also the honest reading of a thin sample: one accept on two
+    /// seconds of scorer time is a rate estimate nobody should act on, and the
+    /// prior prices it as `gain / (2 + prior)` rather than `gain / 2`.
     pub fn value(&self, min_improvement: f64) -> f64 {
         let cost_seconds = self.cost_ms / 1_000.0;
-        if !cost_seconds.is_finite() || cost_seconds <= 0.0 {
+        if !cost_seconds.is_finite() || cost_seconds < 0.0 {
             return 0.0;
         }
-        let value = self.reward_units(min_improvement) / cost_seconds;
+        let value = self.reward_units(min_improvement) / (cost_seconds + PRIOR_COST_SECONDS);
         if value.is_finite() {
             value.max(0.0)
         } else {
@@ -345,8 +386,15 @@ impl StrategyLedger {
         for (strategy, count) in &trials {
             self.arms.entry(*strategy).or_default().trials += count;
         }
-        for (strategy, count) in &promotions {
-            self.arms.entry(*strategy).or_default().promotions += count;
+        // The credit is for *converting* a screen into a promote. An experiment
+        // that ran no screen phase scored every candidate on the full corpus,
+        // so its "conversions" are just its trials and would credit every arm
+        // equally — a signal that says nothing. Its promote cost is still
+        // charged below; only the reward is withheld.
+        if record.screen_scores.is_some() {
+            for (strategy, count) in &promotions {
+                self.arms.entry(*strategy).or_default().promotions += count;
+            }
         }
 
         let (screen_ms, promote_ms) = phase_costs(record);
@@ -390,34 +438,31 @@ impl StrategyLedger {
                 .insert(arm.label().to_string(), self.value(*arm));
         }
 
-        let reserved_each = reserved_slots_each(arms.len(), budget, floor);
-        let reserved = reserved_each * arms.len();
-        let remaining = budget.saturating_sub(reserved);
+        let trials: Vec<f64> = arms.iter().map(|arm| self.evidence(*arm).trials).collect();
+        let reserve = reserved_slots(&trials, budget, floor);
+        let remaining = budget.saturating_sub(reserve.iter().sum());
         let shares = apportion(remaining, &self.indices(arms));
-        for (arm, share) in arms.iter().zip(shares) {
+        for ((arm, reserved), share) in arms.iter().zip(&reserve).zip(shares) {
             allocation
                 .slots
-                .insert(arm.label().to_string(), reserved_each + share);
+                .insert(arm.label().to_string(), reserved + share);
         }
         allocation
     }
 
     /// UCB index per arm: measured value plus an under-trial bonus.
+    ///
+    /// With nothing tried at all the horizon is `ln(1) = 0`, so every index is
+    /// zero and the apportionment falls back to the even split — the
+    /// round-robin allocation adaptive mode has to beat.
     fn indices(&self, arms: &[CandidateStrategy]) -> Vec<f64> {
-        let values: Vec<f64> = arms.iter().map(|arm| self.value(*arm)).collect();
-        let mean_value = values.iter().sum::<f64>() / values.len() as f64;
-        if mean_value <= 0.0 {
-            // Nothing has returned anything yet, so there is nothing to be
-            // confident about: an even split is the honest allocation.
-            return values.iter().map(|_| 0.0).collect();
-        }
         let total_trials: f64 = arms.iter().map(|arm| self.evidence(*arm).trials).sum();
         let horizon = (1.0 + total_trials).ln().max(0.0);
         arms.iter()
-            .zip(&values)
-            .map(|(arm, value)| {
+            .map(|arm| {
                 let trials = self.evidence(*arm).trials.max(1.0);
-                value + EXPLORATION_BONUS_WEIGHT * mean_value * (horizon / trials).sqrt()
+                self.value(*arm)
+                    + EXPLORATION_BONUS_WEIGHT * OPTIMISTIC_VALUE * (horizon / trials).sqrt()
             })
             .collect()
     }
@@ -511,18 +556,40 @@ fn candidate_stem_index(stem: &str) -> Option<usize> {
     stem.strip_prefix("candidate-")?.parse().ok()
 }
 
-/// Whole slots reserved for **each** arm by the exploration floor.
+/// Slots the exploration floor reserves for each arm, coldest arms first.
 ///
-/// Rounded up so the reserve is never quieter than the fraction asked for, and
-/// capped so the reserve alone cannot consume the budget. A budget smaller than
-/// the arm count cannot give everyone a slot, so it reserves nothing and lets
-/// the apportionment spread what there is.
-fn reserved_slots_each(arms: usize, budget: usize, floor: f64) -> usize {
-    if arms == 0 || budget < arms || !floor.is_finite() || floor <= 0.0 {
-        return 0;
+/// `floor × budget` whole slots are reserved and spread evenly; the remainder
+/// of that division goes to the arms with the fewest decayed trials, breaking
+/// ties by arm order. That is what keeps every enabled strategy reachable at
+/// **any** budget:
+///
+/// * When the budget can seat every arm several times over — the production
+///   case, 100 candidates over nine arms at `0.2` — every arm is reserved whole
+///   slots in the same batch, and the reserve is the fraction asked for rather
+///   than a rounded-up approximation of it.
+/// * When the budget is small (a large `--focus-count` splits it, and a focus
+///   share can be smaller than the arm count), no allocation can seat every arm
+///   at once. The reserve then rotates: the coldest arms take it, their trial
+///   counts rise, and the next batch reserves for the next coldest. Every arm
+///   is reached within a few batches instead of one — which is the honest form
+///   of the guarantee at that budget, and is still the property that stops an
+///   arm going permanently unreachable.
+fn reserved_slots(trials: &[f64], budget: usize, floor: f64) -> Vec<usize> {
+    let arms = trials.len();
+    if arms == 0 {
+        return Vec::new();
     }
-    let wanted = (floor.min(1.0) * budget as f64 / arms as f64).ceil() as usize;
-    wanted.clamp(1, budget / arms)
+    if !floor.is_finite() || floor <= 0.0 {
+        return vec![0; arms];
+    }
+    let total = ((floor.min(1.0) * budget as f64).round() as usize).min(budget);
+    let mut reserve = vec![total / arms; arms];
+    let mut coldest: Vec<usize> = (0..arms).collect();
+    coldest.sort_by(|a, b| trials[*a].total_cmp(&trials[*b]).then_with(|| a.cmp(b)));
+    for index in coldest.into_iter().take(total % arms) {
+        reserve[index] += 1;
+    }
+    reserve
 }
 
 /// Apportion `total` slots across `weights` by largest remainders.
@@ -666,19 +733,37 @@ mod tests {
         assert_eq!(apportion(9, &[0.0, 0.0, 0.0]), vec![3, 3, 3]);
     }
 
+    /// The reserve is the fraction asked for, spread evenly, with the odd
+    /// slots going to the arms that have been tried least.
     #[test]
-    fn the_reserve_never_consumes_the_whole_budget() {
-        // 9 arms, 100 slots, 20% floor → 3 each (ceil), leaving 73 to allocate.
-        assert_eq!(reserved_slots_each(9, 100, 0.2), 3);
+    fn the_reserve_is_the_floor_fraction_and_favours_the_coldest_arms() {
+        let cold_last = [9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 1.0, 0.0];
+        let reserve = reserved_slots(&cold_last, 100, 0.2);
+        assert_eq!(reserve.iter().sum::<usize>(), 20, "20% of 100 is 20 slots");
+        assert_eq!(reserve[8], 3, "the coldest arm takes an odd slot");
+        assert_eq!(reserve[7], 3, "and so does the next coldest");
+        assert_eq!(reserve[0], 2, "every other arm keeps the even share");
+
         // A floor of 1.0 reserves the whole budget evenly — round-robin.
-        assert_eq!(reserved_slots_each(9, 90, 1.0), 10);
-        // Fewer slots than arms cannot seat everyone; nothing is reserved.
-        assert_eq!(reserved_slots_each(9, 4, 0.5), 0);
-        assert_eq!(reserved_slots_each(9, 100, 0.0), 0);
+        assert_eq!(reserved_slots(&[0.0; 9], 90, 1.0), vec![10; 9]);
+        // A floor of 0 reserves nothing: pure exploitation, as asked for.
+        assert_eq!(reserved_slots(&[0.0; 9], 100, 0.0), vec![0; 9]);
+    }
+
+    /// A budget too small to seat every arm reserves for the coldest instead,
+    /// so the reserve rotates rather than stranding an arm (issue #218).
+    #[test]
+    fn a_budget_smaller_than_the_arm_count_reserves_for_the_coldest() {
+        let trials = [5.0, 4.0, 3.0, 2.0, 1.0, 0.0, 6.0, 7.0, 8.0];
+        let reserve = reserved_slots(&trials, 4, 0.5);
+        assert_eq!(reserve.iter().sum::<usize>(), 2, "50% of 4 is 2 slots");
+        assert_eq!(reserve[5], 1, "the coldest arm is reserved for");
+        assert_eq!(reserve[4], 1, "and the next coldest");
+        assert_eq!(reserve[8], 0, "the most-tried arm waits its turn");
     }
 
     #[test]
-    fn value_is_reward_units_per_scorer_second() {
+    fn value_is_reward_units_per_scorer_second_against_the_prior() {
         let evidence = StrategyEvidence {
             trials: 10.0,
             promotions: 2.0,
@@ -686,17 +771,44 @@ mod tests {
             score_gain: 4e-6,
             cost_ms: 2_000.0,
         };
-        // 4 units of gain + 2 promotions × 0.05 = 4.1 units over 2 seconds.
-        assert!((evidence.value(1e-6) - 2.05).abs() < 1e-12);
-        // No measured cost, no value — the floor is what keeps it reachable.
+        // 4 units of gain + 2 promotions × 0.05 = 4.1 units, over 2 measured
+        // seconds plus the 10-second prior.
+        assert!((evidence.value(1e-6) - 4.1 / 12.0).abs() < 1e-12);
+        // No return, no value — whatever it cost.
         assert_eq!(
             StrategyEvidence {
-                score_gain: 1.0,
+                trials: 40.0,
+                cost_ms: 60_000.0,
                 ..StrategyEvidence::default()
             }
             .value(1e-6),
             0.0
         );
+    }
+
+    /// The prior is what makes decay bite: a scaled-down ledger must be worth
+    /// less, or the incumbent-change discount could not move a single slot.
+    #[test]
+    fn decayed_evidence_is_worth_less_than_the_evidence_it_came_from() {
+        let fresh = StrategyEvidence {
+            trials: 10.0,
+            promotions: 2.0,
+            accepts: 1.0,
+            score_gain: 4e-6,
+            cost_ms: 2_000.0,
+        };
+        let mut stale = fresh;
+        stale.scale(INCUMBENT_CHANGE_RETENTION);
+        assert!(
+            stale.value(1e-6) < fresh.value(1e-6) * 0.5,
+            "a quartered ledger must lose most of its value: {} vs {}",
+            stale.value(1e-6),
+            fresh.value(1e-6)
+        );
+        // …and keep losing it, towards the zero an unmeasured arm sits at.
+        let mut staler = stale;
+        staler.scale(INCUMBENT_CHANGE_RETENTION);
+        assert!(staler.value(1e-6) < stale.value(1e-6));
     }
 
     #[test]

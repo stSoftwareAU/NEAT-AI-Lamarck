@@ -379,11 +379,17 @@ pub struct RunConfigRecord {
     /// fixed round-robin split, which is still the default.
     #[serde(default)]
     pub strategy_allocation: Option<String>,
-    /// Exploration floor the adaptive allocator reserved; `None` under fixed.
+    /// Exploration floor the adaptive allocator reserved; `None` under fixed,
+    /// where nothing is reserved because nothing is allocated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_exploration_floor: Option<f64>,
-    /// Per-experiment evidence decay the adaptive allocator used; `None` under
-    /// fixed.
+    /// Per-experiment evidence decay in force.
+    ///
+    /// Recorded under **both** modes: the strategy ledger accumulates on a
+    /// fixed-allocation run too, so a report replaying that journal has to
+    /// decay it exactly as the run did or the two A/B arms are priced on
+    /// different estimators. `None` only in journals written before the knob
+    /// existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_evidence_decay: Option<f64>,
     /// Absolute score delta required for acceptance.
@@ -511,10 +517,7 @@ impl RunConfigRecord {
                 .strategy_allocation
                 .is_adaptive()
                 .then_some(config.strategy_exploration_floor),
-            strategy_evidence_decay: config
-                .strategy_allocation
-                .is_adaptive()
-                .then_some(config.strategy_evidence_decay),
+            strategy_evidence_decay: Some(config.strategy_evidence_decay),
             min_improvement: config.min_improvement,
             screen_sample_rate: config.screen_sample_rate,
             screen_promote_threshold: config.screen_promote_threshold,

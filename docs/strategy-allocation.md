@@ -27,7 +27,7 @@ good cheaply.
 | Term | Where it comes from | Why |
 |------|---------------------|-----|
 | Score gain | `improvement` on an accepted experiment, credited to the winner's member strategies via `comboMemberIndices` | The only authoritative signal Lamarck has. A merged combo splits its Δ evenly across its members, so the ledger's total gain can never exceed what the run actually earned. |
-| Promote conversions | Candidates of that strategy carrying a full-corpus score in `scores` | The only measured return available *before* the first accept. Worth `0.05` reward units each — a twentieth of clearing the accept bar — so it can break a tie but never outweigh a real improvement. |
+| Promote conversions | Candidates of that strategy carrying a full-corpus score in `scores`, on an experiment that actually ran a screen phase | The only measured return available *before* the first accept. Worth `0.05` reward units each — a twentieth of clearing the accept bar — so it can break a tie but never outweigh a real improvement. A run with screening off promotes everything, so its "conversions" would credit every arm equally; the credit is withheld there rather than pretending to a signal (the promote cost is still charged). |
 | Cost | The experiment's own `scorerCalls`: screen milliseconds shared across every candidate in the batch, promote and combo milliseconds shared across the candidates that were promoted | This is what a slot actually costs. A strategy that only ever screens is charged screen time; one that keeps promoting and failing is charged the ~11s/creature full-corpus calls it caused. Phase-0 and graft-replay calls score no candidate from the batch, so they are charged to nobody. |
 
 Reward is expressed in multiples of `--min-improvement`, so the numbers stay
@@ -35,12 +35,23 @@ readable at a `1e-6` accept bar:
 
 ```text
 reward_units = max(score_gain, 0) / min_improvement + 0.05 × promotions
-value        = reward_units / cost_seconds
+value        = reward_units / (cost_seconds + 10)
 ```
 
 A strategy that has cost time and returned nothing is worth **zero** — never
 negative. A rejection is evidence about one proposal, not a debt, and a negative
 value would be a licence to eliminate an arm rather than to defund it.
+
+The `+ 10` is a shrinkage prior: ten scorer seconds of assumed silence, about
+one full-corpus creature score on the production creature
+([`docs/scorer-call-cost.md`](scorer-call-cost.md)). It prices a thin sample
+honestly — one accept on two seconds of scorer time is not a rate anybody
+should act on — and it is what makes **decay bite at all**. A bare
+`reward / cost` ratio is scale-invariant, so discounting an arm's whole ledger
+after an incumbent change would leave its value, and therefore its slots,
+exactly where they were: the discount would be a no-op on the one decision it
+exists to influence. Divided by `cost + prior`, a decayed arm converges on
+zero, which is where an arm with no evidence already sits.
 
 ## How the slots are drawn
 
@@ -50,8 +61,8 @@ flowchart TD
     L --> ACC{"did it accept?"}
     ACC -- yes --> RET["discount again:<br/>the incumbent it measured is gone"]
     ACC -- no --> V
-    RET --> V["value = reward units / scorer second"]
-    V --> FLOOR["reserve the exploration floor:<br/>an equal share for every enabled arm"]
+    RET --> V["value = reward units /<br/>(scorer seconds + 10s prior)"]
+    V --> FLOOR["reserve the exploration floor:<br/>an even share, odd slots to the coldest arms"]
     FLOOR --> UCB["apportion what is left by<br/>value + under-trial bonus"]
     UCB --> SLOTS(["per-strategy slots for the next batch"])
     SLOTS --> GEN["generator: a strategy over its slots<br/>is held back, not dropped"]
@@ -66,22 +77,37 @@ flowchart TD
     class SLOTS,ADMIT,DONE stop
 ```
 
-The reserve is spread one whole slot at a time and rounded **up**, so a 20%
-floor over nine arms and a 100-candidate budget reserves three slots each and
-leaves 73 to allocate. What remains is apportioned by largest remainders, so the
-slots always sum to the budget exactly.
+The reserve is exactly `floor × budget` whole slots, spread evenly; the
+remainder of that division goes to the arms with the **fewest decayed trials**.
+A 20% floor over nine arms and a 100-candidate budget therefore reserves 20
+slots — two for every arm, and a third for the two coldest — leaving 80 to
+allocate. What remains is apportioned by largest remainders, so the slots always
+sum to the budget exactly.
+
+Reserving for the coldest arms is what keeps the guarantee at *any* budget. A
+large `--focus-count` splits the budget per focus, and a focus share can be
+smaller than the arm count; no allocation can seat every arm at once there. The
+reserve then rotates — the coldest arms take it, their trial counts rise, and
+the next batch reserves for the next coldest — so every arm is reached within a
+few batches instead of one, which is the honest form of the guarantee at that
+budget and still the property that stops an arm going permanently unreachable.
 
 The index each arm is apportioned on is its value plus a UCB-style bonus for
 being under-tried:
 
 ```text
-index_i = value_i + 0.5 × mean_value × sqrt( ln(1 + Σ trials) / trials_i )
+index_i = value_i + 0.5 × 0.1 × sqrt( ln(1 + Σ trials) / trials_i )
 ```
 
-The bonus is scaled by the pool's own mean value, so it means the same thing at
-any score scale, and it vanishes when nothing has returned anything yet — an
-unmeasured pool is split **evenly**, which is exactly the round-robin allocation
-adaptive mode has to beat.
+`0.1` is the optimism constant — one improvement at the accept bar over the
+prior window, in the same units as `value`. It is deliberately **fixed** rather
+than scaled by the pool's own mean value: a bonus proportional to the pool would
+shrink in step with a decaying leader and leave the split between them
+unchanged, which is the same scale-invariance trap the prior closes one level
+down. Against a fixed reference, a leader that stops earning really does fall
+back towards the cold arms. With nothing tried at all the horizon is `ln(1) = 0`
+and every index is zero, so an unmeasured pool is split **evenly** — exactly the
+round-robin allocation adaptive mode has to beat.
 
 ## Why it cannot become a monoculture
 
@@ -89,14 +115,19 @@ The issue's guardrail is explicit: adaptive allocation, not winner-takes-all
 elimination. Four things bound it, in the order they bind.
 
 1. **The exploration floor** (`--strategy-exploration-floor`, default `0.2`).
-   Reserved *before* value is consulted, split evenly, so every enabled strategy
-   keeps whole slots however well one is doing. Set it to `0` only for a
-   deliberate pure-exploitation arm.
-2. **The UCB bonus.** A cold arm is lifted towards the leader in proportion to
-   how little it has been tried.
+   Reserved *before* value is consulted and spread evenly, odd slots to the
+   coldest arms, so every enabled strategy keeps whole slots however well one is
+   doing. Set it to `0` only for a deliberate pure-exploitation arm.
+2. **The UCB bonus.** A cold arm is lifted by a fixed optimism constant in
+   proportion to how little it has been tried.
 3. **Decay** (`--strategy-evidence-decay`, default `0.9`, half-life ≈ 7
    experiments) and an extra ×`0.25` whenever an accept replaces the incumbent.
    Evidence describes a creature that no longer exists the moment it accepts.
+   Because value is shrunk by the prior, that discount reaches the *allocation*
+   and not merely the ledger: an operator that stops earning gives its slots
+   back, which
+   [`lamarck/tests/strategy_allocation.rs`](../lamarck/tests/strategy_allocation.rs)
+   asserts on the slot vector rather than on the evidence behind it.
 4. **The generator never shortens a batch.** A proposal over its strategy's
    slots is *held back*, and admitted at the end if nothing fresher could fill
    the budget — the same contract mirrored sampling uses for a retired axis

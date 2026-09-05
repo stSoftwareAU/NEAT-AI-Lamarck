@@ -865,24 +865,30 @@ never screen score:
 
 ```text
 reward_units = max(accepted full-corpus Δ, 0) / --min-improvement + 0.05 × screen→promote conversions
-value        = reward_units / scorer seconds the strategy's own candidates caused
+value        = reward_units / (scorer seconds the strategy's own candidates caused + 10)
 ```
 
 Screen milliseconds are shared across every candidate in the batch and promote /
 combo milliseconds across the candidates that were promoted, both read from the
 experiment's own `scorerCalls`, so a `report` reproduces exactly what the run
 computed. A strategy that has cost time and returned nothing is worth zero,
-never negative: a rejection is evidence about one proposal, not a debt.
+never negative: a rejection is evidence about one proposal, not a debt. The
+`+ 10` is a shrinkage prior of ten scorer seconds — roughly one full-corpus
+creature score — which prices a thin sample honestly and is what makes decay
+reach the allocation rather than only the ledger: a bare `reward / cost` ratio
+is scale-invariant, so discounting an arm would not move a single slot.
 
 Four things stop this becoming a `structural_add` monoculture:
 
 - `--strategy-exploration-floor` (default `0.2`) is reserved **before** value is
-  consulted and split evenly, so every enabled strategy keeps whole slots
-  however well one is doing.
-- Arms that have been tried least are lifted towards the leader by a UCB bonus
-  scaled by the pool's own mean value — which vanishes when nothing has returned
-  anything yet, so an unmeasured pool is split evenly, exactly as round-robin
-  would.
+  consulted and spread evenly, the odd slots going to the arms tried least, so
+  every enabled strategy keeps whole slots however well one is doing. Where a
+  focus share is too small to seat every arm at once, that reserve rotates
+  through the coldest arms instead of stranding any of them.
+- Arms that have been tried least are lifted by a UCB bonus against a fixed
+  optimism constant (one improvement at the accept bar per prior window), which
+  is zero before anything has been tried — so an unmeasured pool is split
+  evenly, exactly as round-robin would.
 - `--strategy-evidence-decay` (default `0.9`, half-life ≈ 7 experiments)
   discounts every arm each experiment, and an accept discounts the whole ledger
   again by `0.25`: the evidence describes a creature that has just been

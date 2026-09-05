@@ -277,6 +277,60 @@ fn evidence_decays_after_an_incumbent_change_and_over_time() {
     }
 }
 
+/// Decay has to reach the **decision**, not just the ledger. A discount that
+/// scaled every field but left the allocation identical would satisfy the
+/// letter of "evidence decays after an incumbent change" and none of its point.
+#[test]
+fn decayed_evidence_gives_back_slots_it_won() {
+    let winner = slot_of(CandidateStrategy::StructuralAdd);
+    let accept = Experiment {
+        number: 1,
+        mix: round_robin_mix(),
+        promoted: vec![winner],
+        winner: Some((winner, 5e-5)),
+        screen_ms: 9_000,
+        promote_ms: 11_000,
+    }
+    .record();
+    let quiet = Experiment {
+        number: 2,
+        mix: round_robin_mix(),
+        promoted: vec![],
+        winner: None,
+        screen_ms: 9_000,
+        promote_ms: 0,
+    }
+    .record();
+
+    let mut ledger = StrategyLedger::new(DEFAULT_STRATEGY_EVIDENCE_DECAY, MIN_IMPROVEMENT);
+    ledger.observe(&accept);
+    let slots_of = |ledger: &StrategyLedger| {
+        ledger
+            .allocate(
+                adaptive_strategies(false),
+                100,
+                DEFAULT_STRATEGY_EXPLORATION_FLOOR,
+            )
+            .slots_for(CandidateStrategy::StructuralAdd)
+            .expect("the winner is an arm")
+    };
+    let won = slots_of(&ledger);
+    let value_after_accept = ledger.value(CandidateStrategy::StructuralAdd);
+
+    for _ in 0..5 {
+        ledger.observe(&quiet);
+    }
+    assert!(
+        ledger.value(CandidateStrategy::StructuralAdd) < value_after_accept,
+        "stale evidence must be worth less"
+    );
+    let kept = slots_of(&ledger);
+    assert!(
+        kept < won,
+        "an operator that stopped earning must give slots back: {won} → {kept}"
+    );
+}
+
 /// With no evidence at all, adaptive allocation is the even split — the
 /// round-robin allocation it has to beat, not a random one.
 #[test]
