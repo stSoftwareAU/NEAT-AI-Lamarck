@@ -868,7 +868,11 @@ whole signed-perturbation family: `backprop`, `mean_error_bias`, `stats_weight`,
 `stats_bias`, `stats_skew_bias`, `structural_weaken` and the scalar half of
 `random`. Structural candidates (a grown neuron, an added synapse, a grafted
 subtree) change the shape of the creature, have no meaningful negation, and are
-never mirrored.
+never mirrored. Follow-up probes (issue #219) are the one further exemption:
+they join the batch after generation and are already planned in both directions
+— a step further along the winning move and a partial back-off — so mirroring
+them would spend the burst's own cap on a twin it has effectively already
+proposed. They do respect a retired axis, exactly as the generator does.
 
 The `−δ` twin joins the **same** batch, so both halves are written into one
 scoring directory and priced by one scorer call against identical records — the
@@ -921,6 +925,12 @@ skip; its stand-down guardrail prices that and disables it if it stops paying.
 
 ### Local follow-up search after an accept
 
+> **Not to be confused** with the #75 *follow-up economics campaign*
+> ([`docs/followup-economics.md`](docs/followup-economics.md),
+> `scripts/run-followup-economics.sh`), which is a set of measurement arms run
+> from the shell. This section is the in-run search described below; the two
+> share only the English word.
+
 An accepted candidate is stronger evidence than a merely useful focus: the
 authoritative scorer has just confirmed real gradient or structure at one place
 in the creature. With `--followup-candidates` set, that win emits a **bounded
@@ -969,7 +979,10 @@ Four guardrails bound it:
   run still backfills the ordinary batch to the full `--candidates` width beside
   them. A winner's neighbourhood is not assumed smooth.
 - **Deduplicated.** A probe reproducing a candidate the generator already put in
-  the batch is dropped before it costs a scorer slot, and the opt-in
+  the batch is dropped before it costs a scorer slot; a probe on an axis
+  [mirrored sampling](#mirrored-antithetic-sampling) has retired is not
+  proposed at all, because both its directions already lost against this
+  incumbent; and the opt-in
   [failed-candidate cache](#failed-candidate-cache-economics) filters probes
   exactly as it filters everything else. A probe whose target has since gone, or
   whose step would breach the hard bias/weight limit, is dropped rather than
@@ -1293,7 +1306,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `followupCandidates`, `followupExperiments` (`0` on the off arm), `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with

@@ -2691,6 +2691,27 @@ mod tests {
         assert_eq!(follow_up.ordinary_improvement, 0.0);
     }
 
+    /// An accept whose members cannot be resolved is credited to neither arm.
+    #[test]
+    fn an_unresolvable_winner_is_counted_as_unattributed() {
+        // A pre-#74 journal names only a merged combo stem: no member indices,
+        // so neither arm can claim it.
+        let mut legacy = experiment(1, true);
+        legacy.candidates = vec![prov(CandidateStrategy::Random), probe(0)];
+        legacy.winner = Some("combo-000-k2".into());
+        legacy.combo_member_indices = None;
+        legacy.improvement = Some(2e-6);
+
+        let follow_up = report_from_journal(journal_of(&[legacy]).path())
+            .unwrap()
+            .follow_up;
+        assert_eq!(follow_up.unattributed_accepts, 1);
+        assert_eq!(follow_up.followup_accepts, 0);
+        assert_eq!(follow_up.ordinary_accepts, 0);
+        assert_eq!(follow_up.followup_improvement, 0.0);
+        assert_eq!(follow_up.ordinary_improvement, 0.0);
+    }
+
     /// A journal from `--followup-candidates 0` — or from before #219 — reports
     /// every candidate as ordinary and no follow-up rate at all.
     #[test]

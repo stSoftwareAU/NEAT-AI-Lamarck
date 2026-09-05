@@ -1,5 +1,9 @@
 //! Bounded local follow-up search around an accepted mutation (issue #219).
 //!
+//! Unrelated to the #75 *follow-up economics campaign* (`docs/followup-economics.md`,
+//! `scripts/run-followup-economics.sh`), which is a set of shell-driven
+//! measurement arms. This module is the in-run search.
+//!
 //! An accepted candidate is stronger evidence than a merely useful focus: the
 //! scorer has just confirmed real gradient or structure at one place in the
 //! creature. This module turns that win into a small, finite set of neighbouring
@@ -157,6 +161,20 @@ pub struct FollowUpBurst {
     pub remaining: usize,
 }
 
+/// What the ordinary generator already put in this experiment's batch.
+///
+/// Held by reference so a probe is deduplicated against the real batch rather
+/// than against a copy of it: [`Self::seen`] is updated as probes join, so two
+/// probes cannot collide with each other either.
+pub struct BatchContext<'a> {
+    /// Neuron uuids of the creature this batch was proposed against.
+    pub incumbent_uuids: &'a HashSet<String>,
+    /// Structural fingerprints of the candidates already in the batch.
+    pub seen: &'a mut HashSet<u64>,
+    /// Perturbation axes retired against this incumbent (issue #203).
+    pub dead_axes: &'a [String],
+}
+
 /// A bounded local search plan emitted by one accepted candidate.
 #[derive(Debug, Clone)]
 pub struct FollowUpPlan {
@@ -233,10 +251,12 @@ impl FollowUpPlan {
 
     /// Emit this experiment's follow-up candidates against `incumbent`.
     ///
-    /// `seen` carries the structural fingerprints of the candidates already in
-    /// the batch, and is updated as follow-ups join: a probe that reproduces a
-    /// candidate the ordinary generator already proposed is dropped rather than
-    /// spending a scorer slot on a question the batch is already asking.
+    /// `batch` carries what the ordinary generator already put in this
+    /// experiment's batch — the neuron-uuid set the fingerprints are keyed on,
+    /// the fingerprints themselves, and the axes issue #203 has retired. A probe
+    /// that reproduces a candidate the batch already holds, or that re-opens a
+    /// retired axis, is dropped rather than spending a scorer slot on a question
+    /// already asked or already answered.
     ///
     /// A probe that no longer applies — the uuid or edge is gone, the step
     /// would breach the hard bias/weight limit, or it lands within the plank
@@ -247,7 +267,7 @@ impl FollowUpPlan {
         &mut self,
         incumbent: &CreatureExport,
         backprop: &BackpropConfig,
-        seen: &mut HashSet<u64>,
+        batch: &mut BatchContext<'_>,
     ) -> Vec<Candidate> {
         let mut out = Vec::new();
         if self.is_exhausted() {
@@ -255,21 +275,27 @@ impl FollowUpPlan {
         }
         let slots = self.slots();
         self.experiments_used += 1;
-        let incumbent_uuids: HashSet<String> = incumbent
-            .neurons
-            .iter()
-            .map(|neuron| neuron.uuid.clone())
-            .collect();
         while out.len() < slots && self.next_probe < self.probes.len() {
             let probe = self.probes[self.next_probe].clone();
             self.next_probe += 1;
             if !self.tested.insert(probe.key()) {
                 continue;
             }
+            // A retired axis lost in both directions against this incumbent
+            // (issue #203); a probe is no more entitled to re-open it than the
+            // ordinary generator is.
+            if let FollowUpProbe::Scalar { target, .. } = &probe
+                && batch.dead_axes.contains(&target.axis())
+            {
+                continue;
+            }
             let Some(candidate) = probe_candidate(incumbent, &probe, backprop, &self.parent) else {
                 continue;
             };
-            if !seen.insert(candidate_fingerprint(&incumbent_uuids, &candidate.creature)) {
+            if !batch.seen.insert(candidate_fingerprint(
+                batch.incumbent_uuids,
+                &candidate.creature,
+            )) {
                 continue;
             }
             out.push(candidate);
@@ -532,6 +558,40 @@ mod tests {
         }
     }
 
+    /// Emit against a batch that holds `seen` and has retired `dead_axes`.
+    fn emit_with(
+        plan: &mut FollowUpPlan,
+        incumbent: &CreatureExport,
+        backprop: &BackpropConfig,
+        seen: &mut HashSet<u64>,
+        dead_axes: &[String],
+    ) -> Vec<Candidate> {
+        let incumbent_uuids: HashSet<String> = incumbent
+            .neurons
+            .iter()
+            .map(|neuron| neuron.uuid.clone())
+            .collect();
+        plan.emit(
+            incumbent,
+            backprop,
+            &mut BatchContext {
+                incumbent_uuids: &incumbent_uuids,
+                seen,
+                dead_axes,
+            },
+        )
+    }
+
+    /// The same, at the default backprop limits.
+    fn emit_into(
+        plan: &mut FollowUpPlan,
+        incumbent: &CreatureExport,
+        seen: &mut HashSet<u64>,
+        dead_axes: &[String],
+    ) -> Vec<Candidate> {
+        emit_with(plan, incumbent, &BackpropConfig::default(), seen, dead_axes)
+    }
+
     fn budget(candidates: usize, experiments: usize) -> FollowUpBudget {
         FollowUpBudget {
             candidates,
@@ -598,7 +658,7 @@ mod tests {
         let mut plan =
             FollowUpPlan::from_accept(&previous, &winner, parent(), budget(3, 1)).expect("a plan");
         let mut seen = HashSet::new();
-        let emitted = plan.emit(&winner, &BackpropConfig::default(), &mut seen);
+        let emitted = emit_into(&mut plan, &winner, &mut seen, &[]);
         let weights: Vec<f64> = emitted
             .iter()
             .map(|candidate| candidate.creature.synapses[1].weight)
@@ -620,7 +680,7 @@ mod tests {
 
         let mut plan =
             FollowUpPlan::from_accept(&previous, &winner, parent(), budget(2, 1)).expect("a plan");
-        let emitted = plan.emit(&winner, &BackpropConfig::default(), &mut HashSet::new());
+        let emitted = emit_into(&mut plan, &winner, &mut HashSet::new(), &[]);
         assert!(!emitted.is_empty());
         for candidate in &emitted {
             let link = candidate
@@ -649,9 +709,7 @@ mod tests {
             FollowUpPlan::from_accept(&previous, &winner, parent(), budget(4, 4)).expect("a plan");
         let mut emitted = 0;
         for _ in 0..10 {
-            emitted += plan
-                .emit(&winner, &BackpropConfig::default(), &mut HashSet::new())
-                .len();
+            emitted += emit_into(&mut plan, &winner, &mut HashSet::new(), &[]).len();
         }
         assert_eq!(emitted, 4, "the burst never exceeds its candidate cap");
         assert!(plan.is_exhausted());
@@ -668,22 +726,19 @@ mod tests {
 
         let mut plan =
             FollowUpPlan::from_accept(&previous, &winner, parent(), budget(9, 2)).expect("a plan");
-        let first = plan.emit(&winner, &BackpropConfig::default(), &mut HashSet::new());
+        let first = emit_into(&mut plan, &winner, &mut HashSet::new(), &[]);
         assert_eq!(
             first.len(),
             5,
             "half the cap, rounded up, in one experiment"
         );
-        let second = plan.emit(&winner, &BackpropConfig::default(), &mut HashSet::new());
+        let second = emit_into(&mut plan, &winner, &mut HashSet::new(), &[]);
         assert_eq!(second.len(), 4);
         assert!(
             plan.is_exhausted(),
             "the burst expires after two experiments"
         );
-        assert!(
-            plan.emit(&winner, &BackpropConfig::default(), &mut HashSet::new())
-                .is_empty()
-        );
+        assert!(emit_into(&mut plan, &winner, &mut HashSet::new(), &[]).is_empty());
     }
 
     /// A probe the batch is already asking is dropped, not scored twice.
@@ -697,12 +752,12 @@ mod tests {
         let mut seen = HashSet::new();
         let mut already_batched =
             FollowUpPlan::from_accept(&previous, &winner, parent(), budget(3, 1)).expect("a plan");
-        let batched = already_batched.emit(&winner, &BackpropConfig::default(), &mut seen);
+        let batched = emit_into(&mut already_batched, &winner, &mut seen, &[]);
         assert_eq!(batched.len(), 3, "the batch holds three hypotheses");
 
         let mut plan =
             FollowUpPlan::from_accept(&previous, &winner, parent(), budget(3, 1)).expect("a plan");
-        let emitted = plan.emit(&winner, &BackpropConfig::default(), &mut seen);
+        let emitted = emit_into(&mut plan, &winner, &mut seen, &[]);
         assert!(
             emitted.is_empty(),
             "a hypothesis the batch already asks is not re-proposed: {:?}",
@@ -710,6 +765,51 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.provenance.mutation.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// A retired axis is not re-opened by a probe (issues #203, #219).
+    #[test]
+    fn a_probe_on_a_retired_axis_is_not_proposed() {
+        let previous = incumbent();
+        let mut winner = previous.clone();
+        winner.synapses[1].weight = 1.2;
+        let mut plan =
+            FollowUpPlan::from_accept(&previous, &winner, parent(), budget(3, 1)).expect("a plan");
+
+        let dead = vec!["weight:h1->o1".to_string()];
+        let emitted = emit_into(&mut plan, &winner, &mut HashSet::new(), &dead);
+        assert!(
+            emitted.is_empty(),
+            "both directions of this axis already lost against this incumbent"
+        );
+    }
+
+    /// A neuron carrying no explicit squash excludes nothing (issue #219).
+    #[test]
+    fn a_neuron_without_a_squash_is_offered_every_alternative() {
+        let previous = incumbent();
+        let mut winner = previous.clone();
+        let mut grown = neuron("grown", "hidden", 0.0, "TANH");
+        grown.squash = None;
+        winner.neurons.insert(1, grown);
+        winner.synapses.push(synapse("input-0", "grown", 0.4));
+        winner.synapses.push(synapse("grown", "o1", 0.5));
+
+        let squashes: Vec<String> = plan_probes(&previous, &winner)
+            .into_iter()
+            .filter_map(|probe| match probe {
+                FollowUpProbe::Squash { uuid, squash } if uuid == "grown" => Some(squash),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            squashes,
+            NEURON_GROWTH_SQUASHES[..SQUASH_ALTERNATIVES]
+                .iter()
+                .map(|squash| (*squash).to_string())
+                .collect::<Vec<_>>(),
+            "with no current squash, nothing is excluded"
         );
     }
 
@@ -745,7 +845,7 @@ mod tests {
         // The run moved on: the probed edge no longer exists.
         let mut moved_on = winner.clone();
         moved_on.synapses.remove(1);
-        let emitted = plan.emit(&moved_on, &BackpropConfig::default(), &mut HashSet::new());
+        let emitted = emit_into(&mut plan, &moved_on, &mut HashSet::new(), &[]);
         assert!(
             emitted.is_empty(),
             "no candidate is invented for a lost edge"
@@ -764,8 +864,7 @@ mod tests {
             limit_weight_scale: 1.25,
             ..BackpropConfig::default()
         };
-        let weights: Vec<f64> = plan
-            .emit(&winner, &backprop, &mut HashSet::new())
+        let weights: Vec<f64> = emit_with(&mut plan, &winner, &backprop, &mut HashSet::new(), &[])
             .iter()
             .map(|candidate| candidate.creature.synapses[1].weight)
             .collect();

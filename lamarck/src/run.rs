@@ -26,7 +26,9 @@ use crate::focus::{
     select_highest_signal, select_highest_signal_excluding, select_random_excluding,
     select_unsaturated_excluding,
 };
-use crate::followup::{FollowUpBurst, FollowUpParent, FollowUpPlan};
+use crate::followup::{
+    BatchContext as FollowUpBatchContext, FollowUpBurst, FollowUpParent, FollowUpPlan,
+};
 use crate::grafts::{
     GraftReplayRequest, GraftStore, default_graft_replay_budget, record_structural_acceptance,
     replay_grafts,
@@ -988,6 +990,7 @@ pub fn run_optimisation_cancellable(
     let analysis_threads = config.analysis_threads()?;
     let focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
+    let followup_budget = config.followup_budget()?;
     // Load and validate the creature before anything is written (issue #165):
     // an `input < 1` / `output < 1` creature has no observation width, cannot
     // frame a training record, and must stop the run here — no output dir, no
@@ -1202,7 +1205,6 @@ pub fn run_optimisation_cancellable(
     // Bounded local search around the most recent accepted winner (issue #219).
     // `None` whenever no burst is live: follow-ups are opt-in, expire with their
     // budget, and are replaced outright by the next accept's own plan.
-    let followup_budget = config.followup_budget()?;
     let mut followup_plan: Option<FollowUpPlan> = None;
     // Last-accept details for the final run-summary stamp (Issue #35).
     let mut last_accept_focus = String::new();
@@ -1799,7 +1801,15 @@ pub fn run_optimisation_cancellable(
                 .iter()
                 .map(|candidate| candidate_fingerprint(&incumbent_uuids, &candidate.creature))
                 .collect();
-            let probes = plan.emit(&incumbent, &backprop, &mut seen);
+            let probes = plan.emit(
+                &incumbent,
+                &backprop,
+                &mut FollowUpBatchContext {
+                    incumbent_uuids: &incumbent_uuids,
+                    seen: &mut seen,
+                    dead_axes: &dead_axes,
+                },
+            );
             log::detail(&format!(
                 "follow-up: {} probe(s) around {} (accepted experiment {}), {} left in budget",
                 probes.len(),
@@ -5036,6 +5046,55 @@ mod tests {
         let legacy = encoded.replace(",\"analysisThreads\":8", "");
         let legacy: RunConfigRecord = serde_json::from_str(&legacy).unwrap();
         assert_eq!(legacy.analysis_threads, 0);
+    }
+
+    /// Issue #219: the header identifies the follow-up arm the journal came
+    /// from — without it an on-run and an off-run are indistinguishable.
+    #[test]
+    fn run_header_records_the_follow_up_arm() {
+        let on = RunConfigRecord::from_config(
+            &LamarckConfig {
+                followup_candidates: 6,
+                followup_experiments: 3,
+                ..LamarckConfig::default()
+            },
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+        );
+        assert_eq!(on.followup_candidates, 6);
+        assert_eq!(on.followup_experiments, 3);
+        let encoded = serde_json::to_string(&on).unwrap();
+        assert!(
+            encoded.contains("\"followupCandidates\":6")
+                && encoded.contains("\"followupExperiments\":3"),
+            "follow-up arm missing from the encoded header: {encoded}"
+        );
+        let decoded: RunConfigRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.followup_candidates, 6);
+        assert_eq!(decoded.followup_experiments, 3);
+
+        // Off arm: the span is recorded as 0 rather than as a burst length the
+        // run could never have used.
+        let off = RunConfigRecord::from_config(
+            &LamarckConfig {
+                followup_candidates: 0,
+                followup_experiments: 3,
+                ..LamarckConfig::default()
+            },
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+        );
+        assert_eq!(off.followup_candidates, 0);
+        assert_eq!(
+            off.followup_experiments, 0,
+            "an off arm reports no burst length"
+        );
+
+        // Journals written before the knobs existed must still parse.
+        let legacy = encoded
+            .replace(",\"followupCandidates\":6", "")
+            .replace(",\"followupExperiments\":3", "");
+        let legacy: RunConfigRecord = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(legacy.followup_candidates, 0);
+        assert_eq!(legacy.followup_experiments, 0);
     }
 
     /// Seed replay must survive parallel analysis at every thread count (#107).
