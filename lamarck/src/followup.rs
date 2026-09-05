@@ -305,7 +305,9 @@ pub fn plan_probes(previous: &CreatureExport, winner: &CreatureExport) -> Vec<Fo
         };
         match previous.neurons.iter().find(|n| n.uuid == neuron.uuid) {
             // A neuron the winner grew: try other squashes for it, and refine
-            // the bias it was born with.
+            // the bias it was born with — which for a grown bridge is `0.0`, a
+            // move of no size and therefore no probe. Its scale is refined
+            // through the new synapses either side of it instead.
             None => {
                 squashes.extend(alternate_squashes(&neuron.uuid, neuron.squash.as_deref()));
                 biases.extend(scalar_probes(&target, neuron.bias));

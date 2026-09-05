@@ -965,7 +965,9 @@ Four guardrails bound it:
   is left of the old one — its parent is no longer the incumbent.
 - **Exploration is retained.** Probes are *added* to the batch rather than
   displacing it, so the broad strategy mix — random controls included — is still
-  proposed. A winner's neighbourhood is not assumed smooth.
+  proposed. They raise the batch target by their own count, so a `--failed-cache`
+  run still backfills the ordinary batch to the full `--candidates` width beside
+  them. A winner's neighbourhood is not assumed smooth.
 - **Deduplicated.** A probe reproducing a candidate the generator already put in
   the batch is dropped before it costs a scorer slot, and the opt-in
   [failed-candidate cache](#failed-candidate-cache-economics) filters probes
@@ -1328,7 +1330,7 @@ Every following line is one experiment:
 | `incumbentId` | Incumbent shape identity (`in…-out…-n…-s…`). |
 | `baselineScore` | Authoritative baseline for this experiment. |
 | `focusNeuron` | Primary focus neuron UUID (the first of `focusNeurons`). |
-| `focusNeurons` | Every focus this experiment proposed against (issue #109). Omitted for a single-focus experiment — `focusNeuron` already says it — and absent from journals written before the field existed. Each entry of `candidates[]` names its own `focusNeuron`, so a winner is attributable to one member of this set. |
+| `focusNeurons` | Every focus this experiment proposed against (issue #109). Omitted for a single-focus experiment — `focusNeuron` already says it — and absent from journals written before the field existed. Each entry of `candidates[]` names its own `focusNeuron`, so a winner is attributable to one member of this set — with one exception: a follow-up probe (issue #219) carries the focus of the win it explores, which this experiment need not have drawn, so a follow-up winner's focus can lie outside this set. |
 | `focusStats` | The focus scan of the **primary** focus (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`, `followUp` on a follow-up probe (issue #219) — `parentExperiment`, `parentWinner`, `parentStrategy` and the `probe` it tests — and `mirror` on each half of an antithetic pair (issue #203) — `axis`, the signed `delta` and the `role` (`original` / `mirror`). Omitted for structural candidates, for a perturbation whose twin could not join the batch, and from journals written before the field existed; in each of those the candidate stood alone. |
 | `followUp` | The follow-up burst this experiment carried (issue #219): `parentExperiment`, `parentWinner` (the accepted stem it explores around), `candidates` added to this batch and `remaining` budget. Present on every experiment a burst contributed to — including one whose probes all deduplicated away, so a burst that bought nothing is as visible as one that bought a win. Omitted with `--followup-candidates 0`, when no burst was live, and from journals written before the field existed. See [Local follow-up search after an accept](#local-follow-up-search-after-an-accept). |
@@ -1416,14 +1418,19 @@ not paired with a screen-phase score. A `--no-mirrored-sampling` journal, or one
 written before the field existed, reports zeros — it scored no pairs.
 
 The `followUp` bucket is what a local follow-up burst is judged on (issue
-#219): `bursts`, `followupCandidates` against `ordinaryCandidates`,
+#219): `bursts` (accepted wins that emitted one, counted once each) and
+`burstExperiments` (the experiments they spanned), `followupCandidates` against
+`ordinaryCandidates`,
 `followupAccepts` against `ordinaryAccepts`, and — the headline pair —
 `followupGainPerWallHour` against `ordinaryGainPerWallHour`. Every candidate an
 experiment scored belongs to one arm, and the experiment's measured work
 (`analysisMs` + `scorerMs`) is apportioned between them pro rata by candidate
-count, so the two rates carry identical per-candidate overhead and are directly
-comparable — a follow-up arm that does not beat the ordinary one has not earned
-its slots. An accept is credited to an arm only when **every** member of the
+count. That charges probes for a focus scan they did not cause, which is
+deliberately conservative *against* the burst: a follow-up arm that still wins
+on this pair has not been flattered by the accounting. The whole-run question —
+whether a burst beats simply starting the next ordinary experiment — is the
+on/off `--followup-candidates` pair compared on `scoreImprovementPerWallHour`,
+the same way every other arm in this README is. An accept is credited to an arm only when **every** member of the
 winner came from it; a combo spanning both counts in `mixedAccepts` and its
 improvement is credited to neither. An arm that never ran reports `null` rather
 than `0.0`, because "not measured" is not "measured and worthless". A

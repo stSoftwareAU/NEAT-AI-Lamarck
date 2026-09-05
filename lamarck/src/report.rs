@@ -514,10 +514,14 @@ pub struct JournalReport {
 /// is either a follow-up probe (its provenance names the parent winner) or an
 /// ordinary proposal, and the experiment's measured work — analysis plus scorer
 /// milliseconds — is apportioned between them **pro rata by candidate count**.
-/// Scorer time is the dominant, per-creature cost, and splitting the shared
-/// analysis the same way flatters neither arm: both carry identical per-
-/// candidate overhead, so [`Self::followup_gain_per_wall_hour`] and
-/// [`Self::ordinary_gain_per_wall_hour`] are comparable numbers.
+/// Scorer time is the dominant, per-creature cost. The shared per-experiment
+/// analysis is split the same way, which charges probes for a scan they did not
+/// cause — deliberately conservative *against* the burst, so a follow-up arm
+/// that still wins on [`Self::followup_gain_per_wall_hour`] has not been
+/// flattered by the accounting. What the pair prices is each arm's return per
+/// unit of measured work; the whole-run question — whether a follow-up run
+/// beats one that simply started the next ordinary experiment — is the on/off
+/// `--followup-candidates` pair compared on `scoreImprovementPerWallHour`.
 ///
 /// An accept is credited to an arm only when **every** member of the winner
 /// came from it. A combo that merged a follow-up probe with an ordinary
@@ -527,8 +531,14 @@ pub struct JournalReport {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FollowUpStats {
-    /// Experiments a follow-up burst contributed candidates to.
+    /// Accepted wins that emitted a burst, counted once each.
+    ///
+    /// A burst spanning several experiments is one win, so this is *not* the
+    /// number of journal lines carrying a `followUp` record — that is
+    /// [`Self::burst_experiments`].
     pub bursts: u64,
+    /// Experiments a burst contributed candidates to.
+    pub burst_experiments: u64,
     /// Follow-up probes scored across the journal.
     pub followup_candidates: u64,
     /// Ordinary candidates scored across the journal.
@@ -560,9 +570,19 @@ pub struct FollowUpStats {
 
 impl FollowUpStats {
     /// Fold one experiment in.
-    fn push(&mut self, record: &crate::run::ExperimentRecord) {
-        if record.follow_up.is_some() {
-            self.bursts += 1;
+    ///
+    /// `parents` carries the wins already counted, so a burst spread over
+    /// several experiments is one burst rather than one per experiment.
+    fn push(
+        &mut self,
+        record: &crate::run::ExperimentRecord,
+        parents: &mut std::collections::BTreeSet<(u64, String)>,
+    ) {
+        if let Some(burst) = &record.follow_up {
+            self.burst_experiments += 1;
+            if parents.insert((burst.parent_experiment, burst.parent_winner.clone())) {
+                self.bursts += 1;
+            }
         }
         let followups = record
             .candidates
@@ -746,6 +766,8 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut cache = CacheAccumulator::default();
     let mut mirror = MirrorStats::default();
     let mut follow_up = FollowUpStats::default();
+    let mut follow_up_parents: std::collections::BTreeSet<(u64, String)> =
+        std::collections::BTreeSet::new();
 
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -849,7 +871,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             mirror.push_axis_failures(axes);
         }
 
-        follow_up.push(&record);
+        follow_up.push(&record, &mut follow_up_parents);
 
         batch_generated_total += record.candidates.len() as u64;
         batch_min = Some(batch_min.map_or(record.candidates.len(), |n: usize| {
@@ -1361,15 +1383,16 @@ pub fn print_run_summary(result: &RunResult) {
             ));
         }
         let follow_up = &report.follow_up;
-        if follow_up.followup_candidates > 0 {
+        if follow_up.bursts > 0 || follow_up.followup_candidates > 0 {
             let rate = |gain: Option<f64>| match gain {
                 Some(gain) => format!("{gain:+.3e}/h"),
                 None => "n/a".to_string(),
             };
             log::detail(&format!(
-                "follow-up:     {} burst(s)  {} probe(s) vs {} ordinary  accepts {} vs {} \
-                 (mixed {}, unattributed {})",
+                "follow-up:     {} burst(s) over {} experiment(s)  {} probe(s) vs {} ordinary  \
+                 accepts {} vs {} (mixed {}, unattributed {})",
                 follow_up.bursts,
+                follow_up.burst_experiments,
                 follow_up.followup_candidates,
                 follow_up.ordinary_candidates,
                 follow_up.followup_accepts,
@@ -2602,6 +2625,7 @@ mod tests {
         let follow_up = report_from_journal(file.path()).unwrap().follow_up;
 
         assert_eq!(follow_up.bursts, 1);
+        assert_eq!(follow_up.burst_experiments, 1);
         assert_eq!(follow_up.followup_candidates, 2);
         assert_eq!(follow_up.ordinary_candidates, 6);
         assert_eq!(follow_up.followup_accepts, 1);
@@ -2622,6 +2646,30 @@ mod tests {
             .expect("the ordinary arm ran");
         assert!((followup_rate - 1e-6 / (200.0 / 3_600_000.0)).abs() < 1e-9);
         assert!((ordinary_rate - 4e-6 / (600.0 / 3_600_000.0)).abs() < 1e-9);
+    }
+
+    /// A burst spread over two experiments is one burst, not two (issue #219).
+    #[test]
+    fn a_burst_spanning_two_experiments_counts_once() {
+        let slice = |number: u64, remaining: usize| {
+            let mut record = experiment(number, false);
+            record.candidates = vec![probe(1)];
+            record.follow_up = Some(crate::followup::FollowUpBurst {
+                parent_experiment: 1,
+                parent_winner: "candidate-000".into(),
+                candidates: 1,
+                remaining,
+            });
+            record
+        };
+        let file = journal_of(&[slice(2, 1), slice(3, 0)]);
+
+        let follow_up = report_from_journal(file.path()).unwrap().follow_up;
+        assert_eq!(follow_up.bursts, 1, "one win, one burst");
+        assert_eq!(
+            follow_up.burst_experiments, 2,
+            "spread over two experiments"
+        );
     }
 
     /// A combo spanning both arms is credited to neither (issue #219).

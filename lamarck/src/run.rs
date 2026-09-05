@@ -1788,6 +1788,7 @@ pub fn run_optimisation_cancellable(
         // broad strategy mix — random controls included — is still proposed,
         // and every probe faces the same screen and full-corpus gate.
         let mut followup_burst: Option<FollowUpBurst> = None;
+        let mut followup_probes = 0usize;
         if let Some(plan) = followup_plan.as_mut() {
             let incumbent_uuids: std::collections::HashSet<String> = incumbent
                 .neurons
@@ -1806,6 +1807,7 @@ pub fn run_optimisation_cancellable(
                 plan.parent().experiment,
                 plan.remaining()
             ));
+            followup_probes = probes.len();
             followup_burst = Some(plan.burst(probes.len()));
             candidates.extend(probes);
             if plan.is_exhausted() {
@@ -1848,11 +1850,15 @@ pub fn run_optimisation_cancellable(
                     dead_axes: &dead_axes,
                 },
             };
+            // Follow-up probes are additive (issue #219): they raise the
+            // target rather than occupying ordinary slots, so a cache-skipped
+            // ordinary candidate is still backfilled to the full `--candidates`
+            // width beside them.
             let filtered = filter_and_backfill(
                 cache,
                 &experiment_incumbent_id,
                 candidates,
-                config.candidates,
+                config.candidates.saturating_add(followup_probes),
                 unix_now(),
                 cancel,
                 |wanted| generate_candidates(&gen_ctx, wanted, &mut rng),
@@ -1886,6 +1892,15 @@ pub fn run_optimisation_cancellable(
                 ..ExperimentCost::default()
             };
             candidates = filtered.candidates;
+            // Journal the probes the batch actually carries: the cache can drop
+            // one as known-failed, and a burst record that counted it would
+            // name a candidate no reader can find in `candidates[]`.
+            if let Some(burst) = followup_burst.as_mut() {
+                burst.candidates = candidates
+                    .iter()
+                    .filter(|candidate| candidate.provenance.follow_up.is_some())
+                    .count();
+            }
         }
 
         // Scoring dominates an experiment, so poll here: a signal arriving
@@ -2855,6 +2870,11 @@ fn winning_focuses(
 /// winner is boosted, and a focus whose proposals went nowhere is dampened as
 /// sterile even when the experiment as a whole accepted. With one focus this is
 /// exactly the pre-#109 single call — the whole batch is that focus's.
+///
+/// A follow-up probe carries the focus of the win it explores (issue #219),
+/// which the experiment need not have drawn. That focus is recorded too when it
+/// earned the accept: dropping it would dampen every drawn focus for a win and
+/// boost nothing, teaching the selector the opposite of what happened.
 fn record_focus_outcomes(
     selector: &mut WeightedFocusSelector,
     focus_set: &[String],
@@ -2864,7 +2884,10 @@ fn record_focus_outcomes(
     candidates: &[Candidate],
     min_improvement: f64,
 ) {
-    for focus_uuid in focus_set {
+    let credited_outside_set = accepted_focuses
+        .iter()
+        .filter(|focus| !focus_set.contains(focus));
+    for focus_uuid in focus_set.iter().chain(credited_outside_set) {
         selector.record_outcome(
             focus_uuid,
             accepted_focuses.contains(focus_uuid),
@@ -5818,6 +5841,61 @@ mod tests {
 
     /// Issue #109: an accept in a K=3 batch boosts only the winner's focus; the
     /// other two are dampened as sterile, exactly as a losing experiment is.
+    /// Issue #219: a follow-up probe carries its parent's focus, which this
+    /// experiment need not have drawn. A win there must still boost it.
+    #[test]
+    fn a_follow_up_winner_boosts_the_focus_it_inherited() {
+        let mut selector = WeightedFocusSelector::default();
+        let focus_set = vec!["drawn".to_string()];
+        let mut candidates = candidates_for(&["drawn"]);
+        candidates.push(Candidate {
+            creature: candidates[0].creature.clone(),
+            provenance: CandidateProvenance {
+                strategy: CandidateStrategy::FollowUp,
+                focus_neuron: "parent".into(),
+                mutation: "follow-up weight:h1->o1 1 -> 1.1".into(),
+                old_value: Some(1.0),
+                new_value: Some(1.1),
+                mirror: None,
+                follow_up: Some(crate::followup::FollowUpLink {
+                    parent_experiment: 1,
+                    parent_winner: "candidate-000".into(),
+                    parent_strategy: CandidateStrategy::StructuralAdd,
+                    probe: "weight:h1->o1 step 1".into(),
+                }),
+            },
+        });
+        let scores = scored(&[
+            ("baseline", 0.5),
+            ("candidate-000", 0.5),
+            ("candidate-001", 0.5 + 1e-3),
+        ]);
+        let winners = winning_focuses(&[1], &candidates);
+        assert_eq!(winners, ["parent".to_string()].into_iter().collect());
+
+        record_focus_outcomes(
+            &mut selector,
+            &focus_set,
+            &winners,
+            &scores,
+            scores.get("baseline").expect("the fixture carries one"),
+            &candidates,
+            1e-6,
+        );
+
+        let history = |uuid: &str| selector.history.get(uuid).cloned().unwrap_or_default();
+        assert_eq!(
+            history("parent").accepts,
+            1,
+            "the focus that earned the win is boosted even though it was not drawn"
+        );
+        assert_eq!(
+            history("drawn").accepts,
+            0,
+            "the drawn focus proposed nothing that won"
+        );
+    }
+
     #[test]
     fn an_accept_boosts_only_the_winning_focus() {
         let focus_set = vec!["a".to_string(), "b".to_string(), "c".to_string()];

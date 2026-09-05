@@ -439,6 +439,50 @@ mod tests {
         assert!(err.contains("--focus-count"), "error names the flag: {err}");
     }
 
+    /// Issue #219: follow-ups are off by default, and a burst that may span no
+    /// experiment is a fault rather than a silent disabling of the arm.
+    #[test]
+    fn the_follow_up_budget_is_off_by_default_and_rejects_a_zero_span() {
+        let off = LamarckConfig::default();
+        assert_eq!(off.followup_candidates, DEFAULT_FOLLOWUP_CANDIDATES);
+        assert_eq!(off.followup_budget(), Ok(None));
+
+        let on = LamarckConfig {
+            followup_candidates: 6,
+            followup_experiments: 3,
+            ..LamarckConfig::default()
+        };
+        assert_eq!(
+            on.followup_budget(),
+            Ok(Some(FollowUpBudget {
+                candidates: 6,
+                experiments: 3,
+            }))
+        );
+
+        // A zero span with a positive cap can emit nothing at all.
+        let broken = LamarckConfig {
+            followup_candidates: 6,
+            followup_experiments: 0,
+            ..LamarckConfig::default()
+        };
+        let err = broken
+            .followup_budget()
+            .expect_err("a zero span is a configuration fault");
+        assert!(
+            err.contains("--followup-experiments"),
+            "error names the flag: {err}"
+        );
+
+        // A zero cap disables the feature whatever the span says.
+        let disabled = LamarckConfig {
+            followup_candidates: 0,
+            followup_experiments: 0,
+            ..LamarckConfig::default()
+        };
+        assert_eq!(disabled.followup_budget(), Ok(None));
+    }
+
     /// Issue #111: the opt-in property. With no new flag set the run gets the
     /// pre-#111 absolute gate at the pre-#111 threshold.
     #[test]
