@@ -66,6 +66,12 @@ echo "WHAT: workflow install pin gate behaviour (Issue #169)..."
 echo "Refusing floating package installs in workflow run: blocks (Issue #169)..."
 ./scripts/check-workflow-npm-pins.sh
 
+echo "WHAT: workflow container pin gate behaviour (Issue #212)..."
+./scripts/test-check-workflow-container-pins.sh
+
+echo "Requiring tag+digest pins on workflow container images (Issue #212)..."
+./scripts/check-workflow-container-pins.sh
+
 echo "WHAT: lamarck version order (no downgrade vs base)..."
 ./scripts/test-check-lamarck-version-order.sh
 
