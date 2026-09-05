@@ -548,6 +548,7 @@ mod tests {
             candidates: vec![prov(CandidateStrategy::Random); 8],
             candidates_requested: None,
             batch_limit: None,
+            strategy_allocation: None,
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
             follow_up: None,

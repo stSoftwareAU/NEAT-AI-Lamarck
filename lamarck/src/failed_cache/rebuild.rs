@@ -409,6 +409,7 @@ mod tests {
                 .collect(),
             candidates_requested: None,
             batch_limit: None,
+            strategy_allocation: None,
             scores,
             mirror_axis_failures: None,
             follow_up: None,

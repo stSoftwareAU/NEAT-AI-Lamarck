@@ -3,6 +3,9 @@
 use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
+use neat_ai_lamarck::strategy_allocation::{
+    DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR, StrategyAllocationMode,
+};
 use neat_ai_lamarck::{
     CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS,
     DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
@@ -61,6 +64,35 @@ struct Cli {
         conflicts_with = "scale_candidate_quotas"
     )]
     fixed_candidate_quotas: bool,
+
+    /// Candidate-budget allocation: fixed (default) | adaptive (issue #218).
+    ///
+    /// `fixed` is the pre-#218 split — fixed opening quotas, then round-robin
+    /// across every enabled strategy. `adaptive` allocates each strategy slots
+    /// from its decayed measured return: full-corpus score gain per second of
+    /// scorer time. Opt-in until a paired benchmark on score improvement per
+    /// wall hour justifies moving the default, and `fixed` is the arm it is
+    /// measured against.
+    #[arg(long, default_value = "fixed")]
+    strategy_allocation: String,
+
+    /// Share of the candidate budget reserved for exploration under
+    /// `--strategy-allocation adaptive`, split evenly across every enabled
+    /// strategy. Must be between 0 and 1.
+    ///
+    /// This is the anti-monoculture guardrail: it keeps `random` and a
+    /// temporarily cold operator reachable however well one strategy is doing.
+    #[arg(long, default_value_t = DEFAULT_STRATEGY_EXPLORATION_FLOOR)]
+    strategy_exploration_floor: f64,
+
+    /// Per-experiment decay applied to measured strategy evidence under
+    /// `--strategy-allocation adaptive`. Must be in `(0, 1]`.
+    ///
+    /// Evidence is discounted again whenever an accept replaces the incumbent
+    /// it was measured against, so an operator that worked on an older
+    /// incumbent cannot fund itself forever.
+    #[arg(long, default_value_t = DEFAULT_STRATEGY_EVIDENCE_DECAY)]
+    strategy_evidence_decay: f64,
 
     /// Minimum absolute score improvement (strict `>`).
     #[arg(long, default_value_t = DEFAULT_MIN_IMPROVEMENT)]
@@ -331,6 +363,15 @@ fn main() -> ExitCode {
         std::process::exit(2);
     });
 
+    let strategy_allocation = StrategyAllocationMode::parse(&cli.strategy_allocation)
+        .unwrap_or_else(|| {
+            eprintln!(
+                "unknown --strategy-allocation '{}'; expected fixed|adaptive",
+                cli.strategy_allocation
+            );
+            std::process::exit(2);
+        });
+
     let screen_promote_gate =
         PromoteGateMode::parse(&cli.screen_promote_gate).unwrap_or_else(|| {
             eprintln!(
@@ -347,6 +388,9 @@ fn main() -> ExitCode {
         max_experiments: cli.max_experiments,
         candidates: cli.candidates,
         scale_candidate_quotas: cli.scale_candidate_quotas && !cli.fixed_candidate_quotas,
+        strategy_allocation,
+        strategy_exploration_floor: cli.strategy_exploration_floor,
+        strategy_evidence_decay: cli.strategy_evidence_decay,
         min_improvement: cli.min_improvement,
         seed: cli.seed,
         scorer_path: cli.scorer.clone(),
@@ -408,6 +452,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = config.promote_gate() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.strategy_allocation_policy() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
