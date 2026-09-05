@@ -4,6 +4,7 @@ use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::focus::{FocusNeuronStats, IncomingSourceStats};
 use crate::mirror::{MirrorPolicy, SignedPerturbation, mirror_candidate, original_pair};
 use crate::observations::ObservationsStatistics;
+use crate::strategy_allocation::StrategyAllocation;
 use crate::structural::{
     NeuronBridgeSpec, OLS_WEIGHT_FRACTION, RankedSource, add_neuron_bridge, add_synapse,
     first_previous_hidden_index, growth_squashes_for, pick_smart_source, random_uuid_v4,
@@ -140,7 +141,7 @@ const ADD_SCALE_STEPS: [f64; 4] = [1.0, 2.0, 0.5, 4.0];
 
 /// Requested size of one candidate batch (issue #108).
 #[derive(Debug, Clone, Copy)]
-pub struct CandidateBudget {
+pub struct CandidateBudget<'a> {
     /// Requested candidate count.
     pub count: usize,
     /// When true the per-phase quotas scale with `count`, so the budget binds
@@ -150,6 +151,14 @@ pub struct CandidateBudget {
     /// their ceiling (~33 distinct candidates on the production creature)
     /// whatever `count` says.
     pub scale_quotas: bool,
+    /// Per-strategy slot allocation for this batch (issue #218).
+    ///
+    /// `None` is the pre-#218 generator: no strategy is capped and the mix
+    /// falls out of the fixed quotas and the round-robin fill. `Some` caps each
+    /// allocated strategy at its slots — a proposal over its cap is held back,
+    /// not dropped, and is admitted at the end if nothing fresher could fill
+    /// the budget.
+    pub allocation: Option<&'a StrategyAllocation>,
 }
 
 /// Why a candidate batch stopped growing (issue #108).
@@ -262,6 +271,7 @@ pub fn generate_candidates(
         CandidateBudget {
             count,
             scale_quotas: false,
+            allocation: None,
         },
         rng,
     )
@@ -282,10 +292,10 @@ pub fn generate_candidates(
 /// best guesses almost surely first, every pairing a nonzero chance per batch.
 pub fn generate_candidate_batch(
     ctx: &CandidateGenContext<'_>,
-    budget: CandidateBudget,
+    budget: CandidateBudget<'_>,
     rng: &mut impl Rng,
 ) -> CandidateBatch {
-    let mut batch = Batch::new(ctx, budget.count);
+    let mut batch = Batch::new(ctx, budget.count, budget.allocation);
     if budget.count == 0 {
         return batch.finish(BatchLimit::Budget);
     }
@@ -633,6 +643,12 @@ enum Proposal {
     /// budget, so a retired axis costs a batch slot only when there is nothing
     /// fresher to spend it on.
     DeadAxis,
+    /// The strategy has already filled the slots #218 allocated it.
+    ///
+    /// Held back on the same terms as [`Self::DeadAxis`]: an allocation is a
+    /// preference about how to spend a full batch, never a reason to score a
+    /// short one.
+    OverQuota,
     /// The strategy had nothing to offer, or the batch was already full.
     Nothing,
 }
@@ -654,19 +670,31 @@ struct Batch<'a> {
     out: Vec<Candidate>,
     /// Proposals on a retired axis, in proposal order (issue #203).
     deferred: Vec<(Candidate, SignedPerturbation)>,
+    /// Proposals over their strategy's allocated slots (issue #218).
+    over_quota: Vec<(Candidate, Option<SignedPerturbation>)>,
     seen: HashSet<u64>,
     incumbent_uuids: HashSet<String>,
     count: usize,
     incumbent: &'a CreatureExport,
     backprop: &'a BackpropConfig,
     mirror: MirrorPolicy<'a>,
+    /// Per-strategy slot allocation in force, `None` before #218 / under fixed
+    /// allocation.
+    allocation: Option<&'a StrategyAllocation>,
+    /// Candidates each strategy has contributed to this batch.
+    used: BTreeMap<CandidateStrategy, usize>,
 }
 
 impl<'a> Batch<'a> {
-    fn new(ctx: &CandidateGenContext<'a>, count: usize) -> Self {
+    fn new(
+        ctx: &CandidateGenContext<'a>,
+        count: usize,
+        allocation: Option<&'a StrategyAllocation>,
+    ) -> Self {
         Self {
             out: Vec::with_capacity(count.min(1024)),
             deferred: Vec::new(),
+            over_quota: Vec::new(),
             seen: HashSet::new(),
             incumbent_uuids: ctx
                 .incumbent
@@ -678,7 +706,28 @@ impl<'a> Batch<'a> {
             incumbent: ctx.incumbent,
             backprop: ctx.backprop,
             mirror: ctx.mirror,
+            allocation,
+            used: BTreeMap::new(),
         }
+    }
+
+    /// True when `strategy` has already filled the slots it was allocated.
+    ///
+    /// A strategy the allocation does not name is uncapped: an allocation that
+    /// omits an arm has said nothing about it, which must not read as zero.
+    fn over_quota(&self, strategy: CandidateStrategy) -> bool {
+        let Some(allocation) = self.allocation else {
+            return false;
+        };
+        let Some(slots) = allocation.slots_for(strategy) else {
+            return false;
+        };
+        self.used.get(&strategy).copied().unwrap_or(0) >= slots
+    }
+
+    /// Count one candidate against its strategy's allocation.
+    fn charge_quota(&mut self, strategy: CandidateStrategy) {
+        *self.used.entry(strategy).or_insert(0) += 1;
     }
 
     fn is_full(&self) -> bool {
@@ -717,6 +766,15 @@ impl<'a> Batch<'a> {
             }
             return Proposal::DeadAxis;
         }
+        if self.over_quota(candidate.provenance.strategy) {
+            // Same contract as a retired axis: the allocation reorders the
+            // batch, it never leaves a slot empty (issue #218).
+            if self.over_quota.len() < self.count {
+                self.over_quota.push((candidate, perturbation));
+            }
+            return Proposal::OverQuota;
+        }
+        self.charge_quota(candidate.provenance.strategy);
         self.out.push(candidate);
         if self.mirror.enabled
             && let Some(perturbation) = perturbation
@@ -741,6 +799,10 @@ impl<'a> Batch<'a> {
         if !self.seen.insert(self.fingerprint(&mirror.creature)) {
             return;
         }
+        // The twin is never gated on the allocation — a pair scored apart is
+        // not the variance-reduction device #203 bought — but it does consume
+        // a slot, so it is charged.
+        self.charge_quota(mirror.provenance.strategy);
         self.out[index].provenance.mirror = Some(original_pair(perturbation));
         self.out.push(mirror);
     }
@@ -790,6 +852,7 @@ impl<'a> Batch<'a> {
                 return;
             }
             let (candidate, perturbation) = self.deferred.remove(0);
+            self.charge_quota(candidate.provenance.strategy);
             self.out.push(candidate);
             if self.mirror.enabled {
                 self.push_mirror(self.out.len() - 1, &perturbation);
@@ -797,7 +860,32 @@ impl<'a> Batch<'a> {
         }
     }
 
+    /// Admit proposals held back by the #218 allocation while the batch is
+    /// short.
+    ///
+    /// An allocation says which hypotheses are worth *preferring*, not which
+    /// are worth abandoning: a slot no other strategy could fill buys more as
+    /// an over-quota proposal than as an empty one. Admitted before the retired
+    /// axes of #203 — an axis both directions of which already lost is the
+    /// weaker question of the two.
+    fn admit_over_quota(&mut self) {
+        while !self.is_full() {
+            if self.over_quota.is_empty() {
+                return;
+            }
+            let (candidate, perturbation) = self.over_quota.remove(0);
+            self.charge_quota(candidate.provenance.strategy);
+            self.out.push(candidate);
+            if self.mirror.enabled
+                && let Some(perturbation) = perturbation
+            {
+                self.push_mirror(self.out.len() - 1, &perturbation);
+            }
+        }
+    }
+
     fn finish(mut self, limit: BatchLimit) -> CandidateBatch {
+        self.admit_over_quota();
         self.admit_deferred();
         // Slots the deferred proposals filled are budget met, not a generator
         // that ran dry or a quota that bit.
@@ -1798,6 +1886,7 @@ mod tests {
             CandidateBudget {
                 count: 100,
                 scale_quotas: false,
+                allocation: None,
             },
             &mut rng,
         );
@@ -1895,6 +1984,7 @@ mod tests {
             CandidateBudget {
                 count,
                 scale_quotas: true,
+                allocation: None,
             },
             &mut rng,
         )
@@ -2164,6 +2254,7 @@ mod tests {
             CandidateBudget {
                 count: 29,
                 scale_quotas: false,
+                allocation: None,
             },
             &mut rng,
         );
@@ -3136,6 +3227,146 @@ mod tests {
             "retiring every axis shrank the batch from {} to {}",
             live.candidates.len(),
             after.candidates.len()
+        );
+    }
+
+    /// A hand-built allocation over the nine adaptive arms (issue #218).
+    fn allocation_of(slots: &[(CandidateStrategy, usize)]) -> StrategyAllocation {
+        let mut allocation = StrategyAllocation {
+            exploration_floor: 0.2,
+            ..StrategyAllocation::default()
+        };
+        for (strategy, count) in slots {
+            allocation
+                .slots
+                .insert(strategy.label().to_string(), *count);
+        }
+        allocation
+    }
+
+    /// Batch generated for the wide fixture under `allocation`.
+    fn allocated_batch(
+        allocation: Option<&StrategyAllocation>,
+        count: usize,
+    ) -> super::CandidateBatch {
+        let incumbent = wide_creature(24);
+        let focus = wide_focus();
+        let observations = wide_obs(24);
+        let incoming = [wide_incoming()];
+        let cfg = BackpropConfig::default();
+        let ctx = CandidateGenContext {
+            incumbent: &incumbent,
+            focus_uuid: "o1",
+            focus_stats: &focus,
+            incoming: &incoming,
+            observations: &observations,
+            ranked_sources: None,
+            learning: None,
+            backprop: &cfg,
+            structural_only: false,
+            mirror: MirrorPolicy::default(),
+        };
+        let mut rng = StdRng::seed_from_u64(5);
+        generate_candidate_batch(
+            &ctx,
+            CandidateBudget {
+                count,
+                scale_quotas: true,
+                allocation,
+            },
+            &mut rng,
+        )
+    }
+
+    /// Issue #218: the allocation decides the mix. The same generator, the same
+    /// seed and the same budget produce a different batch composition when the
+    /// slots move.
+    #[test]
+    fn an_allocation_moves_the_batch_mix_onto_its_slots() {
+        let adds_of = |allocation: &StrategyAllocation| {
+            let batch = allocated_batch(Some(allocation), 12);
+            assert_eq!(batch.candidates.len(), 12, "the budget must still bind");
+            batch
+                .strategy_mix()
+                .get(&CandidateStrategy::StructuralAdd)
+                .copied()
+                .unwrap_or(0)
+        };
+
+        let heavy = allocation_of(&[
+            (CandidateStrategy::Backprop, 1),
+            (CandidateStrategy::MeanErrorBias, 1),
+            (CandidateStrategy::StatsWeight, 1),
+            (CandidateStrategy::StatsBias, 1),
+            (CandidateStrategy::StatsSkewBias, 1),
+            (CandidateStrategy::StructuralAdd, 5),
+            (CandidateStrategy::StructuralAddNeuron, 1),
+            (CandidateStrategy::StructuralWeaken, 0),
+            (CandidateStrategy::Random, 1),
+        ]);
+        let starved = allocation_of(&[
+            (CandidateStrategy::Backprop, 1),
+            (CandidateStrategy::MeanErrorBias, 1),
+            (CandidateStrategy::StatsWeight, 1),
+            (CandidateStrategy::StatsBias, 1),
+            (CandidateStrategy::StatsSkewBias, 1),
+            (CandidateStrategy::StructuralAdd, 1),
+            (CandidateStrategy::StructuralAddNeuron, 5),
+            (CandidateStrategy::StructuralWeaken, 0),
+            (CandidateStrategy::Random, 1),
+        ]);
+        let heavy_adds = adds_of(&heavy);
+        let starved_adds = adds_of(&starved);
+        assert!(
+            heavy_adds > starved_adds,
+            "slots must move the mix: heavy={heavy_adds} starved={starved_adds}"
+        );
+    }
+
+    /// Issue #218: an allocation reorders a batch, it never shortens one. When
+    /// the funded strategies run dry the held-back proposals are admitted, so
+    /// the budget is still met — an empty slot buys nothing at all.
+    #[test]
+    fn an_allocation_never_shrinks_the_batch_below_the_budget() {
+        let unallocated = allocated_batch(None, 40);
+        assert_eq!(unallocated.candidates.len(), 40);
+
+        // Every slot to a strategy that can offer at most one proposal on this
+        // creature: without the holdback the batch would be one candidate long.
+        let starving = allocation_of(&[
+            (CandidateStrategy::Backprop, 0),
+            (CandidateStrategy::MeanErrorBias, 0),
+            (CandidateStrategy::StatsWeight, 0),
+            (CandidateStrategy::StatsBias, 0),
+            (CandidateStrategy::StatsSkewBias, 0),
+            (CandidateStrategy::StructuralAdd, 0),
+            (CandidateStrategy::StructuralAddNeuron, 0),
+            (CandidateStrategy::StructuralWeaken, 40),
+            (CandidateStrategy::Random, 0),
+        ]);
+        let batch = allocated_batch(Some(&starving), 40);
+        assert_eq!(
+            batch.candidates.len(),
+            40,
+            "an unfillable allocation must not shrink the batch"
+        );
+        assert_eq!(batch.limit, BatchLimit::Budget);
+    }
+
+    /// Issue #218: a strategy the allocation does not name is uncapped, so an
+    /// allocation from an older arm set can never silence one.
+    #[test]
+    fn a_strategy_absent_from_the_allocation_is_uncapped() {
+        let partial = allocation_of(&[(CandidateStrategy::StructuralAddNeuron, 1)]);
+        let batch = allocated_batch(Some(&partial), 12);
+        assert_eq!(batch.candidates.len(), 12);
+        let mix = batch.strategy_mix();
+        assert!(
+            mix.get(&CandidateStrategy::StructuralAdd)
+                .copied()
+                .unwrap_or(0)
+                > 1,
+            "an unnamed strategy must keep proposing freely: {mix:?}"
         );
     }
 }

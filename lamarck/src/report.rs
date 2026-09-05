@@ -2,14 +2,16 @@
 
 use crate::baseline::BaselineSource;
 use crate::candidates::{BatchLimit, CandidateStrategy};
+use crate::config::DEFAULT_MIN_IMPROVEMENT;
 use crate::log;
 use crate::mirror::{MirrorStats, pair_outcomes};
 use crate::promote_gate::{PromoteGateReplay, PromoteGateReplayAccumulator};
-use crate::run::{JournalLine, RunResult};
+use crate::run::{ExperimentRecord, JournalLine, RunConfigRecord, RunResult};
 use crate::scorer_cost::{ScorerCallCost, ScorerCallCostAccumulator};
 use crate::screen_calibration::{ScreenCalibration, ScreenCalibrationAccumulator};
+use crate::strategy_allocation::{DEFAULT_STRATEGY_EVIDENCE_DECAY, StrategyLedger};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -142,7 +144,7 @@ struct CacheAccumulator {
 
 impl CacheAccumulator {
     /// Record the cache knobs the #71 run header declares.
-    fn push_header(&mut self, config: &crate::run::RunConfigRecord) {
+    fn push_header(&mut self, config: &RunConfigRecord) {
         self.header_seen = true;
         self.enabled = config.failed_cache;
         self.max_entries = config.failed_cache_max_entries;
@@ -380,6 +382,152 @@ pub struct CacheReport {
     pub stood_down_reason: Option<String>,
 }
 
+/// What one strategy was allocated, tried, earned and cost (issue #218).
+///
+/// Counts and sums are the journal's own totals — undecayed, so the row says
+/// what happened. `estimated_value` is the decayed value the adaptive allocator
+/// would hold at the end of the journal, computed by replaying the same records
+/// through the same ledger the run used, so a report never disagrees with the
+/// allocation it is describing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyAllocationRow {
+    /// Strategy label.
+    pub strategy: String,
+    /// Candidate slots allocated to it across the journal (`0` under the fixed
+    /// allocation, which allocates no slots).
+    pub allocated_slots: u64,
+    /// Candidates it contributed to a scored batch.
+    pub trials: u64,
+    /// Candidates that converted from screen to a full-corpus promote.
+    pub promotions: u64,
+    /// Accepted full-corpus improvements credited to it.
+    pub accepts: u64,
+    /// Accepted full-corpus score Δ credited to it.
+    pub score_gain: f64,
+    /// Scorer milliseconds its candidates caused.
+    pub cost_ms: f64,
+    /// Decayed reward units per scorer second at the end of the journal.
+    pub estimated_value: f64,
+}
+
+/// Strategy-allocation economics for one run journal (issue #218).
+///
+/// Reported for every journal, not just an adaptive one: the fixed arm of the
+/// A/B has to be priced on the same numbers as the adaptive arm, and the
+/// per-strategy return is measurable either way.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyAllocationReport {
+    /// Allocation mode from the run header (`fixed` / `adaptive`).
+    pub mode: Option<String>,
+    /// Exploration floor from the run header; `None` under fixed allocation.
+    pub exploration_floor: Option<f64>,
+    /// Evidence decay from the run header; `None` under fixed allocation.
+    pub evidence_decay: Option<f64>,
+    /// Experiments that recorded an adaptive allocation.
+    pub allocated_experiments: u64,
+    /// One row per strategy, in label order.
+    pub strategies: Vec<StrategyAllocationRow>,
+}
+
+/// Streaming accumulator behind one [`StrategyAllocationReport`] (issue #218).
+#[derive(Debug, Default)]
+struct StrategyAllocationAccumulator {
+    mode: Option<String>,
+    exploration_floor: Option<f64>,
+    evidence_decay: Option<f64>,
+    min_improvement: Option<f64>,
+    allocated_experiments: u64,
+    allocated_slots: BTreeMap<String, u64>,
+    ledgers: Option<(StrategyLedger, StrategyLedger)>,
+}
+
+impl StrategyAllocationAccumulator {
+    fn push_header(&mut self, config: &crate::run::RunConfigRecord) {
+        self.mode = config.strategy_allocation.clone();
+        self.exploration_floor = config.strategy_exploration_floor;
+        self.evidence_decay = config.strategy_evidence_decay;
+        self.min_improvement = Some(config.min_improvement);
+    }
+
+    /// Totals and decayed ledgers, built on first use from the header's knobs.
+    ///
+    /// A journal with no header — or one written before the knobs existed —
+    /// falls back to the documented defaults, which is what its run used.
+    fn ledgers(&mut self) -> &mut (StrategyLedger, StrategyLedger) {
+        let min_improvement = self.min_improvement.unwrap_or(DEFAULT_MIN_IMPROVEMENT);
+        let decay = self
+            .evidence_decay
+            .unwrap_or(DEFAULT_STRATEGY_EVIDENCE_DECAY);
+        self.ledgers.get_or_insert_with(|| {
+            (
+                StrategyLedger::totals(min_improvement),
+                StrategyLedger::new(decay, min_improvement),
+            )
+        })
+    }
+
+    fn push_experiment(&mut self, record: &ExperimentRecord) {
+        if let Some(allocation) = &record.strategy_allocation {
+            self.allocated_experiments += 1;
+            for (strategy, slots) in &allocation.slots {
+                *self.allocated_slots.entry(strategy.clone()).or_default() += *slots as u64;
+            }
+        }
+        let (totals, decayed) = self.ledgers();
+        totals.observe(record);
+        decayed.observe(record);
+    }
+
+    fn finish(self) -> StrategyAllocationReport {
+        let mut strategies = Vec::new();
+        if let Some((totals, decayed)) = &self.ledgers {
+            let mut labels: BTreeSet<String> = totals
+                .strategies()
+                .map(|strategy| strategy.label().to_string())
+                .collect();
+            labels.extend(self.allocated_slots.keys().cloned());
+            for strategy in totals.strategies() {
+                let evidence = totals.evidence(strategy);
+                labels.remove(strategy.label());
+                strategies.push(StrategyAllocationRow {
+                    strategy: strategy.label().to_string(),
+                    allocated_slots: self
+                        .allocated_slots
+                        .get(strategy.label())
+                        .copied()
+                        .unwrap_or(0),
+                    trials: evidence.trials.round() as u64,
+                    promotions: evidence.promotions.round() as u64,
+                    accepts: evidence.accepts.round() as u64,
+                    score_gain: evidence.score_gain,
+                    cost_ms: evidence.cost_ms,
+                    estimated_value: decayed.value(strategy),
+                });
+            }
+            // A strategy that was allocated slots but proposed nothing is still
+            // reported: an arm funded and silent is exactly what a reader of
+            // an adaptive journal needs to see.
+            for strategy in labels {
+                strategies.push(StrategyAllocationRow {
+                    allocated_slots: self.allocated_slots.get(&strategy).copied().unwrap_or(0),
+                    strategy,
+                    ..StrategyAllocationRow::default()
+                });
+            }
+            strategies.sort_by(|a, b| a.strategy.cmp(&b.strategy));
+        }
+        StrategyAllocationReport {
+            mode: self.mode,
+            exploration_floor: self.exploration_floor,
+            evidence_decay: self.evidence_decay,
+            allocated_experiments: self.allocated_experiments,
+            strategies,
+        }
+    }
+}
+
 /// Summary report for a Lamarck run journal.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -492,6 +640,13 @@ pub struct JournalReport {
     pub mirror: MirrorStats,
     /// Failed-candidate cache economics (issue #93). `None` on a cache-off journal.
     pub cache: Option<CacheReport>,
+    /// Per-strategy allocation, return and cost (issue #218).
+    ///
+    /// What each strategy was allocated, tried, accepted, gained and cost, plus
+    /// the decayed value the adaptive allocator would put on it now. Reported
+    /// for a fixed-allocation journal too, so the A/B arms are read off the
+    /// same numbers.
+    pub strategy_allocation: StrategyAllocationReport,
     /// What the noise-aware promote gate would have done to this journal (#111).
     ///
     /// Replayed offline from the journal's own `screenScores`, at the default
@@ -615,6 +770,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut focus_rejected = FocusStatsAccumulator::default();
     let mut cache = CacheAccumulator::default();
     let mut mirror = MirrorStats::default();
+    let mut strategy_allocation = StrategyAllocationAccumulator::default();
 
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -628,6 +784,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
                 screen_calibration.push_header(&header.config);
                 promote_gate_replay.push_header(&header.config);
                 cache.push_header(&header.config);
+                strategy_allocation.push_header(&header.config);
                 continue;
             }
             JournalLine::ScorerCalls(calls) => {
@@ -704,6 +861,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             *appearances_total.entry(key).or_default() += 1;
         }
         cache.push_experiment(&record);
+        strategy_allocation.push_experiment(&record);
 
         // Both halves of a pair have to come from one scorer call, so the pair
         // is read off whichever map covered the whole batch: the screen map
@@ -996,6 +1154,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         screen_calibration: screen_calibration.finish(),
         scorer_call_cost: scorer_call_cost.finish(),
         promote_gate_replay: promote_gate_replay.finish(),
+        strategy_allocation: strategy_allocation.finish(),
         mirror,
         cache: cache.finish(),
     })
@@ -1381,6 +1540,7 @@ mod tests {
             candidates: vec![prov(CandidateStrategy::Random)],
             candidates_requested: None,
             batch_limit: None,
+            strategy_allocation: None,
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
             screen_scores: None,
@@ -1726,6 +1886,7 @@ mod tests {
             candidates: vec![prov(CandidateStrategy::Random)],
             candidates_requested: None,
             batch_limit: None,
+            strategy_allocation: None,
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
             screen_scores: None,
@@ -2077,6 +2238,7 @@ mod tests {
             ],
             candidates_requested: None,
             batch_limit: None,
+            strategy_allocation: None,
             scores: {
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.4);
@@ -2132,6 +2294,7 @@ mod tests {
             candidates: vec![prov(CandidateStrategy::Random)],
             candidates_requested: None,
             batch_limit: None,
+            strategy_allocation: None,
             scores: {
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.400002);

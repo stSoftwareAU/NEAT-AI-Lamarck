@@ -15,6 +15,10 @@ use crate::focus::FocusPolicy;
 use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use crate::promote_gate::{DEFAULT_SCREEN_PROMOTE_SIGMA_K, PromoteGate, PromoteGateMode};
+use crate::strategy_allocation::{
+    AllocationPolicy, DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR,
+    StrategyAllocationMode,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -81,6 +85,19 @@ pub struct LamarckConfig {
     /// candidates whatever the budget says. `false` reproduces that fixed
     /// ceiling (`--fixed-candidate-quotas`), kept only for A/B benchmarking.
     pub scale_candidate_quotas: bool,
+    /// How the candidate budget is split across strategies (issue #218).
+    ///
+    /// [`StrategyAllocationMode::Fixed`] — the default — is the pre-#218 run:
+    /// fixed opening quotas then round-robin, whatever each strategy returns.
+    /// Adaptive allocation is opt-in until a paired benchmark on score
+    /// improvement per wall hour justifies moving the default, and `fixed`
+    /// stays available as the arm it is measured against.
+    pub strategy_allocation: StrategyAllocationMode,
+    /// Share of the candidate budget reserved for exploration under adaptive
+    /// allocation, split evenly across every enabled strategy (issue #218).
+    pub strategy_exploration_floor: f64,
+    /// Per-experiment decay applied to measured strategy evidence (issue #218).
+    pub strategy_evidence_decay: f64,
     /// Absolute score delta required for acceptance (`candidate - baseline`).
     pub min_improvement: f64,
     /// Optional deterministic RNG seed.
@@ -247,6 +264,33 @@ impl LamarckConfig {
         }
     }
 
+    /// Strategy-allocation policy for this run, validated (issue #218).
+    ///
+    /// An exploration floor outside `[0, 1]` or a decay outside `(0, 1]` is a
+    /// configuration fault, reported rather than silently replaced by the
+    /// default: a run that quietly ignored the flag would invalidate the A/B it
+    /// was set for. Both are validated whatever the mode, so a typo in an
+    /// adaptive knob cannot hide behind a fixed-mode run.
+    pub fn strategy_allocation_policy(&self) -> Result<AllocationPolicy, String> {
+        let floor = self.strategy_exploration_floor;
+        if !floor.is_finite() || !(0.0..=1.0).contains(&floor) {
+            return Err(format!(
+                "--strategy-exploration-floor must be between 0 and 1 (got {floor})"
+            ));
+        }
+        let decay = self.strategy_evidence_decay;
+        if !decay.is_finite() || decay <= 0.0 || decay > 1.0 {
+            return Err(format!(
+                "--strategy-evidence-decay must be greater than 0 and at most 1 (got {decay})"
+            ));
+        }
+        Ok(AllocationPolicy {
+            mode: self.strategy_allocation,
+            exploration_floor: floor,
+            evidence_decay: decay,
+        })
+    }
+
     /// Baseline-reuse policy for this run, validated (issue #113).
     ///
     /// When [`Self::baseline_drift_epsilon`] is `None`, the epsilon is
@@ -315,6 +359,11 @@ impl Default for LamarckConfig {
             max_experiments: None,
             candidates: DEFAULT_CANDIDATE_COUNT,
             scale_candidate_quotas: true,
+            // Opt-in: the pre-#218 round-robin split is the arm adaptive
+            // allocation has to beat on improvement per wall hour.
+            strategy_allocation: StrategyAllocationMode::Fixed,
+            strategy_exploration_floor: DEFAULT_STRATEGY_EXPLORATION_FLOOR,
+            strategy_evidence_decay: DEFAULT_STRATEGY_EVIDENCE_DECAY,
             min_improvement: DEFAULT_MIN_IMPROVEMENT,
             seed: None,
             scorer_path: PathBuf::from("rust_scorer"),

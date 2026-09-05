@@ -851,6 +851,53 @@ a single estimated optimum.
 Every candidate records the strategy, a full-precision description of the exact
 mutation, and the old/new value for scalar changes.
 
+### Adaptive strategy allocation
+
+That round-robin is *measured* — the journal names the strategy behind every
+candidate and every accept — but it is not *adaptive*: the nine strategies above
+share the budget however they perform. `--strategy-allocation adaptive`
+(issue #218) allocates each strategy a share of `--candidates` from its decayed
+**measured return**, and `--strategy-allocation fixed` — the default — keeps the
+round-robin split as the arm it is measured against.
+
+The return is authoritative full-corpus improvement per unit measured cost,
+never screen score:
+
+```text
+reward_units = max(accepted full-corpus Δ, 0) / --min-improvement + 0.05 × screen→promote conversions
+value        = reward_units / scorer seconds the strategy's own candidates caused
+```
+
+Screen milliseconds are shared across every candidate in the batch and promote /
+combo milliseconds across the candidates that were promoted, both read from the
+experiment's own `scorerCalls`, so a `report` reproduces exactly what the run
+computed. A strategy that has cost time and returned nothing is worth zero,
+never negative: a rejection is evidence about one proposal, not a debt.
+
+Four things stop this becoming a `structural_add` monoculture:
+
+- `--strategy-exploration-floor` (default `0.2`) is reserved **before** value is
+  consulted and split evenly, so every enabled strategy keeps whole slots
+  however well one is doing.
+- Arms that have been tried least are lifted towards the leader by a UCB bonus
+  scaled by the pool's own mean value — which vanishes when nothing has returned
+  anything yet, so an unmeasured pool is split evenly, exactly as round-robin
+  would.
+- `--strategy-evidence-decay` (default `0.9`, half-life ≈ 7 experiments)
+  discounts every arm each experiment, and an accept discounts the whole ledger
+  again by `0.25`: the evidence describes a creature that has just been
+  replaced.
+- A proposal over its strategy's slots is **held back, not dropped**, and is
+  admitted at the end if nothing fresher could fill the budget. An allocation
+  reorders a batch; it never scores a short one. A strategy the allocation does
+  not name is uncapped rather than silenced.
+
+The slots, and the value each strategy was worth when they were drawn, are
+journalled per experiment as `strategyAllocation` and totalled by `report`. The
+mechanism and the paired A/B protocol —
+`scripts/run-strategy-allocation-ab.sh`, compared on score improvement per wall
+hour — are [`docs/strategy-allocation.md`](docs/strategy-allocation.md).
+
 ### Mirrored (antithetic) sampling
 
 Salimans et al. 2017 evaluates every perturbation `ε` together with its negation
@@ -1232,7 +1279,7 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`, `strategyAllocation`, `strategyExplorationFloor`, `strategyEvidenceDecay`. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -1274,6 +1321,7 @@ Every following line is one experiment:
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`, and `mirror` on each half of an antithetic pair (issue #203) — `axis`, the signed `delta` and the `role` (`original` / `mirror`). Omitted for structural candidates, for a perturbation whose twin could not join the batch, and from journals written before the field existed; in each of those the candidate stood alone. |
 | `mirrorAxisFailures` | Perturbation axes whose mirrored pair lost in **both** directions this experiment (issue #203). Both halves were scored in one call against identical records and neither improved, so the incumbent is at a local optimum along the axis and the generator stops leading with it until it accepts. Omitted when the experiment retired no axis, and absent from journals written before the field existed. See [Mirrored (antithetic) sampling](#mirrored-antithetic-sampling). |
 | `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — only under `--fixed-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
+| `strategyAllocation` | Candidate slots each strategy was allocated this experiment (issue #218): the `explorationFloor` in force, the `slots` per strategy, and the `value` — reward units per scorer second — each was worth when they were drawn. A multi-focus experiment records the slots summed across its focuses. Present only under `--strategy-allocation adaptive`, and absent from journals written before the field existed; in both cases the batch was split by the fixed quotas and the round-robin fill. See [Adaptive strategy allocation](#adaptive-strategy-allocation). |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
 | `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Absent when no screen phase ran, and from journals written before the field existed. |
 | `baselineSource` | Which baseline decided this experiment's promote call (issue #113): `fresh` (the call carried the incumbent and scored it), `remembered` (it reused the run's carried full-corpus score) or `rememberedVerified` (it reused it *and* proposed an accept, so the winner and the incumbent were re-scored together before the swap). Omitted when no promote call ran, and absent from journals written before the field existed — so any accept is traceable to the baseline that decided it. |
@@ -1354,6 +1402,20 @@ run would have had to draw independently, later, if at all. Pairs are read from
 always come from one scorer call; a half that reached only the promote map is
 not paired with a screen-phase score. A `--no-mirrored-sampling` journal, or one
 written before the field existed, reports zeros — it scored no pairs.
+
+The `strategyAllocation` bucket is what adaptive allocation is judged on
+(issue #218), and it is emitted for **every** journal — fixed and adaptive alike
+— so the two A/B arms are read off the same numbers. It carries the header's
+`mode`, `explorationFloor` and `evidenceDecay`, the `allocatedExperiments` count
+(`0` under the fixed allocation, which allocates no slots), and one
+`strategies[]` row per strategy: `allocatedSlots`, `trials`, `promotions`,
+`accepts`, `scoreGain`, `costMs` and `estimatedValue`. The counts and sums are
+the journal's own undecayed totals — what happened — while `estimatedValue` is
+the decayed value the allocator would hold at the end of the journal, computed
+by replaying the journal through the same ledger the run used, so a report never
+disagrees with the allocation it describes. The mechanism, the guardrails and
+the A/B protocol are
+[`docs/strategy-allocation.md`](docs/strategy-allocation.md).
 
 The `analysisMemo` report bucket totals the memo columns — `hits`, `misses`,
 `msSaved`, `hitRate` and `analysisMsSavedFraction` (saved milliseconds as a share
@@ -1621,6 +1683,7 @@ NEAT-AI-Lamarck/
     ├── learning.rs
     ├── propagate_layout.rs
     ├── candidates.rs
+    ├── strategy_allocation.rs # adaptive candidate-budget allocation (issue #218)
     ├── mirror.rs             # mirrored (antithetic) ±δ pairs (issue #203)
     ├── structural.rs        # graph mutation primitives + residual ranking
     ├── combos.rs            # candidate merging and stacked-synapse dampening
