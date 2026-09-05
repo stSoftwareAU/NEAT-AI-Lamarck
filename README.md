@@ -1430,8 +1430,8 @@ always come from one scorer call; a half that reached only the promote map is
 not paired with a screen-phase score. A `--no-mirrored-sampling` journal, or one
 written before the field existed, reports zeros — it scored no pairs.
 
-The `followUp` bucket is what a local follow-up burst is judged on (issue
-#219): `bursts` (accepted wins that emitted one, counted once each) and
+The `followUp` bucket is what a local follow-up burst is judged on
+(issue #219): `bursts` (accepted wins that emitted one, counted once each) and
 `burstExperiments` (the experiments they spanned), `followupCandidates` against
 `ordinaryCandidates`,
 `followupAccepts` against `ordinaryAccepts`, and — the headline pair —
