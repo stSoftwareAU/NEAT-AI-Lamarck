@@ -154,6 +154,70 @@ fn measured_return_moves_slots_towards_the_earning_strategy() {
     );
 }
 
+/// The allocator has to track return at the size it will actually run at.
+///
+/// Value is `reward / (cost + prior)`, so its scale falls as an arm accumulates
+/// scorer time: a nine-candidate test batch and a production batch of 100 at
+/// ~100s per screen call are two different regimes. An exploration bonus fixed
+/// at the test scale swamps the measured value at the production scale and the
+/// allocation quietly reverts to uniform — which is why this asserts on a
+/// production-shaped ledger, not a toy one.
+#[test]
+fn measured_return_still_moves_slots_at_production_batch_sizes() {
+    let index = slot_of(CandidateStrategy::StructuralAdd);
+    // 99 candidates per experiment (11 per arm), a ~100s screen call and a
+    // ~33s promote call, and one accept every fifth experiment.
+    let records: Vec<ExperimentRecord> = (1..=20)
+        .map(|number| {
+            let mut mix = Vec::new();
+            for _ in 0..11 {
+                mix.extend(round_robin_mix());
+            }
+            Experiment {
+                number,
+                mix,
+                promoted: vec![index, index + 9, index + 18],
+                winner: (number % 5 == 0).then_some((index, 3e-6)),
+                screen_ms: 100_000,
+                promote_ms: 33_000,
+            }
+            .record()
+        })
+        .collect();
+    let ledger = ledger_with(&records);
+
+    let allocation = ledger.allocate(
+        adaptive_strategies(false),
+        100,
+        DEFAULT_STRATEGY_EXPLORATION_FLOOR,
+    );
+    let earned = allocation
+        .slots_for(CandidateStrategy::StructuralAdd)
+        .expect("the earning strategy is allocated");
+    let arms = adaptive_strategies(false);
+    let even_share = 100 / arms.len();
+    assert!(
+        earned * 2 >= even_share * 3,
+        "at production scale the earner must take at least half again the even \
+         share ({even_share}), got {earned} — the exploration bonus is swamping \
+         measured value"
+    );
+    let others: Vec<usize> = arms
+        .iter()
+        .filter(|arm| **arm != CandidateStrategy::StructuralAdd)
+        .map(|arm| allocation.slots_for(*arm).unwrap_or(0))
+        .collect();
+    assert!(
+        others.iter().all(|slots| *slots < earned),
+        "the earner must lead the pool: {earned} against {others:?}"
+    );
+    assert!(
+        others.iter().all(|slots| *slots >= 5),
+        "…and the reallocation stays conservative — no arm is starved: {others:?}"
+    );
+    assert_eq!(allocation.total_slots(), 100);
+}
+
 /// Guardrail: the exploration floor keeps every enabled strategy reachable, so
 /// one dominant operator cannot become a monoculture.
 #[test]

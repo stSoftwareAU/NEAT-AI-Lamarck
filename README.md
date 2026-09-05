@@ -888,18 +888,22 @@ Four things stop this becoming a `structural_add` monoculture:
   every enabled strategy keeps whole slots however well one is doing. Where a
   focus share is too small to seat every arm at once, that reserve rotates
   through the coldest arms instead of stranding any of them.
-- Arms that have been tried least are lifted by a UCB bonus against a fixed
-  optimism constant (one improvement at the accept bar per prior window), which
-  is zero before anything has been tried — so an unmeasured pool is split
-  evenly, exactly as round-robin would.
+- Arms that have been tried least are lifted by a UCB bonus towards one
+  imagined improvement at the accept bar, priced against the pool's average
+  measured cost so it means the same thing at any batch size. It is zero before
+  anything has been tried, so an unmeasured pool is split **evenly** — note that
+  this is not the same batch the fixed allocation generates, whose opening
+  quotas deliberately front-load structural probes.
 - `--strategy-evidence-decay` (default `0.9`, half-life ≈ 7 experiments)
   discounts every arm each experiment, and an accept discounts the whole ledger
   again by `0.25`: the evidence describes a creature that has just been
   replaced.
 - A proposal over its strategy's slots is **held back, not dropped**, and is
-  admitted at the end if nothing fresher could fill the budget. An allocation
-  reorders a batch; it never scores a short one. A strategy the allocation does
-  not name is uncapped rather than silenced.
+  admitted at the end if nothing fresher could fill the budget — each leftover
+  slot going to the strategy least over its share, so the refill follows the
+  allocation rather than proposal order. An allocation reorders a batch; it
+  never scores a short one. A strategy the allocation does not name is uncapped
+  rather than silenced.
 
 The slots, and the value each strategy was worth when they were drawn, are
 journalled per experiment as `strategyAllocation` and totalled by `report`. The

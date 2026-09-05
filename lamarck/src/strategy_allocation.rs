@@ -41,16 +41,16 @@
 //!    budget before value is consulted at all — and where the budget is too
 //!    small to seat them all at once, that reserve rotates through the coldest
 //!    arms rather than stranding any of them.
-//! 2. **A UCB bonus.** Arms that have been tried least are lifted by
-//!    [`OPTIMISTIC_VALUE`], so a cold arm keeps a real (not merely nonzero)
-//!    chance of slots.
+//! 2. **A UCB bonus.** Arms that have been tried least are lifted towards
+//!    [`OPTIMISM_REWARD_UNITS`] of imagined return, so a cold arm keeps a real
+//!    (not merely nonzero) chance of slots.
 //! 3. **Decay.** Evidence is multiplied by
 //!    [`crate::config::LamarckConfig::strategy_evidence_decay`] each experiment
 //!    and again by [`INCUMBENT_CHANGE_RETENTION`] whenever an accept replaces
 //!    the incumbent — the creature the evidence was measured against is gone.
 
 use crate::candidates::CandidateStrategy;
-use crate::run::ExperimentRecord;
+use crate::run::{ExperimentRecord, candidate_stem_index};
 use crate::scorer_cost::ScorerCallPhase;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -85,7 +85,7 @@ pub const INCUMBENT_CHANGE_RETENTION: f64 = 0.25;
 /// real improvement, which is exactly the weighting intended.
 pub const PROMOTION_REWARD_UNITS: f64 = 0.05;
 
-/// Weight of the UCB exploration bonus, in units of [`OPTIMISTIC_VALUE`].
+/// Weight of the UCB exploration bonus, in units of the pool's optimism value.
 pub const EXPLORATION_BONUS_WEIGHT: f64 = 0.5;
 
 /// Scorer seconds of assumed silence every arm's value is measured against.
@@ -103,16 +103,17 @@ pub const EXPLORATION_BONUS_WEIGHT: f64 = 0.5;
 /// one.
 pub const PRIOR_COST_SECONDS: f64 = 10.0;
 
-/// What an untried arm is optimistically assumed to be worth, in the units of
-/// [`StrategyEvidence::value`]: one improvement at the accept bar over the
-/// prior window.
+/// Reward the exploration bonus optimistically imagines an arm earning: one
+/// improvement that just clears `--min-improvement`.
 ///
-/// The exploration bonus is scaled by this **fixed** optimism rather than by
-/// the pool's own mean value — the same scale-invariance trap
-/// [`PRIOR_COST_SECONDS`] closes, one level up: a bonus proportional to the
-/// pool would shrink in step with a decaying leader and leave the split between
-/// them unchanged.
-pub const OPTIMISTIC_VALUE: f64 = 1.0 / PRIOR_COST_SECONDS;
+/// The bonus is that reward priced against the pool's **average measured
+/// cost**, not against a constant. A constant cannot be calibrated: value is
+/// `reward / (cost + prior)`, so its scale depends on how much scorer time the
+/// arms have accumulated — tens of seconds in a unit test, hundreds on a
+/// production batch of 100 candidates. A bonus fixed at one scale swamps the
+/// measured value at the other, and the allocation stops tracking return at
+/// exactly the size it was built for.
+pub const OPTIMISM_REWARD_UNITS: f64 = 1.0;
 
 /// Strategies the adaptive allocator may fund (issue #218).
 ///
@@ -212,16 +213,17 @@ impl StrategyEvidence {
     /// Zero for an arm that has returned nothing, whatever it cost, and never
     /// negative: a rejection is evidence about one proposal, not a debt.
     pub fn value(&self, min_improvement: f64) -> f64 {
+        self.rate(self.reward_units(min_improvement))
+    }
+
+    /// `reward_units / (measured seconds + prior seconds)`, floored at zero.
+    fn rate(&self, reward_units: f64) -> f64 {
         let cost_seconds = self.cost_ms / 1_000.0;
         if !cost_seconds.is_finite() || cost_seconds < 0.0 {
             return 0.0;
         }
-        let value = self.reward_units(min_improvement) / (cost_seconds + PRIOR_COST_SECONDS);
-        if value.is_finite() {
-            value.max(0.0)
-        } else {
-            0.0
-        }
+        let rate = reward_units / (cost_seconds + PRIOR_COST_SECONDS);
+        if rate.is_finite() { rate.max(0.0) } else { 0.0 }
     }
 
     fn scale(&mut self, factor: f64) {
@@ -445,13 +447,41 @@ impl StrategyLedger {
     fn indices(&self, arms: &[CandidateStrategy]) -> Vec<f64> {
         let total_trials: f64 = arms.iter().map(|arm| self.evidence(*arm).trials).sum();
         let horizon = (1.0 + total_trials).ln().max(0.0);
+        let optimism = self.optimism(arms);
         arms.iter()
             .map(|arm| {
-                let trials = self.evidence(*arm).trials.max(1.0);
-                self.value(*arm)
-                    + EXPLORATION_BONUS_WEIGHT * OPTIMISTIC_VALUE * (horizon / trials).sqrt()
+                let evidence = self.evidence(*arm);
+                let trials = evidence.trials.max(1.0);
+                evidence.value(self.min_improvement)
+                    + EXPLORATION_BONUS_WEIGHT * optimism * (horizon / trials).sqrt()
             })
             .collect()
+    }
+
+    /// The value an unmeasured arm is imagined to have: [`OPTIMISM_REWARD_UNITS`]
+    /// priced against the **pool's average** cost.
+    ///
+    /// Pool-average, not per-arm: an arm's own cost would make a cheap arm
+    /// look optimistic simply for being cheap, and on a real batch every
+    /// non-promoting arm is cheap — the optimism would then outrank the one arm
+    /// that actually earned something, and the allocation would sit at uniform
+    /// however strong the evidence. Pool-average, not pool-*value*: a bonus
+    /// proportional to measured value cancels exactly against it, so decay
+    /// could not move a slot.
+    fn optimism(&self, arms: &[CandidateStrategy]) -> f64 {
+        if arms.is_empty() {
+            return 0.0;
+        }
+        let mean_cost_ms = arms
+            .iter()
+            .map(|arm| self.evidence(*arm).cost_ms)
+            .sum::<f64>()
+            / arms.len() as f64;
+        StrategyEvidence {
+            cost_ms: mean_cost_ms,
+            ..StrategyEvidence::default()
+        }
+        .rate(OPTIMISM_REWARD_UNITS)
     }
 
     fn decay_all(&mut self, factor: f64) {
@@ -536,11 +566,6 @@ fn phase_costs(record: &ExperimentRecord) -> (f64, f64) {
         }
     }
     (screen_ms, promote_ms)
-}
-
-/// Index of a `candidate-NNN` stem, or `None` for any other stem.
-fn candidate_stem_index(stem: &str) -> Option<usize> {
-    stem.strip_prefix("candidate-")?.parse().ok()
 }
 
 /// Slots the exploration floor reserves for each arm, coldest arms first.

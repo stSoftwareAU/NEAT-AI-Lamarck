@@ -423,7 +423,8 @@ pub struct StrategyAllocationReport {
     pub mode: Option<String>,
     /// Exploration floor from the run header; `None` under fixed allocation.
     pub exploration_floor: Option<f64>,
-    /// Evidence decay from the run header; `None` under fixed allocation.
+    /// Evidence decay from the run header, recorded under both modes; `None`
+    /// only for a journal written before the knob existed.
     pub evidence_decay: Option<f64>,
     /// Experiments that recorded an adaptive allocation.
     pub allocated_experiments: u64,

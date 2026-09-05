@@ -365,7 +365,10 @@ pub fn generate_candidate_batch(
         }),
     };
     let limit = loop {
-        if batch.is_full() {
+        // `can_fill` stops the sweep as soon as the admitted and held-back
+        // proposals together cover the budget (issue #218); `finish` admits the
+        // held-back ones, so this is a met budget, not a short batch.
+        if batch.is_full() || batch.can_fill() {
             break BatchLimit::Budget;
         }
         let productive = fill_round(
@@ -734,6 +737,19 @@ impl<'a> Batch<'a> {
         self.out.len() >= self.count
     }
 
+    /// True when the batch already holds enough proposals — admitted plus held
+    /// back over quota — to fill the budget at [`Self::finish`] (issue #218).
+    ///
+    /// This is what bounds the cost of a binding allocation. An over-quota
+    /// proposal is not `accepted()`, so it never makes a scaled-quota round
+    /// "productive"; without this the generator would sweep the whole
+    /// ranked-source × scale grid — thousands of full creature clones and
+    /// fingerprints on the production creature — building proposals it already
+    /// has enough of.
+    fn can_fill(&self) -> bool {
+        self.allocation.is_some() && self.out.len() + self.over_quota.len() >= self.count
+    }
+
     fn candidates(&self) -> &[Candidate] {
         &self.out
     }
@@ -868,12 +884,20 @@ impl<'a> Batch<'a> {
     /// an over-quota proposal than as an empty one. Admitted before the retired
     /// axes of #203 — an axis both directions of which already lost is the
     /// weaker question of the two.
+    ///
+    /// The refill keeps following the allocation. Each slot goes to the
+    /// held-back proposal whose strategy is **least** over its share so far, so
+    /// leftover slots are spread in the allocation's own proportions instead of
+    /// falling to whichever strategy the generator happens to propose first —
+    /// which is always `structural_add`, and would quietly undo the allocation
+    /// on any creature where the weight strategies run dry.
     fn admit_over_quota(&mut self) {
         while !self.is_full() {
             if self.over_quota.is_empty() {
                 return;
             }
-            let (candidate, perturbation) = self.over_quota.remove(0);
+            let pick = self.least_over_subscribed();
+            let (candidate, perturbation) = self.over_quota.remove(pick);
             self.charge_quota(candidate.provenance.strategy);
             self.out.push(candidate);
             if self.mirror.enabled
@@ -882,6 +906,34 @@ impl<'a> Batch<'a> {
                 self.push_mirror(self.out.len() - 1, &perturbation);
             }
         }
+    }
+
+    /// Index into `over_quota` of the proposal whose strategy has taken the
+    /// smallest multiple of its allocated slots so far; ties keep proposal
+    /// order.
+    fn least_over_subscribed(&self) -> usize {
+        let overshoot = |strategy: CandidateStrategy| -> f64 {
+            let used = self.used.get(&strategy).copied().unwrap_or(0) as f64;
+            match self.allocation.and_then(|a| a.slots_for(strategy)) {
+                // An unallocated arm was never capped, so it cannot be over its
+                // share; an allocated arm with no slots is always the furthest
+                // over its share once it has taken any.
+                None => used,
+                // An arm allocated no slots is last in the queue the moment it
+                // has taken one.
+                Some(0) if used > 0.0 => f64::INFINITY,
+                Some(0) => 0.0,
+                Some(slots) => used / slots as f64,
+            }
+        };
+        self.over_quota
+            .iter()
+            .enumerate()
+            .min_by(|(_, (a, _)), (_, (b, _))| {
+                overshoot(a.provenance.strategy).total_cmp(&overshoot(b.provenance.strategy))
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(0)
     }
 
     fn finish(mut self, limit: BatchLimit) -> CandidateBatch {
@@ -3351,6 +3403,42 @@ mod tests {
             "an unfillable allocation must not shrink the batch"
         );
         assert_eq!(batch.limit, BatchLimit::Budget);
+    }
+
+    /// Issue #218: when the funded arms cannot fill the batch, the refill
+    /// still follows the allocation — slots are spread across the held-back
+    /// strategies rather than falling to whichever the generator proposes
+    /// first, which is always `structural_add`.
+    #[test]
+    fn the_refill_spreads_across_strategies_rather_than_by_proposal_order() {
+        // Every arm capped at zero: nothing can be admitted normally, so the
+        // whole batch comes from the held-back queue.
+        let starving = allocation_of(&[
+            (CandidateStrategy::Backprop, 0),
+            (CandidateStrategy::MeanErrorBias, 0),
+            (CandidateStrategy::StatsWeight, 0),
+            (CandidateStrategy::StatsBias, 0),
+            (CandidateStrategy::StatsSkewBias, 0),
+            (CandidateStrategy::StructuralAdd, 0),
+            (CandidateStrategy::StructuralAddNeuron, 0),
+            (CandidateStrategy::StructuralWeaken, 0),
+            (CandidateStrategy::Random, 0),
+        ]);
+        let batch = allocated_batch(Some(&starving), 12);
+        assert_eq!(batch.candidates.len(), 12, "the budget must still bind");
+        let mix = batch.strategy_mix();
+        assert!(
+            mix.len() >= 4,
+            "the refill must spread across strategies, got {mix:?}"
+        );
+        let adds = mix
+            .get(&CandidateStrategy::StructuralAdd)
+            .copied()
+            .unwrap_or(0);
+        assert!(
+            adds * 2 <= batch.candidates.len(),
+            "proposal order must not hand the batch to structural_add: {mix:?}"
+        );
     }
 
     /// Issue #218: a strategy the allocation does not name is uncapped, so an

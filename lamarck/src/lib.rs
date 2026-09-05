@@ -114,9 +114,9 @@ pub use screen_calibration::{
 };
 pub use strategy_allocation::{
     AllocationPolicy, DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR,
-    EXPLORATION_BONUS_WEIGHT, INCUMBENT_CHANGE_RETENTION, PROMOTION_REWARD_UNITS,
-    StrategyAllocation, StrategyAllocationMode, StrategyEvidence, StrategyLedger,
-    adaptive_strategies,
+    EXPLORATION_BONUS_WEIGHT, INCUMBENT_CHANGE_RETENTION, OPTIMISM_REWARD_UNITS,
+    PRIOR_COST_SECONDS, PROMOTION_REWARD_UNITS, StrategyAllocation, StrategyAllocationMode,
+    StrategyEvidence, StrategyLedger, adaptive_strategies,
 };
 pub use tags::{
     CreatureMeta, CreatureTag, LamarckProgress, NeuronOrigin, lamarck_neuron_origin_message,

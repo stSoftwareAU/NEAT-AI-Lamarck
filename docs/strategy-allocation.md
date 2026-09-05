@@ -63,7 +63,7 @@ flowchart TD
     ACC -- no --> V
     RET --> V["value = reward units /<br/>(scorer seconds + 10s prior)"]
     V --> FLOOR["reserve the exploration floor:<br/>an even share, odd slots to the coldest arms"]
-    FLOOR --> UCB["apportion what is left by<br/>value + under-trial bonus"]
+    FLOOR --> UCB["apportion what is left by<br/>value + under-trial optimism"]
     UCB --> SLOTS(["per-strategy slots for the next batch"])
     SLOTS --> GEN["generator: a strategy over its slots<br/>is held back, not dropped"]
     GEN --> SHORT{"budget unmet<br/>at the end?"}
@@ -96,18 +96,41 @@ The index each arm is apportioned on is its value plus a UCB-style bonus for
 being under-tried:
 
 ```text
-index_i = value_i + 0.5 × 0.1 × sqrt( ln(1 + Σ trials) / trials_i )
+optimism = 1 accept-bar improvement / (mean cost seconds over the arms + 10)
+index_i  = value_i + 0.5 × optimism × sqrt( ln(1 + Σ trials) / trials_i )
 ```
 
-`0.1` is the optimism constant — one improvement at the accept bar over the
-prior window, in the same units as `value`. It is deliberately **fixed** rather
-than scaled by the pool's own mean value: a bonus proportional to the pool would
-shrink in step with a decaying leader and leave the split between them
-unchanged, which is the same scale-invariance trap the prior closes one level
-down. Against a fixed reference, a leader that stops earning really does fall
-back towards the cold arms. With nothing tried at all the horizon is `ln(1) = 0`
-and every index is zero, so an unmeasured pool is split **evenly** — exactly the
-round-robin allocation adaptive mode has to beat.
+The optimism term is what a strategy would be worth if it earned **one**
+improvement at the accept bar, priced against what the pool has been spending.
+Both halves of that matter:
+
+* **Not a constant.** `value` is a rate, so its scale depends on how much scorer
+  time the arms have accumulated — tens of seconds in a unit test, hundreds on a
+  100-candidate production batch. A bonus fixed at one scale swamps the measured
+  value at the other, and the allocation stops tracking return at exactly the
+  size it was built for.
+* **Pool-average cost, not the arm's own.** An arm's own cost would make a cheap
+  arm look promising simply for being cheap, and on a real batch every
+  non-promoting arm is cheap — the optimism would outrank the one arm that
+  actually earned something.
+* **Cost, not value.** A bonus proportional to the pool's measured *value*
+  cancels exactly against that value, so the split between a leader and the rest
+  would be identical however far the ledger decayed.
+
+With nothing tried at all the horizon is `ln(1) = 0`, every index is zero, and
+the apportionment falls back to an **even split** — no strategy preferred on
+evidence nobody has. That is not the same batch the fixed allocation would
+generate: its opening quotas deliberately front-load structural probes, so
+`structural_add` and `structural_add_neuron` take more than a ninth of a fixed
+batch. Adaptive mode starts even and moves from there.
+
+On a production-shaped ledger — 100 candidates, a ~100s screen call, a ~33s
+promote call and one accept every fifth experiment — that puts the earning arm
+at roughly **twice** the even share with every other arm still near it. The
+reallocation is deliberately conservative: it concentrates as evidence
+accumulates and gives the slots back when the evidence goes stale, which
+`lamarck/tests/strategy_allocation.rs::measured_return_still_moves_slots_at_production_batch_sizes`
+and `::decayed_evidence_gives_back_slots_it_won` pin from both directions.
 
 ## Why it cannot become a monoculture
 
@@ -118,8 +141,8 @@ elimination. Four things bound it, in the order they bind.
    Reserved *before* value is consulted and spread evenly, odd slots to the
    coldest arms, so every enabled strategy keeps whole slots however well one is
    doing. Set it to `0` only for a deliberate pure-exploitation arm.
-2. **The UCB bonus.** A cold arm is lifted by a fixed optimism constant in
-   proportion to how little it has been tried.
+2. **The UCB bonus.** A cold arm is lifted towards one imagined accept-bar
+   improvement, in proportion to how little it has been tried.
 3. **Decay** (`--strategy-evidence-decay`, default `0.9`, half-life ≈ 7
    experiments) and an extra ×`0.25` whenever an accept replaces the incumbent.
    Evidence describes a creature that no longer exists the moment it accepts.
@@ -132,6 +155,13 @@ elimination. Four things bound it, in the order they bind.
    slots is *held back*, and admitted at the end if nothing fresher could fill
    the budget — the same contract mirrored sampling uses for a retired axis
    (issue #203). An allocation reorders a batch; it never scores a short one.
+   The refill follows the allocation too: each leftover slot goes to the
+   held-back proposal whose strategy is least over its share, so it cannot fall
+   to whichever strategy the generator happens to propose first (always
+   `structural_add`). Generation also stops as soon as the admitted and
+   held-back proposals together cover the budget, so a binding allocation cannot
+   make the generator sweep the whole ranked-source grid building candidates it
+   has no room for.
 
 A strategy the allocation does not name is **uncapped**, not silenced: an
 allocation drawn over a different arm set (`--structural-only`, say) has said

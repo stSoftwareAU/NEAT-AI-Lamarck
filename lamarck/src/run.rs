@@ -964,7 +964,7 @@ fn merge_batch_limits(limits: &[BatchLimit]) -> BatchLimit {
 }
 
 /// Index of a `candidate-NNN` stem, or `None` for any other stem.
-fn candidate_stem_index(stem: &str) -> Option<usize> {
+pub(crate) fn candidate_stem_index(stem: &str) -> Option<usize> {
     stem.strip_prefix("candidate-")?.parse().ok()
 }
 
