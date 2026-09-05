@@ -444,7 +444,7 @@ struct StrategyAllocationAccumulator {
 }
 
 impl StrategyAllocationAccumulator {
-    fn push_header(&mut self, config: &crate::run::RunConfigRecord) {
+    fn push_header(&mut self, config: &RunConfigRecord) {
         self.mode = config.strategy_allocation.clone();
         self.exploration_floor = config.strategy_exploration_floor;
         self.evidence_decay = config.strategy_evidence_decay;

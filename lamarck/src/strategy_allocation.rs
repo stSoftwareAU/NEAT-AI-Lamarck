@@ -31,8 +31,6 @@
 //! `value = reward units / (cost seconds + `[`PRIOR_COST_SECONDS`]`)`. A
 //! strategy that has cost time and returned nothing is worth zero — never
 //! negative, because a rejection is evidence about one proposal, not a debt.
-//! The prior prices a thin sample honestly and, as [`StrategyEvidence::value`]
-//! explains, is what lets decay move an allocation at all.
 //!
 //! # Why it cannot become a monoculture
 //!
@@ -110,11 +108,10 @@ pub const PRIOR_COST_SECONDS: f64 = 10.0;
 /// prior window.
 ///
 /// The exploration bonus is scaled by this **fixed** optimism rather than by
-/// the pool's own mean value. A bonus proportional to the pool would shrink in
-/// step with a decaying leader, leaving the split between them unchanged — the
-/// same scale-invariance trap [`PRIOR_COST_SECONDS`] exists to close, one level
-/// up. Against a fixed reference, a leader that stops earning really does fall
-/// back towards the cold arms.
+/// the pool's own mean value — the same scale-invariance trap
+/// [`PRIOR_COST_SECONDS`] closes, one level up: a bonus proportional to the
+/// pool would shrink in step with a decaying leader and leave the split between
+/// them unchanged.
 pub const OPTIMISTIC_VALUE: f64 = 1.0 / PRIOR_COST_SECONDS;
 
 /// Strategies the adaptive allocator may fund (issue #218).
@@ -210,20 +207,10 @@ impl StrategyEvidence {
     }
 
     /// Reward units per second of measured scorer cost, shrunk towards zero by
-    /// [`PRIOR_COST_SECONDS`].
+    /// [`PRIOR_COST_SECONDS`] — see that constant for why the prior is there.
     ///
-    /// The prior is what makes decay *bite*. A bare `reward / cost` ratio is
-    /// scale-invariant: multiplying an arm's whole ledger by `0.25` after an
-    /// incumbent change would leave its value — and therefore its slots —
-    /// exactly where they were, so the discount would be a no-op on the very
-    /// decision it exists to influence. Dividing by `cost + prior` instead
-    /// makes a decayed arm converge on zero, which is where an arm with no
-    /// evidence already sits, so stale evidence really does return the pool
-    /// towards the even split.
-    ///
-    /// It is also the honest reading of a thin sample: one accept on two
-    /// seconds of scorer time is a rate estimate nobody should act on, and the
-    /// prior prices it as `gain / (2 + prior)` rather than `gain / 2`.
+    /// Zero for an arm that has returned nothing, whatever it cost, and never
+    /// negative: a rejection is evidence about one proposal, not a debt.
     pub fn value(&self, min_improvement: f64) -> f64 {
         let cost_seconds = self.cost_ms / 1_000.0;
         if !cost_seconds.is_finite() || cost_seconds < 0.0 {

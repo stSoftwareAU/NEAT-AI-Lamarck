@@ -143,7 +143,10 @@ Each experiment under adaptive allocation carries a `strategyAllocation` object:
 the `explorationFloor` in force, the `slots` each strategy was given, and the
 `value` it was worth when they were drawn. A multi-focus experiment allocates
 per focus and journals the slots summed across them. The run header records
-`strategyAllocation`, `strategyExplorationFloor` and `strategyEvidenceDecay`.
+`strategyAllocation` and `strategyEvidenceDecay` under both modes — the ledger
+accumulates either way, and a report has to replay it with the decay the run
+used — and `strategyExplorationFloor` only under `adaptive`, where something is
+actually reserved.
 
 `neat_ai_lamarck report` emits a `strategyAllocation` bucket for **every**
 journal, fixed and adaptive alike, so the two A/B arms are read off the same
