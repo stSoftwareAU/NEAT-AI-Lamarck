@@ -27,6 +27,16 @@ What was tested instead:
   --check`, clippy with `-D warnings`, `cargo test --workspace
   --all-features`, `cargo doc` with `-D warnings`): *All quality checks
   passed!*
+- **Re-run on the resumed session** — `./quality.sh` reached the codespell
+  preflight and stopped there because `codespell` is not installed in this
+  container (`spell-check: codespell is not installed.`), and no `pip` is
+  available to install it. Every stage before it reported OK, and each stage
+  after it was then run individually and passed: `cargo deny check`
+  (*advisories ok, bans ok, licenses ok, sources ok*), `cargo fmt --all --
+  --check`, `cargo clippy --workspace --all-targets --all-features -- -D
+  warnings …`, `cargo test --workspace --all-features -- --test-threads=2`
+  (every binary green, no failures), and `RUSTDOCFLAGS="-D warnings" cargo doc
+  --workspace --no-deps`. CI runs codespell on the PR.
 - **Tests** — every test binary green; 25 new tests (11 integration, 4
   generator, 8 unit, 2 end-to-end run, 5 doc-contract).
 - **`report` on a realistic journal** — a six-experiment adaptive journal
