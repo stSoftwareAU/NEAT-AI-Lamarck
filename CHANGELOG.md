@@ -37,14 +37,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `scorerCalls`. `--strategy-allocation fixed` remains the default and the A/B
   arm it is measured against. Four guardrails stop it becoming a
   `structural_add` monoculture: a `--strategy-exploration-floor` (default
-  `0.2`) reserved and split evenly *before* value is consulted, a UCB bonus for
-  under-tried arms that vanishes on an unmeasured pool (which is therefore
-  split evenly, exactly as round-robin), `--strategy-evidence-decay` (default
-  `0.9`) plus an extra ×`0.25` whenever an accept replaces the incumbent the
-  evidence was measured against, and a generator that **holds back** an
-  over-quota proposal rather than dropping it — admitted at the end if nothing
-  fresher could fill the budget, so an allocation reorders a batch and never
-  scores a short one. A strategy the allocation does not name is uncapped, not
+  `0.2`) reserved *before* value is consulted and spread evenly, its odd slots
+  rotating to the least-tried arms so the guarantee holds at any budget; a UCB
+  bonus priced against the pool's average measured cost, so it means the same
+  thing on a nine-candidate test batch and a hundred-candidate production one,
+  and is zero before anything has been tried (an unmeasured pool is split
+  evenly); `--strategy-evidence-decay` (default `0.9`) plus an extra ×`0.25`
+  whenever an accept replaces the incumbent the evidence was measured against,
+  reaching the allocation and not merely the ledger because value is shrunk by
+  a ten-scorer-second prior; and a generator that **holds back** an over-quota
+  proposal rather than dropping it — admitted at the end, least-over-share
+  first, if nothing fresher could fill the budget, so an allocation reorders a
+  batch and never scores a short one. A strategy the allocation does not name is uncapped, not
   silenced. Slots and the value behind them are journalled per experiment as
   `strategyAllocation`, the header records the knobs, and `report` gains a
   `strategyAllocation` bucket — allocated slots, trials, promotions, accepts,
