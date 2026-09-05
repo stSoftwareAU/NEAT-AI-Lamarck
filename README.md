@@ -1709,9 +1709,9 @@ above installed:
 ```
 
 It runs shellcheck, the TypeScript validity gate, the auto-format and
-version-increment workflow validators, the workflow install-pin gate,
-codespell, cargo-deny, fmt `--check`, clippy with warnings denied, the tests,
-and rustdoc.
+version-increment workflow validators, the workflow install-pin and container
+pin gates, codespell, cargo-deny, fmt `--check`, clippy with warnings denied,
+the tests, and rustdoc.
 
 CI runs on pull requests to `Develop` and includes fmt/clippy/tests/docs,
 cargo-deny, gitleaks, cargo-audit, dependency-review, Semgrep, markdownlint,
@@ -1782,6 +1782,53 @@ Bumping the pin is an ordinary dependency change: update the version in
 `.github/workflows/markdown-lint.yml`, re-run `./quality.sh`, and land it in a
 reviewed PR. The repository runs no Renovate app, so nothing bumps the pin
 behind your back.
+
+### Workflow container pin gate (Issue #212)
+
+Container images carry the same risk as `uses:` references, and the two halves
+of a pin do different jobs. The `sha256:` digest makes the image immutable, so a
+compromised namespace cannot re-push a tag under CI. The tag is what identifies
+the release: dependency updaters resolve a bump from it and rewrite the digest
+beside it, and a human reading the workflow can see which version runs. A bare
+digest — `semgrep/semgrep@sha256:a9ea…` — reads as hardened but is frozen
+forever, because there is nothing to resolve a newer release from.
+`scripts/check-workflow-container-pins.sh` therefore requires both halves on
+every `image:` value in `.github/workflows`.
+
+```bash
+./scripts/check-workflow-container-pins.sh              # .github/workflows
+./scripts/check-workflow-container-pins.sh --verbose    # list every image found
+./scripts/check-workflow-container-pins.sh --dir <dir>  # a different directory
+```
+
+`semgrep/semgrep:1.86.0@sha256:a9ea…` passes; a bare digest, a bare tag, a
+malformed digest and a tag supplied by a workflow expression all fail. Docker
+resolves `name:tag@digest` by digest and ignores the tag, so adding the tag
+changes nothing about which bytes run. A deliberate exception is suppressed
+in-source, on or above the line:
+
+```yaml
+# best-practice-ignore: BP-CONTAINER-PIN-<image> — <reason>
+```
+
+Exit codes: `0` everything pinned, `1` a bad pin was found, `2` invalid
+invocation. The gate runs from `./quality.sh` and from the CI **Project
+Validation** job; `scripts/test-check-workflow-container-pins.sh` pins its
+behaviour against throwaway workflow fixtures.
+
+```mermaid
+flowchart LR
+    A["image: name…"] --> B{"digest present?"}
+    B -- no --> E["fail loud — mutable tag"]
+    B -- yes --> C{"tag present?"}
+    C -- no --> F["fail loud — never bumped"]
+    C -- yes --> G["pass — immutable and bumpable"]
+```
+
+Bumping a container image is the same reviewed change as any other pin: update
+the tag, the digest and the version-label comment in lockstep (the protocol is
+documented at the top of `.github/workflows/semgrep.yml`), then re-run
+`./quality.sh`.
 
 PRs also run an auto-format / housekeeping job
 (`.github/workflows/auto-format.yml`, Issue #33). The job runs

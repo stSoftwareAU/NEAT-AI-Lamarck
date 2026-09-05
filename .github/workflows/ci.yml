@@ -173,6 +173,12 @@ jobs:
       - name: Refuse floating package installs in workflow steps (Issue #169)
         run: ./scripts/check-workflow-npm-pins.sh
 
+      - name: WHAT — workflow container pin gate behaviour (Issue #212)
+        run: ./scripts/test-check-workflow-container-pins.sh
+
+      - name: Require tag+digest pins on workflow container images (Issue #212)
+        run: ./scripts/check-workflow-container-pins.sh
+
   shell-checks:
     name: Shell Script Quality
     runs-on: ubuntu-latest
