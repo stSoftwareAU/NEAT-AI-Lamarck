@@ -7,7 +7,7 @@ name: Cargo Quality
 #     fires on PRs into every OTHER branch, so feature branches and stacked
 #     PRs targeting non-Develop bases also get fmt and clippy coverage.
 #   * Keeps a small, fast, single-purpose gate that is cheap to re-run
-#     when iterating on style or lint fixes.
+#     when iterating on style or lint fixes
 #
 # The filter is `branches-ignore`, not `branches: ["**"]` (Issue #213): `**`
 # is a genuine wildcard that also re-matched `Develop` and `milestone/**`, so
