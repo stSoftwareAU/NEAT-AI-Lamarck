@@ -72,6 +72,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **fmt + clippy no longer run twice on Develop / milestone PRs (Issue #213).**
+  `.github/workflows/cargo-quality.yml` exists to cover the feature-branch PRs
+  `ci.yml` skips, but its `branches: ["**"]` filter is a genuine wildcard that
+  also re-matched `Develop` and `milestone/**` — the branches `ci.yml`'s
+  `quality` job already gates — so the majority of PRs here ran the same
+  `cargo fmt --all -- --check` and a near-identical clippy lint twice for zero
+  extra coverage. The trigger is now
+  `branches-ignore: [Develop, "milestone/**"]`; `ci.yml` stays the
+  authoritative gate on that path (it feeds `ci-required`). The new
+  `scripts/check-cargo-quality-overlap.sh` reads both workflows' own
+  `pull_request` filters and fails if they overlap again — or if the exclusion
+  is widened until no feature branch is covered at all. It runs from
+  `./quality.sh` and the CI **Project Validation** job;
+  `scripts/test-check-cargo-quality-overlap.sh` pins the gate's own behaviour.
+
 - **Memetic pruning is now neat-core's, so it cannot drift from rule 31
   (Issue #199).** `lamarck/src/memetic.rs` re-derived rule 31's resolution
   vocabulary, but it could only reproduce the derivable half: a neuron

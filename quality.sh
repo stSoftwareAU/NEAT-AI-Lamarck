@@ -72,6 +72,12 @@ echo "WHAT: workflow container pin gate behaviour (Issue #212)..."
 echo "Requiring tag+digest pins on workflow container images (Issue #212)..."
 ./scripts/check-workflow-container-pins.sh
 
+echo "WHAT: cargo-quality trigger overlap gate behaviour (Issue #213)..."
+./scripts/test-check-cargo-quality-overlap.sh
+
+echo "Refusing a cargo-quality trigger that duplicates ci.yml (Issue #213)..."
+./scripts/check-cargo-quality-overlap.sh
+
 echo "WHAT: lamarck version order (no downgrade vs base)..."
 ./scripts/test-check-lamarck-version-order.sh
 

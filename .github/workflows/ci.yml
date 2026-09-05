@@ -179,6 +179,12 @@ jobs:
       - name: Require tag+digest pins on workflow container images (Issue #212)
         run: ./scripts/check-workflow-container-pins.sh
 
+      - name: WHAT — cargo-quality trigger overlap gate behaviour (Issue #213)
+        run: ./scripts/test-check-cargo-quality-overlap.sh
+
+      - name: Refuse a cargo-quality trigger that duplicates this workflow (Issue #213)
+        run: ./scripts/check-cargo-quality-overlap.sh
+
   shell-checks:
     name: Shell Script Quality
     runs-on: ubuntu-latest
