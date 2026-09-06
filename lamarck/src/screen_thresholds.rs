@@ -19,12 +19,16 @@
 //!
 //! * **Win margin** — with at least one promoted candidate whose full Δ cleared
 //!   the accept bar, the threshold is set to half the *smallest* winning screen
-//!   Δ. That keeps every winner the strategy has ever shown, with a 2× margin
-//!   underneath it, and raises the bar on a family whose winners screen loudly.
+//!   Δ **in the window**, with a 2× margin underneath it. A window is 128
+//!   observations, so a winner that ages out stops holding the bar down.
 //! * **Loss quantile** — a family with enough promotions and no winner at all
 //!   has only wasted calls to learn from, so the threshold moves to the median
 //!   screen Δ of its losing promotions: half of what it bought would not have
-//!   been bought.
+//!   been bought. That sample is **censored** — it holds only what the gate in
+//!   force promoted — so the branch is braked by the weakest *improving*
+//!   candidate the family has shown, and declines entirely when the screen
+//!   scored that improvement at or below zero. Without the brake the branch
+//!   would ratchet on its own past tightening rather than on evidence.
 //! * **Shared** — below [`MIN_CALIBRATION_PAIRS`] paired observations, or with
 //!   no usable statistic, the strategy falls back to the run's shared threshold
 //!   exactly. Insufficient evidence changes nothing.
@@ -401,7 +405,10 @@ impl ScreenThresholdLedger {
 }
 
 /// Stems this experiment promoted as below-threshold controls.
-fn control_stems(record: &ExperimentRecord) -> std::collections::BTreeSet<&str> {
+///
+/// Empty for a shared-threshold experiment and for a journal written before the
+/// record existed — neither promoted a control.
+pub fn control_stems(record: &ExperimentRecord) -> std::collections::BTreeSet<&str> {
     record
         .screen_thresholds
         .iter()
@@ -411,12 +418,20 @@ fn control_stems(record: &ExperimentRecord) -> std::collections::BTreeSet<&str> 
         .collect()
 }
 
-/// Strategy label behind a stem, or [`UNATTRIBUTED_STRATEGY`].
-pub fn strategy_label(record: &ExperimentRecord, stem: &str) -> String {
+/// Strategy behind a stem, when the stem indexes a journalled provenance.
+///
+/// `None` for a merged combo — assembled after the screen, so no strategy
+/// proposed it under that name — and for a journal too old to carry
+/// provenances.
+pub fn strategy_of(record: &ExperimentRecord, stem: &str) -> Option<String> {
     candidate_stem_index(stem)
         .and_then(|index| record.candidates.get(index))
         .map(|provenance| provenance.strategy.label().to_string())
-        .unwrap_or_else(|| UNATTRIBUTED_STRATEGY.to_string())
+}
+
+/// Strategy label behind a stem, or [`UNATTRIBUTED_STRATEGY`].
+pub fn strategy_label(record: &ExperimentRecord, stem: &str) -> String {
+    strategy_of(record, stem).unwrap_or_else(|| UNATTRIBUTED_STRATEGY.to_string())
 }
 
 /// Derive a strategy's threshold multiplier from its paired observations.
@@ -464,7 +479,23 @@ pub fn calibrated_multiplier(
         return None;
     }
     losses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let target = interpolated_quantile(&losses, LOSS_QUANTILE);
+    let quantile = interpolated_quantile(&losses, LOSS_QUANTILE);
+    // The loss sample is **censored**: it holds only candidates the gate in
+    // force already promoted, so its quantile always sits above that gate, and
+    // an unbounded loss branch would ratchet a family up to the clamp on
+    // nothing but its own past tightening. The weakest *improving* candidate is
+    // the brake: whatever the losses say, the bar never rises past half the
+    // smallest screen Δ that produced a real full-corpus improvement, so a
+    // family that keeps improving — without yet clearing the accept bar — keeps
+    // its signal. Only a family with no improvement at all is free to ratchet,
+    // and the control sample is what can still rescue it.
+    let target = match weakest_improving(pairs) {
+        Some(weakest) if weakest > 0.0 => quantile.min(weakest * WIN_MARGIN),
+        // An improvement the screen scored at or below zero says the gate
+        // cannot see this family: it may not be tightened at all.
+        Some(_) => return None,
+        None => quantile,
+    };
     if !target.is_finite() || target <= 0.0 {
         return None;
     }
@@ -472,6 +503,19 @@ pub fn calibrated_multiplier(
         clamp_multiplier(target / floor),
         ThresholdBasis::LossQuantile,
     ))
+}
+
+/// Smallest screen Δ among the candidates the full corpus scored **above zero**.
+///
+/// A weaker signal than a win — it need not clear the accept bar — which is
+/// exactly why it is the brake on the loss branch rather than a threshold of
+/// its own. `None` when the family has never improved on the full corpus.
+fn weakest_improving(pairs: &[PairedScreenObservation]) -> Option<f64> {
+    pairs
+        .iter()
+        .filter(|pair| pair.full_delta > 0.0 && pair.screen_delta.is_finite())
+        .map(|pair| pair.screen_delta)
+        .reduce(f64::min)
 }
 
 /// Bound a raw multiplier to what calibration is allowed to move.
@@ -640,6 +684,12 @@ pub struct ScreenThresholdReplay {
     /// Accepted winners calibration would still have promoted.
     pub accepts_kept: u64,
     /// Accepted winners calibration would have discarded.
+    ///
+    /// Deliberately **pessimistic**: the replay models the control sample as a
+    /// count, not as a draw of named stems, so a winner below the calibrated
+    /// bar is counted dropped even where a control draw might have promoted it
+    /// anyway. The error is in the safe direction — the replay never
+    /// under-states the accepts a calibrated arm risks.
     pub accepts_dropped: u64,
     /// Full-corpus improvement those dropped accepts carried.
     pub improvement_dropped: f64,
@@ -647,6 +697,12 @@ pub struct ScreenThresholdReplay {
     pub promote_ms_per_creature: Option<f64>,
     /// Full-corpus scorer seconds the calibrated arm would have saved
     /// (negative when it buys more than it avoids).
+    ///
+    /// Priced **per creature**, at the journal's own measured promote cost. A
+    /// scorer call also carries a fixed per-call cost (`docs/scorer-fixed-cost.md`),
+    /// which this model does not move: avoiding candidates from a call that
+    /// still happens saves only the marginal cost counted here, and avoiding a
+    /// whole call saves more than this says.
     pub promote_seconds_saved: Option<f64>,
     /// The journal's measured score improvement per wall hour.
     pub score_improvement_per_wall_hour_as_run: Option<f64>,
@@ -1003,6 +1059,36 @@ mod tests {
         assert_eq!(basis, ThresholdBasis::LossQuantile);
         // Median of the eight is 4.5e-6 against a 1e-6 floor.
         assert!((multiplier - 4.5).abs() < 1e-12, "multiplier {multiplier}");
+    }
+
+    /// The loss branch is braked by the weakest improving candidate, so a
+    /// censored loss sample cannot ratchet a family that is still improving.
+    #[test]
+    fn the_loss_quantile_never_rises_past_a_measured_improvement() {
+        // Eight losing promotions at 4e-6, plus one candidate the full corpus
+        // scored barely above zero on a screen Δ of 1e-6.
+        let mut pairs: Vec<_> = [1e-6, 2e-6, 3e-6, 4e-6, 5e-6, 6e-6, 7e-6, 8e-6]
+            .iter()
+            .map(|screen| pair(*screen, -1e-7))
+            .collect();
+        pairs.push(pair(1e-6, 5e-7));
+        let (multiplier, basis) = calibrated_multiplier(&pairs, 1e-6, 1e-6).expect("eight losses");
+        assert_eq!(basis, ThresholdBasis::LossQuantile);
+        // The median loss alone would say 4.5e-6; the improvement caps it at
+        // 0.5 × 1e-6, so the bar is not raised past what the family has shown.
+        assert!((multiplier - 0.5).abs() < 1e-12, "multiplier {multiplier}");
+    }
+
+    /// An improvement the screen scored at or below zero blocks the loss
+    /// branch outright: that family cannot be tightened on censored evidence.
+    #[test]
+    fn an_invisible_improvement_blocks_the_loss_branch() {
+        let mut pairs: Vec<_> = [1e-6, 2e-6, 3e-6, 4e-6, 5e-6, 6e-6, 7e-6, 8e-6]
+            .iter()
+            .map(|screen| pair(*screen, -1e-7))
+            .collect();
+        pairs.push(pair(-2e-7, 5e-7));
+        assert_eq!(calibrated_multiplier(&pairs, 1e-6, 1e-6), None);
     }
 
     /// Too few losses to quantile, and no win: nothing is claimed.

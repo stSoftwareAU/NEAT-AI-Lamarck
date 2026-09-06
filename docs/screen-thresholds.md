@@ -42,8 +42,8 @@ from that window:
 | Basis | When it applies | The threshold |
 |-------|-----------------|---------------|
 | `shared` | Fewer than 8 paired observations, or no usable statistic | The run's shared threshold, unchanged |
-| `win-margin` | The family has at least one promotion whose full Δ cleared the accept bar | Half the **weakest** winning screen Δ |
-| `loss-quantile` | No winner, and at least 8 promotions the full corpus scored at or below zero | The **median** losing screen Δ |
+| `win-margin` | The family has at least one promotion whose full Δ cleared the accept bar | Half the **weakest** winning screen Δ in the window |
+| `loss-quantile` | No winner, and at least 8 promotions the full corpus scored at or below zero | The **median** losing screen Δ, capped by half the weakest *improving* screen Δ |
 
 The result is expressed as a multiplier on the threshold the batch's own promote
 gate resolved — the absolute floor, or the noise-aware `max(k · σ̂, floor)` — so
@@ -57,7 +57,7 @@ flowchart TD
     N -- yes --> W{"any full Δ > accept bar?"}
     W -- yes --> WIN["0.5 x weakest winning screen Δ"]
     W -- no --> L{"8+ promotions at or below zero?"}
-    L -- yes --> LOSS["median losing screen Δ"]
+    L -- yes --> LOSS["median losing screen Δ,<br/>capped by 0.5 x weakest improving Δ"]
     L -- no --> SHARED
     WIN --> CLAMP["clamp to [floor/8, floor x 8]"]
     LOSS --> CLAMP
@@ -89,6 +89,15 @@ calibration could quietly go wrong:
 * **A winner the screen scored at or below zero drops the family to the bounded
   minimum** rather than to a threshold computed from a number with no scale in
   it. Half of `-1e-7` is not a gate.
+* **The loss sample is censored, and the estimator says so.** It holds only the
+  candidates the gate in force promoted, so its median always sits *above* that
+  gate — an unbraked loss branch would ratchet a family towards the clamp on
+  nothing but its own past tightening. The brake is the weakest **improving**
+  candidate (full Δ above zero, whether or not it cleared the accept bar): the
+  bar never rises past half its screen Δ, and the branch declines outright when
+  the screen scored that improvement at or below zero. Only a family that has
+  never improved at all can ratchet, and the control sample is what can still
+  rescue it.
 * **Recency, not decay.** The estimator is a quantile, and a quantile of
   fractionally weighted points is not a number anybody can check by hand. The
   window keeps it a plain order statistic over the observations closest to the
@@ -146,8 +155,8 @@ economics:
 | `screenCalibration.byStrategy[].recommendedMultiplier`, `recommendedThreshold`, `basis` | What this journal's own evidence says its threshold should be, from the same estimator a calibrated run applies. |
 | `screenThresholdReplay.promotedAsRun`, `promotedUnderCalibration` | Full-corpus scores the run bought, against what calibration would have bought. |
 | `screenThresholdReplay.promotionsAvoided`, `promotionsAdded`, `controlPromotions` | The difference, with the control sample charged to the calibrated arm. |
-| `screenThresholdReplay.acceptsKept`, `acceptsDropped`, `improvementDropped` | The number that decides whether the calibration is safe. |
-| `screenThresholdReplay.promoteMsPerCreature`, `promoteSecondsSaved` | The journal's own measured promote cost, and what the avoided calls are worth in seconds. |
+| `screenThresholdReplay.acceptsKept`, `acceptsDropped`, `improvementDropped` | The number that decides whether the calibration is safe. Pessimistic by construction: the replay models controls as a count rather than as named stems, so a winner below the calibrated bar is counted dropped even where a control draw might have promoted it. |
+| `screenThresholdReplay.promoteMsPerCreature`, `promoteSecondsSaved` | The journal's own measured promote cost, and what the avoided calls are worth in seconds — priced **per creature** only. A call's fixed cost ([`docs/scorer-fixed-cost.md`](scorer-fixed-cost.md)) is not modelled, so avoiding a whole call saves more than this says. |
 | `screenThresholdReplay.scoreImprovementPerWallHourAsRun`, `projectedScoreImprovementPerWallHour` | The gate metric as measured, and under calibration. |
 
 The replay is offline: it re-derives the thresholds from the journal's own

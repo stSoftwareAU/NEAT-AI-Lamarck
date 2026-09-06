@@ -21,7 +21,7 @@ use crate::run::{ExperimentRecord, RunConfigRecord};
 use crate::scorer_cost::ScorerCallPhase;
 use crate::screen_thresholds::{
     CALIBRATION_WINDOW, MIN_CALIBRATION_PAIRS, PairedScreenObservation, ThresholdBasis,
-    UNATTRIBUTED_STRATEGY, calibrated_multiplier,
+    UNATTRIBUTED_STRATEGY, calibrated_multiplier, control_stems, strategy_of,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -440,32 +440,19 @@ impl ScreenCalibrationAccumulator {
     }
 }
 
-/// Stems an experiment promoted as below-threshold controls (issue #220).
-fn control_stems(record: &ExperimentRecord) -> std::collections::BTreeSet<&str> {
-    record
-        .screen_thresholds
-        .iter()
-        .flat_map(|thresholds| thresholds.candidates.iter())
-        .filter(|candidate| candidate.control)
-        .map(|candidate| candidate.stem.as_str())
-        .collect()
-}
-
 /// Measured promote-phase milliseconds for one experiment.
 ///
-/// Zero for a journal too old to carry per-call records: a cost that was never
-/// measured is reported as zero rather than estimated into existence.
+/// Promote calls only. A combo is assembled **after** the screen and carries no
+/// strategy of its own, so charging its call to the screened families would
+/// smear cost across candidates that did not cause it. Zero for a journal too
+/// old to carry per-call records: a cost that was never measured is reported as
+/// zero rather than estimated into existence.
 fn promote_call_ms(record: &ExperimentRecord) -> f64 {
     record
         .scorer_calls
         .iter()
         .flatten()
-        .filter(|call| {
-            matches!(
-                call.phase,
-                ScorerCallPhase::Promote | ScorerCallPhase::Combo
-            ) && !call.failed
-        })
+        .filter(|call| call.phase == ScorerCallPhase::Promote && !call.failed)
         .map(|call| call.elapsed_ms as f64)
         .sum()
 }
@@ -548,15 +535,6 @@ fn candidate_stems(scores: &BTreeMap<String, f64>) -> impl Iterator<Item = (&str
         .iter()
         .filter(|(stem, _)| stem.as_str() != "baseline")
         .map(|(stem, score)| (stem.as_str(), *score))
-}
-
-/// Strategy behind a `candidate-NNN` stem, when the index resolves.
-fn strategy_of(record: &ExperimentRecord, stem: &str) -> Option<String> {
-    let index: usize = stem.strip_prefix("candidate-")?.parse().ok()?;
-    record
-        .candidates
-        .get(index)
-        .map(|prov| prov.strategy.label().to_string())
 }
 
 /// The pairs with duplicate (screen Δ, full Δ) points removed, first occurrence

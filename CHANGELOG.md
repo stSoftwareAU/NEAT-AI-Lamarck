@@ -32,9 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   With `--screen-threshold-mode per-strategy`, each family's threshold is now
   scaled from its own journalled `(screen Δ, full Δ)` window
   (`lamarck/src/screen_thresholds.rs`): half the weakest winning screen Δ where
-  the family has won, the median losing screen Δ where it has only ever wasted
-  promote calls, and the **shared threshold unchanged** below eight paired
-  observations. The multiplier is clamped to `[1/8, 8]` and applied to whatever
+  the family has won, the median losing screen Δ — capped by half the weakest
+  screen Δ it has ever *improved* on, because that loss sample only holds what
+  the gate already promoted — where it has only ever wasted promote calls, and
+  the **shared threshold unchanged** below eight paired observations. The multiplier is clamped to `[1/8, 8]` and applied to whatever
   the batch's own promote gate resolved, so it composes with the absolute and
   noise-aware gates rather than replacing either. Calibration never makes the
   screen authoritative: the full-corpus scorer remains the only acceptance gate.

@@ -70,6 +70,27 @@ impl DirectoryScorer for ImprovingScorer {
     }
 }
 
+/// A scorer whose **sample** loves every candidate and whose **full corpus**
+/// hates them: the screen is as wrong as it can be, in the direction that
+/// would matter if the screen could accept anything.
+struct MisleadingScreenScorer;
+
+impl DirectoryScorer for MisleadingScreenScorer {
+    fn score_directory_sampled(
+        &self,
+        candidates_dir: &Path,
+        _training_data: &Path,
+        sample: ScoreSample,
+    ) -> Result<BTreeMap<String, ScoreResult>, ScorerError> {
+        let sampled = sample.rate < 1.0;
+        Ok(score_batch(candidates_dir, |stem| match (stem, sampled) {
+            ("baseline", _) => BASE_SCORE,
+            (_, true) => BASE_SCORE + 1e-2,
+            (_, false) => BASE_SCORE - 1e-2,
+        }))
+    }
+}
+
 fn score_batch(
     candidates_dir: &Path,
     score: impl Fn(&str) -> f64,
@@ -307,6 +328,44 @@ fn the_shared_threshold_run_is_unchanged() {
             "the shared arm bought a full-corpus score for a batch it rejected"
         );
     }
+}
+
+/// The critical guardrail: calibration decides what is *scored*, never what is
+/// *accepted*. A screen that loves every candidate — including the controls it
+/// promotes below threshold — accepts nothing once the full corpus disagrees.
+#[test]
+fn calibration_never_makes_the_screen_authoritative() {
+    let dir = tempdir().unwrap();
+    let result = run_optimisation(
+        &run_config(dir.path(), ScreenThresholdMode::PerStrategy),
+        &MisleadingScreenScorer,
+    )
+    .unwrap();
+
+    let records = experiments(&result);
+    assert!(!records.is_empty(), "the run journalled no experiment");
+    let mut promoted = 0;
+    for record in &records {
+        assert!(
+            !record.accepted,
+            "experiment {} accepted on sampled evidence the full corpus contradicts",
+            record.experiment_number
+        );
+        assert!(record.winner.is_none());
+        promoted += record.scores.keys().filter(|s| *s != "baseline").count();
+        // Whatever the screen said, every full-corpus Δ here is negative.
+        let baseline = record.scores.get("baseline").copied().unwrap_or_default();
+        for (stem, score) in &record.scores {
+            if stem != "baseline" {
+                assert!(*score < baseline, "{stem} did not lose on the full corpus");
+            }
+        }
+    }
+    assert!(
+        promoted > 0,
+        "the misleading screen must have promoted something for this to prove anything"
+    );
+    assert_eq!(result.acceptances, 0, "the run accepted on screen evidence");
 }
 
 /// Acceptance: `report` breaks the calibration down by strategy and prices the

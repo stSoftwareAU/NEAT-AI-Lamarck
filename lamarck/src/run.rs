@@ -280,9 +280,19 @@ pub struct ScreenTierRecord {
     pub gate: String,
     /// Candidates the screen tier scored (baseline excluded).
     pub screened: u64,
-    /// Candidates the gate admitted to full-corpus scoring.
+    /// Candidates admitted to full-corpus scoring.
+    ///
+    /// Under `--screen-threshold-mode per-strategy` (issue #220) this is the
+    /// **post-calibration** count — per-strategy thresholds plus the control
+    /// draw — while [`Self::threshold`] stays the shared threshold the batch
+    /// gate resolved. `screenThresholds` records what each candidate actually
+    /// faced, so the two are read together rather than against each other.
     pub promoted: u64,
     /// Screen Δ a candidate had to clear in this batch.
+    ///
+    /// The **shared** threshold the batch's gate resolved. Under per-strategy
+    /// calibration a candidate faced this scaled by its strategy's multiplier;
+    /// `screenThresholds.candidates[].threshold` is the number that judged it.
     pub threshold: f64,
     /// σ̂ estimated for this batch; omitted under the absolute gate and when
     /// the batch was too degenerate to price its own noise.
@@ -1031,14 +1041,20 @@ pub(crate) fn candidate_stem_index(stem: &str) -> Option<usize> {
 /// measured against, never a candidate — carrying the strategy its stem
 /// indexes. A stem with no resolvable provenance keeps its `None` strategy and
 /// is gated on the shared threshold.
+///
+/// A batch with no `baseline` is a fault, not an empty batch: every Δ here is
+/// measured against it, so returning "nothing to promote" would silently drop
+/// the whole batch. It is the same loud failure
+/// [`crate::screen_thresholds::ScreenThresholdReplayAccumulator::push_experiment`]
+/// and [`crate::promote_gate`] make on the same condition.
 fn screened_candidates(
     screen_scores: &BTreeMap<String, ScoreResult>,
     candidates: &[Candidate],
-) -> Vec<ScreenedCandidate> {
-    let Some(baseline) = screen_scores.get("baseline") else {
-        return Vec::new();
-    };
-    screen_scores
+) -> Result<Vec<ScreenedCandidate>, String> {
+    let baseline = screen_scores
+        .get("baseline")
+        .ok_or_else(|| "screen scores have no baseline to measure deltas against".to_string())?;
+    Ok(screen_scores
         .iter()
         .filter(|(stem, _)| stem.as_str() != "baseline")
         .map(|(stem, score)| ScreenedCandidate {
@@ -1048,7 +1064,7 @@ fn screened_candidates(
                 .map(|candidate| candidate.provenance.strategy),
             screen_delta: improvement(score.score, baseline.score),
         })
-        .collect()
+        .collect())
 }
 
 /// One-line rendering of the calibrated thresholds for the run log.
@@ -1315,8 +1331,9 @@ pub fn run_optimisation_cancellable(
     let mut strategy_ledger = allocation_policy.ledger(config.min_improvement);
     // Measured screen-versus-full-corpus evidence per strategy, consulted
     // before each screen batch under `--screen-threshold-mode per-strategy`
-    // (issue #220). It accumulates under the shared threshold too, so a shared
-    // arm's journal carries the same evidence the calibrated arm acted on.
+    // (issue #220). Every journalled experiment feeds it under both modes, so
+    // there is one journal path and `report` — which rebuilds this ledger from
+    // the journal alone — derives exactly what a calibrated run would apply.
     let mut screen_ledger =
         ScreenThresholdLedger::new(config.screen_promote_threshold, config.min_improvement);
     // Last-accept details for the final run-summary stamp (Issue #35).
@@ -2154,8 +2171,10 @@ pub fn run_optimisation_cancellable(
             if let Some(economics) = cache_economics.as_mut() {
                 economics.observe_screen(screen_ms, screen_scores.len());
             }
-            // Report the batch against the threshold the gate actually applied,
-            // so the ">threshold" count cannot disagree with what is promoted.
+            // Report the batch against the threshold the shared gate resolved.
+            // Under `--screen-threshold-mode per-strategy` that is not the last
+            // word — the per-strategy thresholds and the control draw below
+            // decide the promoted set, and the line they log is what states it.
             log_scorer_batch_stats_labeled(&screen_scores, screen_ms, decision.threshold, "screen");
             consecutive_scorer_failures = 0;
             screen_score_map = Some(
@@ -2172,16 +2191,19 @@ pub fn run_optimisation_cancellable(
                 false => decision.stems.clone(),
                 true => {
                     let calibrated = calibrate_screen_batch(
-                        &screened_candidates(&screen_scores, &candidates),
+                        &screened_candidates(&screen_scores, &candidates)?,
                         decision.threshold,
                         &screen_ledger,
                         &screen_threshold_policy,
                         &mut rng,
                     );
                     log::detail(&format!(
-                        "screen thresholds ({}): {} — {} control promotion(s) below threshold",
+                        "screen thresholds ({}): {} — promoted {} of {} \
+                         incl. {} control promotion(s) below threshold",
                         calibrated.record.model_version,
                         threshold_summary(&calibrated.record),
+                        calibrated.stems.len(),
+                        decision.screened,
                         calibrated.record.controls,
                     ));
                     screen_threshold_record = Some(calibrated.record);
