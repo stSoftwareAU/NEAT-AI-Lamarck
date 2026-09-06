@@ -33,6 +33,7 @@ pub mod scorer_cost;
 pub mod screen_calibration;
 pub mod screen_thresholds;
 pub mod strategy_allocation;
+pub mod strategy_priors;
 pub mod structural;
 pub mod tags;
 pub mod validate;
@@ -132,6 +133,13 @@ pub use strategy_allocation::{
     EXPLORATION_BONUS_WEIGHT, INCUMBENT_CHANGE_RETENTION, OPTIMISM_REWARD_UNITS,
     PRIOR_COST_SECONDS, PROMOTION_REWARD_UNITS, StrategyAllocation, StrategyAllocationMode,
     StrategyEvidence, StrategyLedger, adaptive_strategies,
+};
+pub use strategy_priors::{
+    CORPUS_MISMATCH_CONFIDENCE, DEFAULT_STRATEGY_PRIORS_HALF_LIFE_HOURS, MAX_PRIOR_TRIALS,
+    PriorConfidence, PriorSeed, PriorSource, PriorsPolicy, STRATEGY_PRIORS_FILE,
+    STRATEGY_PRIORS_FORMAT_VERSION, STRATEGY_PRIORS_MAX_AGE_HOURS, StrategyPriors,
+    StrategyPriorsMode, TOPOLOGY_DRIFT_CONFIDENCE, TOPOLOGY_MATCH_CONFIDENCE, load_priors,
+    priors_path, write_priors,
 };
 pub use tags::{
     CreatureMeta, CreatureTag, LamarckProgress, NeuronOrigin, lamarck_neuron_origin_message,

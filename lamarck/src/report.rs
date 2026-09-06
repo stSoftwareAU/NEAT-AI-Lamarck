@@ -6,11 +6,13 @@ use crate::config::DEFAULT_MIN_IMPROVEMENT;
 use crate::log;
 use crate::mirror::{MirrorStats, pair_outcomes};
 use crate::promote_gate::{PromoteGateReplay, PromoteGateReplayAccumulator};
-use crate::run::{ExperimentRecord, JournalLine, RunConfigRecord, RunResult};
+use crate::run::{ExperimentRecord, JournalLine, RunConfigRecord, RunResult, StrategyPriorsRecord};
 use crate::scorer_cost::{ScorerCallCost, ScorerCallCostAccumulator};
 use crate::screen_calibration::{ScreenCalibration, ScreenCalibrationAccumulator};
 use crate::screen_thresholds::{ScreenThresholdReplay, ScreenThresholdReplayAccumulator};
-use crate::strategy_allocation::{DEFAULT_STRATEGY_EVIDENCE_DECAY, StrategyLedger};
+use crate::strategy_allocation::{
+    DEFAULT_STRATEGY_EVIDENCE_DECAY, StrategyEvidence, StrategyLedger,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -410,6 +412,46 @@ pub struct StrategyAllocationRow {
     pub cost_ms: f64,
     /// Decayed reward units per scorer second at the end of the journal.
     pub estimated_value: f64,
+    /// Trials this arm inherited from persisted priors (issue #221).
+    ///
+    /// Counted apart from [`Self::trials`], which is what the journal's own
+    /// experiments measured, so prior-driven standing is never read as fresh
+    /// evidence. `0` on a cold-start journal.
+    pub prior_trials: f64,
+    /// Share of the arm's **decayed** trials still coming from the prior.
+    ///
+    /// Falls as the run measures its own evidence, so it says how much of the
+    /// allocator's current opinion the run inherited rather than earned.
+    pub prior_share: f64,
+}
+
+/// The operator priors a run opened with (issue #221).
+///
+/// Present only when the journal carries a `strategyPriors` line — a
+/// cold-start journal reports `None` rather than a prior of zero confidence,
+/// because "started cold" and "seeded nothing" are different runs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyPriorsReport {
+    /// Prior format version that was read.
+    pub format_version: String,
+    /// Age of the priors when they were read, in hours.
+    pub age_hours: f64,
+    /// Confidence applied to the persisted evidence.
+    pub confidence: f64,
+    /// Age factor behind [`Self::confidence`].
+    pub age_confidence: f64,
+    /// Corpus-fingerprint factor behind [`Self::confidence`].
+    pub corpus_confidence: f64,
+    /// Source-creature factor behind [`Self::confidence`].
+    pub source_confidence: f64,
+    /// Trials seeded across every arm, after confidence and capping.
+    pub seeded_trials: f64,
+    /// Arms seeded.
+    pub seeded_arms: usize,
+    /// Why nothing was seeded, when a file was present but unusable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<String>,
 }
 
 /// Strategy-allocation economics for one run journal (issue #218).
@@ -429,6 +471,10 @@ pub struct StrategyAllocationReport {
     pub evidence_decay: Option<f64>,
     /// Experiments that recorded an adaptive allocation.
     pub allocated_experiments: u64,
+    /// Operator-prior mode from the run header (`off` / `seed`, issue #221).
+    pub priors_mode: Option<String>,
+    /// What the run inherited from persisted priors; `None` on a cold start.
+    pub priors: Option<StrategyPriorsReport>,
     /// One row per strategy, in label order.
     pub strategies: Vec<StrategyAllocationRow>,
 }
@@ -443,6 +489,8 @@ struct StrategyAllocationAccumulator {
     allocated_experiments: u64,
     allocated_slots: BTreeMap<String, u64>,
     ledgers: Option<(StrategyLedger, StrategyLedger)>,
+    priors_mode: Option<String>,
+    priors: Option<StrategyPriorsReport>,
 }
 
 impl StrategyAllocationAccumulator {
@@ -451,6 +499,35 @@ impl StrategyAllocationAccumulator {
         self.exploration_floor = config.strategy_exploration_floor;
         self.evidence_decay = config.strategy_evidence_decay;
         self.min_improvement = Some(config.min_improvement);
+        self.priors_mode = config.strategy_priors.clone();
+    }
+
+    /// Replay the priors line: seed both ledgers exactly as the run did (#221).
+    ///
+    /// The evidence in the record is what was *applied* — already discounted
+    /// and capped — so the report inherits the run's arithmetic rather than
+    /// re-deriving it from a confidence it would have to guess.
+    fn push_priors(&mut self, record: &StrategyPriorsRecord) {
+        let mut seeded: BTreeMap<CandidateStrategy, StrategyEvidence> = BTreeMap::new();
+        for (label, evidence) in &record.seeded {
+            if let Some(strategy) = CandidateStrategy::parse(label) {
+                *seeded.entry(strategy).or_default() = *evidence;
+            }
+        }
+        let (totals, decayed) = self.ledgers();
+        totals.seed_priors(&seeded);
+        decayed.seed_priors(&seeded);
+        self.priors = Some(StrategyPriorsReport {
+            format_version: record.format_version.clone(),
+            age_hours: record.confidence.age_hours,
+            confidence: record.confidence.confidence,
+            age_confidence: record.confidence.age,
+            corpus_confidence: record.confidence.corpus,
+            source_confidence: record.confidence.source,
+            seeded_trials: seeded.values().map(|evidence| evidence.trials).sum(),
+            seeded_arms: seeded.len(),
+            rejected: record.rejected.clone(),
+        });
     }
 
     /// Totals and decayed ledgers, built on first use from the header's knobs.
@@ -506,6 +583,8 @@ impl StrategyAllocationAccumulator {
                     score_gain: evidence.score_gain,
                     cost_ms: evidence.cost_ms,
                     estimated_value: decayed.value(strategy),
+                    prior_trials: totals.prior_evidence(strategy).trials,
+                    prior_share: decayed.prior_share(strategy),
                 });
             }
             // A strategy that was allocated slots but proposed nothing is still
@@ -525,6 +604,8 @@ impl StrategyAllocationAccumulator {
             exploration_floor: self.exploration_floor,
             evidence_decay: self.evidence_decay,
             allocated_experiments: self.allocated_experiments,
+            priors_mode: self.priors_mode,
+            priors: self.priors,
             strategies,
         }
     }
@@ -977,6 +1058,10 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             }
             JournalLine::CacheStandDown(stand_down) => {
                 cache.push_stand_down(&stand_down);
+                continue;
+            }
+            JournalLine::StrategyPriors(priors) => {
+                strategy_allocation.push_priors(&priors);
                 continue;
             }
             JournalLine::Experiment(record) => *record,

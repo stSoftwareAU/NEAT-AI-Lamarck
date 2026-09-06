@@ -52,6 +52,34 @@ pub enum CandidateStrategy {
 }
 
 impl CandidateStrategy {
+    /// Every strategy, in declaration order.
+    ///
+    /// The one list a label round-trip can be built from, so a new variant
+    /// cannot be parseable in one place and unknown in another.
+    pub const ALL: [CandidateStrategy; 10] = [
+        CandidateStrategy::Backprop,
+        CandidateStrategy::MeanErrorBias,
+        CandidateStrategy::StatsWeight,
+        CandidateStrategy::StatsBias,
+        CandidateStrategy::StatsSkewBias,
+        CandidateStrategy::StructuralAdd,
+        CandidateStrategy::StructuralAddNeuron,
+        CandidateStrategy::StructuralWeaken,
+        CandidateStrategy::Random,
+        CandidateStrategy::FollowUp,
+    ];
+
+    /// The strategy behind a journal label, or `None` for an unknown one.
+    ///
+    /// `None` rather than a default: a label this build does not recognise —
+    /// an operator added by a newer Lamarck, say — must be reported by the
+    /// caller, never quietly read as some other strategy's evidence.
+    pub fn parse(label: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|strategy| strategy.label() == label)
+    }
+
     /// Journal / log name of the strategy (the `serde` snake-case spelling).
     pub fn label(self) -> &'static str {
         match self {

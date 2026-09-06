@@ -23,6 +23,10 @@ use crate::strategy_allocation::{
     AllocationPolicy, DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR,
     StrategyAllocationMode,
 };
+use crate::strategy_priors::{
+    DEFAULT_STRATEGY_PRIORS_HALF_LIFE_HOURS, PriorsPolicy, STRATEGY_PRIORS_MAX_AGE_HOURS,
+    StrategyPriorsMode, priors_path,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -115,6 +119,18 @@ pub struct LamarckConfig {
     pub strategy_exploration_floor: f64,
     /// Per-experiment decay applied to measured strategy evidence (issue #218).
     pub strategy_evidence_decay: f64,
+    /// Whether the run seeds its allocation from persisted priors (issue #221).
+    ///
+    /// [`StrategyPriorsMode::Off`] — the default — neither reads nor writes
+    /// them, and is the cold-start arm the seeded run is measured against.
+    pub strategy_priors: StrategyPriorsMode,
+    /// Priors file read at startup and written at the end (issue #221).
+    ///
+    /// `None` uses `strategy-priors.json` inside [`Self::output_dir`]. Set it
+    /// to carry one chain of evidence across runs that write elsewhere.
+    pub strategy_priors_path: Option<PathBuf>,
+    /// Half-life of prior confidence in hours (issue #221).
+    pub strategy_priors_half_life_hours: f64,
     /// Absolute score delta required for acceptance (`candidate - baseline`).
     pub min_improvement: f64,
     /// Optional deterministic RNG seed.
@@ -388,6 +404,35 @@ impl LamarckConfig {
         })
     }
 
+    /// Operator-prior policy for this run, validated (issue #221).
+    ///
+    /// A half-life that is not finite and positive, or that exceeds the maximum
+    /// age past which a prior carries nothing, is a configuration fault. It is
+    /// reported rather than silently replaced: a run that quietly ignored the
+    /// knob would invalidate the A/B it was set for. Validated under both
+    /// modes, so a typo cannot hide behind a cold-start run.
+    pub fn strategy_priors_policy(&self) -> Result<PriorsPolicy, String> {
+        let half_life = self.strategy_priors_half_life_hours;
+        if !half_life.is_finite() || half_life <= 0.0 {
+            return Err(format!(
+                "--strategy-priors-half-life-hours must be finite and greater than 0 (got {half_life})"
+            ));
+        }
+        if half_life > STRATEGY_PRIORS_MAX_AGE_HOURS {
+            return Err(format!(
+                "--strategy-priors-half-life-hours must be at most the {STRATEGY_PRIORS_MAX_AGE_HOURS}h maximum prior age (got {half_life})"
+            ));
+        }
+        Ok(PriorsPolicy {
+            mode: self.strategy_priors,
+            path: self
+                .strategy_priors_path
+                .clone()
+                .unwrap_or_else(|| priors_path(&self.output_dir)),
+            half_life_hours: half_life,
+        })
+    }
+
     /// Baseline-reuse policy for this run, validated (issue #113).
     ///
     /// When [`Self::baseline_drift_epsilon`] is `None`, the epsilon is
@@ -461,6 +506,11 @@ impl Default for LamarckConfig {
             strategy_allocation: StrategyAllocationMode::Fixed,
             strategy_exploration_floor: DEFAULT_STRATEGY_EXPLORATION_FLOOR,
             strategy_evidence_decay: DEFAULT_STRATEGY_EVIDENCE_DECAY,
+            // Opt-in: a cold start is the arm prior-seeded runs are measured
+            // against, so nothing is read or written until it is asked for.
+            strategy_priors: StrategyPriorsMode::Off,
+            strategy_priors_path: None,
+            strategy_priors_half_life_hours: DEFAULT_STRATEGY_PRIORS_HALF_LIFE_HOURS,
             min_improvement: DEFAULT_MIN_IMPROVEMENT,
             seed: None,
             scorer_path: PathBuf::from("rust_scorer"),

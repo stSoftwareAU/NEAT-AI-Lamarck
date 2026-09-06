@@ -7,6 +7,9 @@ use neat_ai_lamarck::screen_thresholds::{DEFAULT_SCREEN_CONTROL_RATE, ScreenThre
 use neat_ai_lamarck::strategy_allocation::{
     DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR, StrategyAllocationMode,
 };
+use neat_ai_lamarck::strategy_priors::{
+    DEFAULT_STRATEGY_PRIORS_HALF_LIFE_HOURS, StrategyPriorsMode,
+};
 use neat_ai_lamarck::{
     CancelToken, DEFAULT_ANALYSIS_MEMO_ENTRIES, DEFAULT_ANALYSIS_THREADS,
     DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
@@ -94,6 +97,32 @@ struct Cli {
     /// incumbent cannot fund itself forever.
     #[arg(long, default_value_t = DEFAULT_STRATEGY_EVIDENCE_DECAY)]
     strategy_evidence_decay: f64,
+
+    /// Operator priors carried across runs: off (default) | seed (issue #221).
+    ///
+    /// `seed` reads `strategy-priors.json` at startup, discounts it for age and
+    /// source/corpus drift, and uses it to initialise the strategy ledger the
+    /// adaptive allocator draws from — then writes this run's own decayed
+    /// evidence back at the end. Only operator-level aggregates travel: no
+    /// historical candidate is ever replayed, and every candidate is still
+    /// screened and scored as it would be on a cold start. `off` is the
+    /// cold-start arm the seeded run is measured against.
+    #[arg(long, default_value = "off")]
+    strategy_priors: String,
+
+    /// Priors file to read at startup and write at the end (issue #221).
+    ///
+    /// Defaults to `strategy-priors.json` inside `--output-dir`. Point
+    /// consecutive runs at one path to carry a single chain of evidence.
+    #[arg(long)]
+    strategy_priors_path: Option<PathBuf>,
+
+    /// Half-life of prior confidence in hours under `--strategy-priors seed`.
+    ///
+    /// Confidence is `0.5 ^ (age / half-life)`, and zero once the priors are
+    /// older than the 168h maximum age, so stale history defunds itself.
+    #[arg(long, default_value_t = DEFAULT_STRATEGY_PRIORS_HALF_LIFE_HOURS)]
+    strategy_priors_half_life_hours: f64,
 
     /// Minimum absolute score improvement (strict `>`).
     #[arg(long, default_value_t = DEFAULT_MIN_IMPROVEMENT)]
@@ -410,6 +439,14 @@ fn main() -> ExitCode {
             std::process::exit(2);
         });
 
+    let strategy_priors = StrategyPriorsMode::parse(&cli.strategy_priors).unwrap_or_else(|| {
+        eprintln!(
+            "unknown --strategy-priors '{}'; expected off|seed",
+            cli.strategy_priors
+        );
+        std::process::exit(2);
+    });
+
     let config = LamarckConfig {
         creature,
         training_data,
@@ -420,6 +457,9 @@ fn main() -> ExitCode {
         strategy_allocation,
         strategy_exploration_floor: cli.strategy_exploration_floor,
         strategy_evidence_decay: cli.strategy_evidence_decay,
+        strategy_priors,
+        strategy_priors_path: cli.strategy_priors_path.clone(),
+        strategy_priors_half_life_hours: cli.strategy_priors_half_life_hours,
         min_improvement: cli.min_improvement,
         seed: cli.seed,
         scorer_path: cli.scorer.clone(),
@@ -491,6 +531,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = config.strategy_allocation_policy() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.strategy_priors_policy() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }

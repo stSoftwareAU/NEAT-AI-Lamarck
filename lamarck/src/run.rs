@@ -51,7 +51,11 @@ use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
 use crate::screen_thresholds::{
     ScreenThresholdLedger, ScreenThresholdRecord, ScreenedCandidate, calibrate_screen_batch,
 };
-use crate::strategy_allocation::{StrategyAllocation, StrategyLedger};
+use crate::strategy_allocation::{StrategyAllocation, StrategyEvidence, StrategyLedger};
+use crate::strategy_priors::{
+    PriorConfidence, PriorSeed, PriorSource, PriorsPolicy, STRATEGY_PRIORS_FORMAT_VERSION,
+    StrategyPriors, load_priors, write_priors,
+};
 use crate::structural::{is_input_source, rank_unused_sources};
 use crate::tags::{CreatureMeta, LamarckProgress, NeuronOrigin, serialize_creature_with_meta};
 use crate::width::{assert_same_width, checked_creature_json_pretty, load_creature};
@@ -425,6 +429,16 @@ pub struct RunConfigRecord {
     /// existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_evidence_decay: Option<f64>,
+    /// Operator-prior mode in force (`off` / `seed`, issue #221).
+    ///
+    /// `None` in journals written before the knob existed — those started
+    /// cold, which is still the default.
+    #[serde(default)]
+    pub strategy_priors: Option<String>,
+    /// Half-life of prior confidence in hours; `None` under `off`, where
+    /// nothing is read and so nothing is discounted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_priors_half_life_hours: Option<f64>,
     /// Absolute score delta required for acceptance.
     pub min_improvement: f64,
     /// Screen subsample rate (`None` = full-corpus scoring only).
@@ -570,6 +584,11 @@ impl RunConfigRecord {
                 .is_adaptive()
                 .then_some(config.strategy_exploration_floor),
             strategy_evidence_decay: Some(config.strategy_evidence_decay),
+            strategy_priors: Some(config.strategy_priors.label().to_string()),
+            strategy_priors_half_life_hours: config
+                .strategy_priors
+                .is_enabled()
+                .then_some(config.strategy_priors_half_life_hours),
             min_improvement: config.min_improvement,
             screen_sample_rate: config.screen_sample_rate,
             screen_promote_threshold: config.screen_promote_threshold,
@@ -735,6 +754,93 @@ impl CacheStandDownRecord {
     }
 }
 
+/// Discriminator for an operator-priors journal line (issue #221).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StrategyPriorsKind {
+    /// This line is a priors seeding event, not an experiment.
+    StrategyPriors,
+}
+
+/// One journal line recording the operator priors a run opened with (#221).
+///
+/// Written once, before the first experiment, whenever `--strategy-priors seed`
+/// is in force — including when there was nothing usable to seed, which is what
+/// makes a cold-looking run distinguishable from one whose priors were refused.
+/// `report` replays this line to separate prior-driven evidence from what the
+/// run measured for itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyPriorsRecord {
+    /// Discriminates this line from an [`ExperimentRecord`].
+    pub record: StrategyPriorsKind,
+    /// Unix timestamp the priors were read at.
+    pub timestamp_unix: u64,
+    /// Format version of the file that was read.
+    pub format_version: String,
+    /// Unix timestamp the priors were written at.
+    pub written_unix: u64,
+    /// Confidence applied, and the age / corpus / source factors behind it.
+    pub confidence: PriorConfidence,
+    /// Evidence actually folded into the ledger, by strategy label.
+    pub seeded: BTreeMap<String, StrategyEvidence>,
+    /// Arm labels in the file this build does not recognise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_arms: Vec<String>,
+    /// Why no priors were seeded, when a file was present but unusable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<String>,
+}
+
+impl StrategyPriorsRecord {
+    /// Journal line for priors that were read and seeded.
+    pub fn new(
+        priors: &StrategyPriors,
+        confidence: &PriorConfidence,
+        seed: &PriorSeed,
+        timestamp_unix: u64,
+    ) -> Self {
+        Self {
+            record: StrategyPriorsKind::StrategyPriors,
+            timestamp_unix,
+            format_version: priors.format_version.clone(),
+            written_unix: priors.written_unix,
+            confidence: *confidence,
+            seeded: seed
+                .arms
+                .iter()
+                .map(|(strategy, evidence)| (strategy.label().to_string(), *evidence))
+                .collect(),
+            unknown_arms: seed.unknown.clone(),
+            rejected: None,
+        }
+    }
+
+    /// Journal line for a run that seeded nothing, and why.
+    ///
+    /// A missing file is a legitimate cold start; an unreadable or
+    /// version-mismatched one is a fault. Both are recorded rather than left to
+    /// look like a run that simply had no history.
+    pub fn rejected(reason: String, timestamp_unix: u64) -> Self {
+        Self {
+            record: StrategyPriorsKind::StrategyPriors,
+            timestamp_unix,
+            format_version: STRATEGY_PRIORS_FORMAT_VERSION.to_string(),
+            written_unix: 0,
+            confidence: PriorConfidence {
+                age_hours: 0.0,
+                age: 0.0,
+                corpus: 0.0,
+                source: 0.0,
+                confidence: 0.0,
+            },
+            seeded: BTreeMap::new(),
+            unknown_arms: Vec::new(),
+            rejected: Some(reason),
+        }
+    }
+}
+
 /// One line of `experiments.jsonl`: run header, graft replay or experiment.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
@@ -747,6 +853,8 @@ pub enum JournalLine {
     ScorerCalls(Box<ScorerCallsRecord>),
     /// Failed-cache stand-down event (issue #92).
     CacheStandDown(Box<CacheStandDownRecord>),
+    /// Operator priors the run opened with (issue #221).
+    StrategyPriors(Box<StrategyPriorsRecord>),
     /// One experiment outcome.
     Experiment(Box<ExperimentRecord>),
 }
@@ -779,6 +887,10 @@ impl JournalLine {
             Some("cacheStandDown") => {
                 let stand_down = serde_json::from_str(line).map_err(|e| e.to_string())?;
                 Ok(Self::CacheStandDown(Box::new(stand_down)))
+            }
+            Some("strategyPriors") => {
+                let priors = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                Ok(Self::StrategyPriors(Box::new(priors)))
             }
             Some(other) => Err(format!("unknown journal record kind: {other}")),
             None => {
@@ -1108,6 +1220,7 @@ pub fn run_optimisation_cancellable(
     let promote_gate = config.promote_gate()?;
     let followup_budget = config.followup_budget()?;
     let allocation_policy = config.strategy_allocation_policy()?;
+    let priors_policy = config.strategy_priors_policy()?;
     let screen_threshold_policy = config.screen_threshold_policy()?;
     // Load and validate the creature before anything is written (issue #165):
     // an `input < 1` / `output < 1` creature has no observation width, cannot
@@ -1329,6 +1442,17 @@ pub fn run_optimisation_cancellable(
     // (issue #218). The ledger accumulates under the fixed allocation too, so
     // an A/B arm's journal carries the same evidence the adaptive arm acted on.
     let mut strategy_ledger = allocation_policy.ledger(config.min_improvement);
+    // Operator priors carried from an earlier run (issue #221). Seeded once,
+    // before the first experiment, and discounted for age and source/corpus
+    // drift on the way in; from there the ordinary per-experiment decay is
+    // what lets this run's own evidence take the ledger back.
+    seed_strategy_priors(
+        &priors_policy,
+        &mut strategy_ledger,
+        &prior_source(&incumbent, &config.training_data),
+        &journal_path,
+        unix_now(),
+    )?;
     // Measured screen-versus-full-corpus evidence per strategy, consulted
     // before each screen batch under `--screen-threshold-mode per-strategy`
     // (issue #220). Every journalled experiment feeds it under both modes, so
@@ -2994,6 +3118,17 @@ pub fn run_optimisation_cancellable(
         unix_now(),
     )?;
 
+    // Carry this run's decayed operator evidence to the next run (issue #221).
+    // Keyed to the incumbent the run *ends* on, which is the creature the
+    // evidence was last measured against.
+    write_strategy_priors(
+        &priors_policy,
+        &strategy_ledger,
+        prior_source(&incumbent, &config.training_data),
+        config.min_improvement,
+        unix_now(),
+    );
+
     if let Some(cache) = failed_cache.as_ref() {
         let snapshot_start = Instant::now();
         match write_snapshot(&config.output_dir, cache, unix_now()) {
@@ -3469,6 +3604,110 @@ fn journal_scorer_calls(
             calls,
         },
     )
+}
+
+/// Fingerprints the operator priors of this run are keyed to (issue #221).
+///
+/// A corpus that cannot be fingerprinted yields `None`, which the confidence
+/// model reads as a mismatch — unconfirmed is not confirmed — and the run says
+/// so rather than trusting history it cannot key.
+fn prior_source(incumbent: &neat_core::CreatureExport, training_data: &Path) -> PriorSource {
+    let training_key = match training_data_key(training_data) {
+        Ok(key) => Some(key),
+        Err(e) => {
+            log::warn(&format!(
+                "strategy-priors: training data could not be fingerprinted: {e}; \
+                 priors are discounted as if the corpus had changed"
+            ));
+            None
+        }
+    };
+    PriorSource {
+        incumbent_id: incumbent_id(incumbent),
+        creature_fingerprint: crate::memo::creature_fingerprint(incumbent),
+        training_key,
+    }
+}
+
+/// Seed `ledger` from persisted operator priors and journal what was applied.
+///
+/// One line is written whatever happens under `--strategy-priors seed`: the
+/// priors that were folded in, or the reason none were. A run that silently
+/// seeded nothing would be indistinguishable from the cold-start arm it is
+/// being measured against.
+fn seed_strategy_priors(
+    policy: &PriorsPolicy,
+    ledger: &mut StrategyLedger,
+    source: &PriorSource,
+    journal_path: &Path,
+    now: u64,
+) -> Result<(), String> {
+    if !policy.is_enabled() {
+        return Ok(());
+    }
+    let record = match load_priors(&policy.path) {
+        Ok(Some(priors)) => {
+            let confidence = priors.confidence(source, now, policy.half_life_hours);
+            let seed = priors.seed(confidence.confidence);
+            for label in &seed.unknown {
+                log::warn(&format!(
+                    "strategy-priors: ignoring unknown arm `{label}` — \
+                     written by a newer Lamarck than this build"
+                ));
+            }
+            ledger.seed_priors(&seed.arms);
+            log::info(&format!(
+                "strategy-priors: seeded {} arm(s), {:.1} trials from {} \
+                 (age={:.1}h, confidence={:.3} = age {:.3} x corpus {:.3} x source {:.3})",
+                seed.arms.len(),
+                seed.total_trials(),
+                policy.path.display(),
+                confidence.age_hours,
+                confidence.confidence,
+                confidence.age,
+                confidence.corpus,
+                confidence.source,
+            ));
+            StrategyPriorsRecord::new(&priors, &confidence, &seed, now)
+        }
+        Ok(None) => {
+            log::info(&format!(
+                "strategy-priors: no priors at {} — starting cold",
+                policy.path.display()
+            ));
+            StrategyPriorsRecord::rejected("no priors file".to_string(), now)
+        }
+        Err(reason) => {
+            log::warn(&format!("strategy-priors: ignoring priors — {reason}"));
+            StrategyPriorsRecord::rejected(reason, now)
+        }
+    };
+    append_journal_line(journal_path, &record)
+}
+
+/// Persist this run's decayed operator evidence for the next run (issue #221).
+///
+/// A failed write is a warning, never a failed run: priors are an optimisation,
+/// and the next run starting cold costs time rather than correctness.
+fn write_strategy_priors(
+    policy: &PriorsPolicy,
+    ledger: &StrategyLedger,
+    source: PriorSource,
+    min_improvement: f64,
+    now: u64,
+) {
+    if !policy.is_enabled() {
+        return;
+    }
+    let priors = StrategyPriors::from_ledger(ledger, source, min_improvement, now);
+    match write_priors(&policy.path, &priors) {
+        Ok(bytes) => log::info(&format!(
+            "strategy-priors: wrote {} arm(s) ({bytes} bytes) to {}",
+            priors.arms.len(),
+            policy.path.display()
+        )),
+        Err(e) => log::warn(&format!("strategy-priors: could not write priors: {e}")),
+    }
 }
 
 /// Identity a remembered baseline must still match to be reused (issue #113).
@@ -4474,7 +4713,8 @@ mod tests {
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_) => None,
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => None,
             })
             .expect("at least one experiment");
         assert!(first.screen_scores.is_some());
@@ -4582,7 +4822,9 @@ mod tests {
                 JournalLine::Experiment(record) => record.scorer_calls.unwrap_or_default(),
                 JournalLine::GraftReplay(replay) => replay.scorer_calls.unwrap_or_default(),
                 JournalLine::ScorerCalls(calls) => calls.calls,
-                JournalLine::Header(_) | JournalLine::CacheStandDown(_) => Vec::new(),
+                JournalLine::Header(_)
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => Vec::new(),
             })
             .collect()
     }
@@ -4688,7 +4930,8 @@ mod tests {
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_) => None,
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => None,
             })
             .expect("at least one experiment")
     }
@@ -4701,7 +4944,8 @@ mod tests {
                 JournalLine::Experiment(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_) => None,
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => None,
             })
             .expect("a run header")
     }
@@ -5177,7 +5421,8 @@ mod tests {
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_) => None,
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -5208,7 +5453,8 @@ mod tests {
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_) => None,
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -5257,7 +5503,8 @@ mod tests {
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_) => None,
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => None,
             })
             .collect();
         assert!(!experiments.is_empty(), "run wrote at least one experiment");
@@ -5434,7 +5681,8 @@ mod tests {
                     JournalLine::Header(_)
                     | JournalLine::GraftReplay(_)
                     | JournalLine::ScorerCalls(_)
-                    | JournalLine::CacheStandDown(_) => None,
+                    | JournalLine::CacheStandDown(_)
+                    | JournalLine::StrategyPriors(_) => None,
                 })
                 .expect("at least one experiment");
             (
@@ -5525,7 +5773,8 @@ mod tests {
                     JournalLine::Header(_)
                     | JournalLine::GraftReplay(_)
                     | JournalLine::ScorerCalls(_)
-                    | JournalLine::CacheStandDown(_) => None,
+                    | JournalLine::CacheStandDown(_)
+                    | JournalLine::StrategyPriors(_) => None,
                 })
                 .expect("at least one experiment")
         };
@@ -5588,7 +5837,8 @@ mod tests {
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_) => None,
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => None,
             })
             .collect()
     }
@@ -5956,7 +6206,8 @@ mod tests {
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_) => None,
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_) => None,
             })
             .collect();
         assert_eq!(

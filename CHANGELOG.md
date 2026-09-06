@@ -23,6 +23,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Transferable operator priors across runs (Issue #221).**
+  Lamarck runs are deliberately short because the supplied champion goes stale,
+  so every run re-discovered which mutation families are currently productive
+  even though earlier journals already measured it. `--strategy-priors seed`
+  now persists one decayed evidence row per strategy — trials, screen→promote
+  conversions, accepts, full-corpus score gain and measured scorer cost — to a
+  versioned `strategy-priors.json`, and uses it to initialise the next run's
+  strategy ledger. Confidence is the product of an age half-life
+  (`--strategy-priors-half-life-hours`, default 24h, zero past the 168h maximum
+  age), a corpus-fingerprint match and a source-creature match, and the seeded
+  mass is capped at 25 trials per arm, so the ordinary per-experiment decay
+  hands the allocation back to the run's own evidence within a few experiments.
+  The format carries no creature, mutation, focus neuron or scalar, so no
+  historical candidate can be replayed; every candidate is still screened and
+  scored as on a cold start, and the exploration floor is untouched. `off`
+  stays the default and is the cold-start A/B arm
+  (`scripts/run-strategy-priors-ab.sh`). `report` separates inherited from
+  fresh evidence under `strategyAllocation.priors` and per-strategy
+  `priorTrials` / `priorShare`. See `docs/strategy-priors.md`.
+
 - **Per-strategy screen thresholds (Issue #220).**
   Lamarck screened every candidate family against one shared
   `--screen-promote-threshold`, but a weight nudge, a structural add and a

@@ -180,7 +180,7 @@ impl StrategyAllocationMode {
 /// contributes a fraction of a trial. [`StrategyLedger::totals`] builds a
 /// ledger that never decays, which is what `report` sums for its per-strategy
 /// row.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyEvidence {
     /// Candidates this strategy contributed to a scored batch.
@@ -226,7 +226,9 @@ impl StrategyEvidence {
         if rate.is_finite() { rate.max(0.0) } else { 0.0 }
     }
 
-    fn scale(&mut self, factor: f64) {
+    /// Multiply every field by `factor` — the one place decay is applied, so a
+    /// discount can never reach some counters and miss others.
+    pub fn scale(&mut self, factor: f64) {
         self.trials *= factor;
         self.promotions *= factor;
         self.accepts *= factor;
@@ -303,6 +305,13 @@ pub struct StrategyLedger {
     incumbent_retention: f64,
     min_improvement: f64,
     arms: BTreeMap<CandidateStrategy, StrategyEvidence>,
+    /// The share of `arms` that came from persisted priors (issue #221).
+    ///
+    /// A shadow copy, decayed by exactly the same factors as the evidence it
+    /// mirrors, so `prior_share` stays exact however long the run goes on. It
+    /// never affects allocation — it exists so a report can separate
+    /// prior-driven evidence from what this run measured for itself.
+    seeded: BTreeMap<CandidateStrategy, StrategyEvidence>,
 }
 
 impl StrategyLedger {
@@ -313,6 +322,7 @@ impl StrategyLedger {
             incumbent_retention: INCUMBENT_CHANGE_RETENTION,
             min_improvement,
             arms: BTreeMap::new(),
+            seeded: BTreeMap::new(),
         }
     }
 
@@ -323,7 +333,39 @@ impl StrategyLedger {
             incumbent_retention: 1.0,
             min_improvement,
             arms: BTreeMap::new(),
+            seeded: BTreeMap::new(),
         }
+    }
+
+    /// Fold persisted operator priors into the ledger (issue #221).
+    ///
+    /// The evidence arrives already discounted for age and source/corpus drift
+    /// and already capped — see [`crate::strategy_priors`] — so this is a plain
+    /// addition. It is recorded twice: once in the evidence the allocator
+    /// consults, and once in the shadow ledger [`Self::prior_share`] reads, so
+    /// the run can always say how much of an arm's standing it inherited.
+    pub fn seed_priors(&mut self, priors: &BTreeMap<CandidateStrategy, StrategyEvidence>) {
+        for (strategy, evidence) in priors {
+            add(self.arms.entry(*strategy).or_default(), evidence);
+            add(self.seeded.entry(*strategy).or_default(), evidence);
+        }
+    }
+
+    /// Prior evidence still standing for `strategy`, decayed as the run went.
+    pub fn prior_evidence(&self, strategy: CandidateStrategy) -> StrategyEvidence {
+        self.seeded.get(&strategy).copied().unwrap_or_default()
+    }
+
+    /// Share of `strategy`'s trials that came from a prior rather than this run.
+    ///
+    /// `0.0` for an arm nothing was seeded into, and for a cold-start run —
+    /// which is what a report of the A/B control has to show.
+    pub fn prior_share(&self, strategy: CandidateStrategy) -> f64 {
+        let trials = self.evidence(strategy).trials;
+        if trials <= 0.0 {
+            return 0.0;
+        }
+        (self.prior_evidence(strategy).trials / trials).clamp(0.0, 1.0)
     }
 
     /// Evidence held for `strategy` (all zeros when it has never been tried).
@@ -491,6 +533,11 @@ impl StrategyLedger {
         for evidence in self.arms.values_mut() {
             evidence.scale(factor);
         }
+        // The prior shadow decays with the evidence it mirrors — a share that
+        // did not decay in step would drift from the ledger it describes.
+        for evidence in self.seeded.values_mut() {
+            evidence.scale(factor);
+        }
     }
 
     /// Charge `ms` across `weights`, pro-rata by weight.
@@ -537,6 +584,15 @@ impl StrategyLedger {
             evidence.score_gain += share;
         }
     }
+}
+
+/// Add `addend` into `target`, field by field.
+fn add(target: &mut StrategyEvidence, addend: &StrategyEvidence) {
+    target.trials += addend.trials;
+    target.promotions += addend.promotions;
+    target.accepts += addend.accepts;
+    target.score_gain += addend.score_gain;
+    target.cost_ms += addend.cost_ms;
 }
 
 /// Screen and promote (plus combo) milliseconds of one experiment.

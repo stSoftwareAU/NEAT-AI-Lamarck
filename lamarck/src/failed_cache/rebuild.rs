@@ -172,7 +172,8 @@ pub fn rebuild_from_journal(
                 JournalLine::Header(_)
                 | JournalLine::GraftReplay(_)
                 | JournalLine::ScorerCalls(_)
-                | JournalLine::CacheStandDown(_),
+                | JournalLine::CacheStandDown(_)
+                | JournalLine::StrategyPriors(_),
             ) => continue,
             Err(_) => {
                 report.lines_skipped += 1;
