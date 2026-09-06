@@ -16,6 +16,9 @@ use crate::followup::FollowUpBudget;
 use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use crate::promote_gate::{DEFAULT_SCREEN_PROMOTE_SIGMA_K, PromoteGate, PromoteGateMode};
+use crate::screen_thresholds::{
+    DEFAULT_SCREEN_CONTROL_RATE, ScreenThresholdMode, ScreenThresholdPolicy,
+};
 use crate::strategy_allocation::{
     AllocationPolicy, DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR,
     StrategyAllocationMode,
@@ -184,6 +187,21 @@ pub struct LamarckConfig {
     pub screen_promote_gate: PromoteGateMode,
     /// σ̂ multiplier for [`PromoteGateMode::NoiseAware`]; ignored otherwise.
     pub screen_promote_sigma_k: f64,
+    /// Screen threshold mode in force (issue #220).
+    ///
+    /// [`ScreenThresholdMode::Shared`] — the default — is the pre-#220 run:
+    /// one threshold for every candidate family. Per-strategy calibration is
+    /// opt-in until a paired benchmark on score improvement per wall hour
+    /// justifies moving the default, and `shared` stays available as the arm it
+    /// is measured against.
+    pub screen_threshold_mode: ScreenThresholdMode,
+    /// Minimum share of below-threshold candidates promoted as controls under
+    /// per-strategy calibration (issue #220).
+    ///
+    /// The false-negative measurement the calibration rests on: without it a
+    /// tightened threshold is unfalsifiable, because a rejected candidate is
+    /// never full-corpus scored. Ignored under the shared threshold.
+    pub screen_control_rate: f64,
     /// Promote calls served from the remembered full-corpus baseline before one
     /// must score it fresh again (issue #113).
     ///
@@ -316,6 +334,33 @@ impl LamarckConfig {
         }
     }
 
+    /// Screen-threshold policy for this run, validated (issue #220).
+    ///
+    /// A control rate outside `[0, 1)` is a configuration fault, and so is a
+    /// **zero** rate under per-strategy calibration: the control sample is what
+    /// makes a tightened threshold falsifiable, so a calibrated run that
+    /// promotes no controls cannot measure the false negatives it is creating.
+    /// Both are reported rather than silently replaced by the default — a run
+    /// that quietly ignored the flag would invalidate the A/B it was set for.
+    pub fn screen_threshold_policy(&self) -> Result<ScreenThresholdPolicy, String> {
+        let rate = self.screen_control_rate;
+        if !rate.is_finite() || !(0.0..1.0).contains(&rate) {
+            return Err(format!(
+                "--screen-control-rate must be at least 0 and less than 1 (got {rate})"
+            ));
+        }
+        if self.screen_threshold_mode.is_per_strategy() && rate <= 0.0 {
+            return Err("--screen-control-rate must be greater than 0 under \
+                 --screen-threshold-mode per-strategy: without control promotions the \
+                 calibrated thresholds cannot measure their own false negatives"
+                .to_string());
+        }
+        Ok(ScreenThresholdPolicy {
+            mode: self.screen_threshold_mode,
+            control_rate: rate,
+        })
+    }
+
     /// Strategy-allocation policy for this run, validated (issue #218).
     ///
     /// An exploration floor outside `[0, 1]` or a decay outside `(0, 1]` is a
@@ -440,6 +485,10 @@ impl Default for LamarckConfig {
             screen_promote_threshold: DEFAULT_SCREEN_PROMOTE_THRESHOLD,
             screen_promote_gate: PromoteGateMode::Absolute,
             screen_promote_sigma_k: DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+            // Opt-in: the pre-#220 run gates every family on one threshold, and
+            // that is the arm per-strategy calibration has to beat.
+            screen_threshold_mode: ScreenThresholdMode::Shared,
+            screen_control_rate: DEFAULT_SCREEN_CONTROL_RATE,
             // Opt-in: the pre-#113 run pairs every promote call with a freshly
             // scored incumbent, and that pairing is a guard as well as a cost.
             baseline_reverify_interval: 0,

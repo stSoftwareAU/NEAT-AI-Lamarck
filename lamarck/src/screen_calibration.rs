@@ -16,8 +16,13 @@
 //! - a journal with no screen phase reports "not applicable" rather than a
 //!   fabricated correlation.
 
-use crate::config::DEFAULT_MIN_IMPROVEMENT;
+use crate::config::{DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_THRESHOLD};
 use crate::run::{ExperimentRecord, RunConfigRecord};
+use crate::scorer_cost::ScorerCallPhase;
+use crate::screen_thresholds::{
+    CALIBRATION_WINDOW, MIN_CALIBRATION_PAIRS, PairedScreenObservation, ThresholdBasis,
+    UNATTRIBUTED_STRATEGY, calibrated_multiplier,
+};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -35,6 +40,57 @@ pub struct ScreenPair {
     pub screen_delta: f64,
     /// Full-corpus score minus the full-corpus baseline.
     pub full_delta: f64,
+    /// Whether the candidate was promoted as a below-threshold control
+    /// (issue #220) — the only false-negative evidence a screen can produce.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub control: bool,
+}
+
+/// Screen-versus-full-corpus calibration for one strategy (issue #220).
+///
+/// The per-family answer the shared figures above cannot give: a batch pools
+/// weight nudges, structural adds and backprop steps, and their relationships
+/// between sampled Δ and full-corpus Δ are not the same relationship.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyScreenCalibration {
+    /// Strategy label.
+    pub strategy: String,
+    /// Candidates of this strategy that got a subsample score.
+    pub screened: u64,
+    /// …that also got a full-corpus score.
+    pub paired: u64,
+    /// Paired candidates whose full-corpus Δ beat zero.
+    pub promoted_improved: u64,
+    /// `promotedImproved / paired`; `None` with no pairs.
+    pub promotion_precision: Option<f64>,
+    /// Paired candidates clearing the accept bar on the full corpus.
+    pub clearing_accept_bar: u64,
+    /// Mean subsample Δ across the pairs.
+    pub mean_screen_delta: Option<f64>,
+    /// Full-corpus Δ spread across the pairs — score gain conditional on
+    /// promotion, with the spread it came from.
+    pub full_delta: Option<DeltaDistribution>,
+    /// Candidates promoted as below-threshold controls.
+    pub control_promotions: u64,
+    /// Controls the full corpus then put above the accept bar — measured false
+    /// negatives, the only kind a screen can produce evidence for.
+    pub control_false_negatives: u64,
+    /// Promote-phase scorer milliseconds attributable to this strategy.
+    ///
+    /// A promote call's measured time split evenly across the candidates it
+    /// scored, so the cost of a family is the cost of the calls it caused.
+    pub promote_ms: f64,
+    /// Multiplier per-strategy calibration puts on the shared threshold, from
+    /// this journal's own evidence; `None` when the evidence is insufficient
+    /// and the shared threshold stands.
+    pub recommended_multiplier: Option<f64>,
+    /// The threshold that multiplier implies against the run's shared
+    /// threshold.
+    pub recommended_threshold: Option<f64>,
+    /// How that multiplier was arrived at (`shared` / `win-margin` /
+    /// `loss-quantile`).
+    pub basis: String,
 }
 
 /// Spread of a sample, reported next to its own size.
@@ -188,6 +244,11 @@ pub struct ScreenCalibration {
     pub baseline_sample_gap: Option<BaselineSampleGap>,
     /// Screen Δ of every candidate that was ultimately accepted.
     pub accepted_candidates: Vec<AcceptedScreenPoint>,
+    /// The same calibration, per candidate strategy (issue #220).
+    ///
+    /// One row per strategy that reached the screen, in label order, carrying
+    /// the threshold this journal's own evidence recommends for it.
+    pub by_strategy: Vec<StrategyScreenCalibration>,
     /// The paired points themselves, in journal order.
     ///
     /// Bounded by the number of *promotions*, not the number of candidates —
@@ -208,6 +269,8 @@ pub struct ScreenCalibrationAccumulator {
     accept_bar: HeaderValue,
     screen_only: u64,
     full_only: u64,
+    screened_by_strategy: BTreeMap<String, u64>,
+    promote_ms_by_strategy: BTreeMap<String, f64>,
     baseline_gaps: Vec<f64>,
     accepted: Vec<AcceptedScreenPoint>,
     pairs: Vec<ScreenPair>,
@@ -281,15 +344,30 @@ impl ScreenCalibrationAccumulator {
             })?),
         };
 
+        let controls = control_stems(record);
+        let promote_ms = promote_call_ms(record);
+        let promoted_stems = candidate_stems(&record.scores).count().max(1) as f64;
         for (stem, screen_score) in candidate_stems(screen) {
+            let strategy = strategy_of(record, stem);
+            let label = strategy
+                .clone()
+                .unwrap_or_else(|| UNATTRIBUTED_STRATEGY.to_string());
+            *self.screened_by_strategy.entry(label.clone()).or_default() += 1;
             match full_baseline.and_then(|base| record.scores.get(stem).map(|s| s - base)) {
-                Some(full_delta) => self.pairs.push(ScreenPair {
-                    experiment_number: record.experiment_number,
-                    stem: stem.to_string(),
-                    strategy: strategy_of(record, stem),
-                    screen_delta: screen_score - screen_baseline,
-                    full_delta,
-                }),
+                Some(full_delta) => {
+                    // A promote call's measured time, split evenly across the
+                    // candidates it scored: what this family's calls cost.
+                    *self.promote_ms_by_strategy.entry(label).or_default() +=
+                        promote_ms / promoted_stems;
+                    self.pairs.push(ScreenPair {
+                        experiment_number: record.experiment_number,
+                        stem: stem.to_string(),
+                        strategy,
+                        screen_delta: screen_score - screen_baseline,
+                        full_delta,
+                        control: controls.contains(stem),
+                    })
+                }
                 None => self.screen_only += 1,
             }
         }
@@ -349,10 +427,119 @@ impl ScreenCalibrationAccumulator {
             full_delta: distribution(&full_deltas),
             screen_noise: screen_noise(&self.pairs, band),
             baseline_sample_gap: baseline_gap(&self.baseline_gaps),
+            by_strategy: by_strategy(
+                &self.pairs,
+                &self.screened_by_strategy,
+                &self.promote_ms_by_strategy,
+                self.promote_threshold.resolve(),
+                band,
+            ),
             accepted_candidates: self.accepted,
             pairs: self.pairs,
         }
     }
+}
+
+/// Stems an experiment promoted as below-threshold controls (issue #220).
+fn control_stems(record: &ExperimentRecord) -> std::collections::BTreeSet<&str> {
+    record
+        .screen_thresholds
+        .iter()
+        .flat_map(|thresholds| thresholds.candidates.iter())
+        .filter(|candidate| candidate.control)
+        .map(|candidate| candidate.stem.as_str())
+        .collect()
+}
+
+/// Measured promote-phase milliseconds for one experiment.
+///
+/// Zero for a journal too old to carry per-call records: a cost that was never
+/// measured is reported as zero rather than estimated into existence.
+fn promote_call_ms(record: &ExperimentRecord) -> f64 {
+    record
+        .scorer_calls
+        .iter()
+        .flatten()
+        .filter(|call| {
+            matches!(
+                call.phase,
+                ScorerCallPhase::Promote | ScorerCallPhase::Combo
+            ) && !call.failed
+        })
+        .map(|call| call.elapsed_ms as f64)
+        .sum()
+}
+
+/// One calibration row per strategy that reached the screen (issue #220).
+fn by_strategy(
+    pairs: &[ScreenPair],
+    screened: &BTreeMap<String, u64>,
+    promote_ms: &BTreeMap<String, f64>,
+    promote_threshold: Option<f64>,
+    band: f64,
+) -> Vec<StrategyScreenCalibration> {
+    let floor = promote_threshold.unwrap_or(DEFAULT_SCREEN_PROMOTE_THRESHOLD);
+    let mut grouped: BTreeMap<String, Vec<&ScreenPair>> = BTreeMap::new();
+    for label in screened.keys() {
+        grouped.entry(label.clone()).or_default();
+    }
+    for pair in pairs {
+        let label = pair
+            .strategy
+            .clone()
+            .unwrap_or_else(|| UNATTRIBUTED_STRATEGY.to_string());
+        grouped.entry(label).or_default().push(pair);
+    }
+
+    grouped
+        .into_iter()
+        .map(|(strategy, pairs)| {
+            let full_deltas: Vec<f64> = pairs.iter().map(|pair| pair.full_delta).collect();
+            let screen_deltas: Vec<f64> = pairs.iter().map(|pair| pair.screen_delta).collect();
+            let paired = pairs.len() as u64;
+            let improved = full_deltas.iter().filter(|delta| **delta > 0.0).count() as u64;
+            let observations: Vec<PairedScreenObservation> = pairs
+                .iter()
+                .map(|pair| PairedScreenObservation {
+                    screen_delta: pair.screen_delta,
+                    full_delta: pair.full_delta,
+                    control: pair.control,
+                })
+                .collect();
+            // The recommendation is drawn from the same estimator a calibrated
+            // run applies, over the same window, so `report` says what the run
+            // would have done rather than a second opinion about it.
+            let window = observations.len().saturating_sub(CALIBRATION_WINDOW);
+            let recommended = (observations.len() >= MIN_CALIBRATION_PAIRS)
+                .then(|| calibrated_multiplier(&observations[window..], floor, band))
+                .flatten();
+            StrategyScreenCalibration {
+                screened: screened.get(&strategy).copied().unwrap_or(paired),
+                paired,
+                promoted_improved: improved,
+                promotion_precision: (paired > 0).then(|| improved as f64 / paired as f64),
+                clearing_accept_bar: full_deltas.iter().filter(|delta| **delta > band).count()
+                    as u64,
+                mean_screen_delta: (paired > 0)
+                    .then(|| screen_deltas.iter().sum::<f64>() / paired as f64),
+                full_delta: distribution(&full_deltas),
+                control_promotions: pairs.iter().filter(|pair| pair.control).count() as u64,
+                control_false_negatives: pairs
+                    .iter()
+                    .filter(|pair| pair.control && pair.full_delta > band)
+                    .count() as u64,
+                promote_ms: promote_ms.get(&strategy).copied().unwrap_or(0.0),
+                recommended_multiplier: recommended.map(|(multiplier, _)| multiplier),
+                recommended_threshold: recommended.map(|(multiplier, _)| multiplier * floor),
+                basis: recommended
+                    .map(|(_, basis)| basis)
+                    .unwrap_or(ThresholdBasis::Shared)
+                    .label()
+                    .to_string(),
+                strategy,
+            }
+        })
+        .collect()
 }
 
 /// Every stem in a score map except the `baseline` anchor.
@@ -554,6 +741,7 @@ mod tests {
             follow_up: None,
             screen_scores: None,
             screen_tiers: None,
+            screen_thresholds: None,
             baseline_source: None,
             winner: None,
             improvement: None,

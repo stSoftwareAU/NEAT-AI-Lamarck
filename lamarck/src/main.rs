@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
+use neat_ai_lamarck::screen_thresholds::{DEFAULT_SCREEN_CONTROL_RATE, ScreenThresholdMode};
 use neat_ai_lamarck::strategy_allocation::{
     DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR, StrategyAllocationMode,
 };
@@ -209,6 +210,25 @@ struct Cli {
     #[arg(long, default_value_t = DEFAULT_SCREEN_PROMOTE_SIGMA_K)]
     screen_promote_sigma_k: f64,
 
+    /// Screen threshold: shared (default) | per-strategy (issue #220).
+    ///
+    /// `shared` is the pre-#220 run: one promote threshold for every candidate
+    /// family. `per-strategy` scales that threshold per strategy from the
+    /// journal's own measured screen-versus-full-corpus history, falling back
+    /// to the shared threshold wherever the evidence is thin. The full-corpus
+    /// scorer stays the only acceptance gate under either mode.
+    #[arg(long, default_value = "shared")]
+    screen_threshold_mode: String,
+
+    /// Minimum share of below-threshold candidates promoted as controls under
+    /// `--screen-threshold-mode per-strategy`. Must be >= 0 and < 1.
+    ///
+    /// A rejected candidate is never full-corpus scored, so a calibrated gate
+    /// cannot otherwise see the winners it is throwing away. Must be > 0 when
+    /// calibration is on; ignored under the shared threshold.
+    #[arg(long, default_value_t = DEFAULT_SCREEN_CONTROL_RATE)]
+    screen_control_rate: f64,
+
     /// Promote calls served from the remembered full-corpus baseline before one
     /// scores it fresh again (issue #113). `0` (default) disables reuse.
     ///
@@ -381,6 +401,15 @@ fn main() -> ExitCode {
             std::process::exit(2);
         });
 
+    let screen_threshold_mode = ScreenThresholdMode::parse(&cli.screen_threshold_mode)
+        .unwrap_or_else(|| {
+            eprintln!(
+                "unknown --screen-threshold-mode '{}'; expected shared|per-strategy",
+                cli.screen_threshold_mode
+            );
+            std::process::exit(2);
+        });
+
     let config = LamarckConfig {
         creature,
         training_data,
@@ -420,6 +449,8 @@ fn main() -> ExitCode {
         screen_promote_threshold: cli.screen_promote_threshold,
         screen_promote_gate,
         screen_promote_sigma_k: cli.screen_promote_sigma_k,
+        screen_threshold_mode,
+        screen_control_rate: cli.screen_control_rate,
         baseline_reverify_interval: cli.baseline_reverify_interval,
         baseline_drift_epsilon: cli.baseline_drift_epsilon,
         grafts_path: cli.grafts_path,
@@ -452,6 +483,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = config.promote_gate() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.screen_threshold_policy() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }

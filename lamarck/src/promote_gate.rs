@@ -678,6 +678,7 @@ mod tests {
                     .collect(),
             ),
             screen_tiers: None,
+            screen_thresholds: None,
             baseline_source: None,
             winner: None,
             improvement: None,

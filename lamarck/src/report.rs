@@ -9,6 +9,7 @@ use crate::promote_gate::{PromoteGateReplay, PromoteGateReplayAccumulator};
 use crate::run::{ExperimentRecord, JournalLine, RunConfigRecord, RunResult};
 use crate::scorer_cost::{ScorerCallCost, ScorerCallCostAccumulator};
 use crate::screen_calibration::{ScreenCalibration, ScreenCalibrationAccumulator};
+use crate::screen_thresholds::{ScreenThresholdReplay, ScreenThresholdReplayAccumulator};
 use crate::strategy_allocation::{DEFAULT_STRATEGY_EVIDENCE_DECAY, StrategyLedger};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -656,6 +657,14 @@ pub struct JournalReport {
     /// for a fixed-allocation journal too, so the A/B arms are read off the
     /// same numbers.
     pub strategy_allocation: StrategyAllocationReport,
+    /// What per-strategy screen calibration would have done to this journal
+    /// (issue #220).
+    ///
+    /// Replayed offline from the journal's own `screenScores`, so the shared
+    /// gate the run applied and the calibrated thresholds it did not are priced
+    /// on the same experiments: full-corpus calls avoided, accepts kept and
+    /// dropped, and what that does to score improvement per wall hour.
+    pub screen_threshold_replay: ScreenThresholdReplay,
     /// What the noise-aware promote gate would have done to this journal (#111).
     ///
     /// Replayed offline from the journal's own `screenScores`, at the default
@@ -916,6 +925,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
     let mut scorer_call_cost = ScorerCallCostAccumulator::default();
     let mut screen_calibration = ScreenCalibrationAccumulator::default();
     let mut promote_gate_replay = PromoteGateReplayAccumulator::default();
+    let mut screen_threshold_replay = ScreenThresholdReplayAccumulator::default();
     let mut focus_all = FocusStatsAccumulator::default();
     let mut focus_accepted = FocusStatsAccumulator::default();
     let mut focus_rejected = FocusStatsAccumulator::default();
@@ -937,6 +947,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
             JournalLine::Header(header) => {
                 screen_calibration.push_header(&header.config);
                 promote_gate_replay.push_header(&header.config);
+                screen_threshold_replay.push_header(&header.config);
                 cache.push_header(&header.config);
                 strategy_allocation.push_header(&header.config);
                 continue;
@@ -973,6 +984,7 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         experiments += 1;
         screen_calibration.push_experiment(&record)?;
         promote_gate_replay.push_experiment(&record)?;
+        screen_threshold_replay.push_experiment(&record)?;
         memo_hits += record.memo_hits;
         memo_misses += record.memo_misses;
         memo_ms_saved = memo_ms_saved.saturating_add(record.memo_ms_saved);
@@ -1310,6 +1322,8 @@ pub fn report_from_journal(path: &Path) -> Result<JournalReport, String> {
         screen_calibration: screen_calibration.finish(),
         scorer_call_cost: scorer_call_cost.finish(),
         promote_gate_replay: promote_gate_replay.finish(),
+        screen_threshold_replay: screen_threshold_replay
+            .finish(wall_duration_ms, total_score_improvement),
         strategy_allocation: strategy_allocation.finish(),
         mirror,
         follow_up: follow_up.finish(),
@@ -1529,6 +1543,39 @@ pub fn print_run_summary(result: &RunResult) {
                 }
             ));
         }
+        // Per-strategy calibration (issue #220): what each family's own screen
+        // evidence says its threshold should be, and what the calibrated gate
+        // would have bought or avoided against the shared one.
+        for row in screen.by_strategy.iter().filter(|row| row.paired > 0) {
+            log::detail(&format!(
+                "screen {:<12}{} paired  precision {}  controls {} ({} false neg)  threshold {}",
+                row.strategy,
+                row.paired,
+                match row.promotion_precision {
+                    Some(p) => format!("{:.0}%", p * 100.0),
+                    None => "n/a".to_string(),
+                },
+                row.control_promotions,
+                row.control_false_negatives,
+                match row.recommended_threshold {
+                    Some(threshold) => format!("{threshold:.3e} ({})", row.basis),
+                    None => "shared (insufficient evidence)".to_string(),
+                }
+            ));
+        }
+        let thresholds = &report.screen_threshold_replay;
+        if thresholds.screened > 0 {
+            log::detail(&format!(
+                "screen calib:  {} promoted as run vs {} calibrated  ({} avoided, {} added incl. {} controls)  accepts kept {}/{}",
+                thresholds.promoted_as_run,
+                thresholds.promoted_under_calibration,
+                thresholds.promotions_avoided,
+                thresholds.promotions_added,
+                thresholds.control_promotions,
+                thresholds.accepts_kept,
+                thresholds.accepts_kept + thresholds.accepts_dropped
+            ));
+        }
         if let Some(ms) = report.time_to_first_acceptance_ms {
             log::detail(&format!("first accept:  {}", format_ms(ms)));
         }
@@ -1730,6 +1777,7 @@ mod tests {
             follow_up: None,
             screen_scores: None,
             screen_tiers: None,
+            screen_thresholds: None,
             baseline_source: None,
             winner: accepted.then(|| "candidate-000".to_string()),
             improvement: accepted.then_some(1e-6),
@@ -2077,6 +2125,7 @@ mod tests {
             follow_up: None,
             screen_scores: None,
             screen_tiers: None,
+            screen_thresholds: None,
             baseline_source: None,
             winner: None,
             improvement: None,
@@ -2441,6 +2490,7 @@ mod tests {
                 m
             }),
             screen_tiers: None,
+            screen_thresholds: None,
             baseline_source: None,
             winner: Some("candidate-000".into()),
             improvement: Some(2e-6),
@@ -2492,6 +2542,7 @@ mod tests {
             follow_up: None,
             screen_scores: None,
             screen_tiers: None,
+            screen_thresholds: None,
             baseline_source: None,
             winner: None,
             improvement: None,
