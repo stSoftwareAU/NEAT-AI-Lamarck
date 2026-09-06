@@ -1,0 +1,39 @@
+# Dependabot configuration (Issue #215).
+#
+# Why this file exists: every existing supply-chain gate is pull-based.
+# `cargo audit` runs on each pull request and on a weekly Monday cron
+# (`.github/workflows/cargo-audit.yml`), `rustsec/audit-check` runs on pull
+# requests inside `.github/workflows/security.yml`, and
+# `.github/workflows/dependency-review.yml` diffs the PR's manifest. None of
+# them hears about an advisory published against a dependency already pinned in
+# `Cargo.lock` until the next PR or the next cron — up to ~6 days.
+#
+# Registering the cargo ecosystem here activates GitHub's native Dependabot
+# advisory feed for this crate, which alerts (and can raise a security update
+# PR) the moment a RustSec advisory lands, independent of the CI schedule. It
+# complements the workflows above; it replaces none of them.
+#
+# `scripts/check-dependabot-config.sh` keeps this registration from being
+# deleted or quietly reduced to an unusable stub.
+version: 2
+
+updates:
+  # `neat-core` is a path dependency on the sibling clone and is not resolved
+  # by Dependabot; the registry crates in `Cargo.lock` are what this covers.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    # Security updates are exempt from this limit, so it caps routine
+    # version-bump noise without delaying an advisory fix.
+    open-pull-requests-limit: 5
+    # Quarantine newly published versions for a week before proposing a routine
+    # bump, so a compromised or unstable release is withdrawn upstream before it
+    # reaches `Cargo.lock`. `cooldown` covers *version* updates only — security
+    # updates ignore it, so the advisory feed this file exists for still raises
+    # the fix the moment a RustSec advisory lands.
+    cooldown:
+      default-days: 7

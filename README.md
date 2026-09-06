@@ -2060,6 +2060,7 @@ NEAT-AI-Lamarck/
 ├── deny.toml
 ├── SECURITY.md
 ├── .github/workflows/   # scorer-aligned quality gates
+├── .github/dependabot.yml  # push-based cargo advisory feed (issue #215)
 ├── scripts/
 ├── docs/                # … measurement docs — see links throughout this README
 ├── lamarck/examples/    # paired benches; support/mod.rs is their shared fixture (issue #138)
@@ -2174,13 +2175,15 @@ above installed:
 
 It runs shellcheck, the TypeScript validity gate, the auto-format and
 version-increment workflow validators, the workflow install-pin and container
-pin gates, codespell, cargo-deny, fmt `--check`, clippy with warnings denied,
-the tests, and rustdoc.
+pin gates, the Dependabot advisory-channel gate, codespell, cargo-deny, fmt
+`--check`, clippy with warnings denied, the tests, and rustdoc.
 
 CI runs on pull requests to `Develop` and includes fmt/clippy/tests/docs,
 cargo-deny, gitleaks, cargo-audit, dependency-review, Semgrep, markdownlint,
-actionlint, SBOM, shellcheck, and codespell. Branch protection should require
-the aggregator check **CI Required Checks**.
+actionlint, SBOM, shellcheck, and codespell. Advisories published between those
+runs arrive through the
+[Dependabot advisory channel](#dependabot-advisory-channel-issue-215). Branch
+protection should require the aggregator check **CI Required Checks**.
 
 ### TypeScript validity gate (Issue #167)
 
@@ -2244,8 +2247,8 @@ flowchart LR
 
 Bumping the pin is an ordinary dependency change: update the version in
 `.github/workflows/markdown-lint.yml`, re-run `./quality.sh`, and land it in a
-reviewed PR. The repository runs no Renovate app, so nothing bumps the pin
-behind your back.
+reviewed PR. The repository runs no Renovate app, and its Dependabot config
+covers the cargo ecosystem only, so nothing bumps the pin behind your back.
 
 ### Workflow container pin gate (Issue #212)
 
@@ -2293,6 +2296,46 @@ Bumping a container image is the same reviewed change as any other pin: update
 the tag, the digest and the version-label comment in lockstep (the protocol is
 documented at the top of `.github/workflows/semgrep.yml`), then re-run
 `./quality.sh`.
+
+### Dependabot advisory channel (Issue #215)
+
+Every other supply-chain gate here is *pull*-based. `cargo audit` runs on each
+PR and on a weekly Monday cron, `rustsec/audit-check` runs on PRs inside
+`security.yml`, and `dependency-review.yml` diffs the PR's manifest. None of
+them hears about an advisory published against a dependency **already** pinned
+in `Cargo.lock`: the lockfile does not change, only the RustSec database does,
+so detection waits for the next PR or the next cron — up to ~6 days.
+[`.github/dependabot.yml`](./.github/dependabot.yml) registers the cargo
+ecosystem, which activates GitHub's native advisory feed and closes that window;
+it complements the workflows above and replaces none of them.
+
+```mermaid
+flowchart LR
+    A["RustSec advisory published"] --> B["Dependabot alert — immediate"]
+    A --> C["cargo audit on next PR"]
+    A --> D["cargo audit weekly cron — up to ~6 days"]
+    B --> E["fix raised while the window is open"]
+    C --> E
+    D --> E
+```
+
+`scripts/check-dependabot-config.sh` keeps that registration from being deleted
+or reduced to a stub GitHub would reject: it requires the config to exist where
+GitHub reads it, to declare `version: 2`, and to carry a
+`package-ecosystem: "cargo"` entry naming a `directory` (or `directories`) and a
+`schedule.interval` Dependabot accepts.
+
+```bash
+./scripts/check-dependabot-config.sh                 # .github/dependabot.yml
+./scripts/check-dependabot-config.sh --verbose       # report each requirement
+./scripts/check-dependabot-config.sh --config <file> # a different config
+```
+
+Exit codes: `0` configured, `1` missing or unusable, `2` invalid invocation. A
+missing config is a failure, not a usage error — the absent advisory channel is
+the finding. The gate runs from `./quality.sh` and from the CI **Project
+Validation** job; `scripts/test-check-dependabot-config.sh` pins its behaviour
+against throwaway config fixtures.
 
 PRs also run an auto-format / housekeeping job
 (`.github/workflows/auto-format.yml`, Issue #33). The job runs
