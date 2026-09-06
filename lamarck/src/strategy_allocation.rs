@@ -356,6 +356,26 @@ impl StrategyLedger {
         self.seeded.get(&strategy).copied().unwrap_or_default()
     }
 
+    /// Evidence for `strategy` that **this** ledger measured, with any seeded
+    /// prior taken back out (issue #221).
+    ///
+    /// The shadow decays in step with the evidence it mirrors, so the
+    /// subtraction is exact at any point in the run. This is what a run
+    /// persists for the next one: re-stamping inherited evidence with today's
+    /// timestamp and today's incumbent would launder both the maximum age and
+    /// the source discount that bound it.
+    pub fn measured_evidence(&self, strategy: CandidateStrategy) -> StrategyEvidence {
+        let evidence = self.evidence(strategy);
+        let prior = self.prior_evidence(strategy);
+        StrategyEvidence {
+            trials: (evidence.trials - prior.trials).max(0.0),
+            promotions: (evidence.promotions - prior.promotions).max(0.0),
+            accepts: (evidence.accepts - prior.accepts).max(0.0),
+            score_gain: (evidence.score_gain - prior.score_gain).max(0.0),
+            cost_ms: (evidence.cost_ms - prior.cost_ms).max(0.0),
+        }
+    }
+
     /// Share of `strategy`'s trials that came from a prior rather than this run.
     ///
     /// `0.0` for an arm nothing was seeded into, and for a cold-start run —

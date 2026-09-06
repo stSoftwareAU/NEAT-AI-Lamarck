@@ -955,6 +955,13 @@ standing falls geometrically as the run measures its own evidence — which is
 what lets a handful of contradicting experiments take the allocation back. The
 exploration floor is untouched and still mandatory.
 
+Priors move slots, so they act **only under `--strategy-allocation adaptive`**;
+a seeded run under the default fixed split warns and changes nothing. At the end
+of the run the file is replaced by what that run itself measured — the inherited
+rows are subtracted back out, so a nightly chain cannot re-stamp week-old
+evidence as fresh — unless the file already there could not be read, in which
+case it is refused and left untouched rather than overwritten with less history.
+
 What was seeded, and the confidence behind it, is journalled once as a
 `strategyPriors` line and reported by `report` under `strategyAllocation.priors`
 with a per-strategy `priorTrials` / `priorShare` split, so prior-driven standing

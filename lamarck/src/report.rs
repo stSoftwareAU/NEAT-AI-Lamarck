@@ -433,8 +433,8 @@ pub struct StrategyAllocationRow {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyPriorsReport {
-    /// Prior format version that was read.
-    pub format_version: String,
+    /// Prior format version that was read; `None` when nothing was read.
+    pub format_version: Option<String>,
     /// Age of the priors when they were read, in hours.
     pub age_hours: f64,
     /// Confidence applied to the persisted evidence.
@@ -449,6 +449,10 @@ pub struct StrategyPriorsReport {
     pub seeded_trials: f64,
     /// Arms seeded.
     pub seeded_arms: usize,
+    /// Arm labels in the file this build does not recognise, and therefore
+    /// could not seed — reported rather than dropped, because a shortfall with
+    /// no signal reads as a prior that simply had less to give.
+    pub unknown_arms: Vec<String>,
     /// Why nothing was seeded, when a file was present but unusable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected: Option<String>,
@@ -491,6 +495,7 @@ struct StrategyAllocationAccumulator {
     ledgers: Option<(StrategyLedger, StrategyLedger)>,
     priors_mode: Option<String>,
     priors: Option<StrategyPriorsReport>,
+    priors_seeded: BTreeMap<CandidateStrategy, StrategyEvidence>,
 }
 
 impl StrategyAllocationAccumulator {
@@ -509,16 +514,29 @@ impl StrategyAllocationAccumulator {
     /// re-deriving it from a confidence it would have to guess.
     fn push_priors(&mut self, record: &StrategyPriorsRecord) {
         let mut seeded: BTreeMap<CandidateStrategy, StrategyEvidence> = BTreeMap::new();
+        let mut unknown_arms = record.unknown_arms.clone();
         for (label, evidence) in &record.seeded {
-            if let Some(strategy) = CandidateStrategy::parse(label) {
-                *seeded.entry(strategy).or_default() = *evidence;
+            match CandidateStrategy::parse(label) {
+                Some(strategy) => *seeded.entry(strategy).or_default() = *evidence,
+                // The run journalled an arm this build cannot name. Saying so
+                // is the whole point of the field: a silently smaller replay
+                // would look like a prior that had less to give.
+                None => unknown_arms.push(label.clone()),
             }
         }
-        let (totals, decayed) = self.ledgers();
-        totals.seed_priors(&seeded);
+        unknown_arms.sort();
+        unknown_arms.dedup();
+        // Only the decayed ledger is seeded. It is the one the allocator drew
+        // on, so it must carry the prior; the totals ledger is what the row's
+        // trials / accepts / gain / cost are read from, and those columns
+        // report what this journal's experiments measured — never what the run
+        // inherited, which has its own `priorTrials` column.
+        self.priors_seeded = seeded.clone();
+        let (_totals, decayed) = self.ledgers();
         decayed.seed_priors(&seeded);
         self.priors = Some(StrategyPriorsReport {
             format_version: record.format_version.clone(),
+            unknown_arms,
             age_hours: record.confidence.age_hours,
             confidence: record.confidence.confidence,
             age_confidence: record.confidence.age,
@@ -583,7 +601,11 @@ impl StrategyAllocationAccumulator {
                     score_gain: evidence.score_gain,
                     cost_ms: evidence.cost_ms,
                     estimated_value: decayed.value(strategy),
-                    prior_trials: totals.prior_evidence(strategy).trials,
+                    prior_trials: self
+                        .priors_seeded
+                        .get(&strategy)
+                        .map(|evidence| evidence.trials)
+                        .unwrap_or(0.0),
                     prior_share: decayed.prior_share(strategy),
                 });
             }

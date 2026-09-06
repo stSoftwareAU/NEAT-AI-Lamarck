@@ -68,7 +68,7 @@ for name, data in arms:
         )
 
 rejected = [
-    (name, (data.get("strategyAllocation") or {}).get("priors", {}).get("rejected"))
+    (name, ((data.get("strategyAllocation") or {}).get("priors") or {}).get("rejected"))
     for name, data in arms
 ]
 rejected = [(name, why) for name, why in rejected if why]

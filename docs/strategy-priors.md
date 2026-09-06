@@ -35,14 +35,22 @@ There is **no creature, no mutation description, no focus neuron and no
 scalar**, so no historical candidate can be replayed even in principle. That is
 the guardrail #221 asks for, and it is held by construction rather than by a
 check somewhere downstream: the format cannot replay an old edit because it does
-not carry one. Every
-candidate a seeded run scores is generated, screened and promoted exactly as it
-would be on a cold start — priors move *slots*, never a gate.
+not carry one. Every candidate a seeded run scores is generated, screened and
+promoted exactly as it would be on a cold start — priors move *slots*, never a
+gate.
 
 It is also what makes the file portable. The only identity in it is a coarse
 shape id (`in2-out1-n3-s4`, which describes no application) and two opaque
 `u64` fingerprints, so a prior can be moved between machines without carrying
 private metadata off one.
+
+Because slots are all they move, they reach the batch **only through the
+adaptive allocator**: under the default `--strategy-allocation fixed` the
+round-robin split consults no ledger, so a seeded run there journals and writes
+priors that cannot change a thing. The run warns when that combination is asked
+for; pair `--strategy-priors seed` with `--strategy-allocation adaptive`
+([`docs/strategy-allocation.md`](strategy-allocation.md)), as the A/B script
+below does.
 
 ```json
 {
@@ -109,6 +117,21 @@ row together so a capped prior keeps its measured *rate* and loses only its
 weight. Twenty-five trials is about a quarter of one production batch: enough to
 move the opening allocation, far too little to hold it.
 
+## What a run writes back
+
+At the end of a seeded run the file is replaced by **what that run measured** —
+the decayed ledger with the seeded prior subtracted back out — stamped with the
+time it was written and keyed to the incumbent and corpus it ended on. Carrying
+the inherited rows forward instead would re-stamp week-old evidence as written
+today and re-key it to a creature it was never measured against, laundering the
+maximum age and the source discount on every hop of a nightly chain. Evidence
+therefore transfers one run at a time, each hop discounted on its own merits.
+
+One exception: a file that was present but **unusable** — unreadable, malformed
+or of another `formatVersion` — is refused *and left alone*. It may be a newer
+chain this build cannot see, and replacing it with less history would destroy
+it; the run says so in the log and journals the refusal.
+
 ## Why the current run wins quickly
 
 Nothing special happens to make fresh evidence dominate — the ledger's ordinary
@@ -137,7 +160,7 @@ be indistinguishable from the cold-start arm it is measured against:
 | `confidence` | The applied `confidence` and the `age` / `corpus` / `source` factors behind it, plus `ageHours`. |
 | `seeded` | The evidence actually folded in, per strategy label. |
 | `unknownArms` | Arm labels this build does not recognise — a file written by a newer Lamarck. |
-| `rejected` | Why nothing was seeded, when a file was present but unusable. |
+| `rejected` | Why nothing was seeded, when a file was present but unusable. `formatVersion` and `writtenUnix` are then `null`: nothing was read, so nothing is claimed about it. |
 
 The run header records `strategyPriors` under both modes and
 `strategyPriorsHalfLifeHours` under `seed`.
@@ -148,8 +171,8 @@ and reports the split:
 | Field | Meaning |
 |-------|---------|
 | `strategyAllocation.priorsMode` | `off` / `seed`, from the run header. |
-| `strategyAllocation.priors` | `formatVersion`, `ageHours`, `confidence`, `ageConfidence`, `corpusConfidence`, `sourceConfidence`, `seededTrials`, `seededArms`, `rejected`. `null` on a cold-start journal — "started cold" and "seeded nothing" are different runs. |
-| `strategies[].priorTrials` | Trials the arm inherited, counted apart from the `trials` this journal's experiments measured. |
+| `strategyAllocation.priors` | `formatVersion`, `ageHours`, `confidence`, `ageConfidence`, `corpusConfidence`, `sourceConfidence`, `seededTrials`, `seededArms`, `unknownArms`, `rejected`. `null` on a cold-start journal — "started cold" and "seeded nothing" are different runs. |
+| `strategies[].priorTrials` | Trials the arm inherited. Counted **apart** from `trials`, `promotions`, `accepts`, `scoreGain` and `costMs`, which report only what this journal's own experiments measured — a seeded arm never shows another run's accepts as its own. |
 | `strategies[].priorShare` | Share of the arm's decayed trials still coming from the prior — how much of the allocator's current opinion was inherited rather than earned. |
 
 ## The A/B

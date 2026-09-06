@@ -533,9 +533,13 @@ fn the_report_separates_prior_driven_from_fresh_evidence() {
         .priors
         .as_ref()
         .expect("the report carries a priors bucket when the run seeded any");
-    assert_eq!(priors_bucket.format_version, STRATEGY_PRIORS_FORMAT_VERSION);
+    assert_eq!(
+        priors_bucket.format_version.as_deref(),
+        Some(STRATEGY_PRIORS_FORMAT_VERSION)
+    );
     assert_eq!(priors_bucket.confidence, 1.0);
     assert!(priors_bucket.seeded_trials > 0.0);
+    assert!(priors_bucket.unknown_arms.is_empty());
 
     let seeded_arm = report
         .strategy_allocation
@@ -552,10 +556,111 @@ fn the_report_separates_prior_driven_from_fresh_evidence() {
         "prior share is a fraction: {}",
         seeded_arm.prior_share
     );
-    assert!(
-        seeded_arm.trials > seeded_arm.prior_trials.round() as u64 || seeded_arm.prior_share < 1.0,
-        "fresh trials are counted on top of the prior, not hidden inside it"
+
+    // The measured columns are exactly what the three journalled experiments
+    // did — the prior seeded `random` with accepts and gain, and none of it may
+    // leak into what this journal is reported to have earned.
+    assert_eq!(
+        seeded_arm.trials, 3,
+        "one random candidate per journalled experiment, and not one inherited"
     );
+    assert_eq!(
+        seeded_arm.accepts, 0,
+        "the prior's accepts belong to another run: {seeded_arm:?}"
+    );
+    assert_eq!(
+        seeded_arm.score_gain, 0.0,
+        "the prior's score gain belongs to another run: {seeded_arm:?}"
+    );
+    let earner = report
+        .strategy_allocation
+        .strategies
+        .iter()
+        .find(|row| row.strategy == CandidateStrategy::StructuralAdd.label())
+        .expect("structural_add row");
+    assert_eq!(
+        earner.accepts, 3,
+        "this journal's own accepts are still counted"
+    );
+    // The prior credited its accepts to `random`, so `structural_add` inherited
+    // trials but no wins — and the row must show exactly that split.
+    assert!(earner.prior_trials > 0.0, "it inherited trials");
+    assert!(
+        priors.seed(1.0).arms[&CandidateStrategy::Random].accepts > 0.0,
+        "the prior really did carry accepts for the seeded arm — otherwise the \
+         assertions above would pass on an empty prior"
+    );
+}
+
+/// An arm label this build cannot name is reported, never quietly dropped.
+#[test]
+fn the_report_names_prior_arms_this_build_does_not_recognise() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal = dir.path().join("experiments.jsonl");
+    let priors = priors_from_winning_run(CandidateStrategy::Random, NOW);
+    let confidence = priors.confidence(&source("in2-out1-n3-s4", 11, Some(22)), NOW, HALF_LIFE);
+    let mut line = serde_json::to_value(StrategyPriorsRecord::new(
+        &priors,
+        &confidence,
+        &priors.seed(1.0),
+        NOW,
+    ))
+    .expect("record serialises");
+    // A newer Lamarck's operator, journalled by a run this build is reading.
+    line["seeded"]["quantum_tunnel"] = json!({
+        "trials": 4.0, "promotions": 0.0, "accepts": 0.0, "scoreGain": 0.0, "costMs": 10.0
+    });
+    std::fs::write(&journal, format!("{line}\n")).expect("write journal");
+
+    let report = report_from_journal(&journal).expect("report");
+    let priors_bucket = report
+        .strategy_allocation
+        .priors
+        .as_ref()
+        .expect("priors bucket");
+    assert_eq!(
+        priors_bucket.unknown_arms,
+        vec!["quantum_tunnel".to_string()],
+        "an unrecognised arm is named rather than silently reducing the seed"
+    );
+}
+
+/// A priors file this build cannot read is refused **and left alone**: the run
+/// starts cold rather than overwriting a chain it could not see.
+#[test]
+fn an_unreadable_priors_file_is_refused_and_never_overwritten() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let priors_file = dir.path().join("newer-priors.json");
+    let corrupt = r#"{"formatVersion":"9.9.9","writtenUnix":1,"minImprovement":1e-6,"source":{"incumbentId":"x","creatureFingerprint":1,"trainingKey":2},"arms":{}}"#;
+    std::fs::write(&priors_file, corrupt).expect("write");
+
+    let result = run_optimisation(
+        &run_config(dir.path(), "refused", Some(priors_file.clone())),
+        &FlatScorer,
+    )
+    .expect("the run completes on an unusable priors file");
+
+    assert_eq!(
+        std::fs::read_to_string(&priors_file).expect("the file survives"),
+        corrupt,
+        "a file this build cannot read must not be replaced by less history"
+    );
+    let report = report_from_journal(&result.journal_path).expect("report");
+    let priors = report
+        .strategy_allocation
+        .priors
+        .as_ref()
+        .expect("the refusal is journalled, not left looking like a cold start");
+    let reason = priors.rejected.as_deref().expect("the reason is recorded");
+    assert!(
+        reason.contains("formatVersion"),
+        "the reason names what was wrong: {reason}"
+    );
+    assert_eq!(
+        priors.format_version, None,
+        "nothing was read, so no version is claimed"
+    );
+    assert_eq!(priors.seeded_trials, 0.0);
 }
 
 /// A journal with no priors line reports no priors bucket — a cold-start arm

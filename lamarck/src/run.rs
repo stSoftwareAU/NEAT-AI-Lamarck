@@ -53,8 +53,8 @@ use crate::screen_thresholds::{
 };
 use crate::strategy_allocation::{StrategyAllocation, StrategyEvidence, StrategyLedger};
 use crate::strategy_priors::{
-    PriorConfidence, PriorSeed, PriorSource, PriorsPolicy, STRATEGY_PRIORS_FORMAT_VERSION,
-    StrategyPriors, load_priors, write_priors,
+    PriorConfidence, PriorSeed, PriorSource, PriorsPolicy, StrategyPriors, load_priors,
+    write_priors,
 };
 use crate::structural::{is_input_source, rank_unused_sources};
 use crate::tags::{CreatureMeta, LamarckProgress, NeuronOrigin, serialize_creature_with_meta};
@@ -776,10 +776,12 @@ pub struct StrategyPriorsRecord {
     pub record: StrategyPriorsKind,
     /// Unix timestamp the priors were read at.
     pub timestamp_unix: u64,
-    /// Format version of the file that was read.
-    pub format_version: String,
-    /// Unix timestamp the priors were written at.
-    pub written_unix: u64,
+    /// Format version of the file that was read; `None` when none was.
+    #[serde(default)]
+    pub format_version: Option<String>,
+    /// Unix timestamp the priors were written at; `None` when none was read.
+    #[serde(default)]
+    pub written_unix: Option<u64>,
     /// Confidence applied, and the age / corpus / source factors behind it.
     pub confidence: PriorConfidence,
     /// Evidence actually folded into the ledger, by strategy label.
@@ -803,8 +805,8 @@ impl StrategyPriorsRecord {
         Self {
             record: StrategyPriorsKind::StrategyPriors,
             timestamp_unix,
-            format_version: priors.format_version.clone(),
-            written_unix: priors.written_unix,
+            format_version: Some(priors.format_version.clone()),
+            written_unix: Some(priors.written_unix),
             confidence: *confidence,
             seeded: seed
                 .arms
@@ -825,8 +827,10 @@ impl StrategyPriorsRecord {
         Self {
             record: StrategyPriorsKind::StrategyPriors,
             timestamp_unix,
-            format_version: STRATEGY_PRIORS_FORMAT_VERSION.to_string(),
-            written_unix: 0,
+            // Nothing was read, so nothing is claimed: a file refused *because*
+            // its version was wrong must not be reported as this version.
+            format_version: None,
+            written_unix: None,
             confidence: PriorConfidence {
                 age_hours: 0.0,
                 age: 0.0,
@@ -1446,10 +1450,21 @@ pub fn run_optimisation_cancellable(
     // before the first experiment, and discounted for age and source/corpus
     // drift on the way in; from there the ordinary per-experiment decay is
     // what lets this run's own evidence take the ledger back.
-    seed_strategy_priors(
+    // Priors reach the batch only through the adaptive allocator, so a seeded
+    // fixed-allocation run would read, journal and write evidence that could
+    // not move a single slot. Say so rather than letting the knob look live.
+    if priors_policy.is_enabled() && !allocation_policy.is_adaptive() {
+        log::warn(
+            "strategy-priors: seeding a run under --strategy-allocation fixed — the priors are \
+             journalled and written, but the fixed round-robin split consults no ledger, so they \
+             cannot change the batch. Pass --strategy-allocation adaptive to act on them.",
+        );
+    }
+    let priors_write_back = seed_strategy_priors(
         &priors_policy,
         &mut strategy_ledger,
-        &prior_source(&incumbent, &config.training_data),
+        &incumbent,
+        &config.training_data,
         &journal_path,
         unix_now(),
     )?;
@@ -3123,8 +3138,10 @@ pub fn run_optimisation_cancellable(
     // evidence was last measured against.
     write_strategy_priors(
         &priors_policy,
+        priors_write_back,
         &strategy_ledger,
-        prior_source(&incumbent, &config.training_data),
+        &incumbent,
+        &config.training_data,
         config.min_improvement,
         unix_now(),
     );
@@ -3638,16 +3655,19 @@ fn prior_source(incumbent: &neat_core::CreatureExport, training_data: &Path) -> 
 fn seed_strategy_priors(
     policy: &PriorsPolicy,
     ledger: &mut StrategyLedger,
-    source: &PriorSource,
+    incumbent: &neat_core::CreatureExport,
+    training_data: &Path,
     journal_path: &Path,
     now: u64,
-) -> Result<(), String> {
+) -> Result<PriorsWriteBack, String> {
     if !policy.is_enabled() {
-        return Ok(());
+        return Ok(PriorsWriteBack::Disabled);
     }
+    let source = prior_source(incumbent, training_data);
+    let mut write_back = PriorsWriteBack::Allowed;
     let record = match load_priors(&policy.path) {
         Ok(Some(priors)) => {
-            let confidence = priors.confidence(source, now, policy.half_life_hours);
+            let confidence = priors.confidence(&source, now, policy.half_life_hours);
             let seed = priors.seed(confidence.confidence);
             for label in &seed.unknown {
                 log::warn(&format!(
@@ -3678,11 +3698,31 @@ fn seed_strategy_priors(
             StrategyPriorsRecord::rejected("no priors file".to_string(), now)
         }
         Err(reason) => {
-            log::warn(&format!("strategy-priors: ignoring priors — {reason}"));
+            log::warn(&format!(
+                "strategy-priors: ignoring priors at {} — {reason}; \
+                 leaving the file untouched",
+                policy.path.display()
+            ));
+            // A file this build cannot read may be a newer chain's. Overwriting
+            // it with our own evidence would destroy history to replace it with
+            // less, so this run reads and writes nothing.
+            write_back = PriorsWriteBack::RefusedUnusableFile;
             StrategyPriorsRecord::rejected(reason, now)
         }
     };
-    append_journal_line(journal_path, &record)
+    append_journal_line(journal_path, &record)?;
+    Ok(write_back)
+}
+
+/// Whether the end of the run may overwrite the priors file (issue #221).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PriorsWriteBack {
+    /// `--strategy-priors off`: nothing was read and nothing is written.
+    Disabled,
+    /// The file was absent or usable, so this run's evidence replaces it.
+    Allowed,
+    /// A file was present but unreadable, malformed or of another version.
+    RefusedUnusableFile,
 }
 
 /// Persist this run's decayed operator evidence for the next run (issue #221).
@@ -3691,15 +3731,31 @@ fn seed_strategy_priors(
 /// and the next run starting cold costs time rather than correctness.
 fn write_strategy_priors(
     policy: &PriorsPolicy,
+    write_back: PriorsWriteBack,
     ledger: &StrategyLedger,
-    source: PriorSource,
+    incumbent: &neat_core::CreatureExport,
+    training_data: &Path,
     min_improvement: f64,
     now: u64,
 ) {
-    if !policy.is_enabled() {
-        return;
+    match write_back {
+        PriorsWriteBack::Allowed => {}
+        PriorsWriteBack::Disabled => return,
+        PriorsWriteBack::RefusedUnusableFile => {
+            log::warn(&format!(
+                "strategy-priors: not writing to {} — the file already there could not be read, \
+                 and replacing it would destroy a chain this build cannot see",
+                policy.path.display()
+            ));
+            return;
+        }
     }
-    let priors = StrategyPriors::from_ledger(ledger, source, min_improvement, now);
+    let priors = StrategyPriors::from_ledger(
+        ledger,
+        prior_source(incumbent, training_data),
+        min_improvement,
+        now,
+    );
     match write_priors(&policy.path, &priors) {
         Ok(bytes) => log::info(&format!(
             "strategy-priors: wrote {} arm(s) ({bytes} bytes) to {}",

@@ -32,15 +32,25 @@
 //!   topology with different weights keeps [`TOPOLOGY_MATCH_CONFIDENCE`]; a
 //!   different topology keeps [`TOPOLOGY_DRIFT_CONFIDENCE`].
 //!
-//! The scaled mass is then capped at [`MAX_PRIOR_TRIALS`] trials per arm, so
-//! however long the history behind a prior is, it is worth a couple of batches
-//! of the run's own measurement and no more. The run's ledger decays every arm
-//! once per experiment, so the prior's share of an arm's evidence falls
-//! geometrically as the run measures its own — which is what lets fresh
-//! evidence dominate a stale prior within a handful of experiments.
+//! The scaled mass is then capped at [`MAX_PRIOR_TRIALS`] trials per arm — about
+//! a quarter of one production batch — so however long the history behind a
+//! prior is, it is worth a fraction of the run's own measurement and no more.
+//! The run's ledger decays every arm once per experiment, so the prior's share
+//! of an arm's evidence falls geometrically as the run measures its own — which
+//! is what lets fresh evidence dominate a stale prior within a handful of
+//! experiments.
+//!
+//! What a run writes back is what **it** measured, never what it inherited:
+//! re-stamping an inherited row with today's timestamp and today's incumbent
+//! would launder exactly the age bound and source discount that bound it, so a
+//! week-old measurement could ride a nightly chain forever. Evidence therefore
+//! transfers one run at a time, each hop discounted on its own merits.
 //!
 //! Priors initialise the allocation and never bypass a gate: a candidate is
 //! still generated, screened and scored exactly as it would be on a cold start.
+//! They reach the batch through the adaptive allocator, so they move nothing
+//! under the default `--strategy-allocation fixed` — the run says so rather
+//! than seeding an allocation nobody consults.
 
 use crate::candidates::CandidateStrategy;
 use crate::strategy_allocation::{StrategyEvidence, StrategyLedger};
@@ -192,7 +202,7 @@ pub struct PriorConfidence {
     pub confidence: f64,
 }
 
-/// One arm's prior evidence, scaled and capped, ready to seed a ledger.
+/// Prior evidence per arm, scaled and capped, ready to seed a ledger.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PriorSeed {
     /// Evidence to fold into the ledger, by strategy.
@@ -236,12 +246,16 @@ pub struct StrategyPriors {
 }
 
 impl StrategyPriors {
-    /// Priors describing what `ledger` currently holds.
+    /// Priors describing what `ledger` **measured**, keyed to `source`.
     ///
-    /// The ledger handed in is the run's own **decayed** ledger, so the file
-    /// carries what was recently productive rather than a lifetime total — and,
-    /// because a seeded run's ledger already contains its own discounted
-    /// priors, evidence chains across runs while decaying the whole way.
+    /// The ledger handed in is the run's own decayed ledger, so the file
+    /// carries what was recently productive rather than a lifetime total. Any
+    /// evidence the ledger was itself seeded with is taken back out
+    /// ([`StrategyLedger::measured_evidence`]): a file stamped `now` and keyed
+    /// to this run's incumbent must contain only evidence that is actually that
+    /// fresh and was actually measured against that creature, or the age bound
+    /// and the source discount would both be laundered on every hop of a
+    /// nightly chain.
     pub fn from_ledger(
         ledger: &StrategyLedger,
         source: PriorSource,
@@ -250,7 +264,7 @@ impl StrategyPriors {
     ) -> Self {
         let arms = ledger
             .strategies()
-            .map(|strategy| (strategy, ledger.evidence(strategy)))
+            .map(|strategy| (strategy, ledger.measured_evidence(strategy)))
             .filter(|(_, evidence)| evidence.trials > 0.0)
             .map(|(strategy, evidence)| (strategy.label().to_string(), evidence))
             .collect();
