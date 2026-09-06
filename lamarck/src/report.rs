@@ -1873,7 +1873,8 @@ pub fn print_run_summary(result: &RunResult) {
             };
             log::detail(&format!(
                 "focus region:  {} expansion(s) over {} root(s)  {} member(s)  \
-                 {} adjacent vs {} isolated candidate(s)  accepts {} vs {} (mixed {}, unattributed {})",
+                 {} adjacent vs {} isolated candidate(s)  accepts {} vs {} \
+                 (mixed {}, follow-up {}, unattributed {})",
                 region.expansions,
                 region.roots,
                 region.members,
@@ -1882,6 +1883,7 @@ pub fn print_run_summary(result: &RunResult) {
                 region.neighbourhood_accepts,
                 region.isolated_accepts,
                 region.mixed_accepts,
+                region.excluded_accepts,
                 region.unattributed_accepts
             ));
             log::detail(&format!(
