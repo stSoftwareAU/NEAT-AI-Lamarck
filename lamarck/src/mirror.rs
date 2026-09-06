@@ -240,6 +240,7 @@ pub fn mirror_candidate(
                 role: MirrorRole::Mirror,
             }),
             follow_up: None,
+            neighbourhood: None,
         },
     })
 }
@@ -450,6 +451,7 @@ mod tests {
                 new_value: None,
                 mirror: None,
                 follow_up: None,
+                neighbourhood: None,
             },
         }
     }
@@ -463,6 +465,7 @@ mod tests {
             new_value: None,
             mirror,
             follow_up: None,
+            neighbourhood: None,
         }
     }
 

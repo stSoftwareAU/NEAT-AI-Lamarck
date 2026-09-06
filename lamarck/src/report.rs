@@ -1734,6 +1734,7 @@ mod tests {
             new_value: Some(0.1),
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         }
     }
 
@@ -1775,6 +1776,7 @@ mod tests {
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
             follow_up: None,
+            neighbourhood: None,
             screen_scores: None,
             screen_tiers: None,
             screen_thresholds: None,
@@ -2123,6 +2125,7 @@ mod tests {
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
             follow_up: None,
+            neighbourhood: None,
             screen_scores: None,
             screen_tiers: None,
             screen_thresholds: None,
@@ -2482,6 +2485,7 @@ mod tests {
             },
             mirror_axis_failures: None,
             follow_up: None,
+            neighbourhood: None,
             screen_scores: Some({
                 let mut m = BTreeMap::new();
                 m.insert("baseline".into(), 0.4);
@@ -2540,6 +2544,7 @@ mod tests {
             },
             mirror_axis_failures: None,
             follow_up: None,
+            neighbourhood: None,
             screen_scores: None,
             screen_tiers: None,
             screen_thresholds: None,
@@ -2794,6 +2799,7 @@ mod tests {
     /// A follow-up probe, as the plan stamps it (issue #219).
     fn probe(parent_experiment: u64) -> CandidateProvenance {
         CandidateProvenance {
+            neighbourhood: None,
             follow_up: Some(crate::followup::FollowUpLink {
                 parent_experiment,
                 parent_winner: "candidate-000".into(),

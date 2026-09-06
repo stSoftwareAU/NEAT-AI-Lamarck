@@ -971,6 +971,7 @@ mod tests {
             new_value: None,
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         }
     }
 

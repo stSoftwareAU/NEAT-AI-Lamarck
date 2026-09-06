@@ -264,6 +264,7 @@ mod tests {
                 new_value: Some(new_value),
                 mirror: None,
                 follow_up: None,
+                neighbourhood: None,
             },
         }
     }

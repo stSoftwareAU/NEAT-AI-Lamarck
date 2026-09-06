@@ -12,11 +12,13 @@ use neat_ai_lamarck::{
     DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
     DEFAULT_CACHE_STAND_DOWN_WINDOW, DEFAULT_CANDIDATE_COUNT, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
     DEFAULT_FAILED_CACHE_MAX_ENTRIES, DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
-    DEFAULT_FAILED_CACHE_TOLERANCE_REL, DEFAULT_FOCUS_COUNT, DEFAULT_FOLLOWUP_CANDIDATES,
-    DEFAULT_FOLLOWUP_EXPERIMENTS, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K,
-    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
-    ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary, report_from_journal,
-    run_optimisation_cancellable,
+    DEFAULT_FAILED_CACHE_TOLERANCE_REL, DEFAULT_FOCUS_COUNT, DEFAULT_FOCUS_NEIGHBOURHOOD_ACCEPTS,
+    DEFAULT_FOCUS_NEIGHBOURHOOD_EDGES, DEFAULT_FOCUS_NEIGHBOURHOOD_EXPERIMENTS,
+    DEFAULT_FOCUS_NEIGHBOURHOOD_NEURONS, DEFAULT_FOCUS_NEIGHBOURHOOD_RADIUS,
+    DEFAULT_FOLLOWUP_CANDIDATES, DEFAULT_FOLLOWUP_EXPERIMENTS, DEFAULT_MIN_IMPROVEMENT,
+    DEFAULT_SCREEN_PROMOTE_SIGMA_K, DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE,
+    DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary,
+    report_from_journal, run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -146,6 +148,44 @@ struct Cli {
     /// and caps this at 1.
     #[arg(long, default_value_t = DEFAULT_FOCUS_COUNT)]
     focus_count: usize,
+
+    /// Adjacent neurons a repeatedly successful focus may expand into (#222).
+    /// `0` (default) keeps every focus an isolated scalar target.
+    ///
+    /// The region's members are proposed against in turn, sharing the same
+    /// `--candidates` budget, and every candidate records the root focus and the
+    /// member it actually targeted.
+    #[arg(long, default_value_t = DEFAULT_FOCUS_NEIGHBOURHOOD_NEURONS)]
+    focus_neighbourhood_neurons: usize,
+
+    /// Edges one focus-region expansion may traverse (issue #222).
+    ///
+    /// Ranked by `|weight|`, so the region follows the highest-impact incoming
+    /// and outgoing structure first. Must be >= 1 when expansion is on.
+    #[arg(long, default_value_t = DEFAULT_FOCUS_NEIGHBOURHOOD_EDGES)]
+    focus_neighbourhood_edges: usize,
+
+    /// Graph hops a focus region may reach from its root (issue #222).
+    ///
+    /// `1` (default) is direct predecessors and successors only. Must be >= 1
+    /// when expansion is on.
+    #[arg(long, default_value_t = DEFAULT_FOCUS_NEIGHBOURHOOD_RADIUS)]
+    focus_neighbourhood_radius: usize,
+
+    /// Acceptances a focus must earn before its region is derived (issue #222).
+    ///
+    /// `1` (default) is the measured-success trigger; `0` is the explicit-policy
+    /// arm that expands every drawn focus.
+    #[arg(long, default_value_t = DEFAULT_FOCUS_NEIGHBOURHOOD_ACCEPTS)]
+    focus_neighbourhood_accepts: u32,
+
+    /// Experiments one root may steer per accept it earned (issue #222).
+    ///
+    /// What stops a productive region monopolising the run: the allowance is
+    /// renewed by a further acceptance and by nothing else. Must be >= 1 when
+    /// expansion is on.
+    #[arg(long, default_value_t = DEFAULT_FOCUS_NEIGHBOURHOOD_EXPERIMENTS)]
+    focus_neighbourhood_experiments: usize,
 
     /// Compute expensive input×input correlations in observations.
     #[arg(long, default_value_t = false)]
@@ -434,6 +474,11 @@ fn main() -> ExitCode {
         focus_neuron: cli.focus_neuron,
         focus_policy,
         focus_count: cli.focus_count,
+        focus_neighbourhood_neurons: cli.focus_neighbourhood_neurons,
+        focus_neighbourhood_edges: cli.focus_neighbourhood_edges,
+        focus_neighbourhood_radius: cli.focus_neighbourhood_radius,
+        focus_neighbourhood_accepts: cli.focus_neighbourhood_accepts,
+        focus_neighbourhood_experiments: cli.focus_neighbourhood_experiments,
         compute_correlations: cli.compute_correlations,
         max_consecutive_scorer_failures: neat_ai_lamarck::DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
         phase0_parity: !cli.skip_phase0,
@@ -479,6 +524,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = config.focus_count() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = config.focus_neighbourhood_limits() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }

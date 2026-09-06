@@ -98,6 +98,16 @@ pub struct CandidateProvenance {
     /// Absent from journals written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<crate::followup::FollowUpLink>,
+    /// The focus region this candidate was proposed in (issue #222).
+    ///
+    /// Present on every candidate of an expanded experiment — including the
+    /// root's own, which carry [`crate::neighbourhood::NeighbourhoodRole::Root`]
+    /// — so a win is attributable to the original focus or to the adjacent
+    /// structure the expansion reached. Absent when expansion is off
+    /// (`--focus-neighbourhood-neurons 0`), when the drawn focus did not expand,
+    /// and from journals written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neighbourhood: Option<crate::neighbourhood::NeighbourhoodLink>,
 }
 
 /// One generated candidate plus provenance.
@@ -1039,6 +1049,7 @@ fn build_structural_add_scaled_gated(
             new_value: Some(weight),
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         },
     })
 }
@@ -1116,6 +1127,7 @@ fn build_structural_add_neuron_combo(
             new_value: Some(w_a),
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         },
     })
 }
@@ -1154,6 +1166,7 @@ fn build_mean_error_bias(
             new_value: Some(new_bias),
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         },
     })
 }
@@ -1220,6 +1233,7 @@ fn build_stats_skew_bias(ctx: &CandidateGenContext<'_>) -> Option<Candidate> {
             new_value: Some(new_bias),
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         },
     })
 }
@@ -1278,6 +1292,7 @@ fn build_candidate(
                                 new_value: Some(new_w),
                                 mirror: None,
                                 follow_up: None,
+                                neighbourhood: None,
                             },
                         });
                     }
@@ -1470,6 +1485,7 @@ fn build_candidate(
             new_value,
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         },
     })
 }
@@ -2957,6 +2973,7 @@ mod tests {
                 new_value: Some(0.35),
                 mirror: None,
                 follow_up: None,
+                neighbourhood: None,
             },
         }]
     }

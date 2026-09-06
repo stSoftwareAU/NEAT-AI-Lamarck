@@ -22,6 +22,7 @@ pub mod log;
 pub mod memetic;
 pub mod memo;
 pub mod mirror;
+pub mod neighbourhood;
 pub mod observations;
 pub mod parity;
 pub mod promote_gate;
@@ -57,8 +58,11 @@ pub use combos::{
     new_synapse_contributor_counts, select_best_with_combinations, stack_dampen_scale,
 };
 pub use config::{
-    DEFAULT_CANDIDATE_COUNT, DEFAULT_FOCUS_COUNT, DEFAULT_FOLLOWUP_CANDIDATES,
-    DEFAULT_FOLLOWUP_EXPERIMENTS, DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES, DEFAULT_MIN_IMPROVEMENT,
+    DEFAULT_CANDIDATE_COUNT, DEFAULT_FOCUS_COUNT, DEFAULT_FOCUS_NEIGHBOURHOOD_ACCEPTS,
+    DEFAULT_FOCUS_NEIGHBOURHOOD_EDGES, DEFAULT_FOCUS_NEIGHBOURHOOD_EXPERIMENTS,
+    DEFAULT_FOCUS_NEIGHBOURHOOD_NEURONS, DEFAULT_FOCUS_NEIGHBOURHOOD_RADIUS,
+    DEFAULT_FOLLOWUP_CANDIDATES, DEFAULT_FOLLOWUP_EXPERIMENTS,
+    DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES, DEFAULT_MIN_IMPROVEMENT,
     DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
     LamarckConfig,
 };
@@ -88,6 +92,10 @@ pub use memo::{
 pub use mirror::{
     MirrorPair, MirrorPolicy, MirrorRole, MirrorStats, PairOutcome, PerturbedScalar,
     SignedPerturbation, axis_failures, mirror_candidate, pair_outcomes, signed_perturbation,
+};
+pub use neighbourhood::{
+    FocusNeighbourhood, NeighbourhoodEdge, NeighbourhoodExpansion, NeighbourhoodLedger,
+    NeighbourhoodLimits, NeighbourhoodLink, NeighbourhoodMember, NeighbourhoodRole,
 };
 pub use parity::{
     PHASE0_ERROR_ABS_TOL, PHASE0_ERROR_REL_TOL, PHASE0_SCORE_ABS_TOL, PHASE0_SCORE_REL_TOL,
