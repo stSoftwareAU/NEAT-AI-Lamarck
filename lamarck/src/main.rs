@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use neat_ai_lamarck::focus::FocusPolicy;
 use neat_ai_lamarck::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
+use neat_ai_lamarck::scale::ScaleBudgetMode;
 use neat_ai_lamarck::screen_thresholds::{DEFAULT_SCREEN_CONTROL_RATE, ScreenThresholdMode};
 use neat_ai_lamarck::strategy_allocation::{
     DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR, StrategyAllocationMode,
@@ -70,6 +71,19 @@ struct Cli {
         conflicts_with = "scale_candidate_quotas"
     )]
     fixed_candidate_quotas: bool,
+
+    /// Scale-sensitive budgets: fixed (default) | derived (issue #223).
+    ///
+    /// `fixed` is the pre-#223 run: every scale-sensitive budget is a literal
+    /// calibrated against a historical creature. `derived` resolves the focus
+    /// count and the structural residual limits from the creature this run was
+    /// actually handed and from its wall-clock budget, so an evolving creature
+    /// is not optimised to the shape of an older one. Under `derived` the
+    /// resolved focus count replaces `--focus-count`. Opt-in until a paired
+    /// benchmark on score improvement per wall hour justifies moving the
+    /// default, and `fixed` is the arm it is measured against.
+    #[arg(long, default_value = "fixed")]
+    scale_budgets: String,
 
     /// Candidate-budget allocation: fixed (default) | adaptive (issue #218).
     ///
@@ -455,6 +469,14 @@ fn main() -> ExitCode {
         std::process::exit(2);
     });
 
+    let scale_budgets = ScaleBudgetMode::parse(&cli.scale_budgets).unwrap_or_else(|| {
+        eprintln!(
+            "unknown --scale-budgets '{}'; expected fixed|derived",
+            cli.scale_budgets
+        );
+        std::process::exit(2);
+    });
+
     let strategy_allocation = StrategyAllocationMode::parse(&cli.strategy_allocation)
         .unwrap_or_else(|| {
             eprintln!(
@@ -497,6 +519,7 @@ fn main() -> ExitCode {
         max_experiments: cli.max_experiments,
         candidates: cli.candidates,
         scale_candidate_quotas: cli.scale_candidate_quotas && !cli.fixed_candidate_quotas,
+        scale_budgets,
         strategy_allocation,
         strategy_exploration_floor: cli.strategy_exploration_floor,
         strategy_evidence_decay: cli.strategy_evidence_decay,

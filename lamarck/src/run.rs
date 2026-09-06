@@ -29,10 +29,7 @@ use crate::focus::{
 use crate::followup::{
     BatchContext as FollowUpBatchContext, FollowUpBurst, FollowUpParent, FollowUpPlan,
 };
-use crate::grafts::{
-    GraftReplayRequest, GraftStore, default_graft_replay_budget, record_structural_acceptance,
-    replay_grafts,
-};
+use crate::grafts::{GraftReplayRequest, GraftStore, record_structural_acceptance, replay_grafts};
 use crate::log;
 use crate::memo::{AnalysisMemo, MemoScope};
 use crate::mirror::{MirrorPolicy, axis_failures};
@@ -42,6 +39,7 @@ use crate::parity::{check_phase0_parity, compute_local_mse};
 #[cfg(test)]
 use crate::promote_gate::DEFAULT_SCREEN_PROMOTE_SIGMA_K;
 use crate::promote_gate::PromoteGateMode;
+use crate::scale::{CreatureScale, ResolvedBudgets};
 use crate::scorer::improvement;
 use crate::scorer::{
     DirectoryScorer, RecordingScorer, ScoreResult, ScoreSample, accepts_improvement,
@@ -421,6 +419,12 @@ pub struct RunConfigRecord {
     pub max_experiments: Option<u64>,
     /// Candidates generated per experiment.
     pub candidates: usize,
+    /// Scale-sensitive budget mode in force (`fixed` / `derived`, issue #223).
+    ///
+    /// `None` in journals written before the knob existed — those ran the fixed
+    /// literals, which are still the default.
+    #[serde(default)]
+    pub scale_budgets: Option<String>,
     /// Strategy allocation in force (`fixed` / `adaptive`, issue #218).
     ///
     /// `None` in journals written before the knob existed — those ran the
@@ -497,7 +501,10 @@ pub struct RunConfigRecord {
     /// Focus neurons proposed against per experiment (`--focus-count`, #109).
     ///
     /// `0` in journals written before the knob existed; a real run always
-    /// records at least 1.
+    /// records at least 1. This is the **configured** flag: under
+    /// `--scale-budgets derived` the run resolves its own focus count from the
+    /// creature and records that separately under `budgets.focusCount` (issue
+    /// #223), so an A/B arm stays identifiable from the configuration alone.
     #[serde(default)]
     pub focus_count: usize,
     /// Adjacent neurons a focus region could hold (`0` = off, issue #222).
@@ -609,6 +616,7 @@ impl RunConfigRecord {
             timeout_seconds: config.timeout.as_secs(),
             max_experiments: config.max_experiments,
             candidates: config.candidates,
+            scale_budgets: Some(config.scale_budgets.label().to_string()),
             strategy_allocation: Some(config.strategy_allocation.label().to_string()),
             // Recorded only when they are actually in force, so a journal never
             // implies a knob the run did not use.
@@ -721,6 +729,96 @@ pub struct RunHeaderRecord {
     pub version: String,
     /// Run configuration knobs.
     pub config: RunConfigRecord,
+    /// Dimensions of the creature the run was handed (issue #223).
+    ///
+    /// `None` only in journals written before #223 — every run since records
+    /// them, so a reader never has to infer the scale a run worked at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creature: Option<CreatureDimensionsRecord>,
+    /// Budgets resolved from those dimensions and the wall clock (issue #223).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<ResolvedBudgetsRecord>,
+}
+
+/// Dimensions of the creature a run was handed (issue #223).
+///
+/// Journalled for every run so a reader can tell what scale the run worked at
+/// without opening the creature file, which may since have been replaced by the
+/// evolutionary system that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatureDimensionsRecord {
+    /// Observation width.
+    pub input: usize,
+    /// Output width.
+    pub output: usize,
+    /// Non-input neurons (hidden plus output).
+    pub non_input_neurons: usize,
+    /// Total neurons, inputs included.
+    pub neurons: usize,
+    /// Synapse count.
+    pub synapses: usize,
+    /// Whether the creature is strictly feed-forward.
+    pub forward_only: bool,
+}
+
+impl From<CreatureScale> for CreatureDimensionsRecord {
+    fn from(scale: CreatureScale) -> Self {
+        Self {
+            input: scale.inputs,
+            output: scale.outputs,
+            non_input_neurons: scale.non_input_neurons,
+            neurons: scale.neurons(),
+            synapses: scale.synapses,
+            forward_only: scale.forward_only,
+        }
+    }
+}
+
+/// Budgets a run resolved before its first experiment (issue #223).
+///
+/// These are the numbers the run actually used, not the flags it was given: a
+/// default resolved from the wall-clock budget or from the creature's own size
+/// is recorded here as the value, never as an absent override.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedBudgetsRecord {
+    /// Mode the budgets were resolved under (`fixed` / `derived`).
+    pub scale_budgets: String,
+    /// Candidates generated per experiment.
+    pub candidates: usize,
+    /// Focus neurons the run was **configured** with (`--focus-count`).
+    ///
+    /// Under `--scale-budgets derived` the run resolves its own focus count
+    /// from the creature, and that resolved value is recorded separately under
+    /// `budgets.focusCount` (issue #223) — this field stays the flag, so an
+    /// A/B arm remains identifiable from the configuration alone.
+    pub focus_count: usize,
+    /// Head of the prior ranking re-scored by residual correlation.
+    pub residual_shortlist: usize,
+    /// Extra unused non-input sources folded in beyond the head.
+    pub residual_hidden_extra: usize,
+    /// Synthetic probe rows drawn when the corpus has fewer than two records.
+    pub synthetic_probe_rows: usize,
+    /// Resolved Phase-G graft-replay budget, in milliseconds.
+    pub graft_replay_ms: u64,
+    /// Wall-clock budget in seconds.
+    pub timeout_seconds: u64,
+}
+
+impl From<ResolvedBudgets> for ResolvedBudgetsRecord {
+    fn from(budgets: ResolvedBudgets) -> Self {
+        Self {
+            scale_budgets: budgets.mode.label().to_string(),
+            candidates: budgets.candidates,
+            focus_count: budgets.focus_count,
+            residual_shortlist: budgets.residual.shortlist,
+            residual_hidden_extra: budgets.residual.hidden_extra,
+            synthetic_probe_rows: budgets.residual.synthetic_probes,
+            graft_replay_ms: budgets.graft_replay_ms,
+            timeout_seconds: budgets.timeout_seconds,
+        }
+    }
 }
 
 impl RunHeaderRecord {
@@ -738,7 +836,19 @@ impl RunHeaderRecord {
             seed_source,
             version: env!("CARGO_PKG_VERSION").to_string(),
             config,
+            creature: None,
+            budgets: None,
         }
+    }
+
+    /// Record the creature the run was handed and the budgets it resolved.
+    ///
+    /// Called on every real run (issue #223): a header without them is a
+    /// pre-#223 journal, never a run that chose not to say.
+    pub fn with_scale(mut self, scale: CreatureScale, budgets: ResolvedBudgets) -> Self {
+        self.creature = Some(scale.into());
+        self.budgets = Some(budgets.into());
+        self
     }
 }
 
@@ -1261,7 +1371,7 @@ pub fn run_optimisation_cancellable(
     // the run, never be silently replaced by the default mid-A/B.
     let backprop = config.backprop_config()?;
     let analysis_threads = config.analysis_threads()?;
-    let focus_count = config.focus_count()?;
+    let configured_focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
     let followup_budget = config.followup_budget()?;
     let neighbourhood_limits = config.focus_neighbourhood_limits()?;
@@ -1277,6 +1387,33 @@ pub fn run_optimisation_cancellable(
         load_creature(&original_text).map_err(|e| format!("{}: {e}", config.creature.display()))?;
     // Tags/uuid are stripped by CreatureExport — keep them for check-in writes.
     let mut creature_meta = CreatureMeta::from_creature_json(&original_text);
+    // Every scale-sensitive budget is resolved here, from the creature this run
+    // was handed rather than from a historical one (issue #223), and both the
+    // dimensions and the resolved budgets go into the journal header below.
+    let creature_scale = CreatureScale::from_creature(&incumbent);
+    let resolved_budgets = ResolvedBudgets::resolve(config, creature_scale)?;
+    let focus_count = resolved_budgets.focus_count;
+    log::info(&format!(
+        "creature scale: inputs={} outputs={} neurons={} synapses={} (forwardOnly={})",
+        creature_scale.inputs,
+        creature_scale.outputs,
+        creature_scale.neurons(),
+        creature_scale.synapses,
+        creature_scale.forward_only
+    ));
+    if resolved_budgets.mode.is_derived() {
+        log::info(&format!(
+            "scale-budgets derived: focus-count={focus_count}, residual shortlist={} (+{} hidden), synthetic probes={}",
+            resolved_budgets.residual.shortlist,
+            resolved_budgets.residual.hidden_extra,
+            resolved_budgets.residual.synthetic_probes
+        ));
+        if resolved_budgets.focus_count_superseded() {
+            log::info(&format!(
+                "--focus-count {configured_focus_count} superseded: --scale-budgets derived resolves the focus count from the creature ({focus_count})"
+            ));
+        }
+    }
     // Measure every scorer call at the boundary (issue #112): the wrapper sees
     // Phase-0, Phase-G, screen, promote and combo batches alike, so the journal
     // can never be fitted to a subset of the calls a run actually made.
@@ -1327,7 +1464,8 @@ pub fn run_optimisation_cancellable(
             seed_source,
             RunConfigRecord::from_config(config, baseline_policy.drift_epsilon),
             unix_now(),
-        ),
+        )
+        .with_scale(creature_scale, resolved_budgets),
     )?;
     log::info(&format!(
         "ensuring observations-{} (inputs={} outputs={})",
@@ -1548,9 +1686,7 @@ pub fn run_optimisation_cancellable(
     };
 
     if let Some((grafts_path, store)) = graft_store.take() {
-        let budget = config
-            .graft_replay_budget
-            .unwrap_or_else(|| default_graft_replay_budget(config.timeout));
+        let budget = resolved_budgets.graft_replay_budget();
         let remaining = deadline.saturating_duration_since(Instant::now());
         let graft_deadline = Instant::now() + budget.min(remaining);
         log::info(&format!(
@@ -1990,7 +2126,8 @@ pub fn run_optimisation_cancellable(
                             &mut network,
                             &config.training_data,
                             focus_uuid,
-                            ScanBudget::new(focus_sample_limit, analysis_threads),
+                            ScanBudget::new(focus_sample_limit, analysis_threads)
+                                .with_residual(resolved_budgets.residual),
                             Some(&observations),
                             &prior_sources,
                         )?;

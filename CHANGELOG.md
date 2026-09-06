@@ -23,6 +23,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Creature-scale budgets, and an inventory of what actually moves with size
+  (Issue #223).** The README described a production creature of ~2 511 inputs
+  and ~1 590 hidden neurons as the design target, while the same champion has
+  since been observed near 7 363 neurons and 49 000 synapses — so budgets
+  calibrated at the older shape were quietly covering less and less of it. The
+  new `lamarck/src/scale.rs` reads the supplied creature's dimensions
+  (`CreatureScale`) and resolves the run's budgets from them
+  (`ResolvedBudgets`); **every** run now journals both in the `runHeader` under
+  `creature` and `budgets`, including the resolved Phase-G graft-replay budget,
+  which previously read `null` whenever the default fraction was used. The new
+  `--scale-budgets derived` arm derives the focus count and the structural
+  residual limits from the creature's own width and the run's wall clock,
+  sublinearly and bounded at both ends; `fixed` — the default — reproduces the
+  pre-#223 literals exactly and is the arm `derived` is measured against.
+  `docs/scale-sensitivity.md` inventories every scale-sensitive constant as
+  dimensionless, measured or size-dependent, and records the paired benchmark:
+  widening the shortlist from 0.65 % to 2.3 % of a 7 363-neuron creature's
+  ranked sources costs 0.6 % more analysis time, because the scan is dominated
+  by the per-record forward pass. The README's GRQ dimensions are now a dated
+  historical example rather than a design target.
+
 - **Transferable operator priors across runs (Issue #221).**
   Lamarck runs are deliberately short because the supplied champion goes stale,
   so every run re-discovered which mutation families are currently productive

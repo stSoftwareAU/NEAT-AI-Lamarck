@@ -260,12 +260,40 @@ preferred over one expensive analysis that eats the window. That is the design
 bias throughout: an analysis earns its place only when its expected value
 justifies the share of the run budget it consumes.
 
-### Production scale target
+### Creature scale is read, not assumed
 
-The production creature is the GRQ champion (`../GRQ-cluster/network.json`):
-about `2511` inputs, `1` output, `~1590` hidden neurons, `~21k` synapses,
-`forwardOnly: true`. Streaming statistics, the 45-minute budget and cheap
-candidate proposals all exist to stay viable at that scale.
+Lamarck optimises a creature that keeps evolving, so no dimension of any
+particular creature is a design target here. Every run reads the dimensions of
+the creature it was handed and records them — with the budgets it resolved from
+them — in the journal `runHeader`, so a reader never has to infer the scale a
+run worked at (issue #223):
+
+```mermaid
+flowchart LR
+    C["supplied creature<br/>inputs / neurons / synapses"] --> S["CreatureScale"]
+    T["--timeout-seconds<br/>--candidates"] --> B
+    S --> B["ResolvedBudgets<br/>(lamarck/src/scale.rs)"]
+    B --> H["journal runHeader<br/>creature + budgets"]
+    B --> R["focus count,<br/>residual limits,<br/>Phase-G budget"]
+```
+
+Under the default `--scale-budgets fixed` those budgets are the literals the
+crate shipped with; under `--scale-budgets derived` the size-dependent ones are
+derived from the creature's own width and the run's wall clock. Which constants
+are dimensionless, which are measured and which are size-dependent is
+inventoried in
+[`docs/scale-sensitivity.md`](docs/scale-sensitivity.md).
+
+Streaming statistics, the 45-minute budget and cheap candidate proposals exist
+so a run stays viable at whatever scale it is handed.
+
+**Historical example, October 2025.** The GRQ champion
+(`../GRQ-cluster/network.json`) then measured about `2511` inputs, `1` output,
+`~1590` hidden neurons, `~21k` synapses, `forwardOnly: true`, and the measured
+economics throughout this README were taken at that shape. It is dated evidence
+of one creature, not the current target — the same champion has since been
+observed near `7363` neurons and `49k` synapses. Cite it as a benchmark, never
+as a size the code may assume.
 
 ## Usage
 
@@ -303,6 +331,7 @@ The run always uses these; the flag only overrides the value.
 | `--scorer` | `rust_scorer` on `PATH` | NEAT-AI-scorer binary. Scoring is **mandatory** — safety invariant 3 lets only the scorer declare a candidate fitter, so a run that cannot spawn the binary aborts, at the Phase-0 gate or after 3 consecutive scorer failures when `--skip-phase0` is passed. |
 | `--output-dir` | `.` | Holds `best.json`, `experiments.jsonl`, `winners/` and per-experiment working directories. |
 | `--candidates` | `100` | Candidates generated per experiment. |
+| `--scale-budgets` | `fixed` | Whether scale-sensitive budgets are fixed literals or derived from the supplied creature (issue #223). `fixed` is the pre-#223 run: the focus count and the structural residual limits are literals calibrated against a historical creature. `derived` resolves them from the creature this run was handed — sublinear in its width, bounded by the candidate budget and the wall clock — so an evolving creature is not optimised to the shape of an older one; under it the resolved focus count replaces `--focus-count`. Opt-in until a paired benchmark on score improvement per wall hour justifies moving the default, and `fixed` is the arm it is measured against. Any other value aborts the run. Resolved budgets are recorded in the journal `runHeader` under `budgets` on **both** arms. See [Creature scale is read, not assumed](#creature-scale-is-read-not-assumed) and [`docs/scale-sensitivity.md`](docs/scale-sensitivity.md). |
 | `--timeout-seconds` | `2700` | Wall-clock budget (45 minutes). |
 | `--strategy-priors` | `off` | Whether the run carries operator priors across runs (issue #221). `seed` reads `strategy-priors.json` at startup, discounts it for age and source/corpus drift, seeds the strategy ledger with it, and writes this run's own decayed evidence back at the end; `off` — the default — neither reads nor writes it and is the cold-start arm `seed` is measured against. Any other value aborts the run. See [Transferable operator priors](#transferable-operator-priors). |
 | `--strategy-priors-path` | `<output-dir>/strategy-priors.json` | Priors file read at startup and written at the end under `--strategy-priors seed`. Point consecutive runs at one path to carry a single chain of evidence across output directories. |
@@ -1565,7 +1594,9 @@ reproducibility contract (issue #71) — everything needed to replay the run:
 | `seed` | Effective RNG seed — pass it back as `--seed` to replay. |
 | `seedSource` | `supplied` (`--seed` given) or `drawn` (from OS entropy). |
 | `version` | Lamarck version that wrote the journal. |
-| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `followupCandidates`, `followupExperiments` (`0` on the off arm), `focusNeighbourhoodNeurons` (`0` on the isolated arm) and — only when expansion is on — `focusNeighbourhoodEdges`, `focusNeighbourhoodRadius`, `focusNeighbourhoodAccepts`, `focusNeighbourhoodExperiments`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`, `strategyAllocation`, `strategyExplorationFloor`, `strategyEvidenceDecay`. |
+| `config` | Run knobs: `creature`, `trainingData`, `scorerPath`, `timeoutSeconds`, `maxExperiments`, `candidates`, `minImprovement`, `screenSampleRate`, `screenPromoteThreshold`, `screenPromoteGate`, `screenPromoteSigmaK`, `baselineReverifyInterval`, `baselineDriftEpsilon`, `focusNeuron`, `focusPolicy`, `focusCount`, `statsMode`, `quickSampleRecords`, `computeCorrelations`, `structuralOnly`, `followupCandidates`, `followupExperiments` (`0` on the off arm), `focusNeighbourhoodNeurons` (`0` on the isolated arm) and — only when expansion is on — `focusNeighbourhoodEdges`, `focusNeighbourhoodRadius`, `focusNeighbourhoodAccepts`, `focusNeighbourhoodExperiments`, `phase0Parity`, `preserveLosers`, `maxConsecutiveScorerFailures`, `graftsPath`, `graftReplayBudgetSeconds`, `backpropLearningRate`, `backpropMaxBiasAdjustmentScale`, `analysisMemoEntries`, `analysisThreads`, `strategyAllocation`, `strategyExplorationFloor`, `strategyEvidenceDecay`, `scaleBudgets`. |
+| `creature` | Dimensions of the creature the run was handed (issue #223): `input`, `output`, `nonInputNeurons`, `neurons`, `synapses`, `forwardOnly`. Absent only in journals written before #223. |
+| `budgets` | Budgets the run resolved from those dimensions and its wall clock (issue #223): `scaleBudgets`, `candidates`, `focusCount`, `residualShortlist`, `residualHiddenExtra`, `syntheticProbeRows`, `graftReplayMs`, `timeoutSeconds`. These are the numbers the run used, so a default resolved from the clock is recorded as its value rather than as an absent override. |
 
 When `--grafts-path` is set, the Phase-G replay writes one `graftReplay` record
 before the first experiment (issue #74). A replay can improve the incumbent with
@@ -2014,6 +2045,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured on an idle exclusive-box run**: each needs the production creature and exclusive use of the scorer. A shared-box **local calibration campaign** already has journals for an output-0 slice, a backprop-cap arm and a second seed — mined for screen/promote pairing only; see [`docs/screen-calibration.md`](docs/screen-calibration.md) and the campaign disambiguation in [`docs/followup-economics.md`](docs/followup-economics.md). |
 | Adaptive strategy allocation ([#218](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/218)) | Shipped **opt-in** (`--strategy-allocation adaptive`, `fixed` by default). The paired A/B is scripted (`scripts/run-strategy-allocation-ab.sh`) but **not yet run**: it needs exclusive box time on the production creature and corpus, so no `scoreImprovementPerWallHour` comparison exists yet. [`docs/strategy-allocation.md`](docs/strategy-allocation.md). |
 | Per-strategy screen thresholds ([#220](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/220)) | Shipped **opt-in** (`--screen-threshold-mode per-strategy`, `shared` by default). The offline comparison is in `report` (`screenThresholdReplay`) and the paired A/B is scripted (`scripts/run-screen-threshold-ab.sh`), but **not yet run**: it needs exclusive box time on the production creature and corpus, so no measured `scoreImprovementPerWallHour` comparison exists yet, and no false-negative rate has been measured on a production creature. [`docs/screen-thresholds.md`](docs/screen-thresholds.md). |
+| Creature-scale budgets ([#223](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/223)) | Shipped **opt-in** (`--scale-budgets derived`, `fixed` by default). The analysis-side cost is measured ([`docs/scale-sensitivity.md`](docs/scale-sensitivity.md): a shortlist widened from 0.65 % to 2.3 % of a 7 363-neuron creature's ranked sources costs under 1 % more scan time), but the **run** economics are not: no paired A/B script exists yet, the derived focus count is unbenchmarked, and it multiplies with the derived shortlist because the post-focus scan runs per focus. Journalled creature dimensions and resolved budgets ship on **both** arms. |
 | Transferable operator priors ([#221](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/221)) | Shipped **opt-in** (`--strategy-priors seed`, `off` by default). The paired cold-start-vs-seeded A/B is scripted (`scripts/run-strategy-priors-ab.sh`) but **not yet run**: it needs exclusive box time on the production creature and corpus, so no `scoreImprovementPerWallHour` comparison exists yet. [`docs/strategy-priors.md`](docs/strategy-priors.md). |
 | [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | **Fixed, pending release.** A sampled scorer call used to read and decode the whole corpus to score a twentieth of it; it now fetches only the records it scores, cutting the fixed cost of a screen call from **10 693 ms to 3 423 ms** ([`docs/scorer-fixed-cost.md`](docs/scorer-fixed-cost.md)). The change lives in NEAT-AI-core (`issue-scorer-sampled-read`) and NEAT-AI-scorer (`issue-lamarck-123-sampled-read`); a human must open those two PRs and cut a scorer release before a run picks it up ([#141](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/141)). The whole-run `scorerCallCost` re-measure on an idle box is owed then. |
 
@@ -2035,6 +2067,7 @@ NEAT-AI-Lamarck/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
     ├── config.rs            # defaults and run options
+    ├── scale.rs             # creature-scale budgets and resolved-budget record (issue #223)
     ├── analysis.rs          # the two fused per-experiment training scans
     ├── chunks.rs            # deterministic analysis chunking (issue #107)
     ├── memo.rs              # cross-experiment analysis memo (issue #106)

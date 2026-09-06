@@ -32,9 +32,22 @@ use neat_core::{compile_creature, parse_creature_json};
 /// Synthetic creature: `inputs` inputs, `hidden` TANH hiddens, one output.
 ///
 /// Only the hiddens feed the output, so every input is an unused ranked source
-/// the candidate generator may propose — the production shape the benchmarks
-/// were measured on.
+/// the candidate generator may propose — the shape the benchmarks were measured
+/// on. Fan-in is four inputs per hidden; use [`creature_json_with_fan_in`] when
+/// a bench needs a denser creature.
 pub fn creature_json(inputs: usize, hidden: usize) -> String {
+    creature_json_with_fan_in(inputs, hidden, 4)
+}
+
+/// [`creature_json`] with an explicit per-hidden input fan-in.
+///
+/// Synapse count is `hidden × (fan_in + 1)`, so a bench that needs to match a
+/// measured creature's synapse count as well as its neuron count can dial the
+/// density instead of inventing a second fixture. The source stride stays four
+/// whatever the fan-in, so `fan_in` of `4` reproduces [`creature_json`] byte for
+/// byte; `fan_in` must not exceed `inputs`, or a hidden would read one input
+/// twice.
+pub fn creature_json_with_fan_in(inputs: usize, hidden: usize, fan_in: usize) -> String {
     let mut neurons = String::new();
     let mut synapses = String::new();
     for h in 0..hidden {
@@ -46,7 +59,7 @@ pub fn creature_json(inputs: usize, hidden: usize) -> String {
             r#"{{"type":"hidden","uuid":"h{h}","bias":{bias},"squash":"TANH"}}"#
         ));
         // Each hidden reads a deterministic slice of the inputs.
-        for k in 0..4 {
+        for k in 0..fan_in {
             let i = (h * 4 + k) % inputs;
             let weight = 0.05 + ((h + k) as f64 % 11.0) * 0.01;
             synapses.push_str(&format!(

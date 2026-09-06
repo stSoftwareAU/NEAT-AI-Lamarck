@@ -29,6 +29,7 @@ pub mod promote_gate;
 pub mod propagate_layout;
 pub mod report;
 pub mod run;
+pub mod scale;
 pub mod scorer;
 pub mod scorer_cost;
 pub mod screen_calibration;
@@ -113,6 +114,11 @@ pub use report::{
 pub use run::{
     ExperimentRecord, JournalLine, RunConfigRecord, RunHeaderKind, RunHeaderRecord, RunResult,
     SeedSource, StopReason, run_optimisation, run_optimisation_cancellable,
+};
+pub use scale::{
+    CreatureScale, FIXED_RESIDUAL_HIDDEN_EXTRA, FIXED_RESIDUAL_SHORTLIST,
+    FIXED_SYNTHETIC_PROBE_ROWS, ResidualLimits, ResolvedBudgets, ScaleBudgetMode,
+    derived_focus_count, sublinear_budget,
 };
 pub use scorer::{
     ExternalScorer, PromoteDecision, RecordingScorer, ScoreResult, ScoreSample,

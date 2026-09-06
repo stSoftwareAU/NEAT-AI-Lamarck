@@ -17,6 +17,7 @@ use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
 use crate::neighbourhood::NeighbourhoodLimits;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use crate::promote_gate::{DEFAULT_SCREEN_PROMOTE_SIGMA_K, PromoteGate, PromoteGateMode};
+use crate::scale::ScaleBudgetMode;
 use crate::screen_thresholds::{
     DEFAULT_SCREEN_CONTROL_RATE, ScreenThresholdMode, ScreenThresholdPolicy,
 };
@@ -136,6 +137,14 @@ pub struct LamarckConfig {
     /// candidates whatever the budget says. `false` reproduces that fixed
     /// ceiling (`--fixed-candidate-quotas`), kept only for A/B benchmarking.
     pub scale_candidate_quotas: bool,
+    /// Whether scale-sensitive budgets are fixed literals or derived from the
+    /// supplied creature and the wall-clock budget (issue #223).
+    ///
+    /// `Fixed` is the pre-#223 run. `Derived` resolves the focus count and the
+    /// structural residual limits from the creature the run was handed, so a
+    /// creature that has outgrown the literals is not optimised to the shape of
+    /// a historical one. See [`crate::scale`].
+    pub scale_budgets: ScaleBudgetMode,
     /// How the candidate budget is split across strategies (issue #218).
     ///
     /// [`StrategyAllocationMode::Fixed`] — the default — is the pre-#218 run:
@@ -594,6 +603,9 @@ impl Default for LamarckConfig {
             max_experiments: None,
             candidates: DEFAULT_CANDIDATE_COUNT,
             scale_candidate_quotas: true,
+            // Opt-in: the fixed literals are the arm derived budgets have to
+            // beat on improvement per wall hour (issue #223).
+            scale_budgets: ScaleBudgetMode::Fixed,
             // Opt-in: the pre-#218 round-robin split is the arm adaptive
             // allocation has to beat on improvement per wall hour.
             strategy_allocation: StrategyAllocationMode::Fixed,
