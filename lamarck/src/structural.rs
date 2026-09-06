@@ -678,12 +678,7 @@ pub fn refine_sources_by_residual(
         network,
         training_data,
         focus_uuid,
-        ResidualRefine {
-            prior,
-            max_records,
-            observations: None,
-            limits: ResidualLimits::FIXED,
-        },
+        ResidualRefine::fixed(prior, max_records),
     )
 }
 
@@ -718,12 +713,6 @@ impl<'a> ResidualRefine<'a> {
     /// Same refine, with the observations behind the synthetic fallback.
     pub fn with_observations(mut self, observations: Option<&'a ObservationsStatistics>) -> Self {
         self.observations = observations;
-        self
-    }
-
-    /// Same refine, under `limits`.
-    pub fn with_limits(mut self, limits: ResidualLimits) -> Self {
-        self.limits = limits;
         self
     }
 }

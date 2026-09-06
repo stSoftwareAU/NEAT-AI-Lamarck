@@ -33,31 +33,12 @@ fn grouped(n: usize) -> String {
     out
 }
 
-/// Creature of the given shape, matching the bench fixture's topology.
-fn creature(inputs: usize, hidden: usize, fan_in: usize) -> String {
-    let mut neurons = String::new();
-    let mut synapses = String::new();
-    for h in 0..hidden {
-        neurons.push_str(&format!(
-            r#"{{"type":"hidden","uuid":"h{h}","bias":0.01,"squash":"TANH"}},"#
-        ));
-        for k in 0..fan_in {
-            synapses.push_str(&format!(
-                r#"{{"fromUUID":"input-{}","toUUID":"h{h}","weight":0.3}},"#,
-                (h * 4 + k) % inputs
-            ));
-        }
-        synapses.push_str(&format!(
-            r#"{{"fromUUID":"h{h}","toUUID":"o1","weight":0.2}},"#
-        ));
-    }
-    neurons.push_str(r#"{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}"#);
-    synapses.push_str(r#"{"fromUUID":"input-0","toUUID":"o1","weight":0.1}"#);
-    format!(
-        r#"{{"semanticVersion":"4.0.0","forwardOnly":true,"input":{inputs},"output":1,
-           "neurons":[{neurons}],"synapses":[{synapses}]}}"#
-    )
-}
+/// The shapes below must be the ones the benchmark actually built, so the
+/// creature comes from the benchmark's own fixture rather than a copy of it.
+#[path = "../examples/support/mod.rs"]
+mod support;
+
+use support::creature_json_with_fan_in as creature;
 
 /// The document tells the reader to run these, so they have to exist.
 #[test]
@@ -162,7 +143,7 @@ fn both_arms_resolve_the_budgets_the_document_says_are_journalled() {
             scale_budgets: mode,
             ..LamarckConfig::default()
         };
-        let budgets = ResolvedBudgets::resolve(&config, scale);
+        let budgets = ResolvedBudgets::resolve(&config, scale).expect("budgets resolve");
         assert_eq!(budgets.mode, mode);
         assert!(
             budgets.graft_replay_ms > 0,

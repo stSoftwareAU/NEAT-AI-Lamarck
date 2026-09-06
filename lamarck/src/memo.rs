@@ -46,11 +46,17 @@ use crate::focus::OutputErrorInfluence;
 
 /// Default cap on focus-dependent memo entries held at once.
 ///
-/// A production creature repeats its focus heavily — `docs/baseline-economics.md`
-/// records one neuron selected 19 times out of 75 experiments — so a small cap
-/// captures nearly all the reuse. Each entry holds one `FocusNeuronStats`, the
-/// focus's incoming-source rows and its ranked unused sources, so the whole memo
-/// is bounded by the focus fan-in, never by the creature's neuron count.
+/// A creature that repeats its focus heavily — `docs/baseline-economics.md`
+/// records one neuron selected 19 times out of 75 experiments — has nearly all
+/// its reuse captured by a small cap, so the *count* is set by the focus
+/// policy rather than by creature size.
+///
+/// Its **footprint is not**: each entry holds one `FocusNeuronStats`, the
+/// focus's incoming-source rows and its ranked unused sources — and that last
+/// list is O(inputs + neurons), not fan-in bounded, so the memo grows with the
+/// creature (issue #223). Bounding the cap by bytes needs a measured entry
+/// size the run does not yet take; `docs/scale-sensitivity.md` records the gap
+/// rather than leaving this doc claiming a bound that does not hold.
 pub const DEFAULT_ANALYSIS_MEMO_ENTRIES: usize = 16;
 
 /// Content hash of a creature: everything an analysis scan can observe.

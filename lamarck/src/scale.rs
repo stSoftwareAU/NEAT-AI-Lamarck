@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use neat_core::CreatureExport;
 
-use crate::config::{DEFAULT_FOCUS_COUNT, LamarckConfig};
+use crate::config::LamarckConfig;
 use crate::grafts::default_graft_replay_budget;
 
 /// Head of the target-correlation ranking re-scored by residual correlation
@@ -68,10 +68,12 @@ const RESIDUAL_HIDDEN_EXTRA_CEILING: usize = 128;
 
 /// Sublinear gain applied to the input width for synthetic probe rows.
 ///
-/// The probes fit residual correlations in an `input`-dimensional space, so a
-/// row count fixed while the input width grows becomes rank-deficient. Rows
-/// cost one forward pass each, hence a square-root gain rather than a linear
-/// one.
+/// The probes are the fallback ranking used when the corpus cannot supply two
+/// records, so they are the only spread a wide creature's sources are judged
+/// on. More rows do **not** make the fit well-determined — 3·√2511 rows is as
+/// rank-deficient in 2 511 dimensions as 64 was — they widen the sample the
+/// ranking is drawn from. Rows cost one forward pass each, hence a square-root
+/// gain rather than a linear one.
 const SYNTHETIC_PROBE_GAIN: f64 = 3.0;
 
 /// Ceiling on derived synthetic probe rows.
@@ -79,9 +81,13 @@ const SYNTHETIC_PROBE_CEILING: usize = 512;
 
 /// Sublinear gain applied to the non-input neuron count for the focus count.
 ///
-/// One creature-wide analysis is paid per experiment whatever the focus count,
-/// so a wider creature — a costlier analysis over more distinguishable regions
-/// — should amortise that analysis over more focuses.
+/// The creature-wide *pre*-focus scan is paid once per experiment whatever the
+/// focus count, so a wider creature — a costlier pre-focus pass over more
+/// distinguishable regions — should amortise it over more focuses. The
+/// *post*-focus scan is **not** amortised: it runs per focus, so a derived
+/// focus count multiplies with a derived residual shortlist. That product is
+/// exactly what the run-economics A/B has to price before this arm can become
+/// the default; the gain is deliberately small for the same reason.
 const FOCUS_COUNT_GAIN: f64 = 0.125;
 
 /// Ceiling on the derived focus count before the budget caps below are applied.
@@ -268,7 +274,9 @@ impl ResidualLimits {
 pub struct ResolvedBudgets {
     /// Mode the budgets were resolved under.
     pub mode: ScaleBudgetMode,
-    /// Focus neurons proposed against per experiment.
+    /// Focus count the run was configured with (`--focus-count`).
+    pub configured_focus_count: usize,
+    /// Focus neurons proposed against per experiment — the resolved value.
     pub focus_count: usize,
     /// Candidates generated per experiment.
     pub candidates: usize,
@@ -283,11 +291,16 @@ pub struct ResolvedBudgets {
 
 impl ResolvedBudgets {
     /// Resolve every scale-sensitive budget for `config` against `scale`.
-    pub fn resolve(config: &LamarckConfig, scale: CreatureScale) -> Self {
+    ///
+    /// Errors on an unusable `--focus-count`, through the same validation the
+    /// run uses ([`LamarckConfig::focus_count`]), so a caller of this API can
+    /// never be handed a zero-focus budget to act on.
+    pub fn resolve(config: &LamarckConfig, scale: CreatureScale) -> Result<Self, String> {
         let mode = config.scale_budgets;
         let timeout_seconds = config.timeout.as_secs();
+        let configured_focus_count = config.focus_count()?;
         let focus_count = match mode {
-            ScaleBudgetMode::Fixed => config.focus_count,
+            ScaleBudgetMode::Fixed => configured_focus_count,
             ScaleBudgetMode::Derived => {
                 derived_focus_count(scale, config.candidates, timeout_seconds)
             }
@@ -295,14 +308,15 @@ impl ResolvedBudgets {
         let graft_replay = config
             .graft_replay_budget
             .unwrap_or_else(|| default_graft_replay_budget(config.timeout));
-        Self {
+        Ok(Self {
             mode,
+            configured_focus_count,
             focus_count,
             candidates: config.candidates,
             residual: ResidualLimits::resolve(mode, scale),
             graft_replay_ms: u64::try_from(graft_replay.as_millis()).unwrap_or(u64::MAX),
             timeout_seconds,
-        }
+        })
     }
 
     /// Graft-replay budget as a [`Duration`].
@@ -310,15 +324,16 @@ impl ResolvedBudgets {
         Duration::from_millis(self.graft_replay_ms)
     }
 
-    /// True when the resolved focus count overrode a configured one.
+    /// True when the resolved focus count differs from the configured one.
     ///
-    /// Under [`ScaleBudgetMode::Derived`] the focus count is derived, so an
-    /// explicit `--focus-count` is reported as overridden rather than silently
-    /// dropped.
-    pub fn focus_count_overridden(&self, configured: usize) -> bool {
-        self.mode.is_derived()
-            && configured != self.focus_count
-            && configured != DEFAULT_FOCUS_COUNT
+    /// Under [`ScaleBudgetMode::Derived`] the focus count comes from the
+    /// creature, so `--focus-count` is superseded. The run reports that
+    /// supersession rather than dropping the flag quietly; it cannot abort on
+    /// it, because the flag always carries a value and the operator's silence
+    /// is indistinguishable from an explicit
+    /// `--focus-count [`crate::config::DEFAULT_FOCUS_COUNT`]`.
+    pub fn focus_count_superseded(&self) -> bool {
+        self.configured_focus_count != self.focus_count
     }
 }
 
@@ -458,7 +473,7 @@ mod tests {
             ..LamarckConfig::default()
         };
         let scale = CreatureScale::from_creature(&creature(2_511, 1_590));
-        let budgets = ResolvedBudgets::resolve(&config, scale);
+        let budgets = ResolvedBudgets::resolve(&config, scale).expect("budgets resolve");
         assert_eq!(
             budgets.graft_replay_budget(),
             default_graft_replay_budget(config.timeout),
@@ -467,6 +482,7 @@ mod tests {
         assert_eq!(budgets.timeout_seconds, 2_700);
         assert_eq!(budgets.mode, ScaleBudgetMode::Fixed);
         assert_eq!(budgets.focus_count, config.focus_count);
+        assert!(!budgets.focus_count_superseded());
     }
 
     #[test]
@@ -478,9 +494,15 @@ mod tests {
             ..LamarckConfig::default()
         };
         let scale = CreatureScale::from_creature(&creature(2_511, 4_852));
-        let budgets = ResolvedBudgets::resolve(&config, scale);
+        let budgets = ResolvedBudgets::resolve(&config, scale).expect("budgets resolve");
         assert!(budgets.focus_count > config.focus_count);
-        assert!(budgets.focus_count_overridden(3));
-        assert!(!budgets.focus_count_overridden(DEFAULT_FOCUS_COUNT));
+        assert_eq!(
+            budgets.configured_focus_count,
+            crate::config::DEFAULT_FOCUS_COUNT
+        );
+        assert!(
+            budgets.focus_count_superseded(),
+            "a derived focus count that differs from the flag must be reported"
+        );
     }
 }

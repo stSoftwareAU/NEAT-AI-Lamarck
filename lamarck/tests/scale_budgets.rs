@@ -25,47 +25,16 @@ use neat_core::{CreatureExport, compile_creature, parse_creature_json};
 
 const SAMPLE_RECORDS: usize = 48;
 
-/// Synthetic creature: `inputs` inputs, `hidden` TANH hiddens, one output.
-///
-/// Every input is unused, so the residual pass has the whole input width to
-/// rank — the property the shortlist budget bounds.
-fn creature_json(inputs: usize, hidden: usize) -> String {
-    let mut neurons = String::new();
-    let mut synapses = String::new();
-    for h in 0..hidden {
-        neurons.push_str(&format!(
-            r#"{{"type":"hidden","uuid":"h{h}","bias":0.01,"squash":"TANH"}},"#
-        ));
-        synapses.push_str(&format!(
-            r#"{{"fromUUID":"input-{}","toUUID":"h{h}","weight":0.3}},"#,
-            h % inputs
-        ));
-        synapses.push_str(&format!(
-            r#"{{"fromUUID":"h{h}","toUUID":"o1","weight":0.2}},"#
-        ));
-    }
-    neurons.push_str(r#"{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}"#);
-    synapses.push_str(r#"{"fromUUID":"input-0","toUUID":"o1","weight":0.1}"#);
-    format!(
-        r#"{{"semanticVersion":"4.0.0","forwardOnly":true,"input":{inputs},"output":1,
-           "neurons":[{neurons}],"synapses":[{synapses}]}}"#
-    )
-}
+/// The creature and the corpus come from the benchmarks' shared fixture, so a
+/// change to either lands here as well as on every bench (issue #138).
+#[path = "../examples/support/mod.rs"]
+mod support;
 
-/// Deterministic xorshift sample: `inputs` inputs and a target per record.
-fn write_sample(dir: &Path, inputs: usize, records: usize) {
-    let mut bytes = Vec::new();
-    let mut state = 0x2545_F491_4F6C_DD1Du64;
-    for _ in 0..records {
-        for _ in 0..=inputs {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let v = ((state >> 11) as f64 / (1u64 << 53) as f64) as f32 * 2.0 - 1.0;
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    std::fs::write(dir.join("0.bin"), &bytes).unwrap();
+use support::{creature_json_with_fan_in, write_sample};
+
+/// Fixture creature at the benchmarks' default fan-in.
+fn creature_json(inputs: usize, hidden: usize) -> String {
+    creature_json_with_fan_in(inputs, hidden, 4)
 }
 
 /// Scores everything flat, so the incumbent survives the whole run.
@@ -102,7 +71,7 @@ fn run(dir: &Path, out: &str, inputs: usize, hidden: usize, mode: ScaleBudgetMod
     let creature = dir.join(format!("{out}-creature.json"));
     let training = dir.join(format!("{out}-data"));
     std::fs::create_dir_all(&training).unwrap();
-    write_sample(&training, inputs, SAMPLE_RECORDS);
+    write_sample(&training, SAMPLE_RECORDS, inputs);
     std::fs::write(&creature, creature_json(inputs, hidden)).unwrap();
     let config = LamarckConfig {
         creature,
@@ -168,7 +137,8 @@ fn every_run_journals_the_creature_it_was_handed_and_the_budgets_it_resolved() {
     // Three hiddens plus the output.
     assert_eq!(dims.non_input_neurons, 4);
     assert_eq!(dims.neurons, 10);
-    assert_eq!(dims.synapses, 7);
+    // Fan-in four plus one output edge, per hidden.
+    assert_eq!(dims.synapses, 15);
     assert!(dims.forward_only);
 
     let budgets = header.budgets.expect("header records resolved budgets");
@@ -243,6 +213,7 @@ fn fixed_budgets_are_identical_across_materially_different_creatures() {
         .map(|(inputs, hidden)| {
             let creature = parse_creature_json(&creature_json(*inputs, *hidden)).unwrap();
             ResolvedBudgets::resolve(&config, CreatureScale::from_creature(&creature))
+                .expect("budgets resolve")
         })
         .collect();
     for budgets in &resolved {
@@ -263,6 +234,7 @@ fn derived_budgets_grow_with_the_creature_they_are_handed() {
     let resolve = |inputs: usize, hidden: usize| {
         let creature = parse_creature_json(&creature_json(inputs, hidden)).unwrap();
         ResolvedBudgets::resolve(&config, CreatureScale::from_creature(&creature))
+            .expect("budgets resolve")
     };
     let tiny = resolve(4, 2);
     let historical = resolve(2_511, 1_590);
@@ -291,7 +263,7 @@ fn a_derived_scan_examines_more_of_a_wide_creature_than_a_fixed_one() {
     // ranked sources buys a head of about 2 × √2 000 ≈ 90.
     let inputs = 2_000;
     let dir = tempfile::tempdir().unwrap();
-    write_sample(dir.path(), inputs, SAMPLE_RECORDS);
+    write_sample(dir.path(), SAMPLE_RECORDS, inputs);
     let creature = parse_creature_json(&creature_json(inputs, 4)).unwrap();
     let scale = CreatureScale::from_creature(&creature);
     let prior = prior_inputs(&creature);

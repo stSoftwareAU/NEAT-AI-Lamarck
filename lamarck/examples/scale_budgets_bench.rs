@@ -9,8 +9,12 @@
 //! that has since grown.
 //!
 //! It measures the **analysis**, not the run economics: what a wider shortlist
-//! is worth in accepts per wall-clock hour needs the real creature and the real
-//! scorer, and is an arm of `scripts/run-followup-economics.sh`.
+//! is worth in accepts per wall-clock hour needs the real creature, the real
+//! scorer and exclusive box time. No paired A/B script exists for
+//! `--scale-budgets` yet, and the README's outstanding-work table records that.
+//!
+//! It also holds the focus count at one, so the derived arm's *other* budget is
+//! not priced here — see the warning in `docs/scale-sensitivity.md`.
 //!
 //! Usage (release build — debug timings are meaningless):
 //!

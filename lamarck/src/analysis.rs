@@ -111,12 +111,10 @@ pub struct PostFocusScan {
     pub ranked_sources: Vec<RankedSource>,
 }
 
-/// How much of the training sample a scan folds, on how many workers, and how
-/// wide the residual shortlist it re-ranks is.
+/// How much of the training sample a scan folds, and on how many workers.
 ///
-/// Bundled so the scan entry points keep a readable signature: the cap, the
-/// worker count and the shortlist budgets are always chosen together, at the
-/// same call site.
+/// Bundled so the scan entry points keep a readable signature: the cap and the
+/// worker count are always chosen together, at the same call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanBudget {
     /// Cap on records folded — `None` folds the whole sample.
@@ -124,6 +122,9 @@ pub struct ScanBudget {
     /// Worker threads folding record chunks (issue #107). Must be at least 1.
     pub threads: usize,
     /// Residual shortlist and synthetic-probe budgets (issue #223).
+    ///
+    /// Read by [`scan_post_focus`] alone — [`scan_pre_focus`] ranks no sources,
+    /// so the field is inert on that call and left at [`ResidualLimits::FIXED`].
     pub residual: ResidualLimits,
 }
 

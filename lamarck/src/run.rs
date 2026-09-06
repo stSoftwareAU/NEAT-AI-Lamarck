@@ -501,7 +501,10 @@ pub struct RunConfigRecord {
     /// Focus neurons proposed against per experiment (`--focus-count`, #109).
     ///
     /// `0` in journals written before the knob existed; a real run always
-    /// records at least 1.
+    /// records at least 1. This is the **configured** flag: under
+    /// `--scale-budgets derived` the run resolves its own focus count from the
+    /// creature and records that separately under `budgets.focusCount` (issue
+    /// #223), so an A/B arm stays identifiable from the configuration alone.
     #[serde(default)]
     pub focus_count: usize,
     /// Adjacent neurons a focus region could hold (`0` = off, issue #222).
@@ -784,7 +787,12 @@ pub struct ResolvedBudgetsRecord {
     pub scale_budgets: String,
     /// Candidates generated per experiment.
     pub candidates: usize,
-    /// Focus neurons proposed against per experiment.
+    /// Focus neurons the run was **configured** with (`--focus-count`).
+    ///
+    /// Under `--scale-budgets derived` the run resolves its own focus count
+    /// from the creature, and that resolved value is recorded separately under
+    /// `budgets.focusCount` (issue #223) — this field stays the flag, so an
+    /// A/B arm remains identifiable from the configuration alone.
     pub focus_count: usize,
     /// Head of the prior ranking re-scored by residual correlation.
     pub residual_shortlist: usize,
@@ -1383,7 +1391,7 @@ pub fn run_optimisation_cancellable(
     // was handed rather than from a historical one (issue #223), and both the
     // dimensions and the resolved budgets go into the journal header below.
     let creature_scale = CreatureScale::from_creature(&incumbent);
-    let resolved_budgets = ResolvedBudgets::resolve(config, creature_scale);
+    let resolved_budgets = ResolvedBudgets::resolve(config, creature_scale)?;
     let focus_count = resolved_budgets.focus_count;
     log::info(&format!(
         "creature scale: inputs={} outputs={} neurons={} synapses={} (forwardOnly={})",
@@ -1400,9 +1408,9 @@ pub fn run_optimisation_cancellable(
             resolved_budgets.residual.hidden_extra,
             resolved_budgets.residual.synthetic_probes
         ));
-        if resolved_budgets.focus_count_overridden(configured_focus_count) {
-            log::warn(&format!(
-                "--focus-count {configured_focus_count} ignored: --scale-budgets derived resolves the focus count from the creature ({focus_count})"
+        if resolved_budgets.focus_count_superseded() {
+            log::info(&format!(
+                "--focus-count {configured_focus_count} superseded: --scale-budgets derived resolves the focus count from the creature ({focus_count})"
             ));
         }
     }

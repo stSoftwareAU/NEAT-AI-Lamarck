@@ -9,8 +9,13 @@ on a smaller slice of a bigger creature. This document is the inventory that
 makes those decisions visible, and the record of what each one is measured to
 cost.
 
-Every constant in the crate that could plausibly depend on creature size is
-listed below and classified as one of three things:
+Every constant this audit examined is listed below and classified as one of
+three things. The inventory covers the areas issue #223 named — candidate count
+and quota defaults, focus-count default and focus analysis cost, structural
+candidate grids, scorer batch sizing, memory estimates, analysis and cache
+economics, and thresholds justified by historical counts — but it is an audit,
+not a proof of exhaustiveness: a constant added later is not automatically
+covered here.
 
 | Class | Meaning |
 |-------|---------|
@@ -62,8 +67,18 @@ benchmark evidence, never inputs to behaviour.
 |----------|-------------|-------|------------|
 | `residual_shortlist` (`structural.rs`) | `48` sources | size-dependent | `sublinear(48, ranked_sources, gain 2.0, cap 512)`. The head of the target-correlation ranking that the residual pass re-scores; the population is every input and non-input neuron. |
 | `residual_hidden_extra` (`structural.rs`) | `16` sources | size-dependent | `sublinear(16, ranked_sources, gain 0.5, cap 128)`. Unused non-input sources folded in beyond the head. |
-| `synthetic_probes` (`structural.rs`) | `64` rows | size-dependent | `sublinear(64, inputs, gain 3.0, cap 512)`. The probes fit residual correlations in an `input`-dimensional space, so a fixed row count becomes rank-deficient as the input width grows. |
-| `DEFAULT_FOCUS_COUNT` (`config.rs`) | `1` focus | size-dependent | `sublinear(1, non_input_neurons, gain 0.125, cap 16)`, then capped by the candidate budget (≥ 8 candidates per focus) and the clock (≥ 60 s per focus). One creature-wide analysis is paid per experiment whatever the focus count, so a wider creature should amortise it over more focuses. |
+| `synthetic_probes` (`structural.rs`) | `64` rows | size-dependent | `sublinear(64, inputs, gain 3.0, cap 512)`. The fallback ranking used only when the corpus yields fewer than two records, so it is the sole spread a wide creature's sources are judged on. It does **not** make the fit well-determined — 150 rows is as rank-deficient in 2 511 dimensions as 64 — it widens the sample the ranking is drawn from. |
+| `DEFAULT_FOCUS_COUNT` (`config.rs`) | `1` focus | size-dependent | `sublinear(1, non_input_neurons, gain 0.125, cap 16)`, then capped by the candidate budget (≥ 8 candidates per focus) and the clock (≥ 60 s per focus). The creature-wide **pre**-focus scan is paid once per experiment whatever the focus count, so a wider creature amortises it over more focuses. |
+
+> **The two derived budgets multiply.** `scan_post_focus` runs *per focus*, not
+> once per experiment, so a run at K focuses pays K post-focus scans — each with
+> the widened shortlist above. On a 7 363-neuron creature the derived arm
+> resolves 9 focuses and a 172-source shortlist, so the analysis cost per
+> experiment is roughly `9 × 3.6` times the fixed arm's, not `1.006` times it.
+> The benchmark below fixes the focus count at 1 and measures the shortlist
+> alone; pricing the product is the run-economics A/B's job, and is the main
+> reason this arm is still opt-in. The analysis memo also holds one entry per
+> focus scan, so a high focus count shortens its reach (see below).
 
 ### Resolved from the wall clock, on both arms
 
@@ -87,9 +102,15 @@ forgotten.
 | `MAX_COMBO_CANDIDATES` (`combos.rs`) | `50` | A scorer batch size. Bounded by the scorer's own memory and the directory-call cost, both measured at the scorer boundary (`scorer_cost.rs`), not by the creature's neuron count. |
 | `ANALYSIS_CHUNK_RECORDS` (`chunks.rs`) | `2048` | Must stay fixed: the chunk boundary is what makes float summation deterministic across worker counts. Its *footprint* scales with record width, which is bounded by the read batch above. |
 | `DEFAULT_ANALYSIS_THREADS` (`chunks.rs`) | `4` | Host-dependent, not creature-dependent. |
-| `DEFAULT_ANALYSIS_MEMO_ENTRIES` (`memo.rs`) | `16` | Entry *count* is set by the measured focus reuse rate (`docs/baseline-economics.md`), which is a property of the focus policy, not of creature width. |
+| `DEFAULT_ANALYSIS_MEMO_ENTRIES` (`memo.rs`) | `16` entries | Entry *count* is set by the measured focus reuse rate (`docs/baseline-economics.md`), a property of the focus policy rather than of creature width. Its **footprint is not**: each entry holds a `PostFocusScan`, whose `ranked_sources` is the full O(inputs + neurons) prior list, so 16 entries on a 7 363-source creature is tens of MB rather than the fan-in-bounded figure `memo.rs` claims. The count stays fixed because bounding it by bytes needs a measured entry size the run does not yet take; the discrepancy is recorded here rather than left in the module doc. |
 | `DEFAULT_FAILED_CACHE_MAX_ENTRIES` / `FAILED_CACHE_BYTES_PER_ENTRY` (`failed_cache/store.rs`) | `50 000` / `512` B | The fingerprint strings are bounded by the mutation description, not by the creature. The resident-bytes ceiling derived from them (`DEFAULT_CACHE_MAX_RESIDENT_BYTES`) is enforced, so an under-estimate costs entries, never memory. |
 | `DEFAULT_QUICK_SAMPLE_RECORDS` (`observations.rs`) | `25 000` | A sample size for a statistics scan, capped so quick mode stays quick. Scan time per record does scale with input width — the operator flag `--quick-sample-records` is the lever, and it is journalled. |
+| `FILL_PER_STRATEGY`, `ADDS_PER_ROUND`, `NEURONS_PER_ROUND`, `HIDDEN_NEURONS_PER_ROUND` (`candidates.rs`) | `3` / `4` / `3` / `2` | Per-round quotas over a grid whose width is `ranked_sources × scale_steps`, so a wider creature takes more rounds to sweep the same fraction. Under the default `--scale-candidate-quotas` the generator keeps issuing rounds until the batch budget is filled, so `--candidates` — not these quotas — is what binds. Raising them changes the strategy *mix* of a batch, which is `--strategy-allocation`'s job (issue #218). |
+| `BACKFILL_PROPOSAL_BUDGET_MULTIPLE` (`failed_cache/filter.rs`) | `2` | Already scales: it is a multiple of the batch size, not an absolute count. |
+| `DEFAULT_CACHE_STAND_DOWN_MARGIN_MS` / `DEFAULT_CACHE_STAND_DOWN_WINDOW` (`failed_cache/economics.rs`) | `1 000` ms / `20` experiments | The margin is compared against **measured** scorer savings, which do grow with creature size — so on a bigger creature the guardrail trips *less* readily, which is the safe direction (the cache stands down only when it is measurably not paying). The window is a count of experiments, and experiment throughput is itself creature-dependent; both are journalled and flag-settable. |
+| `PHASE0_MSE_BATCH_RECORDS` (`parity.rs`) | `1 024` records | A SIMD packing width. Its footprint is `1 024 × record width`, bounded the same way the read batch is; the count itself is a vectorisation constant, not a coverage budget. |
+| `DEFAULT_FOCUS_NEIGHBOURHOOD_EDGES` / `_NEURONS` / `_RADIUS` (`config.rs`) | `4` / `0` / `1` | A *local* region by definition: the point of issue #222 is a bounded neighbourhood, so widening it with the creature would defeat the mechanism. Expansion is off by default and has its own A/B. |
+| `MIN_CALIBRATION_PAIRS` / `CALIBRATION_WINDOW` (`screen_thresholds.rs`) | `8` / `128` pairs | Sample sizes for a statistical estimate, set by the variance of the estimate rather than by the creature it was measured on. |
 
 ### Dimensionless — correct at every scale
 
