@@ -7,8 +7,9 @@ productive even though earlier journals already measured it.
 This adds **transferable operator priors**, opt-in behind `--strategy-priors
 seed` (`off` — a cold start — stays the default and is the A/B arm). A seeded
 run reads a versioned `strategy-priors.json`, discounts it for age, corpus
-fingerprint and source-creature drift, caps it at 25 trials per arm, seeds the
-#218 strategy ledger with it, and writes back **what it measured** at the end.
+fingerprint and source-creature drift, caps it at 25 trials per arm, seeds
+the #218 strategy ledger with it, and writes back **what it measured** at the
+end.
 Only operator-level aggregates travel — trials, screen→promote conversions,
 accepts, full-corpus score gain and measured scorer cost, per strategy — so no
 historical candidate can be replayed, and every candidate is still generated,
