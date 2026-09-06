@@ -4,9 +4,11 @@
 //! something useful lives *there* — but the useful thing may be a small local
 //! subgraph rather than one neuron in isolation. This module turns a repeatedly
 //! successful focus into a small, bounded region of the creature — the focus
-//! itself, its direct predecessors and successors along the highest-impact
-//! edges, and the neurons accepted structural mutations recently grew — whose
-//! members the ordinary candidate generator can then target in turn.
+//! itself and the neurons reached from it along the highest-impact edges, with
+//! any neuron an accepted structural mutation recently grew taken first — whose
+//! members the ordinary candidate generator can then target in turn. Growth is
+//! a ranking preference, not an exemption: a grown neuron outside the region's
+//! radius is as far away as any other.
 //!
 //! Four properties keep the expansion honest:
 //!
@@ -33,7 +35,10 @@ use std::collections::HashMap;
 /// Hard limits on one focus-neighbourhood expansion.
 ///
 /// All four bind. [`Self::neurons`] is the master switch: `0` is the pre-#222
-/// run, where a focus is always treated as an isolated scalar target.
+/// run, where a focus is always treated as an isolated scalar target. A zero
+/// [`Self::edges`] or [`Self::radius`] can reach nothing either, so it derives
+/// no region — which is why [`crate::config::LamarckConfig`] rejects those two
+/// outright rather than letting a run silently lose the arm it was set for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NeighbourhoodLimits {
     /// Adjacent neurons one region may hold, over and above the root focus.
@@ -70,7 +75,9 @@ pub struct NeighbourhoodMember {
     pub uuid: String,
     /// Graph hops from the root focus (`0` only for the root).
     pub hops: usize,
-    /// Direction the member was reached in.
+    /// Direction the member was reached in, relative to the neuron it was
+    /// reached *from* — which is the root at one hop, and an inner member
+    /// beyond that.
     pub role: NeighbourhoodRole,
     /// True when an accepted structural mutation grew this neuron.
     pub grown: bool,
@@ -101,7 +108,8 @@ pub struct NeighbourhoodLink {
     pub member: String,
     /// Graph hops from the root to the member.
     pub hops: usize,
-    /// Where the member sits relative to the root.
+    /// Direction the member was reached in, relative to the neuron it was
+    /// reached *from*: the root itself at one hop, an inner member beyond that.
     pub role: NeighbourhoodRole,
 }
 
@@ -115,6 +123,14 @@ pub struct NeighbourhoodExpansion {
     pub accepts: u32,
     /// Adjacent members the region holds, in traversal order.
     pub members: Vec<String>,
+    /// The members an accepted structural mutation grew.
+    ///
+    /// Growth is the one signal the ranking treats as decisive, so a reader can
+    /// see whether a region was built around structure the scorer had already
+    /// paid for or around the creature's existing wiring. Omitted when the
+    /// region holds no grown member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grown: Vec<String>,
     /// Edges the region spans.
     pub edges: usize,
     /// Greatest hop count any member sits at.
@@ -185,6 +201,12 @@ impl FocusNeighbourhood {
             root_focus: self.root.clone(),
             accepts: self.accepts,
             members: self.members.iter().map(|m| m.uuid.clone()).collect(),
+            grown: self
+                .members
+                .iter()
+                .filter(|m| m.grown)
+                .map(|m| m.uuid.clone())
+                .collect(),
             edges: self.edges.len(),
             radius: self.members.iter().map(|m| m.hops).max().unwrap_or(0),
             remaining: self.remaining,
@@ -231,9 +253,11 @@ impl NeighbourhoodLedger {
     /// Expand around `root` when its measured evidence and allowance permit.
     ///
     /// `accepts` is the acceptances the run has credited to `root` so far and
-    /// `grown` the neurons accepted structural mutations recently inserted —
-    /// preferred over equally-weighted neighbours, because a neuron the scorer
-    /// has already paid for is the strongest local evidence available. Returns
+    /// `grown` the neurons accepted structural mutations recently inserted. A
+    /// grown neighbour is taken ahead of every plain one, however heavy that
+    /// one's edge: the scorer has already paid for the grown structure, which
+    /// is the strongest local evidence available. It still has to lie inside
+    /// the region's radius to join at all. Returns
     /// `None` when the trigger is unmet, when the root has spent its allowance,
     /// or when the creature offers no adjacent neuron to target.
     ///
@@ -280,12 +304,17 @@ impl NeighbourhoodLedger {
 
 /// Breadth-first region growth, bounded by every limit at once.
 ///
-/// Edges are considered in impact order — a neuron an accepted mutation grew
-/// first, then descending `|weight|`, then by uuid so the walk is deterministic
-/// — and each considered edge spends the edge budget whether or not it admits a
-/// member. An edge into an input neuron therefore counts (it is genuinely part
-/// of the region's incoming structure) without adding a member, because an
-/// input cannot be a focus.
+/// Edges are considered in impact order: a neuron an accepted structural
+/// mutation grew first — the scorer has already paid for it, so it outranks a
+/// heavier plain neighbour outright — then descending `|weight|`, then by uuid
+/// so the walk is deterministic. Each admitted edge spends the edge budget, and
+/// admits its endpoint as a member while the neuron budget allows.
+///
+/// An edge whose far endpoint cannot be a focus — an input neuron, or a
+/// dangling uuid no neuron declares — is skipped without spending the edge
+/// budget. Spending it there would let a focus fed by several strong input
+/// edges exhaust the budget before reaching a single targetable neighbour, and
+/// silently never expand at all.
 fn derive_region(
     creature: &CreatureExport,
     root: &str,
@@ -312,6 +341,7 @@ fn derive_region(
             break;
         }
         let mut ranked: Vec<(NeighbourhoodEdge, String, NeighbourhoodRole)> = Vec::new();
+        let targetable = |uuid: &str| known.contains(uuid) && !inputs.contains(uuid);
         for synapse in &creature.synapses {
             let edge = NeighbourhoodEdge {
                 from_uuid: synapse.from_uuid.clone(),
@@ -320,6 +350,7 @@ fn derive_region(
             };
             if frontier.iter().any(|f| f == &synapse.to_uuid)
                 && !visited.contains(&synapse.from_uuid)
+                && targetable(&synapse.from_uuid)
             {
                 ranked.push((
                     edge.clone(),
@@ -329,6 +360,7 @@ fn derive_region(
             }
             if frontier.iter().any(|f| f == &synapse.from_uuid)
                 && !visited.contains(&synapse.to_uuid)
+                && targetable(&synapse.to_uuid)
             {
                 ranked.push((edge, synapse.to_uuid.clone(), NeighbourhoodRole::Successor));
             }
@@ -356,12 +388,6 @@ fn derive_region(
                 continue;
             }
             edges.push(edge);
-            if inputs.contains(other.as_str()) || !known.contains(other.as_str()) {
-                // An input is real incoming structure but can never be a focus;
-                // an unknown endpoint is a dangling synapse, not a neuron.
-                visited.insert(other);
-                continue;
-            }
             visited.insert(other.clone());
             members.push(NeighbourhoodMember {
                 uuid: other.clone(),
@@ -504,7 +530,7 @@ mod tests {
         assert_eq!(region.members()[0].uuid, "h1", "the strongest edge wins");
     }
 
-    /// The edge cap is hard, and counts edges into inputs the region spans.
+    /// The edge cap is hard: it bounds the edges the region spans.
     #[test]
     fn the_edge_cap_bounds_the_region() {
         let mut ledger = NeighbourhoodLedger::new(NeighbourhoodLimits {
@@ -518,38 +544,117 @@ mod tests {
         assert_eq!(region.members().len(), 1);
     }
 
-    /// The radius is hard: a two-hop neuron never joins a radius-1 region.
+    /// A focus fed by heavy input edges still expands (issue #222).
+    ///
+    /// An input can never be a focus, so an edge into one buys the region
+    /// nothing. Spending the edge budget there let a first-layer focus — the
+    /// very shape this feature was built for — exhaust its budget before
+    /// reaching a single targetable neighbour, and silently never expand.
     #[test]
-    fn the_radius_bounds_the_region() {
+    fn heavy_input_edges_do_not_consume_the_edge_budget() {
+        let fed: CreatureExport = parse_creature_json(
+            r#"{
+              "semanticVersion": "4.0.0",
+              "forwardOnly": true,
+              "input": 2,
+              "output": 1,
+              "neurons": [
+                {"type":"hidden","uuid":"h1","bias":0.1,"squash":"IDENTITY"},
+                {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+              ],
+              "synapses": [
+                {"fromUUID":"input-0","toUUID":"h1","weight":0.95},
+                {"fromUUID":"input-1","toUUID":"h1","weight":0.9},
+                {"fromUUID":"h1","toUUID":"o1","weight":0.4}
+              ]
+            }"#,
+        )
+        .expect("the input-fed creature parses");
         let mut ledger = NeighbourhoodLedger::new(NeighbourhoodLimits {
             neurons: 4,
-            edges: 8,
+            edges: 1,
             radius: 1,
             ..limits()
         });
-        let one_hop = ledger.expand(&creature(), "o1", 1, &[]).expect("a region");
+        let region = ledger
+            .expand(&fed, "h1", 1, &[])
+            .expect("the two heavier input edges must not starve the region");
+        let members: Vec<&str> = region
+            .members()
+            .iter()
+            .map(|member| member.uuid.as_str())
+            .collect();
+        assert_eq!(members, vec!["o1"], "the one targetable neighbour joins");
+        assert_eq!(
+            region.edges().len(),
+            1,
+            "only the edge that admitted a member spends the budget"
+        );
+    }
+
+    /// The radius is hard: a two-hop neuron never joins a radius-1 region.
+    #[test]
+    fn the_radius_bounds_the_region() {
+        // input-0 → a → b → c → o1: one targetable neuron per hop from `o1`.
+        let chain: CreatureExport = parse_creature_json(
+            r#"{
+              "semanticVersion": "4.0.0",
+              "forwardOnly": true,
+              "input": 1,
+              "output": 1,
+              "neurons": [
+                {"type":"hidden","uuid":"a","bias":0.0,"squash":"IDENTITY"},
+                {"type":"hidden","uuid":"b","bias":0.0,"squash":"IDENTITY"},
+                {"type":"hidden","uuid":"c","bias":0.0,"squash":"IDENTITY"},
+                {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}
+              ],
+              "synapses": [
+                {"fromUUID":"input-0","toUUID":"a","weight":1.0},
+                {"fromUUID":"a","toUUID":"b","weight":0.7},
+                {"fromUUID":"b","toUUID":"c","weight":0.6},
+                {"fromUUID":"c","toUUID":"o1","weight":0.5}
+              ]
+            }"#,
+        )
+        .expect("the chain creature parses");
+        let region_at = |radius: usize| {
+            NeighbourhoodLedger::new(NeighbourhoodLimits {
+                neurons: 4,
+                edges: 8,
+                radius,
+                accepts: 1,
+                experiments: 1,
+            })
+            .expand(&chain, "o1", 1, &[])
+            .expect("a region")
+        };
+
+        let one_hop = region_at(1);
         let members: Vec<&str> = one_hop
             .members()
             .iter()
             .map(|member| member.uuid.as_str())
             .collect();
-        assert_eq!(members, vec!["h1", "h2"], "inputs are not targetable");
+        assert_eq!(members, vec!["c"], "only the direct predecessor");
 
-        let mut wider = NeighbourhoodLedger::new(NeighbourhoodLimits {
-            neurons: 4,
-            edges: 8,
-            radius: 2,
-            accepts: 1,
-            experiments: 1,
-        });
-        let two_hop = wider.expand(&creature(), "o1", 1, &[]).expect("a region");
-        assert!(
-            two_hop.members().iter().all(|member| member.hops <= 2),
-            "nothing beyond the radius joins"
+        let two_hop = region_at(2);
+        let members: Vec<(&str, usize)> = two_hop
+            .members()
+            .iter()
+            .map(|member| (member.uuid.as_str(), member.hops))
+            .collect();
+        assert_eq!(
+            members,
+            vec![("c", 1), ("b", 2)],
+            "the second hop reaches exactly one neuron further"
         );
         assert!(
             two_hop.edges().len() > one_hop.edges().len(),
-            "the second hop spans the input edges"
+            "the second hop spans one more edge"
+        );
+        assert!(
+            !two_hop.members().iter().any(|member| member.uuid == "a"),
+            "the three-hop neuron stays outside a radius-2 region"
         );
     }
 
@@ -566,6 +671,19 @@ mod tests {
             .expect("a region");
         assert_eq!(region.members()[0].uuid, "h2");
         assert!(region.members()[0].grown, "the member is marked as grown");
+        assert_eq!(
+            region.record().grown,
+            vec!["h2".to_string()],
+            "the journal says the region was built around grown structure"
+        );
+    }
+
+    /// The ledger reports the limits it enforces, so a caller can bound its own
+    /// bookkeeping by them rather than by a second copy of the numbers.
+    #[test]
+    fn the_ledger_reports_its_limits() {
+        let ledger = NeighbourhoodLedger::new(limits());
+        assert_eq!(ledger.limits(), limits());
     }
 
     /// Every candidate target resolves to provenance naming root and member.
@@ -603,6 +721,7 @@ mod tests {
         assert_eq!(record.root_focus, "o1");
         assert_eq!(record.accepts, 4);
         assert_eq!(record.members, vec!["h1".to_string(), "h2".to_string()]);
+        assert!(record.grown.is_empty(), "nothing here was grown");
         assert_eq!(record.edges, 2);
         assert_eq!(record.radius, 1);
         assert_eq!(record.remaining, 2, "one of three expansions spent");

@@ -1,7 +1,7 @@
 //! Benchmark / strategy economics reporting from `experiments.jsonl`.
 
 use crate::baseline::BaselineSource;
-use crate::candidates::{BatchLimit, CandidateStrategy};
+use crate::candidates::{BatchLimit, CandidateProvenance, CandidateStrategy};
 use crate::config::DEFAULT_MIN_IMPROVEMENT;
 use crate::log;
 use crate::mirror::{MirrorStats, pair_outcomes};
@@ -819,39 +819,53 @@ impl FollowUpStats {
 
 /// Score improvement per wall hour, or `None` when the arm was never run.
 fn gain_per_wall_hour(improvement: f64, ms: f64, candidates: u64) -> Option<f64> {
-    if candidates == 0 || ms <= 0.0 {
-        return None;
-    }
-    Some(improvement / (ms / 3_600_000.0))
+    per_wall_hour(improvement, ms, candidates)
 }
 
 /// Accepts per wall hour, or `None` when the arm was never run.
 fn wins_per_wall_hour(accepts: u64, ms: f64, candidates: u64) -> Option<f64> {
+    per_wall_hour(accepts as f64, ms, candidates)
+}
+
+/// `value` per wall hour of `ms`, or `None` when the arm was never run.
+///
+/// An arm that scored no candidate, or that was apportioned no measurable time,
+/// has no rate at all — `0.0` would read as a measured failure rather than as
+/// the absence of a measurement.
+fn per_wall_hour(value: f64, ms: f64, candidates: u64) -> Option<f64> {
     if candidates == 0 || ms <= 0.0 {
         return None;
     }
-    Some(accepts as f64 / (ms / 3_600_000.0))
+    Some(value / (ms / 3_600_000.0))
 }
 
 /// What focus-neighbourhood expansion bought against isolated focuses (#222).
 ///
 /// The two arms are priced exactly as the #219 pair is. Every candidate an
-/// experiment scored is either a **neighbourhood** trial — its provenance names
-/// an adjacent member of a derived region — or an **isolated** one, which is
-/// every candidate aimed at the root focus itself and every candidate of an
-/// unexpanded experiment. The experiment's measured work, analysis plus scorer
-/// milliseconds, is apportioned between them pro rata by candidate count. That
-/// charges the neighbourhood arm for a share of the creature-wide analysis it
-/// did not cause, which is deliberately conservative *against* expansion: an
-/// arm that still wins on [`Self::neighbourhood_wins_per_wall_hour`] has not
-/// been flattered by the accounting.
+/// experiment scored falls in one of three buckets: a **neighbourhood** trial —
+/// its provenance names an adjacent member of a derived region — an **isolated**
+/// one — aimed at the root focus itself, at another drawn focus, or proposed in
+/// an unexpanded experiment — or a follow-up probe (issue #219), which belongs
+/// to that feature's own arm and is held in [`Self::excluded_candidates`] rather
+/// than folded into either of these. Leaving probes in would let the #219 burst
+/// decide this A/B. The experiment's measured work, analysis plus scorer
+/// milliseconds, is apportioned across all three pro rata by candidate count,
+/// and only the two arms' shares are priced. That charges the neighbourhood arm
+/// for a share of the creature-wide analysis it did not cause, which is
+/// deliberately conservative *against* expansion: an arm that still wins on
+/// [`Self::neighbourhood_wins_per_wall_hour`] has not been flattered by the
+/// accounting.
 ///
 /// An accept is credited to an arm only when **every** member of the winner came
-/// from it; a combo spanning both counts in [`Self::mixed_accepts`] and its
-/// improvement is credited to neither. [`Self::root_accepts`] and
+/// from it; a combo spanning both counts in [`Self::mixed_accepts`], one whose
+/// members include a follow-up probe in [`Self::excluded_accepts`], and neither
+/// contributes improvement to an arm. [`Self::root_accepts`] and
 /// [`Self::adjacent_accepts`] answer the separate question the expansion was
 /// built to ask: within the experiments that expanded, did the follow-on wins
-/// land on the original focus or on the adjacent structure?
+/// land on the original focus or on the adjacent structure? Both require every
+/// winning member to carry the region link that says so, so a probe — or a
+/// candidate from another drawn focus — is counted in neither rather than
+/// assumed to be the root's.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NeighbourhoodStats {
@@ -869,12 +883,16 @@ pub struct NeighbourhoodStats {
     pub neighbourhood_candidates: u64,
     /// Candidates aimed at an isolated focus (the root's own included).
     pub isolated_candidates: u64,
+    /// Follow-up probes (issue #219), priced in neither arm.
+    pub excluded_candidates: u64,
     /// Accepts every member of which targeted adjacent structure.
     pub neighbourhood_accepts: u64,
     /// Accepts every member of which targeted an isolated focus.
     pub isolated_accepts: u64,
     /// Accepts whose members span both arms; credited to neither.
     pub mixed_accepts: u64,
+    /// Accepts whose members include a follow-up probe; credited to neither.
+    pub excluded_accepts: u64,
     /// Accepts whose members could not be resolved (a pre-#74 journal).
     pub unattributed_accepts: u64,
     /// Accepts in an **expanded** experiment that landed on the root focus.
@@ -889,6 +907,8 @@ pub struct NeighbourhoodStats {
     pub neighbourhood_ms: f64,
     /// Milliseconds apportioned to isolated candidates.
     pub isolated_ms: f64,
+    /// Milliseconds apportioned to follow-up probes, priced in neither arm.
+    pub excluded_ms: f64,
     /// Neighbourhood accepts per wall hour of the time it was apportioned.
     ///
     /// `None` when the arm was never exercised — reporting `0.0` for "not
@@ -919,47 +939,57 @@ impl NeighbourhoodStats {
                 self.roots += 1;
             }
         }
-        let adjacent = record
-            .candidates
-            .iter()
-            .filter(|prov| is_adjacent(prov))
-            .count() as u64;
-        let isolated = record.candidates.len() as u64 - adjacent;
+        let arms: Vec<Arm> = record.candidates.iter().map(arm_of).collect();
+        let count = |wanted: Arm| arms.iter().filter(|arm| **arm == wanted).count() as u64;
+        let adjacent = count(Arm::Adjacent);
+        let isolated = count(Arm::Isolated);
+        let excluded = count(Arm::Excluded);
         self.neighbourhood_candidates += adjacent;
         self.isolated_candidates += isolated;
+        self.excluded_candidates += excluded;
 
-        let total = (adjacent + isolated) as f64;
+        let total = arms.len() as f64;
         if total > 0.0 {
             let work = (record.analysis_ms + record.scorer_ms) as f64;
             self.neighbourhood_ms += work * adjacent as f64 / total;
             self.isolated_ms += work * isolated as f64 / total;
+            self.excluded_ms += work * excluded as f64 / total;
         }
 
         if !record.accepted {
             return;
         }
         let members = winner_member_indices(record);
-        let resolved: Vec<bool> = members
+        let winners: Vec<&CandidateProvenance> = members
             .iter()
             .filter_map(|idx| record.candidates.get(*idx))
-            .map(is_adjacent)
             .collect();
-        if resolved.len() != members.len() || resolved.is_empty() {
+        if winners.len() != members.len() || winners.is_empty() {
             self.unattributed_accepts += 1;
             return;
         }
         let improvement = record.improvement.unwrap_or(0.0);
         let expanded = record.neighbourhood.is_some();
-        if resolved.iter().all(|is_adjacent| *is_adjacent) {
+        let every = |wanted: Arm| winners.iter().all(|prov| arm_of(prov) == wanted);
+        if winners.iter().any(|prov| arm_of(prov) == Arm::Excluded) {
+            // A #219 probe won, alone or in a combo. It is that feature's
+            // result, not this one's, and crediting it to either arm would
+            // hand this A/B to the burst.
+            self.excluded_accepts += 1;
+        } else if every(Arm::Adjacent) {
             self.neighbourhood_accepts += 1;
             self.neighbourhood_improvement += improvement;
             if expanded {
                 self.adjacent_accepts += 1;
             }
-        } else if resolved.iter().all(|is_adjacent| !*is_adjacent) {
+        } else if every(Arm::Isolated) {
             self.isolated_accepts += 1;
             self.isolated_improvement += improvement;
-            if expanded {
+            // Only a winner every member of which names the root as its
+            // target landed *on the root*. A candidate from another drawn
+            // focus is an isolated trial too, and counting it here would
+            // report a follow-on win on a neuron the region never held.
+            if expanded && winners.iter().all(|prov| targets_root(prov)) {
                 self.root_accepts += 1;
             }
         } else {
@@ -993,15 +1023,37 @@ impl NeighbourhoodStats {
     }
 }
 
-/// Whether a candidate was aimed at adjacent structure rather than the root.
+/// Which arm of the #222 A/B a candidate belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arm {
+    /// Aimed at adjacent structure inside a derived region.
+    Adjacent,
+    /// Aimed at a focus treated as an isolated scalar target.
+    Isolated,
+    /// A follow-up probe (issue #219) — that feature's own arm.
+    Excluded,
+}
+
+/// Classify one candidate.
 ///
-/// A candidate carrying no link at all was proposed in an unexpanded
-/// experiment, which is the isolated arm — the same arm the root's own
-/// candidates sit in.
-fn is_adjacent(prov: &crate::candidates::CandidateProvenance) -> bool {
+/// A candidate carrying no region link was proposed in an unexpanded
+/// experiment, or against a focus outside the region; it is an isolated trial
+/// either way, the same arm the root's own candidates sit in.
+fn arm_of(prov: &CandidateProvenance) -> Arm {
+    if prov.follow_up.is_some() {
+        return Arm::Excluded;
+    }
+    match &prov.neighbourhood {
+        Some(link) if link.role != crate::neighbourhood::NeighbourhoodRole::Root => Arm::Adjacent,
+        _ => Arm::Isolated,
+    }
+}
+
+/// Whether a candidate names the region's root as the neuron it targeted.
+fn targets_root(prov: &CandidateProvenance) -> bool {
     prov.neighbourhood
         .as_ref()
-        .is_some_and(|link| link.role != crate::neighbourhood::NeighbourhoodRole::Root)
+        .is_some_and(|link| link.role == crate::neighbourhood::NeighbourhoodRole::Root)
 }
 
 /// Achieved candidate batch size across a journal (issue #108).
@@ -3241,6 +3293,7 @@ mod tests {
             root_focus: "o1".into(),
             accepts: 1,
             members: vec!["h1".into()],
+            grown: Vec::new(),
             edges: 1,
             radius: 1,
             remaining: 1,
@@ -3293,6 +3346,7 @@ mod tests {
             root_focus: "o1".into(),
             accepts: 2,
             members: vec!["h1".into()],
+            grown: Vec::new(),
             edges: 1,
             radius: 1,
             remaining: 0,
@@ -3329,6 +3383,92 @@ mod tests {
         assert_eq!(region.isolated_improvement, 0.0);
     }
 
+    /// A follow-up probe (issue #219) is priced in neither #222 arm.
+    ///
+    /// A probe carries no region link, so folding it into the isolated arm
+    /// would credit the #219 burst's win — and charge its scorer time — to the
+    /// arm this A/B is judging.
+    #[test]
+    fn a_follow_up_probe_is_excluded_from_both_arms() {
+        let mut expanded = experiment(1, true);
+        expanded.candidates = vec![
+            root_candidate("o1"),
+            adjacent_candidate("o1", "h1"),
+            probe(0),
+            probe(0),
+        ];
+        expanded.neighbourhood = Some(crate::neighbourhood::NeighbourhoodExpansion {
+            root_focus: "o1".into(),
+            accepts: 1,
+            members: vec!["h1".into()],
+            grown: Vec::new(),
+            edges: 1,
+            radius: 1,
+            remaining: 0,
+        });
+        expanded.winner = Some("candidate-002".into());
+        expanded.combo_member_indices = Some(vec![2]);
+        expanded.improvement = Some(5e-6);
+        expanded.analysis_ms = 100;
+        expanded.scorer_ms = 300;
+
+        let region = report_from_journal(journal_of(&[expanded]).path())
+            .unwrap()
+            .neighbourhood;
+        assert_eq!(region.excluded_candidates, 2);
+        assert_eq!(region.neighbourhood_candidates, 1);
+        assert_eq!(region.isolated_candidates, 1);
+        assert_eq!(region.excluded_accepts, 1, "the probe's win is its own");
+        assert_eq!(region.neighbourhood_accepts, 0);
+        assert_eq!(region.isolated_accepts, 0);
+        assert_eq!(region.root_accepts, 0, "the win did not land on the root");
+        assert_eq!(region.adjacent_accepts, 0);
+        assert_eq!(region.neighbourhood_improvement, 0.0);
+        assert_eq!(region.isolated_improvement, 0.0);
+        // The probes' half of the 400ms is charged to neither arm.
+        assert!((region.excluded_ms - 200.0).abs() < 1e-9);
+        assert!((region.neighbourhood_ms - 100.0).abs() < 1e-9);
+        assert!((region.isolated_ms - 100.0).abs() < 1e-9);
+    }
+
+    /// A win by another drawn focus is not reported as a win on the root.
+    ///
+    /// Under `--focus-count K > 1` an expanded experiment also carries
+    /// candidates from focuses outside the region. They are isolated trials,
+    /// but they did not land on the root, and saying they did would answer the
+    /// issue's follow-on question with a neuron the region never held.
+    #[test]
+    fn a_win_by_another_drawn_focus_is_not_credited_to_the_root() {
+        let mut expanded = experiment(1, true);
+        let other_focus = CandidateProvenance {
+            focus_neuron: "h9".into(),
+            ..prov(CandidateStrategy::StatsBias)
+        };
+        expanded.candidates = vec![root_candidate("o1"), other_focus];
+        expanded.neighbourhood = Some(crate::neighbourhood::NeighbourhoodExpansion {
+            root_focus: "o1".into(),
+            accepts: 1,
+            members: vec!["h1".into()],
+            grown: Vec::new(),
+            edges: 1,
+            radius: 1,
+            remaining: 0,
+        });
+        expanded.winner = Some("candidate-001".into());
+        expanded.combo_member_indices = Some(vec![1]);
+        expanded.improvement = Some(2e-6);
+
+        let region = report_from_journal(journal_of(&[expanded]).path())
+            .unwrap()
+            .neighbourhood;
+        assert_eq!(region.isolated_accepts, 1, "still an isolated trial");
+        assert_eq!(
+            region.root_accepts, 0,
+            "the win landed on a neuron the region never held"
+        );
+        assert_eq!(region.adjacent_accepts, 0);
+    }
+
     /// One root expanding twice is one root: the anti-monopoly reading (#222).
     #[test]
     fn a_root_expanding_across_experiments_counts_once() {
@@ -3339,6 +3479,7 @@ mod tests {
                 root_focus: "o1".into(),
                 accepts: 1,
                 members: vec!["h1".into()],
+                grown: Vec::new(),
                 edges: 1,
                 radius: 1,
                 remaining,

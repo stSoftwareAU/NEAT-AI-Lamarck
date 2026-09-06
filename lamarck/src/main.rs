@@ -160,8 +160,11 @@ struct Cli {
 
     /// Edges one focus-region expansion may traverse (issue #222).
     ///
-    /// Ranked by `|weight|`, so the region follows the highest-impact incoming
-    /// and outgoing structure first. Must be >= 1 when expansion is on.
+    /// A neuron an accepted structural mutation grew is taken first; the rest
+    /// are ranked by `|weight|`, so the region follows the highest-impact
+    /// incoming and outgoing structure. An edge into an input neuron is skipped
+    /// rather than charged here — an input can never be a focus. Must be >= 1
+    /// when expansion is on.
     #[arg(long, default_value_t = DEFAULT_FOCUS_NEIGHBOURHOOD_EDGES)]
     focus_neighbourhood_edges: usize,
 

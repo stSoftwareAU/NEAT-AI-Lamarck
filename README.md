@@ -317,7 +317,7 @@ The run always uses these; the flag only overrides the value.
 | `--focus-policy` | `weighted` | `weighted` \| `high-error` \| `random` \| `unsaturated`. |
 | `--baseline-reverify-interval` | `0` | Promote calls served from the run's **remembered** full-corpus baseline before one scores the incumbent again (issue #113). `0` is the pre-#113 run: every promote call carries the incumbent. A value `N >= 1` omits it from up to `N` consecutive promote calls — ≈20% of a promote call's creature-scores — then re-scores it and checks it against `--baseline-drift-epsilon`. Any accept off a remembered baseline is re-decided against a freshly scored pair before the incumbent is swapped. Recorded in the journal `runHeader`. See [The remembered baseline](#the-remembered-baseline). |
 | `--baseline-drift-epsilon` | *auto* | Absolute baseline-score drift that **aborts the run** when baseline reuse is enabled (issue #113). **Omitted by default** — Lamarck auto-tunes from corpus size and Phase-0 error (`ε_f32 · error · log₂(N) · headroom`, clamped to `[1e-6, 1e-3]`). Pass an absolute value only for expert / A/B overrides; hosts (e.g. GRQ) must not ship a competing default. With the default `--baseline-reverify-interval 0` the canary is inactive (every promote is already self-paired). Accept safety is the paired re-score, not this epsilon. |
-| `--focus-count` | `1` | Focus neurons an experiment proposes against (issue #109). The creature-wide learning and output-residual passes run **once per experiment** whatever this is, so `K > 1` amortises them over `K` focuses and splits `--candidates` between them. `0` aborts the run; `--focus-neuron` pins the focus and caps this at 1. See [Phase 2](#phase-2--select-the-focus-neurons). |
+| `--focus-count` | `1` | Focus neurons an experiment proposes against (issue #109). The creature-wide learning and output-residual passes run **once per experiment** whatever this is, so `K > 1` amortises them over `K` focuses and splits `--candidates` between them. `0` aborts the run; `--focus-neuron` pins the focus and caps this at 1. `--focus-neighbourhood-neurons` adds the primary focus's region members on top of this set (issue #222). See [Phase 2](#phase-2--select-the-focus-neurons). |
 | `--quick-sample-records` | `25000` | Record cap for `--quick` observations / focus / learning scans. |
 | `--analysis-memo-entries` | `16` | Focus-dependent entries the cross-experiment analysis memo may hold. `0` disables memoisation; every entry is dropped whenever the incumbent changes. See [Memoised analysis across experiments](#memoised-analysis-across-experiments). |
 | `--analysis-threads` | `4` | Worker threads folding record chunks in the two analysis scans. The analysis is **bit-identical at every thread count** — only the wall clock moves. `0` aborts the run. Not `num_cpus` on purpose: the scorer owns the box whenever it runs. See [Parallel analysis scans](#parallel-analysis-scans). |
@@ -330,13 +330,13 @@ Leaving these unset changes behaviour.
 |------|-----------------|
 | `--seed` | Deterministic RNG seed. When unset a seed is drawn from OS entropy and recorded in the journal `runHeader`, so the run stays replayable. |
 | `--max-experiments` | Stop after this many experiments, whichever of it and `--timeout-seconds` comes first. Unset = wall-clock bounded only. |
-| `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. |
+| `--focus-neuron` | Pin every experiment to one neuron UUID (debug / smoke); overrides `--focus-policy`. With `--focus-neighbourhood-neurons` set, the pinned neuron is the root the region is derived from, so the batch is also aimed at its members — see [Focus-neighbourhood expansion](#focus-neighbourhood-expansion). |
 | `--structural-only` | Generate only synapse/neuron growth candidates. |
 | `--no-mirrored-sampling` | Score signed perturbation candidates alone instead of beside their `−δ` mirror (issue #203). Mirrored pairs are **on** by default; this is the A/B arm the journal's `mirrorWinRate` is read against. See [Mirrored (antithetic) sampling](#mirrored-antithetic-sampling). |
 | `--followup-candidates` | Follow-up candidates one accepted win may spend probing its own neighbourhood (issue #219). Default `0` — **off**, the arm the burst is measured against. The probes join the ordinary batch and face the same screen and full-corpus gate; `report` prices them against the ordinary trials they ran beside. See [Local follow-up search after an accept](#local-follow-up-search-after-an-accept). |
 | `--followup-experiments` | Experiments one follow-up burst may span before it is dropped (issue #219). Default `2`; the candidate cap is spread across them, so this is what bounds a burst's wall-clock. Must be `>= 1` when `--followup-candidates` is set — `0` aborts the run rather than silently disabling the arm it was set for. |
 | `--focus-neighbourhood-neurons` | Adjacent neurons a repeatedly successful focus may expand into (issue #222). Default `0` — **off**, the isolated-focus arm the expansion is measured against. The members share the same `--candidates` budget and every candidate records the root focus and the member it targeted. See [Focus-neighbourhood expansion](#focus-neighbourhood-expansion). |
-| `--focus-neighbourhood-edges` | Edges one region expansion may traverse (issue #222). Default `4`; ranked by `|weight|`, so the region follows the highest-impact incoming and outgoing structure first. Must be `>= 1` when expansion is on — `0` aborts the run rather than silently deriving an unreachable region. |
+| `--focus-neighbourhood-edges` | Edges one region expansion may traverse (issue #222). Default `4`. A neuron an accepted structural mutation grew is taken first; the rest are ranked by `|weight|`, so the region follows the highest-impact incoming and outgoing structure. An edge into an input neuron is skipped rather than charged against this budget — an input can never be a focus, so spending the budget there would let a first-layer focus never expand at all. Must be `>= 1` when expansion is on — `0` aborts the run rather than silently deriving an unreachable region. |
 | `--focus-neighbourhood-radius` | Graph hops a region may reach from its root (issue #222). Default `1` — direct predecessors and successors only. Must be `>= 1` when expansion is on. |
 | `--focus-neighbourhood-accepts` | Acceptances a focus must earn before its region is derived (issue #222). Default `1` — the measured-success trigger. `0` is the explicit-policy arm that expands every drawn focus, kept as the arm the trigger is compared against. |
 | `--focus-neighbourhood-experiments` | Experiments one root may steer per accept it earned (issue #222). Default `2`. This is what stops a productive region monopolising the run: the allowance is renewed by a further acceptance and by nothing else. Must be `>= 1` when expansion is on. |
@@ -1063,10 +1063,12 @@ Four guardrails bound it:
 A focus the scorer keeps rewarding may not be a useful *neuron* so much as one
 neuron of a useful local *subgraph*. With `--focus-neighbourhood-neurons` set, a
 focus that has earned `--focus-neighbourhood-accepts` measured acceptances
-derives a **bounded region** — itself, the neighbours reached along its
-highest-impact incoming and outgoing edges, and any neuron an accepted
-structural mutation recently grew — and the ordinary generator proposes against
-each member in turn. Off by default: a region costs a focus scan per member and
+derives a **bounded region** — itself and the neighbours reached along its
+highest-impact incoming and outgoing edges, with any neuron an accepted
+structural mutation recently grew taken ahead of them — and the ordinary
+generator proposes against each member in turn. Growth is a ranking preference,
+not an exemption: a grown neuron still has to lie inside the region's radius to
+join it. Off by default: a region costs a focus scan per member and
 splits `--candidates` across them, and whether aiming the batch at adjacent
 structure earns that is exactly what the on/off A/B measures.
 
@@ -1108,7 +1110,11 @@ Four guardrails bound it:
 - **Hard caps.** `--focus-neighbourhood-neurons`, `--focus-neighbourhood-edges`
   and `--focus-neighbourhood-radius` bound the members, the edges the region
   spans and the graph hops it reaches. All three bind at once, so a region stays
-  a region rather than becoming a section of the network.
+  a region rather than becoming a section of the network. An edge into an input
+  neuron is skipped rather than charged against the edge budget: an input can
+  never be a focus, so spending the budget there would let a focus fed by
+  several strong inputs — exactly the shape this feature is for — exhaust it
+  before reaching one targetable neighbour and silently never expand.
 - **No monopoly.** A root may steer only `--focus-neighbourhood-experiments`
   experiments per accept it earned; the allowance is renewed by a further
   acceptance and by nothing else. The root itself is still drawn by the ordinary
@@ -1119,6 +1125,13 @@ Four guardrails bound it:
   arm against the isolated one on **wins per wall hour** and states whether the
   follow-on wins of an expanded experiment landed on the original focus or on
   adjacent structure.
+
+A member is an ordinary focus for the experiment it is proposed against, so it
+feeds the [weighted focus history](#phase-2--select-the-focus-neurons) exactly as
+a drawn focus does: a member that wins is credited and becomes likelier to be
+drawn on its own later — the local-subgraph hypothesis, tested by the selector
+rather than asserted — and a member that proposes nothing useful is dampened as
+sterile just as any barren focus is.
 
 ### Phase 5 — authoritative candidate scoring
 
@@ -1539,7 +1552,7 @@ Every following line is one experiment:
 | `focusStats` | The focus scan of the **primary** focus (issue #70) — structure (`squash`, `incomingCount`), activation statistics (`preMean`, `preVariance`, `preMin`, `preMax`, `postMean`, `postVariance`, `nearZeroFraction`, `saturationFraction`, `recordCount`), output residuals (`meanError`, `meanAbsError`, `meanAdjustedError`, `meanDerivative`) and backprop blame (`meanBlame`, `meanAbsBlame`, `blameCount`, `blameNoChange`). Error and blame fields are omitted when the scan produced none; the whole object is absent from journals written before the field existed. |
 | `candidates[]` | Per candidate: `strategy`, `focusNeuron`, `mutation`, `oldValue`, `newValue`, `followUp` on a follow-up probe (issue #219) — `parentExperiment`, `parentWinner`, `parentStrategy` and the `probe` it tests — `neighbourhood` on every candidate of an expanded experiment (issue #222) — `rootFocus`, the `member` actually targeted, its `hops` from the root and its `role` (`root` / `predecessor` / `successor`) — and `mirror` on each half of an antithetic pair (issue #203) — `axis`, the signed `delta` and the `role` (`original` / `mirror`). Omitted for structural candidates, for a perturbation whose twin could not join the batch, and from journals written before the field existed; in each of those the candidate stood alone. |
 | `followUp` | The follow-up burst this experiment carried (issue #219): `parentExperiment`, `parentWinner` (the accepted stem it explores around), `candidates` added to this batch and `remaining` budget. Present on every experiment a burst contributed to — including one whose probes all deduplicated away, so a burst that bought nothing is as visible as one that bought a win. Omitted with `--followup-candidates 0`, when no burst was live, and from journals written before the field existed. See [Local follow-up search after an accept](#local-follow-up-search-after-an-accept). |
-| `neighbourhood` | The focus region this experiment proposed into (issue #222): `rootFocus`, the `accepts` that triggered it, the adjacent `members` it holds, the `edges` it spans, its achieved `radius` and the expansions `remaining` to that root on the evidence it has. Present only on an experiment whose focus expanded. Omitted with `--focus-neighbourhood-neurons 0`, when the drawn focus did not qualify, and from journals written before the field existed. See [Focus-neighbourhood expansion](#focus-neighbourhood-expansion). |
+| `neighbourhood` | The focus region this experiment proposed into (issue #222): `rootFocus`, the `accepts` that triggered it, the adjacent `members` it holds, which of them an accepted structural mutation `grown` (omitted when none were), the `edges` it spans, its achieved `radius` and the expansions `remaining` to that root on the evidence it has. Present only on an experiment whose focus expanded. Omitted with `--focus-neighbourhood-neurons 0`, when the drawn focus did not qualify, and from journals written before the field existed. See [Focus-neighbourhood expansion](#focus-neighbourhood-expansion). |
 | `mirrorAxisFailures` | Perturbation axes whose mirrored pair lost in **both** directions this experiment (issue #203). Both halves were scored in one call against identical records and neither improved, so the incumbent is at a local optimum along the axis and the generator stops leading with it until it accepts. Omitted when the experiment retired no axis, and absent from journals written before the field existed. See [Mirrored (antithetic) sampling](#mirrored-antithetic-sampling). |
 | `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — only under `--fixed-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `strategyAllocation` | Candidate slots each strategy was allocated this experiment (issue #218): the `explorationFloor` in force, the `slots` per strategy, and the `value` — reward units per scorer second — each was worth when they were drawn. A multi-focus experiment records the slots summed across its focuses. Present only under `--strategy-allocation adaptive`, and absent from journals written before the field existed; in both cases the batch was split by the fixed quotas and the round-robin fill. See [Adaptive strategy allocation](#adaptive-strategy-allocation). |
@@ -1653,17 +1666,24 @@ pinned to one region, which the per-root allowance exists to prevent),
 `neighbourhoodAccepts` against `isolatedAccepts`, and — the headline pair —
 `neighbourhoodWinsPerWallHour` against `isolatedWinsPerWallHour`, with
 `neighbourhoodGainPerWallHour` against `isolatedGainPerWallHour` beside them.
-Every candidate an experiment scored belongs to one arm — aimed at adjacent
-structure, or at an isolated focus, the root's own candidates included — and the
-experiment's measured work (`analysisMs` + `scorerMs`) is apportioned between
-them pro rata by candidate count, exactly as the `followUp` pair is. That charges
+Every candidate an experiment scored falls in one of three buckets — aimed at
+adjacent structure, aimed at an isolated focus (the root's own candidates, any
+other drawn focus, and every candidate of an unexpanded experiment), or a
+[follow-up probe](#local-follow-up-search-after-an-accept), which stays in that
+feature's arm and is counted in `excludedCandidates` rather than folded into
+either of these. The experiment's measured work (`analysisMs` + `scorerMs`) is
+apportioned across all three pro rata by candidate count, exactly as the
+`followUp` pair is, and only the two arms' shares are priced. That charges
 the neighbourhood arm for a share of the creature-wide analysis it did not cause,
 which is deliberately conservative *against* expansion. `rootAccepts` against
 `adjacentAccepts` answers the separate question the expansion was built to ask:
 within the experiments that expanded, did the follow-on wins land on the original
-focus or on the adjacent structure? An accept is credited to an arm only when
-**every** member of the winner came from it; a combo spanning both counts in
-`mixedAccepts`. An arm that never ran reports `null` rather than `0.0`. A
+focus or on the adjacent structure? Both require **every** winning member to
+carry the region link that says so, so a probe — or a candidate from another
+drawn focus — is counted in neither rather than assumed to be the root's. An
+accept is credited to an arm only when every member of the winner came from it; a
+combo spanning both counts in `mixedAccepts`, and one whose members include a
+follow-up probe in `excludedAccepts`. An arm that never ran reports `null` rather than `0.0`. A
 `--focus-neighbourhood-neurons 0` journal, or one written before the field
 existed, reports the whole batch as isolated.
 
