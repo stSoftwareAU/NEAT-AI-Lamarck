@@ -23,6 +23,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Bounded focus-neighbourhood expansion (Issue #222).**
+  A focus the scorer keeps rewarding may be one neuron of a useful local
+  subgraph, but the run treated every focus as an isolated scalar target and
+  could reach the structure beside it only by drawing it independently. With
+  `--focus-neighbourhood-neurons` set, a focus that has earned
+  `--focus-neighbourhood-accepts` measured acceptances now derives a bounded
+  region (`lamarck/src/neighbourhood.rs`) — itself and the neighbours reached
+  along its highest-impact edges, with any neuron an accepted structural
+  mutation recently grew taken first — and the ordinary generator proposes
+  against each member in turn, sharing the same `--candidates` budget.
+  `--focus-neighbourhood-edges` and `--focus-neighbourhood-radius` bound the
+  edges the region spans and the hops it reaches; an edge into an input neuron
+  is skipped rather than charged, so a focus fed by strong inputs cannot
+  silently fail to expand. `--focus-neighbourhood-experiments` bounds how many
+  experiments one root may steer per accept it earned — renewed by a further
+  acceptance and by nothing else — and the root itself is still drawn by the
+  ordinary focus policy every experiment, so random / control selection is
+  untouched. Expansion changes only where the batch is aimed: every candidate
+  faces the same screen and full-corpus gate, and carries a `neighbourhood`
+  provenance link naming the root focus and the member it actually targeted.
+  The journal records the region on the experiment, and `report` gains a
+  `neighbourhood` bucket pricing the adjacent arm against the isolated one on
+  wins and score gain per wall hour, plus `rootAccepts` against
+  `adjacentAccepts` — whether an expanded experiment's follow-on wins landed on
+  the original focus or beside it. The default is unchanged: with
+  `--focus-neighbourhood-neurons 0` no region is derived and no field is
+  written. See
+  [Focus-neighbourhood expansion](README.md#focus-neighbourhood-expansion).
+
 - **Per-strategy screen thresholds (Issue #220).**
   Lamarck screened every candidate family against one shared
   `--screen-promote-threshold`, but a weight nudge, a structural add and a
