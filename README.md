@@ -1070,6 +1070,10 @@ each member in turn. Off by default: a region costs a focus scan per member and
 splits `--candidates` across them, and whether aiming the batch at adjacent
 structure earns that is exactly what the on/off A/B measures.
 
+The root is whichever focus the experiment drew — or the one `--focus-neuron`
+pinned. Under `--focus-count K > 1` only the primary focus expands, so the
+region is one bounded addition to the set rather than one per focus.
+
 Expansion changes *where* the batch is aimed, never how a candidate is accepted.
 A candidate proposed against a member is an ordinary member of the batch, faces
 the same screen and the same full-corpus gate, and carries a `neighbourhood`
