@@ -179,6 +179,12 @@ jobs:
       - name: Require tag+digest pins on workflow container images (Issue #212)
         run: ./scripts/check-workflow-container-pins.sh
 
+      - name: WHAT — Dependabot advisory-channel gate behaviour (Issue #215)
+        run: ./scripts/test-check-dependabot-config.sh
+
+      - name: Require a push-based Dependabot advisory channel for cargo (Issue #215)
+        run: ./scripts/check-dependabot-config.sh
+
       - name: WHAT — cargo-quality trigger overlap gate behaviour (Issue #213)
         run: ./scripts/test-check-cargo-quality-overlap.sh
 

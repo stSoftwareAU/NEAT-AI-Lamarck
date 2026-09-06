@@ -78,6 +78,12 @@ echo "WHAT: cargo-quality trigger overlap gate behaviour (Issue #213)..."
 echo "Refusing a cargo-quality trigger that duplicates ci.yml (Issue #213)..."
 ./scripts/check-cargo-quality-overlap.sh
 
+echo "WHAT: Dependabot advisory-channel gate behaviour (Issue #215)..."
+./scripts/test-check-dependabot-config.sh
+
+echo "Requiring a push-based Dependabot advisory channel for cargo (Issue #215)..."
+./scripts/check-dependabot-config.sh
+
 echo "WHAT: lamarck version order (no downgrade vs base)..."
 ./scripts/test-check-lamarck-version-order.sh
 

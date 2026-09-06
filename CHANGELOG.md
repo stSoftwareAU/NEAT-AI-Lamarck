@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **A push-based advisory channel now covers the cargo dependencies
+  (Issue #215).** Every supply-chain gate here was pull-based — `cargo audit` on
+  each PR and a weekly Monday cron, `rustsec/audit-check` on PRs, and
+  `dependency-review` against the PR manifest — so an advisory published against
+  a dependency already pinned in `Cargo.lock` went unseen for up to ~6 days: the
+  lockfile does not change, only the RustSec database does. The new
+  `.github/dependabot.yml` registers the cargo ecosystem, activating GitHub's
+  native advisory feed, and `scripts/check-dependabot-config.sh` keeps that
+  registration from being deleted or reduced to a stub GitHub would reject
+  (config present, `version: 2`, a cargo entry with a directory and an accepted
+  `schedule.interval`). It runs from `./quality.sh` and the CI **Project
+  Validation** job; `scripts/test-check-dependabot-config.sh` pins the gate's own
+  behaviour.
+
 - **CI installs are pinned to an exact version (Issue #169).**
   `.github/workflows/markdown-lint.yml` installed `markdownlint-cli2` with no
   version, so the job ran whatever the registry served at that instant — a
