@@ -260,12 +260,40 @@ preferred over one expensive analysis that eats the window. That is the design
 bias throughout: an analysis earns its place only when its expected value
 justifies the share of the run budget it consumes.
 
-### Production scale target
+### Creature scale is read, not assumed
 
-The production creature is the GRQ champion (`../GRQ-cluster/network.json`):
-about `2511` inputs, `1` output, `~1590` hidden neurons, `~21k` synapses,
-`forwardOnly: true`. Streaming statistics, the 45-minute budget and cheap
-candidate proposals all exist to stay viable at that scale.
+Lamarck optimises a creature that keeps evolving, so no dimension of any
+particular creature is a design target here. Every run reads the dimensions of
+the creature it was handed and records them — with the budgets it resolved from
+them — in the journal `runHeader`, so a reader never has to infer the scale a
+run worked at (issue #223):
+
+```mermaid
+flowchart LR
+    C["supplied creature<br/>inputs / neurons / synapses"] --> S["CreatureScale"]
+    T["--timeout-seconds<br/>--candidates"] --> B
+    S --> B["ResolvedBudgets<br/>(lamarck/src/scale.rs)"]
+    B --> H["journal runHeader<br/>creature + budgets"]
+    B --> R["focus count,<br/>residual limits,<br/>Phase-G budget"]
+```
+
+Under the default `--scale-budgets fixed` those budgets are the literals the
+crate shipped with; under `--scale-budgets derived` the size-dependent ones are
+derived from the creature's own width and the run's wall clock. Which constants
+are dimensionless, which are measured and which are size-dependent is
+inventoried in
+[`docs/scale-sensitivity.md`](docs/scale-sensitivity.md).
+
+Streaming statistics, the 45-minute budget and cheap candidate proposals exist
+so a run stays viable at whatever scale it is handed.
+
+**Historical example, October 2025.** The GRQ champion
+(`../GRQ-cluster/network.json`) then measured about `2511` inputs, `1` output,
+`~1590` hidden neurons, `~21k` synapses, `forwardOnly: true`, and the measured
+economics throughout this README were taken at that shape. It is dated evidence
+of one creature, not the current target — the same champion has since been
+observed near `7363` neurons and `49k` synapses. Cite it as a benchmark, never
+as a size the code may assume.
 
 ## Usage
 
@@ -303,6 +331,7 @@ The run always uses these; the flag only overrides the value.
 | `--scorer` | `rust_scorer` on `PATH` | NEAT-AI-scorer binary. Scoring is **mandatory** — safety invariant 3 lets only the scorer declare a candidate fitter, so a run that cannot spawn the binary aborts, at the Phase-0 gate or after 3 consecutive scorer failures when `--skip-phase0` is passed. |
 | `--output-dir` | `.` | Holds `best.json`, `experiments.jsonl`, `winners/` and per-experiment working directories. |
 | `--candidates` | `100` | Candidates generated per experiment. |
+| `--scale-budgets` | `fixed` | Whether scale-sensitive budgets are fixed literals or derived from the supplied creature (issue #223). `fixed` is the pre-#223 run: the focus count and the structural residual limits are literals calibrated against a historical creature. `derived` resolves them from the creature this run was handed — sublinear in its width, bounded by the candidate budget and the wall clock — so an evolving creature is not optimised to the shape of an older one; under it the resolved focus count replaces `--focus-count`. Opt-in until a paired benchmark on score improvement per wall hour justifies moving the default, and `fixed` is the arm it is measured against. Any other value aborts the run. Resolved budgets are recorded in the journal `runHeader` under `budgets` on **both** arms. See [Creature scale is read, not assumed](#creature-scale-is-read-not-assumed) and [`docs/scale-sensitivity.md`](docs/scale-sensitivity.md). |
 | `--timeout-seconds` | `2700` | Wall-clock budget (45 minutes). |
 | `--strategy-priors` | `off` | Whether the run carries operator priors across runs (issue #221). `seed` reads `strategy-priors.json` at startup, discounts it for age and source/corpus drift, seeds the strategy ledger with it, and writes this run's own decayed evidence back at the end; `off` — the default — neither reads nor writes it and is the cold-start arm `seed` is measured against. Any other value aborts the run. See [Transferable operator priors](#transferable-operator-priors). |
 | `--strategy-priors-path` | `<output-dir>/strategy-priors.json` | Priors file read at startup and written at the end under `--strategy-priors seed`. Point consecutive runs at one path to carry a single chain of evidence across output directories. |
@@ -2035,6 +2064,7 @@ NEAT-AI-Lamarck/
     ├── lib.rs
     ├── main.rs              # CLI (optimise + report subcommand)
     ├── config.rs            # defaults and run options
+    ├── scale.rs             # creature-scale budgets and resolved-budget record (issue #223)
     ├── analysis.rs          # the two fused per-experiment training scans
     ├── chunks.rs            # deterministic analysis chunking (issue #107)
     ├── memo.rs              # cross-experiment analysis memo (issue #106)

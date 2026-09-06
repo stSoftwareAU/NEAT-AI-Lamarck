@@ -25,7 +25,9 @@ use neat_ai_lamarck::focus::{
     collect_focus_stats, collect_incoming_source_stats, collect_output_mean_abs_errors,
 };
 use neat_ai_lamarck::propagate_layout::accumulate_creature_learning;
-use neat_ai_lamarck::structural::{RankedSource, refine_sources_by_residual_with_observations};
+use neat_ai_lamarck::structural::{
+    RankedSource, ResidualRefine, refine_sources_by_residual_with_observations,
+};
 use neat_core::{CreatureExport, compile_creature, parse_creature_json};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -60,9 +62,7 @@ fn legacy(creature: &CreatureExport, data: &Path, limit: Option<u64>, prior: &[R
         &mut network,
         data,
         FOCUS,
-        prior,
-        limit,
-        None,
+        ResidualRefine::fixed(prior, limit),
     )
     .unwrap();
     report("5 residual refine", &mut lap);

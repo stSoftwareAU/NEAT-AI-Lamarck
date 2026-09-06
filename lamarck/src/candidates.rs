@@ -1604,6 +1604,7 @@ pub fn write_candidate_batch(
 mod tests {
     use super::*;
     use crate::backprop::BiasSignal;
+    use crate::scale::ResidualLimits;
     use crate::structural::{refine_sources_from_probes, synthetic_observation_probes};
     use neat_core::{creature_to_json_pretty, parse_creature_json};
     use rand::{SeedableRng, rngs::StdRng};
@@ -2912,8 +2913,15 @@ mod tests {
         let prior = rank_unused_sources(&incumbent, "o1", &observations);
         let mut probe_rng = StdRng::seed_from_u64(3);
         let probes = synthetic_observation_probes(&observations, 2, 1, 32, &mut probe_rng);
-        let ranked =
-            refine_sources_from_probes(&incumbent, &mut network, "o1", &prior, &probes).unwrap();
+        let ranked = refine_sources_from_probes(
+            &incumbent,
+            &mut network,
+            "o1",
+            &prior,
+            &probes,
+            ResidualLimits::FIXED,
+        )
+        .unwrap();
         let h1 = ranked
             .iter()
             .find(|r| r.from_uuid == "h1")

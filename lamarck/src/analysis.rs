@@ -49,6 +49,7 @@ use crate::focus::{
 };
 use crate::observations::ObservationsStatistics;
 use crate::propagate_layout::LearningPlan;
+use crate::scale::ResidualLimits;
 use crate::structural::{RankedSource, ResidualScan, refine_sources_from_synthetic};
 
 thread_local! {
@@ -110,30 +111,42 @@ pub struct PostFocusScan {
     pub ranked_sources: Vec<RankedSource>,
 }
 
-/// How much of the training sample a scan folds, and on how many workers.
+/// How much of the training sample a scan folds, on how many workers, and how
+/// wide the residual shortlist it re-ranks is.
 ///
-/// Bundled so the scan entry points keep a readable signature: the cap and the
-/// worker count are always chosen together, at the same call site.
+/// Bundled so the scan entry points keep a readable signature: the cap, the
+/// worker count and the shortlist budgets are always chosen together, at the
+/// same call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanBudget {
     /// Cap on records folded — `None` folds the whole sample.
     pub max_records: Option<u64>,
     /// Worker threads folding record chunks (issue #107). Must be at least 1.
     pub threads: usize,
+    /// Residual shortlist and synthetic-probe budgets (issue #223).
+    pub residual: ResidualLimits,
 }
 
 impl ScanBudget {
-    /// Fold at most `max_records` records on `threads` workers.
+    /// Fold at most `max_records` records on `threads` workers, under the
+    /// pre-#223 fixed residual limits.
     pub fn new(max_records: Option<u64>, threads: usize) -> Self {
         Self {
             max_records,
             threads,
+            residual: ResidualLimits::FIXED,
         }
     }
 
     /// Fold at most `max_records` records on the calling thread alone.
     pub fn serial(max_records: Option<u64>) -> Self {
         Self::new(max_records, 1)
+    }
+
+    /// Same budget, folding the residual shortlist under `residual`.
+    pub fn with_residual(mut self, residual: ResidualLimits) -> Self {
+        self.residual = residual;
+        self
     }
 }
 
@@ -260,7 +273,8 @@ pub fn scan_post_focus(
 ) -> Result<PostFocusScan, String> {
     let mut focus_scan = FocusStatsScan::new(creature, network, focus_uuid)?;
     let mut incoming_scan = IncomingSourceScan::new(creature, focus_uuid, observations)?;
-    let mut residual_scan = ResidualScan::new(creature, focus_uuid, prior_sources)?;
+    let mut residual_scan =
+        ResidualScan::new(creature, focus_uuid, prior_sources, budget.residual)?;
     let scan_incoming = incoming_scan.needs_scan();
 
     note_training_scan();
@@ -276,7 +290,8 @@ pub fn scan_post_focus(
         |net, chunk| {
             let mut focus = FocusStatsScan::new(creature, net, focus_uuid)?;
             let mut incoming = IncomingSourceScan::new(creature, focus_uuid, observations)?;
-            let mut residual = ResidualScan::new(creature, focus_uuid, prior_sources)?;
+            let mut residual =
+                ResidualScan::new(creature, focus_uuid, prior_sources, budget.residual)?;
             let mut reader = sample.reader(chunk);
             let mut record = empty_record();
             let mut count = 0u64;
@@ -306,7 +321,14 @@ pub fn scan_post_focus(
     // Fewer than two rows cannot carry a residual statistic — fall back to
     // synthetic probes exactly as the standalone refine does.
     let ranked_sources = if count < 2 {
-        refine_sources_from_synthetic(creature, network, focus_uuid, prior_sources, observations)?
+        refine_sources_from_synthetic(
+            creature,
+            network,
+            focus_uuid,
+            prior_sources,
+            observations,
+            budget.residual,
+        )?
     } else {
         residual_scan.finish(prior_sources)
     };
@@ -324,7 +346,9 @@ mod tests {
     use crate::focus::{collect_focus_stats, collect_incoming_source_stats};
     use crate::observations::{StatsMode, generate_statistics};
     use crate::propagate_layout::accumulate_creature_learning;
-    use crate::structural::{rank_unused_sources, refine_sources_by_residual_with_observations};
+    use crate::structural::{
+        ResidualRefine, rank_unused_sources, refine_sources_by_residual_with_observations,
+    };
     use neat_core::{compile_creature, parse_creature_json};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -475,9 +499,7 @@ mod tests {
             &mut net_a,
             dir.path(),
             focus,
-            &prior,
-            limit,
-            Some(&observations),
+            ResidualRefine::fixed(&prior, limit).with_observations(Some(&observations)),
         )
         .unwrap();
 
@@ -884,9 +906,7 @@ mod tests {
             &mut network,
             dir.path(),
             "o1",
-            &[],
-            Some(20),
-            None,
+            ResidualRefine::fixed(&[], Some(20)),
         )
         .unwrap();
 

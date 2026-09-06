@@ -2,6 +2,7 @@
 
 use crate::focus::{FocusNeuronStats, IncomingSourceStats, neuron_index};
 use crate::observations::ObservationsStatistics;
+use crate::scale::ResidualLimits;
 use neat_core::{
     CompiledNetwork, CreatureExport, NeuronExport, SynapseExport, TrainingDataConfig,
     TrainingRecord,
@@ -15,10 +16,6 @@ const TARGET_PRE_DELTA: f64 = 1e-3;
 const MAX_NEW_WEIGHT: f64 = 0.08;
 /// Apply this fraction of the residual OLS coefficient (full OLS overshoots).
 pub const OLS_WEIGHT_FRACTION: f64 = 0.05;
-/// How many target-corr shortlist sources to re-rank by residual correlation.
-const RESIDUAL_SHORTLIST: usize = 48;
-/// Extra unused hiddens always included in residual refine (beyond the shortlist head).
-const RESIDUAL_HIDDEN_EXTRA: usize = 16;
 /// Floor std used when converting measured activation scale → weight_scale.
 const MIN_ACT_STD: f64 = 1e-3;
 
@@ -381,8 +378,11 @@ fn residual_activation(
 }
 
 /// Build the residual-refine shortlist: top priors, plus unused previous hiddens.
-fn residual_shortlist(prior: &[RankedSource]) -> Vec<RankedSource> {
-    let mut shortlist: Vec<RankedSource> = prior.iter().take(RESIDUAL_SHORTLIST).cloned().collect();
+///
+/// `limits` decides how wide the head and the extra-hidden tail are — fixed
+/// literals, or budgets derived from the creature's own size (issue #223).
+fn residual_shortlist(prior: &[RankedSource], limits: ResidualLimits) -> Vec<RankedSource> {
+    let mut shortlist: Vec<RankedSource> = prior.iter().take(limits.shortlist).cloned().collect();
     let mut hidden_extra = 0usize;
     for src in prior.iter().filter(|s| !is_input_source(&s.from_uuid)) {
         if shortlist.iter().any(|s| s.from_uuid == src.from_uuid) {
@@ -390,7 +390,7 @@ fn residual_shortlist(prior: &[RankedSource]) -> Vec<RankedSource> {
         }
         shortlist.push(src.clone());
         hidden_extra += 1;
-        if hidden_extra >= RESIDUAL_HIDDEN_EXTRA {
+        if hidden_extra >= limits.hidden_extra {
             break;
         }
     }
@@ -438,6 +438,7 @@ impl ResidualScan {
         creature: &CreatureExport,
         focus_uuid: &str,
         prior: &[RankedSource],
+        limits: ResidualLimits,
     ) -> Result<Self, String> {
         let mode = match focus_output_index(creature, focus_uuid) {
             Some(out_idx) => {
@@ -451,7 +452,7 @@ impl ResidualScan {
             }
             None => ResidualMode::ActivationStd,
         };
-        let shortlist = residual_shortlist(prior);
+        let shortlist = residual_shortlist(prior, limits);
         let acts: Vec<Option<ResidualAct>> = shortlist
             .iter()
             .map(|s| residual_act_for(creature, &s.from_uuid))
@@ -646,8 +647,9 @@ pub fn refine_sources_from_probes(
     focus_uuid: &str,
     prior: &[RankedSource],
     probes: &[ActivationProbe],
+    limits: ResidualLimits,
 ) -> Result<Vec<RankedSource>, String> {
-    let mut scan = ResidualScan::new(creature, focus_uuid, prior)?;
+    let mut scan = ResidualScan::new(creature, focus_uuid, prior, limits)?;
     for probe in probes {
         if !scan.wants_probe(&probe.inputs, &probe.outputs) {
             continue;
@@ -676,10 +678,54 @@ pub fn refine_sources_by_residual(
         network,
         training_data,
         focus_uuid,
-        prior,
-        max_records,
-        None,
+        ResidualRefine {
+            prior,
+            max_records,
+            observations: None,
+            limits: ResidualLimits::FIXED,
+        },
     )
+}
+
+/// What one residual refine is asked to rank, and under which budgets.
+///
+/// Bundled so the entry point keeps a readable signature: the prior ranking,
+/// the sample cap, the observations behind the synthetic fallback and the
+/// shortlist limits are always chosen together, for the same creature.
+#[derive(Debug, Clone, Copy)]
+pub struct ResidualRefine<'a> {
+    /// Prior ranking (typically by target correlation) to re-score.
+    pub prior: &'a [RankedSource],
+    /// Cap on records folded — `None` folds the whole sample.
+    pub max_records: Option<u64>,
+    /// Observation statistics behind the synthetic-probe fallback.
+    pub observations: Option<&'a ObservationsStatistics>,
+    /// Shortlist and synthetic-probe budgets (issue #223).
+    pub limits: ResidualLimits,
+}
+
+impl<'a> ResidualRefine<'a> {
+    /// Refine `prior` under the pre-#223 fixed limits.
+    pub fn fixed(prior: &'a [RankedSource], max_records: Option<u64>) -> Self {
+        Self {
+            prior,
+            max_records,
+            observations: None,
+            limits: ResidualLimits::FIXED,
+        }
+    }
+
+    /// Same refine, with the observations behind the synthetic fallback.
+    pub fn with_observations(mut self, observations: Option<&'a ObservationsStatistics>) -> Self {
+        self.observations = observations;
+        self
+    }
+
+    /// Same refine, under `limits`.
+    pub fn with_limits(mut self, limits: ResidualLimits) -> Self {
+        self.limits = limits;
+        self
+    }
 }
 
 /// Build the synthetic-probe fallback ranking used when the corpus yields
@@ -692,13 +738,20 @@ pub(crate) fn refine_sources_from_synthetic(
     focus_uuid: &str,
     prior: &[RankedSource],
     observations: Option<&ObservationsStatistics>,
+    limits: ResidualLimits,
 ) -> Result<Vec<RankedSource>, String> {
     let Some(obs) = observations else {
         return Ok(prior.to_vec());
     };
     let mut rng = StdRng::seed_from_u64(0xA07E_u64);
-    let probes = synthetic_observation_probes(obs, creature.input, creature.output, 64, &mut rng);
-    refine_sources_from_probes(creature, network, focus_uuid, prior, &probes)
+    let probes = synthetic_observation_probes(
+        obs,
+        creature.input,
+        creature.output,
+        limits.synthetic_probes,
+        &mut rng,
+    );
+    refine_sources_from_probes(creature, network, focus_uuid, prior, &probes, limits)
 }
 
 /// Like [`refine_sources_by_residual`], with optional synthetic-probe fallback.
@@ -711,11 +764,15 @@ pub fn refine_sources_by_residual_with_observations(
     network: &mut CompiledNetwork,
     training_data: &Path,
     focus_uuid: &str,
-    prior: &[RankedSource],
-    max_records: Option<u64>,
-    observations: Option<&ObservationsStatistics>,
+    refine: ResidualRefine<'_>,
 ) -> Result<Vec<RankedSource>, String> {
-    let mut scan = ResidualScan::new(creature, focus_uuid, prior)?;
+    let ResidualRefine {
+        prior,
+        max_records,
+        observations,
+        limits,
+    } = refine;
+    let mut scan = ResidualScan::new(creature, focus_uuid, prior, limits)?;
     let config = TrainingDataConfig::new(creature.input, creature.output);
     let mut iter = crate::analysis::open_training_scan(training_data, config)?;
     // Hold the first two records back: with fewer than two the sample is
@@ -742,7 +799,14 @@ pub fn refine_sources_by_residual_with_observations(
     }
 
     if count < 2 {
-        return refine_sources_from_synthetic(creature, network, focus_uuid, prior, observations);
+        return refine_sources_from_synthetic(
+            creature,
+            network,
+            focus_uuid,
+            prior,
+            observations,
+            limits,
+        );
     }
 
     Ok(scan.finish(prior))
@@ -1635,8 +1699,15 @@ mod tests {
         let prior = rank_unused_sources(&creature, "o1", &obs);
         // Symmetric ± probes: mean input ≈ 0 ⇒ mean-forward ABSOLUTE is useless.
         let probes = probes_abs_target(&[-1.0, -0.5, 0.5, 1.0, -0.75, 0.75]);
-        let ranked =
-            refine_sources_from_probes(&creature, &mut network, "o1", &prior, &probes).unwrap();
+        let ranked = refine_sources_from_probes(
+            &creature,
+            &mut network,
+            "o1",
+            &prior,
+            &probes,
+            ResidualLimits::FIXED,
+        )
+        .unwrap();
         let h_abs = ranked.iter().find(|r| r.from_uuid == "h_abs").unwrap();
         let h_signed = ranked.iter().find(|r| r.from_uuid == "h_signed").unwrap();
         assert!(
@@ -1683,8 +1754,15 @@ mod tests {
                 outputs: vec![x],
             })
             .collect();
-        let ranked =
-            refine_sources_from_probes(&creature, &mut network, "o1", &prior, &probes).unwrap();
+        let ranked = refine_sources_from_probes(
+            &creature,
+            &mut network,
+            "o1",
+            &prior,
+            &probes,
+            ResidualLimits::FIXED,
+        )
+        .unwrap();
         let live = ranked.iter().find(|r| r.from_uuid == "h_live").unwrap();
         let dead = ranked.iter().find(|r| r.from_uuid == "h_dead").unwrap();
         assert!(live.score > 0.9, "live score={}", live.score);

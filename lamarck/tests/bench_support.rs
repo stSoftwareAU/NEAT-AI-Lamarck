@@ -16,7 +16,7 @@ use neat_core::parse_creature_json;
 #[path = "../examples/support/mod.rs"]
 mod support;
 
-use support::{LocalMseScorer, creature_json, write_sample};
+use support::{LocalMseScorer, creature_json, creature_json_with_fan_in, write_sample};
 
 /// The corpus writer, re-implemented here from the documented rule so the test
 /// fails if the shared writer's stream ever changes.
@@ -178,4 +178,31 @@ fn every_bench_shares_one_corpus_definition() {
     write_sample(dir.path(), 3, 2);
     let corpus: &Path = &dir.path().join("0.bin");
     assert_eq!(std::fs::read(corpus).unwrap(), expected_corpus_bytes(3, 2));
+}
+
+/// The fan-in variant is the same fixture at fan-in four, and a denser one
+/// above it — so a bench may match a measured creature's synapse count without
+/// invalidating the numbers taken at the default shape (issue #223).
+#[test]
+fn creature_json_with_fan_in_extends_the_fixture_without_moving_it() {
+    assert_eq!(
+        creature_json_with_fan_in(16, 3, 4),
+        creature_json(16, 3),
+        "fan-in four must reproduce the shared fixture byte for byte"
+    );
+
+    let dense = parse_creature_json(&creature_json_with_fan_in(16, 3, 9)).expect("fixture parses");
+    assert_eq!(dense.input, 16);
+    // Three hiddens plus the output, unchanged by the density.
+    assert_eq!(dense.neurons.len(), 4);
+    // Nine inputs plus one output edge per hidden, plus nothing else.
+    assert_eq!(dense.synapses.len(), 3 * (9 + 1));
+    for h in 0..3 {
+        let fan_in = dense
+            .synapses
+            .iter()
+            .filter(|s| s.to_uuid == format!("h{h}"))
+            .count();
+        assert_eq!(fan_in, 9, "hidden h{h} must read nine distinct inputs");
+    }
 }
