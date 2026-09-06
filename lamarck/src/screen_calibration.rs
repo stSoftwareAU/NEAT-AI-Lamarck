@@ -531,6 +531,7 @@ mod tests {
             old_value: Some(0.0),
             new_value: Some(0.1),
             mirror: None,
+            follow_up: None,
         }
     }
 
@@ -550,6 +551,7 @@ mod tests {
             strategy_allocation: None,
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
+            follow_up: None,
             screen_scores: None,
             screen_tiers: None,
             baseline_source: None,

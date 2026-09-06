@@ -658,6 +658,7 @@ mod tests {
                 old_value: None,
                 new_value: None,
                 mirror: None,
+                follow_up: None,
             },
         }
     }

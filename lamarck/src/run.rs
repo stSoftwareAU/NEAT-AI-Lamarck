@@ -7,8 +7,8 @@ use crate::baseline::{
 use crate::cancel::CancelToken;
 use crate::candidates::{
     BatchLimit, Candidate, CandidateBudget, CandidateGenContext, CandidateProvenance,
-    CandidateStrategy, generate_candidate_batch, generate_candidates, strategy_mix_summary,
-    write_candidate_batch,
+    CandidateStrategy, candidate_fingerprint, generate_candidate_batch, generate_candidates,
+    strategy_mix_summary, write_candidate_batch,
 };
 use crate::combos::{
     ComboSelectRequest, ComboSelection, StackDampenReport, select_best_with_combinations,
@@ -25,6 +25,9 @@ use crate::focus::{
     attach_focus_blame, attach_learning_to_incoming, build_improvement_signals,
     select_highest_signal, select_highest_signal_excluding, select_random_excluding,
     select_unsaturated_excluding,
+};
+use crate::followup::{
+    BatchContext as FollowUpBatchContext, FollowUpBurst, FollowUpParent, FollowUpPlan,
 };
 use crate::grafts::{
     GraftReplayRequest, GraftStore, default_graft_replay_budget, record_structural_acceptance,
@@ -121,6 +124,15 @@ pub struct ExperimentRecord {
     /// field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_axis_failures: Option<Vec<String>>,
+    /// The follow-up burst this experiment carried, when one was live (#219).
+    ///
+    /// Present on every experiment a burst contributed candidates to — including
+    /// one where every probe deduplicated away, so a burst that bought nothing
+    /// is as visible as one that bought a win. Omitted when follow-ups are off
+    /// (`--followup-candidates 0`), when no burst was live, and from journals
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<FollowUpBurst>,
     /// Screen-phase (subsample) scores by stem when two-phase scoring is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_scores: Option<std::collections::BTreeMap<String, f64>>,
@@ -440,6 +452,15 @@ pub struct RunConfigRecord {
     pub compute_correlations: bool,
     /// Whether only structural growth candidates were generated.
     pub structural_only: bool,
+    /// Follow-up candidates each accepted win could spend (issue #219).
+    ///
+    /// `0` — the default, and what a journal written before the knob existed
+    /// reports — is the off arm: no accept emitted a local follow-up search.
+    #[serde(default)]
+    pub followup_candidates: usize,
+    /// Experiments one follow-up burst could span (issue #219).
+    #[serde(default)]
+    pub followup_experiments: usize,
     /// Whether the Phase-0 parity gate ran.
     pub phase0_parity: bool,
     /// Whether rejected candidate directories were kept.
@@ -538,6 +559,14 @@ impl RunConfigRecord {
             quick_sample_records: config.quick_sample_records,
             compute_correlations: config.compute_correlations,
             structural_only: config.structural_only,
+            followup_candidates: config.followup_candidates,
+            // Recorded only when follow-ups are on, so a journal never implies
+            // a burst length the run could not have used.
+            followup_experiments: if config.followup_candidates > 0 {
+                config.followup_experiments
+            } else {
+                0
+            },
             phase0_parity: config.phase0_parity,
             preserve_losers: config.preserve_losers,
             max_consecutive_scorer_failures: config.max_consecutive_scorer_failures,
@@ -997,6 +1026,7 @@ pub fn run_optimisation_cancellable(
     let analysis_threads = config.analysis_threads()?;
     let focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
+    let followup_budget = config.followup_budget()?;
     let allocation_policy = config.strategy_allocation_policy()?;
     // Load and validate the creature before anything is written (issue #165):
     // an `input < 1` / `output < 1` creature has no observation width, cannot
@@ -1209,6 +1239,10 @@ pub fn run_optimisation_cancellable(
     // records and neither improved, so the incumbent sits at a local optimum
     // along them; an accept moves the incumbent and re-opens every one of them.
     let mut dead_axes: Vec<String> = Vec::new();
+    // Bounded local search around the most recent accepted winner (issue #219).
+    // `None` whenever no burst is live: follow-ups are opt-in, expire with their
+    // budget, and are replaced outright by the next accept's own plan.
+    let mut followup_plan: Option<FollowUpPlan> = None;
     // Measured per-strategy return, fed by every journalled experiment and
     // consulted before each batch under `--strategy-allocation adaptive`
     // (issue #218). The ledger accumulates under the fixed allocation too, so
@@ -1816,6 +1850,48 @@ pub fn run_optimisation_cancellable(
             }
         }
 
+        // Exploit the last accepted win with a bounded local search (#219).
+        // The probes join the ordinary batch rather than displacing it, so the
+        // broad strategy mix — random controls included — is still proposed,
+        // and every probe faces the same screen and full-corpus gate.
+        let mut followup_burst: Option<FollowUpBurst> = None;
+        let mut followup_probes = 0usize;
+        if let Some(plan) = followup_plan.as_mut() {
+            let incumbent_uuids: std::collections::HashSet<String> = incumbent
+                .neurons
+                .iter()
+                .map(|neuron| neuron.uuid.clone())
+                .collect();
+            let mut seen: std::collections::HashSet<u64> = candidates
+                .iter()
+                .map(|candidate| candidate_fingerprint(&incumbent_uuids, &candidate.creature))
+                .collect();
+            let probes = plan.emit(
+                &incumbent,
+                &backprop,
+                &mut FollowUpBatchContext {
+                    incumbent_uuids: &incumbent_uuids,
+                    seen: &mut seen,
+                    dead_axes: &dead_axes,
+                },
+            );
+            log::detail(&format!(
+                "follow-up: {} probe(s) around {} (accepted experiment {}), {} left in budget",
+                probes.len(),
+                plan.parent().winner_stem,
+                plan.parent().experiment,
+                plan.remaining()
+            ));
+            followup_probes = probes.len();
+            followup_burst = Some(plan.burst(probes.len()));
+            candidates.extend(probes);
+            if plan.is_exhausted() {
+                // Spent or expired: the run is back on the broad mix until the
+                // next accept plans its own burst.
+                followup_plan = None;
+            }
+        }
+
         // The identity every candidate in this batch was proposed against.
         // Captured *before* any acceptance swaps the incumbent: a post-accept
         // id would key the batch's rejections to a creature they were never
@@ -1849,11 +1925,15 @@ pub fn run_optimisation_cancellable(
                     dead_axes: &dead_axes,
                 },
             };
+            // Follow-up probes are additive (issue #219): they raise the
+            // target rather than occupying ordinary slots, so a cache-skipped
+            // ordinary candidate is still backfilled to the full `--candidates`
+            // width beside them.
             let filtered = filter_and_backfill(
                 cache,
                 &experiment_incumbent_id,
                 candidates,
-                config.candidates,
+                config.candidates.saturating_add(followup_probes),
                 unix_now(),
                 cancel,
                 |wanted| generate_candidates(&gen_ctx, wanted, &mut rng),
@@ -1887,6 +1967,15 @@ pub fn run_optimisation_cancellable(
                 ..ExperimentCost::default()
             };
             candidates = filtered.candidates;
+            // Journal the probes the batch actually carries: the cache can drop
+            // one as known-failed, and a burst record that counted it would
+            // name a candidate no reader can find in `candidates[]`.
+            if let Some(burst) = followup_burst.as_mut() {
+                burst.candidates = candidates
+                    .iter()
+                    .filter(|candidate| candidate.provenance.follow_up.is_some())
+                    .count();
+            }
         }
 
         // Scoring dominates an experiment, so poll here: a signal arriving
@@ -1918,6 +2007,7 @@ pub fn run_optimisation_cancellable(
             candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
             candidates_requested: Some(config.candidates),
             batch_limit: Some(batch_limit),
+            follow_up: followup_burst.clone(),
             strategy_allocation: experiment_allocation.clone(),
             analysis_ms,
             memo_hits: memo_delta.hits,
@@ -2513,6 +2603,23 @@ pub fn run_optimisation_cancellable(
             best_score = sel.result.score;
             accepted = true;
             acceptances += 1;
+            // The scorer has just confirmed useful structure or gradient at one
+            // place in the creature. Plan a bounded local search there before
+            // returning to the broad mix (issue #219); the plan replaces any
+            // burst still live, whose parent is no longer the incumbent.
+            followup_plan = followup_budget.and_then(|budget| {
+                FollowUpPlan::from_accept(
+                    &previous,
+                    &incumbent,
+                    FollowUpParent {
+                        experiment: experiments,
+                        winner_stem: sel.stem.clone(),
+                        strategy,
+                        focus_neuron: winner_focus.clone(),
+                    },
+                    budget,
+                )
+            });
             improvement = Some(delta);
             winner_stem = Some(sel.stem.clone());
             winner_member_indices = Some(sel.member_indices.clone());
@@ -2655,6 +2762,7 @@ pub fn run_optimisation_cancellable(
                 candidates: candidates.iter().map(|c| c.provenance.clone()).collect(),
                 candidates_requested: Some(config.candidates),
                 batch_limit: Some(batch_limit),
+                follow_up: followup_burst,
                 strategy_allocation: experiment_allocation,
                 scores: score_map,
                 mirror_axis_failures: (!mirror_axis_failures.is_empty())
@@ -2844,6 +2952,11 @@ fn winning_focuses(
 /// winner is boosted, and a focus whose proposals went nowhere is dampened as
 /// sterile even when the experiment as a whole accepted. With one focus this is
 /// exactly the pre-#109 single call — the whole batch is that focus's.
+///
+/// A follow-up probe carries the focus of the win it explores (issue #219),
+/// which the experiment need not have drawn. That focus is recorded too when it
+/// earned the accept: dropping it would dampen every drawn focus for a win and
+/// boost nothing, teaching the selector the opposite of what happened.
 fn record_focus_outcomes(
     selector: &mut WeightedFocusSelector,
     focus_set: &[String],
@@ -2853,7 +2966,10 @@ fn record_focus_outcomes(
     candidates: &[Candidate],
     min_improvement: f64,
 ) {
-    for focus_uuid in focus_set {
+    let credited_outside_set = accepted_focuses
+        .iter()
+        .filter(|focus| !focus_set.contains(focus));
+    for focus_uuid in focus_set.iter().chain(credited_outside_set) {
         selector.record_outcome(
             focus_uuid,
             accepted_focuses.contains(focus_uuid),
@@ -2881,6 +2997,7 @@ struct UnacceptedJournal {
     candidates: Vec<CandidateProvenance>,
     candidates_requested: Option<usize>,
     batch_limit: Option<BatchLimit>,
+    follow_up: Option<FollowUpBurst>,
     strategy_allocation: Option<StrategyAllocation>,
     analysis_ms: u128,
     memo_hits: u64,
@@ -2922,6 +3039,7 @@ impl ExperimentRecord {
             candidates: journal.candidates.clone(),
             candidates_requested: journal.candidates_requested,
             batch_limit: journal.batch_limit,
+            follow_up: journal.follow_up.clone(),
             strategy_allocation: journal.strategy_allocation.clone(),
             scores: BTreeMap::new(),
             mirror_axis_failures: outcome.mirror_axis_failures,
@@ -4689,6 +4807,107 @@ mod tests {
         assert!(encoded.contains("\"graftsApplied\""));
     }
 
+    /// Issue #219: an accept plans a bounded local follow-up search, and every
+    /// probe it emits is scored by the ordinary gate rather than around it.
+    #[test]
+    fn an_accept_emits_follow_up_probes_that_face_the_normal_gate() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let config = LamarckConfig {
+            max_experiments: Some(2),
+            phase0_parity: false,
+            followup_candidates: 3,
+            followup_experiments: 1,
+            ..base_config(creature_path, training, dir.path().join("out"))
+        };
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+        assert!(result.acceptances >= 1, "the scripted winner is accepted");
+
+        let records = experiment_records(&result.journal_path);
+        let second = records.get(1).expect("a second experiment ran");
+        let burst = second
+            .follow_up
+            .as_ref()
+            .expect("the accept in experiment 1 planned a burst for experiment 2");
+        assert_eq!(burst.parent_experiment, 1);
+        assert_eq!(
+            burst.candidates, 3,
+            "the burst spends its whole cap at once"
+        );
+
+        let probes: Vec<(usize, &CandidateProvenance)> = second
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, prov)| prov.follow_up.is_some())
+            .collect();
+        assert_eq!(probes.len(), 3, "three probes joined the batch");
+        for (index, prov) in &probes {
+            let link = prov.follow_up.as_ref().expect("filtered on Some");
+            assert_eq!(link.parent_experiment, 1);
+            assert_eq!(
+                Some(link.parent_winner.as_str()),
+                records[0].winner.as_deref(),
+                "the probe names the winner it explores around"
+            );
+            assert_eq!(prov.strategy, CandidateStrategy::FollowUp);
+            // The gate, not the plan, decides: every probe was scored by the
+            // authoritative full-corpus call like any other candidate.
+            assert!(
+                second.scores.contains_key(&format!("candidate-{index:03}")),
+                "probe {index} must be scored by the full-corpus gate"
+            );
+        }
+        // The ordinary strategy mix is still proposed beside the burst.
+        assert!(
+            second.candidates.len() > probes.len(),
+            "follow-ups join the batch rather than replacing it"
+        );
+
+        // And the burst is bounded: one experiment, then back to the broad mix.
+        let encoded = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(
+            encoded.contains("\"followUp\""),
+            "the link survives encoding"
+        );
+    }
+
+    /// Issue #219: the off arm plans nothing at all.
+    #[test]
+    fn follow_ups_are_off_by_default() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let config = LamarckConfig {
+            max_experiments: Some(2),
+            phase0_parity: false,
+            ..base_config(creature_path, training, dir.path().join("out"))
+        };
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+        assert!(result.acceptances >= 1, "the scripted winner is accepted");
+        for record in experiment_records(&result.journal_path) {
+            assert!(record.follow_up.is_none(), "no burst without the flag");
+            assert!(
+                record
+                    .candidates
+                    .iter()
+                    .all(|prov| prov.follow_up.is_none()),
+                "no probe without the flag"
+            );
+        }
+    }
+
     /// Issue #74: an accepted winner journals the candidate indices behind it.
     #[test]
     fn an_accepted_winner_journals_its_member_indices() {
@@ -5003,6 +5222,55 @@ mod tests {
         let legacy = encoded.replace(",\"analysisThreads\":8", "");
         let legacy: RunConfigRecord = serde_json::from_str(&legacy).unwrap();
         assert_eq!(legacy.analysis_threads, 0);
+    }
+
+    /// Issue #219: the header identifies the follow-up arm the journal came
+    /// from — without it an on-run and an off-run are indistinguishable.
+    #[test]
+    fn run_header_records_the_follow_up_arm() {
+        let on = RunConfigRecord::from_config(
+            &LamarckConfig {
+                followup_candidates: 6,
+                followup_experiments: 3,
+                ..LamarckConfig::default()
+            },
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+        );
+        assert_eq!(on.followup_candidates, 6);
+        assert_eq!(on.followup_experiments, 3);
+        let encoded = serde_json::to_string(&on).unwrap();
+        assert!(
+            encoded.contains("\"followupCandidates\":6")
+                && encoded.contains("\"followupExperiments\":3"),
+            "follow-up arm missing from the encoded header: {encoded}"
+        );
+        let decoded: RunConfigRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.followup_candidates, 6);
+        assert_eq!(decoded.followup_experiments, 3);
+
+        // Off arm: the span is recorded as 0 rather than as a burst length the
+        // run could never have used.
+        let off = RunConfigRecord::from_config(
+            &LamarckConfig {
+                followup_candidates: 0,
+                followup_experiments: 3,
+                ..LamarckConfig::default()
+            },
+            crate::baseline::DEFAULT_BASELINE_DRIFT_EPSILON,
+        );
+        assert_eq!(off.followup_candidates, 0);
+        assert_eq!(
+            off.followup_experiments, 0,
+            "an off arm reports no burst length"
+        );
+
+        // Journals written before the knobs existed must still parse.
+        let legacy = encoded
+            .replace(",\"followupCandidates\":6", "")
+            .replace(",\"followupExperiments\":3", "");
+        let legacy: RunConfigRecord = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(legacy.followup_candidates, 0);
+        assert_eq!(legacy.followup_experiments, 0);
     }
 
     /// Seed replay must survive parallel analysis at every thread count (#107).
@@ -5773,6 +6041,7 @@ mod tests {
                     old_value: None,
                     new_value: None,
                     mirror: None,
+                    follow_up: None,
                 },
             })
             .collect()
@@ -5807,6 +6076,61 @@ mod tests {
 
     /// Issue #109: an accept in a K=3 batch boosts only the winner's focus; the
     /// other two are dampened as sterile, exactly as a losing experiment is.
+    /// Issue #219: a follow-up probe carries its parent's focus, which this
+    /// experiment need not have drawn. A win there must still boost it.
+    #[test]
+    fn a_follow_up_winner_boosts_the_focus_it_inherited() {
+        let mut selector = WeightedFocusSelector::default();
+        let focus_set = vec!["drawn".to_string()];
+        let mut candidates = candidates_for(&["drawn"]);
+        candidates.push(Candidate {
+            creature: candidates[0].creature.clone(),
+            provenance: CandidateProvenance {
+                strategy: CandidateStrategy::FollowUp,
+                focus_neuron: "parent".into(),
+                mutation: "follow-up weight:h1->o1 1 -> 1.1".into(),
+                old_value: Some(1.0),
+                new_value: Some(1.1),
+                mirror: None,
+                follow_up: Some(crate::followup::FollowUpLink {
+                    parent_experiment: 1,
+                    parent_winner: "candidate-000".into(),
+                    parent_strategy: CandidateStrategy::StructuralAdd,
+                    probe: "weight:h1->o1 step 1".into(),
+                }),
+            },
+        });
+        let scores = scored(&[
+            ("baseline", 0.5),
+            ("candidate-000", 0.5),
+            ("candidate-001", 0.5 + 1e-3),
+        ]);
+        let winners = winning_focuses(&[1], &candidates);
+        assert_eq!(winners, ["parent".to_string()].into_iter().collect());
+
+        record_focus_outcomes(
+            &mut selector,
+            &focus_set,
+            &winners,
+            &scores,
+            scores.get("baseline").expect("the fixture carries one"),
+            &candidates,
+            1e-6,
+        );
+
+        let history = |uuid: &str| selector.history.get(uuid).cloned().unwrap_or_default();
+        assert_eq!(
+            history("parent").accepts,
+            1,
+            "the focus that earned the win is boosted even though it was not drawn"
+        );
+        assert_eq!(
+            history("drawn").accepts,
+            0,
+            "the drawn focus proposed nothing that won"
+        );
+    }
+
     #[test]
     fn an_accept_boosts_only_the_winning_focus() {
         let focus_set = vec!["a".to_string(), "b".to_string(), "c".to_string()];
@@ -5891,6 +6215,7 @@ mod tests {
             candidates: vec![],
             candidates_requested: Some(4),
             batch_limit: Some(BatchLimit::Budget),
+            follow_up: None,
             strategy_allocation: None,
             analysis_ms: 10,
             memo_hits: 1,

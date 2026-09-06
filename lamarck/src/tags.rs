@@ -279,6 +279,7 @@ fn strategy_emoji(strategy: CandidateStrategy) -> (&'static str, &'static str) {
         CandidateStrategy::StructuralAddNeuron => ("🧩", "structural_add_neuron"),
         CandidateStrategy::StructuralWeaken => ("✂️", "structural_weaken"),
         CandidateStrategy::Random => ("🎲", "random"),
+        CandidateStrategy::FollowUp => ("🧭", "follow_up"),
     }
 }
 

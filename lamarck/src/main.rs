@@ -11,10 +11,11 @@ use neat_ai_lamarck::{
     DEFAULT_CACHE_MAX_RESIDENT_BYTES, DEFAULT_CACHE_STAND_DOWN_MARGIN_MS,
     DEFAULT_CACHE_STAND_DOWN_WINDOW, DEFAULT_CANDIDATE_COUNT, DEFAULT_FAILED_CACHE_MAX_AGE_SECONDS,
     DEFAULT_FAILED_CACHE_MAX_ENTRIES, DEFAULT_FAILED_CACHE_TOLERANCE_ABS,
-    DEFAULT_FAILED_CACHE_TOLERANCE_REL, DEFAULT_FOCUS_COUNT, DEFAULT_MIN_IMPROVEMENT,
-    DEFAULT_SCREEN_PROMOTE_SIGMA_K, DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE,
-    DEFAULT_TIMEOUT_SECONDS, ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary,
-    report_from_journal, run_optimisation_cancellable,
+    DEFAULT_FAILED_CACHE_TOLERANCE_REL, DEFAULT_FOCUS_COUNT, DEFAULT_FOLLOWUP_CANDIDATES,
+    DEFAULT_FOLLOWUP_EXPERIMENTS, DEFAULT_MIN_IMPROVEMENT, DEFAULT_SCREEN_PROMOTE_SIGMA_K,
+    DEFAULT_SCREEN_PROMOTE_THRESHOLD, DEFAULT_SCREEN_SAMPLE_RATE, DEFAULT_TIMEOUT_SECONDS,
+    ExternalScorer, LamarckConfig, PromoteGateMode, print_run_summary, report_from_journal,
+    run_optimisation_cancellable,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -161,6 +162,22 @@ struct Cli {
     /// mirror (issue #203). The mirrored pair is on by default.
     #[arg(long, default_value_t = false)]
     no_mirrored_sampling: bool,
+
+    /// Follow-up candidates each accepted win may probe its own neighbourhood
+    /// with (issue #219). `0` (default) returns straight to the broad mix.
+    ///
+    /// The probes join the ordinary batch and are accepted only by the same
+    /// full-corpus scorer gate; nothing here can bypass it. `report` prices the
+    /// burst against the ordinary trials it ran beside.
+    #[arg(long, default_value_t = DEFAULT_FOLLOWUP_CANDIDATES)]
+    followup_candidates: usize,
+
+    /// Experiments one follow-up burst may span before it is dropped (#219).
+    ///
+    /// The candidate cap is spread across them, so this is what bounds a
+    /// burst's wall-clock. Must be >= 1 when `--followup-candidates` is set.
+    #[arg(long, default_value_t = DEFAULT_FOLLOWUP_EXPERIMENTS)]
+    followup_experiments: usize,
 
     /// Screen candidates on a scorer subsample before full-corpus promote scoring
     /// (issue #24). Values in `(0, 1)` enable screening; `1` (or `>=1`) disables
@@ -393,6 +410,8 @@ fn main() -> ExitCode {
         phase0_parity: !cli.skip_phase0,
         structural_only: cli.structural_only,
         mirrored_sampling: !cli.no_mirrored_sampling,
+        followup_candidates: cli.followup_candidates,
+        followup_experiments: cli.followup_experiments,
         screen_sample_rate: if cli.screen_sample_rate > 0.0 && cli.screen_sample_rate < 1.0 {
             Some(cli.screen_sample_rate)
         } else {
