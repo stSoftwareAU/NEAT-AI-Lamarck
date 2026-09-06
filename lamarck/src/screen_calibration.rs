@@ -697,6 +697,7 @@ mod tests {
             new_value: Some(0.1),
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         }
     }
 
@@ -717,6 +718,7 @@ mod tests {
             scores: BTreeMap::new(),
             mirror_axis_failures: None,
             follow_up: None,
+            neighbourhood: None,
             screen_scores: None,
             screen_tiers: None,
             screen_thresholds: None,

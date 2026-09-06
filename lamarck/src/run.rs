@@ -36,6 +36,7 @@ use crate::grafts::{
 use crate::log;
 use crate::memo::{AnalysisMemo, MemoScope};
 use crate::mirror::{MirrorPolicy, axis_failures};
+use crate::neighbourhood::{FocusNeighbourhood, NeighbourhoodExpansion, NeighbourhoodLedger};
 use crate::observations::ensure_statistics;
 use crate::parity::{check_phase0_parity, compute_local_mse};
 #[cfg(test)]
@@ -140,6 +141,16 @@ pub struct ExperimentRecord {
     /// written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<FollowUpBurst>,
+    /// The focus region this experiment proposed into, when one was derived
+    /// (issue #222).
+    ///
+    /// Present only on an experiment whose focus expanded — the root, the
+    /// members, the edges the region spans, the accepts that triggered it and
+    /// the allowance left. Omitted when expansion is off
+    /// (`--focus-neighbourhood-neurons 0`), when the drawn focus did not
+    /// qualify, and from journals written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neighbourhood: Option<NeighbourhoodExpansion>,
     /// Screen-phase (subsample) scores by stem when two-phase scoring is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_scores: Option<std::collections::BTreeMap<String, f64>>,
@@ -489,6 +500,27 @@ pub struct RunConfigRecord {
     /// records at least 1.
     #[serde(default)]
     pub focus_count: usize,
+    /// Adjacent neurons a focus region could hold (`0` = off, issue #222).
+    ///
+    /// `0` — the default, and what a journal written before the knob existed
+    /// reports — is the isolated-focus arm: no focus expanded into a region.
+    #[serde(default)]
+    pub focus_neighbourhood_neurons: usize,
+    /// Edges one region expansion could traverse (issue #222).
+    ///
+    /// This and the three knobs below are recorded only when expansion was on,
+    /// so a journal never implies a region the run could not have derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_neighbourhood_edges: Option<usize>,
+    /// Graph radius a region could reach (issue #222).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_neighbourhood_radius: Option<usize>,
+    /// Acceptances a focus had to earn before expanding (issue #222).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_neighbourhood_accepts: Option<u32>,
+    /// Experiments one root could steer per accept it earned (issue #222).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_neighbourhood_experiments: Option<usize>,
     /// Observations mode label (`full` / `quick`).
     pub stats_mode: String,
     /// Record cap for quick-mode analysis sampling.
@@ -569,6 +601,7 @@ impl RunConfigRecord {
     /// `drift_epsilon` is the effective tolerance after auto-tune (or the
     /// explicit override). Journal readers always see the number the run used.
     pub fn from_config(config: &LamarckConfig, drift_epsilon: f64) -> Self {
+        let neighbourhood_on = config.focus_neighbourhood_neurons > 0;
         Self {
             creature: config.creature.clone(),
             training_data: config.training_data.clone(),
@@ -612,6 +645,14 @@ impl RunConfigRecord {
             focus_neuron: config.focus_neuron.clone(),
             focus_policy: config.focus_policy.label().to_string(),
             focus_count: config.focus_count,
+            focus_neighbourhood_neurons: config.focus_neighbourhood_neurons,
+            focus_neighbourhood_edges: neighbourhood_on.then_some(config.focus_neighbourhood_edges),
+            focus_neighbourhood_radius: neighbourhood_on
+                .then_some(config.focus_neighbourhood_radius),
+            focus_neighbourhood_accepts: neighbourhood_on
+                .then_some(config.focus_neighbourhood_accepts),
+            focus_neighbourhood_experiments: neighbourhood_on
+                .then_some(config.focus_neighbourhood_experiments),
             stats_mode: config.stats_mode.label().to_string(),
             quick_sample_records: config.quick_sample_records,
             compute_correlations: config.compute_correlations,
@@ -1223,6 +1264,7 @@ pub fn run_optimisation_cancellable(
     let focus_count = config.focus_count()?;
     let promote_gate = config.promote_gate()?;
     let followup_budget = config.followup_budget()?;
+    let neighbourhood_limits = config.focus_neighbourhood_limits()?;
     let allocation_policy = config.strategy_allocation_policy()?;
     let priors_policy = config.strategy_priors_policy()?;
     let screen_threshold_policy = config.screen_threshold_policy()?;
@@ -1441,6 +1483,15 @@ pub fn run_optimisation_cancellable(
     // `None` whenever no burst is live: follow-ups are opt-in, expire with their
     // budget, and are replaced outright by the next accept's own plan.
     let mut followup_plan: Option<FollowUpPlan> = None;
+    // Focus-region expansion around repeatedly successful focuses (issue #222).
+    // `None` when expansion is off, which is the isolated-focus arm the feature
+    // is measured against.
+    let mut neighbourhood_ledger = neighbourhood_limits.map(NeighbourhoodLedger::new);
+    // Neurons accepted structural mutations grew, newest first. They are the
+    // strongest local evidence a region can be built from — the scorer has
+    // already paid for them — so an expansion prefers them over an equally
+    // weighted plain neighbour.
+    let mut grown_neurons: Vec<String> = Vec::new();
     // Measured per-strategy return, fed by every journalled experiment and
     // consulted before each batch under `--strategy-allocation adaptive`
     // (issue #218). The ledger accumulates under the fixed allocation too, so
@@ -1822,7 +1873,7 @@ pub fn run_optimisation_cancellable(
         // above ran once; each focus below pays only its own focus-specific
         // scan, so K focuses amortise the expensive analysis over K proposals
         // instead of one.
-        let focus_set = selectors.select_focus_set(
+        let mut focus_set = selectors.select_focus_set(
             &incumbent,
             config.focus_policy,
             focus_count,
@@ -1833,6 +1884,42 @@ pub fn run_optimisation_cancellable(
             .first()
             .cloned()
             .ok_or_else(|| "no focus neuron available".to_string())?;
+        // A focus the scorer has repeatedly rewarded may be one neuron of a
+        // useful local subgraph (issue #222). Expand around it — bounded by
+        // every limit at once — and let the ordinary generator propose against
+        // the members in turn. The draw above is untouched, so random / control
+        // focus selection still happens every experiment whatever the region
+        // does, and each root's allowance expires until it earns another accept.
+        let neighbourhood: Option<FocusNeighbourhood> =
+            neighbourhood_ledger.as_mut().and_then(|ledger| {
+                let accepts = selectors
+                    .weighted
+                    .history
+                    .get(&focus)
+                    .map_or(0, |history| history.accepts);
+                ledger.expand(&incumbent, &focus, accepts, &grown_neurons)
+            });
+        if let Some(region) = &neighbourhood {
+            log::detail(&format!(
+                "focus region around {}: {} member(s) [{}] across {} edge(s), {} expansion(s) left",
+                region.root(),
+                region.members().len(),
+                region
+                    .members()
+                    .iter()
+                    .map(|member| member.uuid.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                region.edges().len(),
+                region.record().remaining
+            ));
+            for member in region.members() {
+                if !focus_set.contains(&member.uuid) {
+                    focus_set.push(member.uuid.clone());
+                }
+            }
+        }
+        let neighbourhood_record = neighbourhood.as_ref().map(FocusNeighbourhood::record);
         // Runtime key check: whatever the memo still holds must describe the
         // creature about to be analysed. In a debug/test build a missed
         // invalidation panics here instead of quietly proposing against the
@@ -2205,6 +2292,24 @@ pub fn run_optimisation_cancellable(
             }
         }
 
+        // Every candidate of an expanded experiment says which region it came
+        // from and which member it targeted — the root's own candidates
+        // included, as [`NeighbourhoodRole::Root`] — so a win is attributable to
+        // the original focus or to the adjacent structure the expansion reached
+        // rather than to the region as a whole (issue #222). Stamped once the
+        // batch is final, so a cache backfill (issue #91) carries it too.
+        // Follow-up probes are left alone: they belong to the #219 arm, and
+        // their focus is the win they explore rather than a region member.
+        if let Some(region) = &neighbourhood {
+            for candidate in &mut candidates {
+                if candidate.provenance.follow_up.is_some() {
+                    continue;
+                }
+                candidate.provenance.neighbourhood =
+                    region.link(&candidate.provenance.focus_neuron);
+            }
+        }
+
         // Scoring dominates an experiment, so poll here: a signal arriving
         // during analysis abandons this experiment before any working
         // directory is written, instead of waiting out a full scorer batch.
@@ -2235,6 +2340,7 @@ pub fn run_optimisation_cancellable(
             candidates_requested: Some(config.candidates),
             batch_limit: Some(batch_limit),
             follow_up: followup_burst.clone(),
+            neighbourhood: neighbourhood_record.clone(),
             strategy_allocation: experiment_allocation.clone(),
             analysis_ms,
             memo_hits: memo_delta.hits,
@@ -2835,6 +2941,20 @@ pub fn run_optimisation_cancellable(
                 strategy,
                 experiments,
             });
+            // Neurons this win grew are the strongest local evidence a focus
+            // region can be built from, so remember them for the next expansion
+            // (issue #222). Bounded by the region's own neuron cap: an older
+            // growth has long since been proposed against.
+            if let Some(ledger) = &neighbourhood_ledger {
+                let previous_uuids: std::collections::HashSet<&str> =
+                    previous.neurons.iter().map(|n| n.uuid.as_str()).collect();
+                for neuron in &incumbent.neurons {
+                    if !previous_uuids.contains(neuron.uuid.as_str()) {
+                        grown_neurons.insert(0, neuron.uuid.clone());
+                    }
+                }
+                grown_neurons.truncate(ledger.limits().neurons);
+            }
             // Neurons the winner grew are Lamarck's, so they get their own
             // provenance tag; the ones it inherited keep theirs (issue #187).
             creature_meta.stamp_new_neurons(
@@ -3027,6 +3147,7 @@ pub fn run_optimisation_cancellable(
                 candidates_requested: Some(config.candidates),
                 batch_limit: Some(batch_limit),
                 follow_up: followup_burst,
+                neighbourhood: neighbourhood_record,
                 strategy_allocation: experiment_allocation,
                 scores: score_map,
                 mirror_axis_failures: (!mirror_axis_failures.is_empty())
@@ -3276,6 +3397,7 @@ struct UnacceptedJournal {
     candidates_requested: Option<usize>,
     batch_limit: Option<BatchLimit>,
     follow_up: Option<FollowUpBurst>,
+    neighbourhood: Option<NeighbourhoodExpansion>,
     strategy_allocation: Option<StrategyAllocation>,
     analysis_ms: u128,
     memo_hits: u64,
@@ -3319,6 +3441,7 @@ impl ExperimentRecord {
             candidates_requested: journal.candidates_requested,
             batch_limit: journal.batch_limit,
             follow_up: journal.follow_up.clone(),
+            neighbourhood: journal.neighbourhood.clone(),
             strategy_allocation: journal.strategy_allocation.clone(),
             scores: BTreeMap::new(),
             mirror_axis_failures: outcome.mirror_axis_failures,
@@ -5312,6 +5435,127 @@ mod tests {
         );
     }
 
+    /// Issue #222: a focus the scorer has rewarded expands into a bounded
+    /// region, and the batch is aimed at its members with full provenance.
+    #[test]
+    fn a_rewarded_focus_expands_into_a_bounded_neighbourhood() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let config = LamarckConfig {
+            max_experiments: Some(2),
+            phase0_parity: false,
+            focus_neighbourhood_neurons: 2,
+            focus_neighbourhood_accepts: 1,
+            focus_neighbourhood_experiments: 2,
+            ..base_config(creature_path, training, dir.path().join("out"))
+        };
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+        assert!(result.acceptances >= 1, "the scripted winner is accepted");
+
+        let records = experiment_records(&result.journal_path);
+        assert!(
+            records[0].neighbourhood.is_none(),
+            "an unproven focus is still an isolated target"
+        );
+        let second = records.get(1).expect("a second experiment ran");
+        let region = second
+            .neighbourhood
+            .as_ref()
+            .expect("the accept in experiment 1 earned an expansion");
+        assert_eq!(region.root_focus, "o1");
+        assert_eq!(region.accepts, 1, "the measured evidence is recorded");
+        assert_eq!(region.members, vec!["h1".to_string()]);
+        assert_eq!(region.radius, 1);
+        assert_eq!(region.remaining, 1, "one of two expansions spent");
+        assert!(
+            second
+                .focus_neurons
+                .as_ref()
+                .is_some_and(|set| set.contains(&"h1".to_string())),
+            "the region member is proposed against: {:?}",
+            second.focus_neurons
+        );
+
+        // Provenance names the root and the member actually targeted.
+        let mut roots = 0;
+        let mut adjacent = 0;
+        for prov in &second.candidates {
+            let link = prov
+                .neighbourhood
+                .as_ref()
+                .expect("every candidate of an expanded experiment is attributed");
+            assert_eq!(link.root_focus, "o1");
+            match link.role {
+                crate::neighbourhood::NeighbourhoodRole::Root => {
+                    assert_eq!(link.member, "o1");
+                    assert_eq!(link.hops, 0);
+                    roots += 1;
+                }
+                crate::neighbourhood::NeighbourhoodRole::Predecessor => {
+                    assert_eq!(link.member, "h1");
+                    assert_eq!(link.hops, 1);
+                    adjacent += 1;
+                }
+                crate::neighbourhood::NeighbourhoodRole::Successor => {
+                    panic!("o1 is an output; it has no successor")
+                }
+            }
+            assert_eq!(
+                prov.focus_neuron, link.member,
+                "the link names the focus the candidate was proposed for"
+            );
+        }
+        assert!(roots > 0, "the root keeps a share of the batch");
+        assert!(adjacent > 0, "the member is genuinely targeted");
+
+        let encoded = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(
+            encoded.contains("\"neighbourhood\"") && encoded.contains("\"rootFocus\""),
+            "the region survives the journal encoding"
+        );
+    }
+
+    /// Issue #222: expansion is off by default — every focus stays isolated.
+    #[test]
+    fn focus_neighbourhood_expansion_is_off_by_default() {
+        let dir = tempdir().unwrap();
+        let (creature_path, training) = tiny_setup(dir.path());
+        let config = LamarckConfig {
+            max_experiments: Some(2),
+            phase0_parity: false,
+            ..base_config(creature_path, training, dir.path().join("out"))
+        };
+        let result = run_optimisation(
+            &config,
+            &ScriptedScorer {
+                calls: Arc::new(Mutex::new(0)),
+            },
+        )
+        .unwrap();
+        assert!(result.acceptances >= 1, "the scripted winner is accepted");
+        for record in experiment_records(&result.journal_path) {
+            assert!(record.neighbourhood.is_none(), "no region without the flag");
+            assert!(
+                record
+                    .candidates
+                    .iter()
+                    .all(|prov| prov.neighbourhood.is_none()),
+                "no candidate claims a region that was never derived"
+            );
+        }
+        let encoded = fs::read_to_string(&result.journal_path).unwrap();
+        assert!(
+            !encoded.contains("\"neighbourhood\""),
+            "the off arm writes no region field at all"
+        );
+    }
+
     /// Issue #219: the off arm plans nothing at all.
     #[test]
     fn follow_ups_are_off_by_default() {
@@ -6483,6 +6727,7 @@ mod tests {
                     new_value: None,
                     mirror: None,
                     follow_up: None,
+                    neighbourhood: None,
                 },
             })
             .collect()
@@ -6533,6 +6778,7 @@ mod tests {
                 old_value: Some(1.0),
                 new_value: Some(1.1),
                 mirror: None,
+                neighbourhood: None,
                 follow_up: Some(crate::followup::FollowUpLink {
                     parent_experiment: 1,
                     parent_winner: "candidate-000".into(),
@@ -6657,6 +6903,7 @@ mod tests {
             candidates_requested: Some(4),
             batch_limit: Some(BatchLimit::Budget),
             follow_up: None,
+            neighbourhood: None,
             strategy_allocation: None,
             analysis_ms: 10,
             memo_hits: 1,

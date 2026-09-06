@@ -380,6 +380,7 @@ mod tests {
             new_value,
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         }
     }
 
@@ -414,6 +415,7 @@ mod tests {
             scores,
             mirror_axis_failures: None,
             follow_up: None,
+            neighbourhood: None,
             screen_scores: None,
             screen_tiers: None,
             screen_thresholds: None,

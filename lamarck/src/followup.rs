@@ -496,6 +496,7 @@ pub fn probe_candidate(
             old_value,
             new_value,
             mirror: None,
+            neighbourhood: None,
             follow_up: Some(FollowUpLink {
                 parent_experiment: parent.experiment,
                 parent_winner: parent.winner_stem.clone(),

@@ -184,6 +184,7 @@ mod tests {
             new_value,
             mirror: None,
             follow_up: None,
+            neighbourhood: None,
         }
     }
 

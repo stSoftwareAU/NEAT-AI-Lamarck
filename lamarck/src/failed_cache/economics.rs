@@ -617,6 +617,7 @@ mod tests {
                 new_value: Some(1.0),
                 mirror: None,
                 follow_up: None,
+                neighbourhood: None,
             },
         )
     }

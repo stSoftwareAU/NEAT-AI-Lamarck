@@ -14,6 +14,7 @@ use crate::failed_cache::{
 use crate::focus::FocusPolicy;
 use crate::followup::FollowUpBudget;
 use crate::memo::DEFAULT_ANALYSIS_MEMO_ENTRIES;
+use crate::neighbourhood::NeighbourhoodLimits;
 use crate::observations::{DEFAULT_QUICK_SAMPLE_RECORDS, StatsMode};
 use crate::promote_gate::{DEFAULT_SCREEN_PROMOTE_SIGMA_K, PromoteGate, PromoteGateMode};
 use crate::screen_thresholds::{
@@ -86,6 +87,35 @@ pub const DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES: u32 = 3;
 /// economics change the paired benchmark has to justify before it moves.
 pub const DEFAULT_FOCUS_COUNT: usize = 1;
 
+/// Default adjacent neurons a focus region may hold (issue #222).
+///
+/// `0` — expansion is off, and a focus is treated as the isolated scalar target
+/// it was before #222. The region costs a focus scan per member and splits the
+/// candidate budget across them, so whether targeting adjacent structure earns
+/// that is exactly what the on/off A/B measures.
+pub const DEFAULT_FOCUS_NEIGHBOURHOOD_NEURONS: usize = 0;
+
+/// Default edges one focus-region expansion may traverse (issue #222).
+pub const DEFAULT_FOCUS_NEIGHBOURHOOD_EDGES: usize = 4;
+
+/// Default graph radius of a focus region (issue #222).
+///
+/// One hop: direct predecessors and successors only. Anything wider stops being
+/// a local region and starts being a section of the network.
+pub const DEFAULT_FOCUS_NEIGHBOURHOOD_RADIUS: usize = 1;
+
+/// Default acceptances a focus must earn before its region is derived (#222).
+///
+/// One measured accept — the scorer has confirmed something real there. `0` is
+/// the explicit-policy arm: expand every drawn focus.
+pub const DEFAULT_FOCUS_NEIGHBOURHOOD_ACCEPTS: u32 = 1;
+
+/// Default experiments one root may steer per accept it earned (issue #222).
+///
+/// Two, so a successful region is explored while the evidence is fresh and the
+/// run is back on ordinary focus draws immediately afterwards.
+pub const DEFAULT_FOCUS_NEIGHBOURHOOD_EXPERIMENTS: usize = 2;
+
 /// Run-time knobs for a Lamarck optimisation session.
 #[derive(Debug, Clone)]
 pub struct LamarckConfig {
@@ -156,6 +186,29 @@ pub struct LamarckConfig {
     /// and splits [`Self::candidates`] between them. `--focus-neuron` pins the
     /// focus, so it caps this at 1.
     pub focus_count: usize,
+    /// Adjacent neurons a repeatedly successful focus may expand into (#222).
+    ///
+    /// `0` — the default — is the pre-#222 run: every focus is an isolated
+    /// scalar target. A positive value lets a focus that has earned
+    /// [`Self::focus_neighbourhood_accepts`] acceptances derive a bounded local
+    /// region, whose members the ordinary generator then proposes against in
+    /// turn. The candidate budget is split across them, so the batch does not
+    /// grow; what changes is where it is aimed.
+    pub focus_neighbourhood_neurons: usize,
+    /// Edges one region expansion may traverse (issue #222).
+    pub focus_neighbourhood_edges: usize,
+    /// Graph hops a region may reach from its root focus (issue #222).
+    pub focus_neighbourhood_radius: usize,
+    /// Acceptances a focus must have earned before it expands (issue #222).
+    ///
+    /// `0` expands every drawn focus — the explicit-policy arm the measured
+    /// trigger is compared against.
+    pub focus_neighbourhood_accepts: u32,
+    /// Experiments one root may steer per accept it earned (issue #222).
+    ///
+    /// What stops a productive region monopolising the run: the allowance is
+    /// renewed by a further acceptance and by nothing else.
+    pub focus_neighbourhood_experiments: usize,
     /// Compute expensive input×input correlations in observations.
     pub compute_correlations: bool,
     /// Abort after this many consecutive scorer failures.
@@ -326,6 +379,46 @@ impl LamarckConfig {
         Ok(Some(FollowUpBudget {
             candidates: self.followup_candidates,
             experiments: self.followup_experiments,
+        }))
+    }
+
+    /// Focus-neighbourhood limits for this run, validated (issue #222).
+    ///
+    /// `None` when expansion is off. A positive neuron cap with a zero edge
+    /// budget, a zero radius or a zero experiment allowance is a configuration
+    /// fault, reported rather than clamped: each of those makes the region
+    /// unreachable, and a run that quietly ignored the flag would invalidate the
+    /// A/B it was set for.
+    pub fn focus_neighbourhood_limits(&self) -> Result<Option<NeighbourhoodLimits>, String> {
+        if self.focus_neighbourhood_neurons == 0 {
+            return Ok(None);
+        }
+        for (value, flag) in [
+            (
+                self.focus_neighbourhood_edges,
+                "--focus-neighbourhood-edges",
+            ),
+            (
+                self.focus_neighbourhood_radius,
+                "--focus-neighbourhood-radius",
+            ),
+            (
+                self.focus_neighbourhood_experiments,
+                "--focus-neighbourhood-experiments",
+            ),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "{flag} must be at least 1 when --focus-neighbourhood-neurons is set (got 0)"
+                ));
+            }
+        }
+        Ok(Some(NeighbourhoodLimits {
+            neurons: self.focus_neighbourhood_neurons,
+            edges: self.focus_neighbourhood_edges,
+            radius: self.focus_neighbourhood_radius,
+            accepts: self.focus_neighbourhood_accepts,
+            experiments: self.focus_neighbourhood_experiments,
         }))
     }
 
@@ -522,6 +615,11 @@ impl Default for LamarckConfig {
             focus_neuron: None,
             focus_policy: FocusPolicy::Weighted,
             focus_count: DEFAULT_FOCUS_COUNT,
+            focus_neighbourhood_neurons: DEFAULT_FOCUS_NEIGHBOURHOOD_NEURONS,
+            focus_neighbourhood_edges: DEFAULT_FOCUS_NEIGHBOURHOOD_EDGES,
+            focus_neighbourhood_radius: DEFAULT_FOCUS_NEIGHBOURHOOD_RADIUS,
+            focus_neighbourhood_accepts: DEFAULT_FOCUS_NEIGHBOURHOOD_ACCEPTS,
+            focus_neighbourhood_experiments: DEFAULT_FOCUS_NEIGHBOURHOOD_EXPERIMENTS,
             compute_correlations: false,
             max_consecutive_scorer_failures: DEFAULT_MAX_CONSECUTIVE_SCORER_FAILURES,
             phase0_parity: true,
@@ -585,6 +683,80 @@ mod tests {
         };
         let err = none.focus_count().expect_err("zero is rejected");
         assert!(err.contains("--focus-count"), "error names the flag: {err}");
+    }
+
+    /// Issue #222: focus-neighbourhood expansion is off by default, and a
+    /// region nothing can reach is a fault rather than a silent disabling.
+    #[test]
+    fn focus_neighbourhood_expansion_is_off_by_default_and_rejects_dead_limits() {
+        let off = LamarckConfig::default();
+        assert_eq!(
+            off.focus_neighbourhood_neurons,
+            DEFAULT_FOCUS_NEIGHBOURHOOD_NEURONS
+        );
+        assert_eq!(off.focus_neighbourhood_limits(), Ok(None));
+
+        let on = LamarckConfig {
+            focus_neighbourhood_neurons: 3,
+            ..LamarckConfig::default()
+        };
+        assert_eq!(
+            on.focus_neighbourhood_limits(),
+            Ok(Some(NeighbourhoodLimits {
+                neurons: 3,
+                edges: DEFAULT_FOCUS_NEIGHBOURHOOD_EDGES,
+                radius: DEFAULT_FOCUS_NEIGHBOURHOOD_RADIUS,
+                accepts: DEFAULT_FOCUS_NEIGHBOURHOOD_ACCEPTS,
+                experiments: DEFAULT_FOCUS_NEIGHBOURHOOD_EXPERIMENTS,
+            }))
+        );
+
+        for (config, flag) in [
+            (
+                LamarckConfig {
+                    focus_neighbourhood_neurons: 3,
+                    focus_neighbourhood_edges: 0,
+                    ..LamarckConfig::default()
+                },
+                "--focus-neighbourhood-edges",
+            ),
+            (
+                LamarckConfig {
+                    focus_neighbourhood_neurons: 3,
+                    focus_neighbourhood_radius: 0,
+                    ..LamarckConfig::default()
+                },
+                "--focus-neighbourhood-radius",
+            ),
+            (
+                LamarckConfig {
+                    focus_neighbourhood_neurons: 3,
+                    focus_neighbourhood_experiments: 0,
+                    ..LamarckConfig::default()
+                },
+                "--focus-neighbourhood-experiments",
+            ),
+        ] {
+            let err = config
+                .focus_neighbourhood_limits()
+                .expect_err("a region nothing can reach is rejected");
+            assert!(err.contains(flag), "error names the flag: {err}");
+        }
+    }
+
+    /// A zero accept trigger is legitimate — it is the explicit-policy arm.
+    #[test]
+    fn a_zero_accept_trigger_is_accepted_as_the_policy_arm() {
+        let policy = LamarckConfig {
+            focus_neighbourhood_neurons: 2,
+            focus_neighbourhood_accepts: 0,
+            ..LamarckConfig::default()
+        };
+        let limits = policy
+            .focus_neighbourhood_limits()
+            .expect("a zero trigger is a policy, not a fault")
+            .expect("expansion is on");
+        assert_eq!(limits.accepts, 0);
     }
 
     /// Issue #219: follow-ups are off by default, and a burst that may span no
