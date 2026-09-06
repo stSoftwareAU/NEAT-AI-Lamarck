@@ -48,6 +48,9 @@ use crate::scorer::{
     write_promote_batch, write_promote_batch_without_baseline,
 };
 use crate::scorer_cost::{ScorerCallPhase, ScorerCallRecord};
+use crate::screen_thresholds::{
+    ScreenThresholdLedger, ScreenThresholdRecord, ScreenedCandidate, calibrate_screen_batch,
+};
 use crate::strategy_allocation::{StrategyAllocation, StrategyLedger};
 use crate::structural::{is_input_source, rank_unused_sources};
 use crate::tags::{CreatureMeta, LamarckProgress, NeuronOrigin, serialize_creature_with_meta};
@@ -142,6 +145,14 @@ pub struct ExperimentRecord {
     /// before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_tiers: Option<ScreenTierRecord>,
+    /// The threshold and calibration model version every candidate in this
+    /// batch faced (issue #220).
+    ///
+    /// Present only under `--screen-threshold-mode per-strategy`, and absent
+    /// from journals written before the knob existed — in both cases every
+    /// candidate faced the one shared threshold `screenTiers` already records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_thresholds: Option<ScreenThresholdRecord>,
     /// Which baseline decided this experiment's promote call (issue #113).
     ///
     /// `fresh` when the call carried the incumbent and scored it, `remembered`
@@ -269,9 +280,19 @@ pub struct ScreenTierRecord {
     pub gate: String,
     /// Candidates the screen tier scored (baseline excluded).
     pub screened: u64,
-    /// Candidates the gate admitted to full-corpus scoring.
+    /// Candidates admitted to full-corpus scoring.
+    ///
+    /// Under `--screen-threshold-mode per-strategy` (issue #220) this is the
+    /// **post-calibration** count — per-strategy thresholds plus the control
+    /// draw — while [`Self::threshold`] stays the shared threshold the batch
+    /// gate resolved. `screenThresholds` records what each candidate actually
+    /// faced, so the two are read together rather than against each other.
     pub promoted: u64,
     /// Screen Δ a candidate had to clear in this batch.
+    ///
+    /// The **shared** threshold the batch's gate resolved. Under per-strategy
+    /// calibration a candidate faced this scaled by its strategy's multiplier;
+    /// `screenThresholds.candidates[].threshold` is the number that judged it.
     pub threshold: f64,
     /// σ̂ estimated for this batch; omitted under the absolute gate and when
     /// the batch was too degenerate to price its own noise.
@@ -421,6 +442,16 @@ pub struct RunConfigRecord {
     /// σ̂ multiplier the noise-aware gate used; `None` under the absolute gate.
     #[serde(default)]
     pub screen_promote_sigma_k: Option<f64>,
+    /// Screen threshold mode in force (`shared` / `per-strategy`, issue #220).
+    ///
+    /// `None` in journals written before the knob existed — those ran the one
+    /// shared threshold, which is still the default.
+    #[serde(default)]
+    pub screen_threshold_mode: Option<String>,
+    /// Minimum control-promotion rate; `None` under the shared threshold,
+    /// where nothing is calibrated and so nothing needs a control sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_control_rate: Option<f64>,
     /// Promote calls served from a remembered baseline before one is scored
     /// fresh (`--baseline-reverify-interval`, issue #113).
     ///
@@ -549,6 +580,13 @@ impl RunConfigRecord {
                 PromoteGateMode::Absolute => None,
                 PromoteGateMode::NoiseAware => Some(config.screen_promote_sigma_k),
             },
+            screen_threshold_mode: Some(config.screen_threshold_mode.label().to_string()),
+            // Recorded only when calibration is in force, so a journal never
+            // implies a control sample the run did not promote.
+            screen_control_rate: config
+                .screen_threshold_mode
+                .is_per_strategy()
+                .then_some(config.screen_control_rate),
             baseline_reverify_interval: config.baseline_reverify_interval,
             baseline_drift_epsilon: drift_epsilon,
             baseline_drift_epsilon_auto: config.baseline_drift_epsilon.is_none(),
@@ -997,6 +1035,48 @@ pub(crate) fn candidate_stem_index(stem: &str) -> Option<usize> {
     stem.strip_prefix("candidate-")?.parse().ok()
 }
 
+/// The screened batch as the calibrated gate sees it (issue #220).
+///
+/// One entry per scored candidate — `baseline` is the anchor every Δ is
+/// measured against, never a candidate — carrying the strategy its stem
+/// indexes. A stem with no resolvable provenance keeps its `None` strategy and
+/// is gated on the shared threshold.
+///
+/// A batch with no `baseline` is a fault, not an empty batch: every Δ here is
+/// measured against it, so returning "nothing to promote" would silently drop
+/// the whole batch. It is the same loud failure
+/// [`crate::screen_thresholds::ScreenThresholdReplayAccumulator::push_experiment`]
+/// and [`crate::promote_gate`] make on the same condition.
+fn screened_candidates(
+    screen_scores: &BTreeMap<String, ScoreResult>,
+    candidates: &[Candidate],
+) -> Result<Vec<ScreenedCandidate>, String> {
+    let baseline = screen_scores
+        .get("baseline")
+        .ok_or_else(|| "screen scores have no baseline to measure deltas against".to_string())?;
+    Ok(screen_scores
+        .iter()
+        .filter(|(stem, _)| stem.as_str() != "baseline")
+        .map(|(stem, score)| ScreenedCandidate {
+            stem: stem.clone(),
+            strategy: candidate_stem_index(stem)
+                .and_then(|index| candidates.get(index))
+                .map(|candidate| candidate.provenance.strategy),
+            screen_delta: improvement(score.score, baseline.score),
+        })
+        .collect())
+}
+
+/// One-line rendering of the calibrated thresholds for the run log.
+fn threshold_summary(record: &ScreenThresholdRecord) -> String {
+    record
+        .thresholds
+        .iter()
+        .map(|(strategy, threshold)| format!("{strategy}={threshold:.3e}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Run the Lamarck optimisation loop with no external cancellation.
 ///
 /// Equivalent to [`run_optimisation_cancellable`] with a token that is never
@@ -1028,6 +1108,7 @@ pub fn run_optimisation_cancellable(
     let promote_gate = config.promote_gate()?;
     let followup_budget = config.followup_budget()?;
     let allocation_policy = config.strategy_allocation_policy()?;
+    let screen_threshold_policy = config.screen_threshold_policy()?;
     // Load and validate the creature before anything is written (issue #165):
     // an `input < 1` / `output < 1` creature has no observation width, cannot
     // frame a training record, and must stop the run here — no output dir, no
@@ -1248,6 +1329,13 @@ pub fn run_optimisation_cancellable(
     // (issue #218). The ledger accumulates under the fixed allocation too, so
     // an A/B arm's journal carries the same evidence the adaptive arm acted on.
     let mut strategy_ledger = allocation_policy.ledger(config.min_improvement);
+    // Measured screen-versus-full-corpus evidence per strategy, consulted
+    // before each screen batch under `--screen-threshold-mode per-strategy`
+    // (issue #220). Every journalled experiment feeds it under both modes, so
+    // there is one journal path and `report` — which rebuilds this ledger from
+    // the journal alone — derives exactly what a calibrated run would apply.
+    let mut screen_ledger =
+        ScreenThresholdLedger::new(config.screen_promote_threshold, config.min_improvement);
     // Last-accept details for the final run-summary stamp (Issue #35).
     let mut last_accept_focus = String::new();
     let mut last_accept_strategy = CandidateStrategy::Random;
@@ -2023,6 +2111,7 @@ pub fn run_optimisation_cancellable(
         let scorer_start = Instant::now();
         let mut screen_score_map: Option<std::collections::BTreeMap<String, f64>> = None;
         let mut screen_tiers: Option<ScreenTierRecord> = None;
+        let mut screen_threshold_record: Option<ScreenThresholdRecord> = None;
         let mut promote_dir: Option<PathBuf> = None;
         // Identity any remembered baseline must still match this experiment
         // (issue #113): a changed creature or a changed corpus invalidates it.
@@ -2050,6 +2139,7 @@ pub fn run_optimisation_cancellable(
                         handle_scorer_failure(ScorerFailure {
                             consecutive: &mut consecutive_scorer_failures,
                             ledger: &mut strategy_ledger,
+                            screen_ledger: &mut screen_ledger,
                             max_consecutive: config.max_consecutive_scorer_failures,
                             err: e.to_string(),
                             warn_label: "screen scorer failed",
@@ -2061,6 +2151,7 @@ pub fn run_optimisation_cancellable(
                             preserve_losers: config.preserve_losers,
                             screen_scores: None,
                             screen_tiers: None,
+                            screen_thresholds: None,
                             cache_economics: cache_economics.as_mut(),
                             failed_cache: failed_cache.as_mut(),
                             cache_cost,
@@ -2080,8 +2171,10 @@ pub fn run_optimisation_cancellable(
             if let Some(economics) = cache_economics.as_mut() {
                 economics.observe_screen(screen_ms, screen_scores.len());
             }
-            // Report the batch against the threshold the gate actually applied,
-            // so the ">threshold" count cannot disagree with what is promoted.
+            // Report the batch against the threshold the shared gate resolved.
+            // Under `--screen-threshold-mode per-strategy` that is not the last
+            // word — the per-strategy thresholds and the control draw below
+            // decide the promoted set, and the line they log is what states it.
             log_scorer_batch_stats_labeled(&screen_scores, screen_ms, decision.threshold, "screen");
             consecutive_scorer_failures = 0;
             screen_score_map = Some(
@@ -2091,7 +2184,32 @@ pub fn run_optimisation_cancellable(
                     .collect(),
             );
 
-            let promote_stems = decision.stems.clone();
+            // Per-strategy calibration scales the threshold this batch's own
+            // gate resolved, and promotes a control sample below it (#220).
+            // Under the shared mode nothing here changes the gate's verdict.
+            let promote_stems = match screen_threshold_policy.mode.is_per_strategy() {
+                false => decision.stems.clone(),
+                true => {
+                    let calibrated = calibrate_screen_batch(
+                        &screened_candidates(&screen_scores, &candidates)?,
+                        decision.threshold,
+                        &screen_ledger,
+                        &screen_threshold_policy,
+                        &mut rng,
+                    );
+                    log::detail(&format!(
+                        "screen thresholds ({}): {} — promoted {} of {} \
+                         incl. {} control promotion(s) below threshold",
+                        calibrated.record.model_version,
+                        threshold_summary(&calibrated.record),
+                        calibrated.stems.len(),
+                        decision.screened,
+                        calibrated.record.controls,
+                    ));
+                    screen_threshold_record = Some(calibrated.record);
+                    calibrated.stems
+                }
+            };
             screen_tiers = Some(ScreenTierRecord {
                 gate: promote_gate.label().to_string(),
                 screened: decision.screened as u64,
@@ -2148,6 +2266,7 @@ pub fn run_optimisation_cancellable(
                 journal_experiment(
                     &journal_path,
                     &mut strategy_ledger,
+                    &mut screen_ledger,
                     &ExperimentRecord::unaccepted(
                         &unaccepted,
                         UnacceptedOutcome {
@@ -2159,6 +2278,7 @@ pub fn run_optimisation_cancellable(
                                 .then_some(mirror_axis_failures),
                             screen_scores: screen_score_map,
                             screen_tiers,
+                            screen_thresholds: screen_threshold_record.clone(),
                             scorer_ms: screen_ms,
                             scorer_calls: journal_calls(scorer.drain()),
                             scorer_error: None,
@@ -2230,6 +2350,7 @@ pub fn run_optimisation_cancellable(
                     handle_scorer_failure(ScorerFailure {
                         consecutive: &mut consecutive_scorer_failures,
                         ledger: &mut strategy_ledger,
+                        screen_ledger: &mut screen_ledger,
                         max_consecutive: config.max_consecutive_scorer_failures,
                         err: e.to_string(),
                         warn_label: "promote scorer failed",
@@ -2241,6 +2362,7 @@ pub fn run_optimisation_cancellable(
                         preserve_losers: config.preserve_losers,
                         screen_scores: screen_score_map,
                         screen_tiers,
+                        screen_thresholds: screen_threshold_record.clone(),
                         cache_economics: cache_economics.as_mut(),
                         failed_cache: failed_cache.as_mut(),
                         cache_cost,
@@ -2277,6 +2399,7 @@ pub fn run_optimisation_cancellable(
                     handle_scorer_failure(ScorerFailure {
                         consecutive: &mut consecutive_scorer_failures,
                         ledger: &mut strategy_ledger,
+                        screen_ledger: &mut screen_ledger,
                         max_consecutive: config.max_consecutive_scorer_failures,
                         err: e.to_string(),
                         warn_label: "scorer failed",
@@ -2288,6 +2411,7 @@ pub fn run_optimisation_cancellable(
                         preserve_losers: config.preserve_losers,
                         screen_scores: None,
                         screen_tiers: None,
+                        screen_thresholds: None,
                         cache_economics: cache_economics.as_mut(),
                         failed_cache: failed_cache.as_mut(),
                         cache_cost,
@@ -2750,6 +2874,7 @@ pub fn run_optimisation_cancellable(
         journal_experiment(
             &journal_path,
             &mut strategy_ledger,
+            &mut screen_ledger,
             &ExperimentRecord {
                 experiment_number: experiments,
                 timestamp_unix: unix_now(),
@@ -2769,6 +2894,7 @@ pub fn run_optimisation_cancellable(
                     .then_some(mirror_axis_failures),
                 screen_scores: screen_score_map,
                 screen_tiers,
+                screen_thresholds: screen_threshold_record,
                 baseline_source: Some(baseline_source),
                 winner: winner_stem,
                 improvement,
@@ -3015,6 +3141,7 @@ struct UnacceptedOutcome {
     mirror_axis_failures: Option<Vec<String>>,
     screen_scores: Option<BTreeMap<String, f64>>,
     screen_tiers: Option<ScreenTierRecord>,
+    screen_thresholds: Option<ScreenThresholdRecord>,
     scorer_ms: u128,
     scorer_calls: Option<Vec<ScorerCallRecord>>,
     scorer_error: Option<String>,
@@ -3045,6 +3172,7 @@ impl ExperimentRecord {
             mirror_axis_failures: outcome.mirror_axis_failures,
             screen_scores: outcome.screen_scores,
             screen_tiers: outcome.screen_tiers,
+            screen_thresholds: outcome.screen_thresholds,
             baseline_source: None,
             winner: None,
             improvement: None,
@@ -3097,6 +3225,7 @@ fn retire_dead_axes(dead_axes: &mut Vec<String>, failures: &[String], accepted: 
 struct ScorerFailure<'a> {
     consecutive: &'a mut u32,
     ledger: &'a mut StrategyLedger,
+    screen_ledger: &'a mut ScreenThresholdLedger,
     max_consecutive: u32,
     err: String,
     warn_label: &'a str,
@@ -3108,6 +3237,7 @@ struct ScorerFailure<'a> {
     preserve_losers: bool,
     screen_scores: Option<BTreeMap<String, f64>>,
     screen_tiers: Option<ScreenTierRecord>,
+    screen_thresholds: Option<ScreenThresholdRecord>,
     cache_economics: Option<&'a mut CacheEconomics>,
     failed_cache: Option<&'a mut FailedCandidateCache>,
     cache_cost: ExperimentCost,
@@ -3148,6 +3278,7 @@ fn handle_scorer_failure(failure: ScorerFailure<'_>) -> Result<(), String> {
     journal_experiment(
         failure.journal_path,
         failure.ledger,
+        failure.screen_ledger,
         &ExperimentRecord::unaccepted(
             failure.journal,
             UnacceptedOutcome {
@@ -3156,6 +3287,7 @@ fn handle_scorer_failure(failure: ScorerFailure<'_>) -> Result<(), String> {
                 mirror_axis_failures: None,
                 screen_scores: failure.screen_scores,
                 screen_tiers: failure.screen_tiers,
+                screen_thresholds: failure.screen_thresholds,
                 scorer_ms: failure.scorer_ms,
                 scorer_calls: failure.scorer_calls,
                 scorer_error: Some(failure.err.clone()),
@@ -3284,9 +3416,11 @@ fn unix_now() -> u64 {
 fn journal_experiment(
     path: &Path,
     ledger: &mut StrategyLedger,
+    screen_ledger: &mut ScreenThresholdLedger,
     record: &ExperimentRecord,
 ) -> Result<(), String> {
     ledger.observe(record);
+    screen_ledger.observe(record);
     append_journal(path, record)
 }
 
@@ -6238,6 +6372,7 @@ mod tests {
                 mirror_axis_failures: None,
                 screen_scores: None,
                 screen_tiers: None,
+                screen_thresholds: None,
                 scorer_ms: 99,
                 scorer_calls: None,
                 scorer_error: Some("boom".into()),
@@ -6278,9 +6413,11 @@ mod tests {
         let mut rebuild = None;
         let journal = unaccepted_journal(1);
         let mut ledger = StrategyLedger::totals(1e-6);
+        let mut screen_ledger = ScreenThresholdLedger::new(1e-6, 1e-6);
         let err = handle_scorer_failure(ScorerFailure {
             consecutive: &mut consecutive,
             ledger: &mut ledger,
+            screen_ledger: &mut screen_ledger,
             max_consecutive: 1,
             err: "boom".into(),
             warn_label: "scorer failed",
@@ -6292,6 +6429,7 @@ mod tests {
             preserve_losers: false,
             screen_scores: None,
             screen_tiers: None,
+            screen_thresholds: None,
             cache_economics: None,
             failed_cache: None,
             cache_cost: ExperimentCost::default(),

@@ -23,6 +23,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Per-strategy screen thresholds (Issue #220).**
+  Lamarck screened every candidate family against one shared
+  `--screen-promote-threshold`, but a weight nudge, a structural add and a
+  backprop step do not share a relationship between sampled Δ and full-corpus
+  Δ — so one gate over-buys full-corpus calls for the noisy families and drops
+  the ones whose sample signal is weak but whose promoted precision is good.
+  With `--screen-threshold-mode per-strategy`, each family's threshold is now
+  scaled from its own journalled `(screen Δ, full Δ)` window
+  (`lamarck/src/screen_thresholds.rs`): half the weakest winning screen Δ where
+  the family has won, the median losing screen Δ — capped by half the weakest
+  screen Δ it has ever *improved* on, because that loss sample only holds what
+  the gate already promoted — where it has only ever wasted promote calls, and
+  the **shared threshold unchanged** below eight paired observations. The multiplier is clamped to `[1/8, 8]` and applied to whatever
+  the batch's own promote gate resolved, so it composes with the absolute and
+  noise-aware gates rather than replacing either. Calibration never makes the
+  screen authoritative: the full-corpus scorer remains the only acceptance gate.
+  `--screen-control-rate` (default `0.02`, and required to be `> 0` under
+  calibration) promotes that minimum share of **below-threshold** candidates
+  anyway, drawn uniformly at random, so the false negatives a tightened
+  threshold creates stay measurable — the limit `docs/screen-calibration.md`
+  recorded as structural. Every candidate is journalled with the threshold and
+  calibration model version it faced (`screenThresholds`), `report` gains
+  per-strategy calibration rows (`screenCalibration.byStrategy`) and an offline
+  `screenThresholdReplay` pricing the calibrated gate against the shared one on
+  full-corpus calls saved and score improvement per wall hour, and
+  `scripts/run-screen-threshold-ab.sh` scripts the paired production A/B. The
+  default is unchanged: a `shared` run journals no calibration record, promotes
+  no controls and gates exactly as before. See
+  [`docs/screen-thresholds.md`](docs/screen-thresholds.md).
+
 - **Bounded local follow-up search after an accept (Issue #219).**
   An accepted candidate identifies a local region and mutation family the
   authoritative scorer has just confirmed, but the run returned straight to the

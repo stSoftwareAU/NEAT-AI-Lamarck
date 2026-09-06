@@ -31,6 +31,7 @@ pub mod run;
 pub mod scorer;
 pub mod scorer_cost;
 pub mod screen_calibration;
+pub mod screen_thresholds;
 pub mod strategy_allocation;
 pub mod structural;
 pub mod tags;
@@ -117,6 +118,14 @@ pub use scorer_cost::{
 pub use screen_calibration::{
     AcceptedScreenPoint, BaselineSampleGap, DeltaDistribution, ScreenCalibration,
     ScreenCalibrationAccumulator, ScreenNoise, ScreenPair, spearman_rank_correlation,
+};
+pub use screen_thresholds::{
+    CALIBRATION_WINDOW, CalibratedScreen, CandidateScreenDecision, DEFAULT_SCREEN_CONTROL_RATE,
+    MAX_THRESHOLD_ADJUSTMENT, MIN_CALIBRATION_PAIRS, PairedScreenObservation,
+    SCREEN_THRESHOLD_MODEL_VERSION, ScreenThresholdLedger, ScreenThresholdMode,
+    ScreenThresholdPolicy, ScreenThresholdRecord, ScreenThresholdReplay,
+    ScreenThresholdReplayAccumulator, ScreenedCandidate, StrategyThreshold, ThresholdBasis,
+    calibrate_screen_batch, calibrated_multiplier, control_quota,
 };
 pub use strategy_allocation::{
     AllocationPolicy, DEFAULT_STRATEGY_EVIDENCE_DECAY, DEFAULT_STRATEGY_EXPLORATION_FLOOR,

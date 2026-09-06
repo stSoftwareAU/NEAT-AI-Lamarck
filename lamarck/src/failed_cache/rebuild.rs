@@ -415,6 +415,7 @@ mod tests {
             follow_up: None,
             screen_scores: None,
             screen_tiers: None,
+            screen_thresholds: None,
             baseline_source: None,
             winner: None,
             improvement: None,

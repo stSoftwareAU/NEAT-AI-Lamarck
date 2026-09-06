@@ -253,3 +253,17 @@ pooled 1.06e-6 is a cross-experiment noise floor, and a per-batch gate needs a
 per-batch scale. Replayed over these same journals it avoids 66% of promotions
 while keeping both accepts; see [`docs/promote-gate.md`](promote-gate.md). The
 default remains `absolute`.
+
+**What #220 did with it:** the pooled figures above are the whole population of
+candidates at once, and the families in it are not alike. Per-strategy
+calibration landed as opt-in `--screen-threshold-mode per-strategy`, which
+scales the threshold each family faces from that family's own paired history and
+falls back to the shared threshold wherever the evidence is thin. It also
+attacks the second limit in the list above directly: a calibrated run promotes a
+minimum `--screen-control-rate` of **below-threshold** candidates, so a false
+negative — a candidate the screen rejected and the full corpus would have
+accepted — becomes measurable rather than structurally invisible. The
+per-strategy rows and the offline comparison against the shared gate are in
+`report` (`screenCalibration.byStrategy`, `screenThresholdReplay`); see
+[`docs/screen-thresholds.md`](screen-thresholds.md). The default remains
+`shared`, and nothing here has yet been measured on a production creature.

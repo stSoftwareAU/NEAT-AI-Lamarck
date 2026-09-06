@@ -309,6 +309,8 @@ The run always uses these; the flag only overrides the value.
 | `--screen-promote-threshold` | `1e-6` | Minimum sample-score Δ before a candidate earns a full-corpus score. Stays in force under `--screen-promote-gate noise-aware` as that gate's absolute floor. |
 | `--screen-promote-gate` | `absolute` | Promote gate (issue #111). `absolute` is the pre-#111 run: promote on a bare `--screen-promote-threshold`. `noise-aware` prices the batch's own screen-Δ spread first and promotes on `Δ > max(k · σ̂, --screen-promote-threshold)`, so it can only ever promote a **subset** of what `absolute` does. Opt-in until a paired benchmark on accepts per wall-clock hour justifies moving the default — see [The promote gate](#the-promote-gate). Any other value aborts the run. |
 | `--screen-promote-sigma-k` | `3` | σ̂ multiplier `k` for `--screen-promote-gate noise-aware`; ignored under `absolute`. Must be `> 0` — a non-positive or non-finite value aborts the run instead of reverting to the default. Recorded in the journal `runHeader` so an A/B arm is identifiable. |
+| `--screen-threshold-mode` | `shared` | Screen threshold per candidate family (issue #220). `shared` is the pre-#220 run: one promote threshold for every strategy. `per-strategy` scales that threshold per strategy from the journal's own measured screen-versus-full-corpus history, and falls back to the shared threshold wherever the evidence is thin. Acceptance is untouched — the full-corpus scorer stays the only gate. Opt-in until a paired benchmark on score improvement per wall hour justifies moving the default, and `shared` is the arm it is measured against. Any other value aborts the run. See [Per-strategy screen thresholds](#per-strategy-screen-thresholds). |
+| `--screen-control-rate` | `0.02` | Minimum share of **below-threshold** candidates a calibrated run promotes anyway, so the false negatives its thresholds create stay measurable. Rounded up, so any rejected batch buys at least one control. Must be `>= 0` and `< 1`, and `> 0` under `--screen-threshold-mode per-strategy` — a calibrated run with no control sample aborts rather than tightening a gate it cannot falsify. Ignored under `shared`, and recorded in the journal `runHeader` only under `per-strategy`, where a control sample is actually promoted. |
 | `--strategy-allocation` | `fixed` | How the candidate budget is split across the nine strategies (issue #218). `fixed` is the pre-#218 run: fixed opening quotas then round-robin. `adaptive` allocates each strategy slots from its decayed measured return — full-corpus score gain per second of scorer time. Opt-in until a paired benchmark on score improvement per wall hour justifies moving the default, and `fixed` is the arm it is measured against. Any other value aborts the run. See [Adaptive strategy allocation](#adaptive-strategy-allocation). |
 | `--strategy-exploration-floor` | `0.2` | Share of the candidate budget `--strategy-allocation adaptive` reserves for exploration, spread evenly across every enabled strategy before value is consulted — the anti-monoculture guardrail. Must be between `0` and `1`; anything else aborts the run instead of reverting to the default. Recorded in the journal `runHeader`. |
 | `--strategy-evidence-decay` | `0.9` | Per-experiment decay applied to measured strategy evidence (half-life ≈ 7 experiments), on top of the ×`0.25` an accept applies when it replaces the incumbent the evidence was measured against. Must be in `(0, 1]`; anything else aborts the run. Recorded in the journal `runHeader` under **both** modes, so a report replays either A/B arm with the decay that run used. |
@@ -1146,6 +1148,69 @@ ever earned (`+1.11e-6` and `+1.00e-6`, each barely over the bar) would still
 have been promoted, at every `k` from 1 to 5. A gate that drops either fails
 `cargo test`.
 
+#### Per-strategy screen thresholds
+
+The gate above is one number for every candidate family, and the families are
+not alike: a tiny weight perturbation, a structural add and a backprop step do
+not share a relationship between sampled Δ and full-corpus Δ. A shared gate
+therefore buys full-corpus calls for families that never convert while dropping
+families whose sample signal is weak but whose promoted precision is good.
+
+`--screen-threshold-mode per-strategy` (issue #220) scales the threshold the
+batch gate just resolved, per strategy, from the journal's own paired
+observations. **The default is unchanged**: `shared` is exactly the pre-#220
+run.
+
+```mermaid
+flowchart LR
+    JOURNAL[["journalled (screen Δ, full Δ)<br/>per strategy, last 128"]] --> EVID{"pairs >= 8?"}
+    EVID -->|no| SHARED["multiplier 1.0<br/>the shared threshold"]
+    EVID -->|"yes, family has a win"| WIN["0.5 x weakest winning screen Δ"]
+    EVID -->|"yes, no win, >= 8 losses"| LOSS["median losing screen Δ,<br/>capped by 0.5 x weakest improving Δ"]
+    WIN --> CLAMP["clamp to [floor/8, floor x 8]"]
+    LOSS --> CLAMP
+    CLAMP --> APPLY["threshold = batch gate Δ x multiplier"]
+    SHARED --> APPLY
+    APPLY --> PROMOTE[["full-corpus promote batch"]]
+    APPLY -.->|"below the bar"| CONTROL{"control sample<br/>--screen-control-rate"}
+    CONTROL -->|"drawn"| PROMOTE
+    CONTROL -->|"not drawn"| DROP["dropped — no full-corpus score"]
+```
+
+Three properties hold whatever the evidence says, each pinned by tests in
+`lamarck/src/screen_thresholds.rs` and `lamarck/tests/screen_thresholds.rs`:
+
+- **Calibration never makes the screen authoritative.** It only decides which
+  candidates are worth a full-corpus score. Acceptance stays on the full corpus
+  at `--min-improvement`, and nothing in the calibration can accept a candidate.
+- **Insufficient evidence changes nothing.** Below eight paired observations, or
+  with no usable statistic, a strategy runs on the shared threshold exactly — so
+  the opening experiments of a calibrated run gate as the shared arm does.
+- **The adjustment is bounded.** The multiplier is clamped to `[1/8, 8]`, so a
+  thin window can neither silence a family nor open the gate until the screen
+  stops screening. The loss branch carries a second bound: its sample holds only
+  what the gate already promoted, so the bar it sets is capped by half the
+  weakest screen Δ the family has ever *improved* on, and is declined outright
+  when the screen scored that improvement at or below zero.
+
+The **control sample** is what keeps the calibration falsifiable. A rejected
+candidate is never full-corpus scored, so a tightened threshold cannot otherwise
+be shown to be wrong — `docs/screen-calibration.md` records exactly that limit.
+Under calibration, `--screen-control-rate` of the below-threshold candidates are
+promoted anyway, drawn uniformly at random from the rejected set using the run's
+seeded rng. A control that the full corpus then puts above the accept bar is a
+**measured false negative**, and it is also the only way a winner with a weak
+screen Δ can enter the evidence and pull its family's threshold down.
+
+Every candidate is journalled with the threshold it faced and the calibration
+model version that produced it (`screenThresholds`), and `report` breaks the
+calibration down per strategy and prices the calibrated gate against the shared
+one on the same experiments (`screenCalibration.byStrategy`,
+`screenThresholdReplay`). The mechanism, the guardrails and the paired A/B
+protocol — `scripts/run-screen-threshold-ab.sh`, compared on score improvement
+per wall hour — are
+[`docs/screen-thresholds.md`](docs/screen-thresholds.md).
+
 Scorer argv is the locked two-argument form plus the screen sampling flags only;
 Lamarck never passes `--gpu` or `--cost`, so scorer defaults decide backend and
 loss. Pass `--screen-sample-rate 1` to disable screening.
@@ -1411,7 +1476,8 @@ Every following line is one experiment:
 | `candidatesRequested`, `batchLimit` | The `--candidates` budget this experiment asked for, and why the batch stopped growing (issue #108): `budget` (the budget bound it), `quota_ceiling` (the fixed opening quotas ran out — only under `--fixed-candidate-quotas`) or `exhausted` (every ranked source and squash was proposed). The achieved batch size is `candidates[].length`. Absent from journals written before the fields existed. |
 | `strategyAllocation` | Candidate slots each strategy was allocated this experiment (issue #218): the `explorationFloor` in force, the `slots` per strategy, and the `value` — reward units per scorer second — each was worth when they were drawn. A multi-focus experiment records the slots summed across its focuses. Present only under `--strategy-allocation adaptive`, and absent from journals written before the field existed; in both cases the batch was split by the fixed quotas and the round-robin fill. See [Adaptive strategy allocation](#adaptive-strategy-allocation). |
 | `screenScores`, `scores` | Sample-phase and full-corpus scores by stem. |
-| `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Absent when no screen phase ran, and from journals written before the field existed. |
+| `screenTiers` | What the screen tier and the promote gate did this experiment (issue #111): the `gate` in force, `screened` candidates, `promoted` candidates, the `threshold` they had to clear, and the `sigma` estimated for the batch (omitted under the absolute gate and when the batch was too degenerate to price its own noise). Under `--screen-threshold-mode per-strategy` (issue #220) `promoted` is the **post-calibration** count — per-strategy thresholds plus the control draw — while `threshold` stays the shared threshold the batch gate resolved; `screenThresholds` records what each candidate actually faced. Absent when no screen phase ran, and from journals written before the field existed. |
+| `screenThresholds` | The threshold and calibration model version every candidate in this batch faced (issue #220): the `modelVersion`, the `mode`, the `sharedThreshold` the batch gate resolved before calibration, the `controlRate` in force, the applied `thresholds` and `basis` per strategy, the `controls` promoted below threshold, and one `candidates[]` entry per screened candidate carrying its own `stem`, `strategy`, `threshold`, `modelVersion`, whether it was `promoted` and whether it was a `control`. Present only under `--screen-threshold-mode per-strategy`, and absent from journals written before the field existed; in both cases every candidate faced the one shared threshold `screenTiers` records. See [Per-strategy screen thresholds](#per-strategy-screen-thresholds). |
 | `baselineSource` | Which baseline decided this experiment's promote call (issue #113): `fresh` (the call carried the incumbent and scored it), `remembered` (it reused the run's carried full-corpus score) or `rememberedVerified` (it reused it *and* proposed an accept, so the winner and the incumbent were re-scored together before the swap). Omitted when no promote call ran, and absent from journals written before the field existed — so any accept is traceable to the baseline that decided it. |
 | `winner`, `improvement`, `accepted` | Outcome of the experiment. |
 | `analysisMs`, `scorerMs` | Where the time went. |
@@ -1582,6 +1648,24 @@ number that decides whether the gate is safe — `acceptsKept` against
 `acceptsDropped`, with every accepted winner listed in `accepts[]` beside the Δ
 it had and the Δ the gate demanded. The measured result for the journals in hand
 is [`docs/promote-gate.md`](docs/promote-gate.md).
+
+The `screenCalibration.byStrategy` rows and the `screenThresholdReplay` bucket
+are the same question asked per candidate family (issue #220). Each row carries
+what that strategy `screened` and `paired`, its `promotionPrecision`, the
+`fullDelta` spread its promotions earned, the `promoteMs` its calls cost, the
+`controlPromotions` it bought and the `controlFalseNegatives` among them, and
+the `recommendedMultiplier` / `recommendedThreshold` its own evidence implies
+with the `basis` that produced them. The replay then prices the calibrated gate
+against the shared one the run applied: `promotedAsRun` against
+`promotedUnderCalibration`, the `promotionsAvoided` and `promotionsAdded`
+between them (`controlPromotions` included), `acceptsKept` against
+`acceptsDropped`, the `promoteSecondsSaved` those calls are worth at the
+journal's own measured `promoteMsPerCreature`, and
+`scoreImprovementPerWallHourAsRun` beside
+`projectedScoreImprovementPerWallHour`. The projection assumes every kept accept
+still lands and moves the wall clock only by the promote time saved, so it must
+be read beside `acceptsDropped`: an arm that drops an accept changed which
+creature the run was optimising, and no replay can price that.
 
 `focusStats` is aggregated into a `focusStats` report object with three buckets —
 `all`, `accepted` and `rejected` — each carrying `experiments`,
@@ -1760,6 +1844,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 | Failed-candidate cache ([#94](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/94) / [#158](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/158)) | Shipped **opt-in** (`--failed-cache`, off by default). The #158 45-minute pair recorded **2 accepts on both arms** and the same Δ; treatment did not improve `scoreImprovementPerWallHour`. [`docs/failed-candidate-cache-economics.md`](docs/failed-candidate-cache-economics.md). |
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured on an idle exclusive-box run**: each needs the production creature and exclusive use of the scorer. A shared-box **local calibration campaign** already has journals for an output-0 slice, a backprop-cap arm and a second seed — mined for screen/promote pairing only; see [`docs/screen-calibration.md`](docs/screen-calibration.md) and the campaign disambiguation in [`docs/followup-economics.md`](docs/followup-economics.md). |
 | Adaptive strategy allocation ([#218](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/218)) | Shipped **opt-in** (`--strategy-allocation adaptive`, `fixed` by default). The paired A/B is scripted (`scripts/run-strategy-allocation-ab.sh`) but **not yet run**: it needs exclusive box time on the production creature and corpus, so no `scoreImprovementPerWallHour` comparison exists yet. [`docs/strategy-allocation.md`](docs/strategy-allocation.md). |
+| Per-strategy screen thresholds ([#220](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/220)) | Shipped **opt-in** (`--screen-threshold-mode per-strategy`, `shared` by default). The offline comparison is in `report` (`screenThresholdReplay`) and the paired A/B is scripted (`scripts/run-screen-threshold-ab.sh`), but **not yet run**: it needs exclusive box time on the production creature and corpus, so no measured `scoreImprovementPerWallHour` comparison exists yet, and no false-negative rate has been measured on a production creature. [`docs/screen-thresholds.md`](docs/screen-thresholds.md). |
 | [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | **Fixed, pending release.** A sampled scorer call used to read and decode the whole corpus to score a twentieth of it; it now fetches only the records it scores, cutting the fixed cost of a screen call from **10 693 ms to 3 423 ms** ([`docs/scorer-fixed-cost.md`](docs/scorer-fixed-cost.md)). The change lives in NEAT-AI-core (`issue-scorer-sampled-read`) and NEAT-AI-scorer (`issue-lamarck-123-sampled-read`); a human must open those two PRs and cut a scorer release before a run picks it up ([#141](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/141)). The whole-run `scorerCallCost` re-measure on an idle box is owed then. |
 
 ## Repository layout
@@ -1805,6 +1890,7 @@ NEAT-AI-Lamarck/
     ├── failed_cache/        # opt-in unsuccessful-candidate cache (issues #88–#94)
     ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
+    ├── screen_thresholds.rs # per-strategy screen thresholds (issue #220)
     ├── tags.rs
     ├── validate.rs          # neat_core::creature_validate output gate (issue #192)
     ├── memetic.rs           # memetic prune + write-path guard (issues #197, #199)
