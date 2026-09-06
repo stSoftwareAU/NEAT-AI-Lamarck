@@ -118,21 +118,24 @@ arms differ only in the shortlist they fold.
 cargo run --release --example scale_budgets_bench -- 8000 3 "2511:1590:12,2511:4852:9"
 ```
 
-Measured 2026-09-06 on a 7-core Linux container, release profile, 8 000 records:
+Measured 2026-09-06 on a 7-core Linux container, release profile, 8 000
+records, best of three repeats per arm. Two independent runs of the same
+command are shown, because the difference between the arms is smaller than the
+drift between runs:
 
 | Creature (in:hidden:fan-in) | Neurons | Synapses | Ranked sources | Fixed shortlist | Derived shortlist | Fixed ms | Derived ms | Ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `2511:1590:12` — historical GRQ shape | 4 102 | 20 670 | 4 101 | 48 (+16) | 128 (+32) | 225 | 226 | 1.00× |
-| `2511:4852:9` — current large shape | 7 364 | 48 520 | 7 363 | 48 (+16) | 172 (+43) | 665 | 669 | 1.01× |
+| `2511:1590:12` — historical GRQ shape | 4 102 | 20 670 | 4 101 | 48 (+16) | 128 (+32) | 225 / 219 | 226 / 220 | 1.00× |
+| `2511:4852:9` — current large shape | 7 364 | 48 520 | 7 363 | 48 (+16) | 172 (+43) | 665 / 657 | 669 / 659 | 1.01× / 1.00× |
 
 At 2 000 records the same shapes measure 63 ms / 63 ms and 206 ms / 206 ms.
 
 **What this says.** The residual scan's cost is dominated by the per-record
 forward pass through the creature, not by the shortlist it folds. Widening the
 shortlist from 48 to 172 sources on the larger creature — from **0.65 %** to
-**2.3 %** of its ranked sources — cost **0.6 %** more analysis time. The fixed
-literal was not buying speed; it was simply the coverage a smaller creature
-happened to need.
+**2.3 %** of its ranked sources — cost **under 1 %** more analysis time, which
+is inside the run-to-run drift on this host. The fixed literal was not buying
+speed; it was simply the coverage a smaller creature happened to need.
 
 **What this does not say.** Whether wider coverage finds better candidates is a
 run-economics question — accepts and score improvement per wall-clock hour — and
