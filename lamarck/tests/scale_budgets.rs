@@ -206,6 +206,30 @@ fn a_derived_run_journals_the_budgets_its_own_creature_earned() {
     assert_eq!(budgets.focus_count, 1);
 }
 
+/// A journal written before #223 carries neither block, and must still read as
+/// a valid run rather than as a malformed one.
+#[test]
+fn a_pre_223_header_still_parses_without_the_new_blocks() {
+    let line = r#"{"record":"runHeader","timestampUnix":1,"seed":7,"seedSource":"supplied",
+        "version":"0.1.35","config":{"creature":"c.json","trainingData":"d","scorerPath":"s",
+        "timeoutSeconds":2700,"candidates":100,"minImprovement":1e-6,"screenSampleRate":0.05,
+        "screenPromoteThreshold":1e-6,"baselineReverifyInterval":0,"baselineDriftEpsilon":1e-6,
+        "baselineDriftEpsilonAuto":true,"focusPolicy":"weighted","focusCount":1,
+        "focusNeighbourhoodNeurons":0,"statsMode":"quick","quickSampleRecords":100,
+        "computeCorrelations":false,"structuralOnly":false,"followupCandidates":0,
+        "followupExperiments":0,"phase0Parity":false,"preserveLosers":false,
+        "maxConsecutiveScorerFailures":3,"analysisMemoEntries":16,"analysisThreads":4,
+        "failedCache":false}}"#;
+    let header = match JournalLine::parse(&line.replace('\n', "")).expect("pre-#223 header parses")
+    {
+        JournalLine::Header(header) => *header,
+        other => panic!("not a header: {other:?}"),
+    };
+    assert!(header.creature.is_none());
+    assert!(header.budgets.is_none());
+    assert!(header.config.scale_budgets.is_none());
+}
+
 #[test]
 fn fixed_budgets_are_identical_across_materially_different_creatures() {
     let config = LamarckConfig {

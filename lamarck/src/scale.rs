@@ -325,8 +325,8 @@ impl ResolvedBudgets {
 /// Focus count derived from creature width, the candidate budget and the clock.
 ///
 /// Sublinear in the non-input neuron count, then capped by what a focus can
-/// still be given: at least [`MIN_CANDIDATES_PER_FOCUS`] candidates and
-/// [`MIN_SECONDS_PER_FOCUS`] of wall clock each.
+/// still be given: at least `MIN_CANDIDATES_PER_FOCUS` candidates and
+/// `MIN_SECONDS_PER_FOCUS` of wall clock each.
 pub fn derived_focus_count(scale: CreatureScale, candidates: usize, timeout_seconds: u64) -> usize {
     let width = sublinear_budget(
         1,
