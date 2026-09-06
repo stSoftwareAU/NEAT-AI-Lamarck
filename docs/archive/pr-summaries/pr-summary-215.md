@@ -13,8 +13,11 @@ up to ~6 days.
 
 This change adds `.github/dependabot.yml` registering the `cargo` ecosystem on a
 weekly schedule, which activates GitHub's native Dependabot advisory feed and
-closes that window. It is additive: it complements the existing workflows and
-replaces none of them. A new gate, `scripts/check-dependabot-config.sh`, keeps
+closes that window. The entry carries a `cooldown` of `default-days: 7` so a
+newly published version is quarantined for a week before a routine bump is
+proposed; cooldown applies to *version* updates only, so security updates are
+still raised immediately. It is additive: it complements the existing workflows
+and replaces none of them. A new gate, `scripts/check-dependabot-config.sh`, keeps
 the registration from being deleted or quietly reduced to a stub GitHub would
 reject, and runs from `./quality.sh` and the CI **Project Validation** job.
 
@@ -48,7 +51,8 @@ parser reads the same structure GitHub will:
       "package-ecosystem": "cargo",
       "directory": "/",
       "schedule": { "interval": "weekly", "day": "monday", "time": "06:00", "timezone": "Etc/UTC" },
-      "open-pull-requests-limit": 5
+      "open-pull-requests-limit": 5,
+      "cooldown": { "default-days": 7 }
     }
   ]
 }

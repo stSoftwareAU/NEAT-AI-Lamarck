@@ -30,3 +30,10 @@ updates:
     # Security updates are exempt from this limit, so it caps routine
     # version-bump noise without delaying an advisory fix.
     open-pull-requests-limit: 5
+    # Quarantine newly published versions for a week before proposing a routine
+    # bump, so a compromised or unstable release is withdrawn upstream before it
+    # reaches `Cargo.lock`. `cooldown` covers *version* updates only — security
+    # updates ignore it, so the advisory feed this file exists for still raises
+    # the fix the moment a RustSec advisory lands.
+    cooldown:
+      default-days: 7
