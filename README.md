@@ -304,6 +304,9 @@ The run always uses these; the flag only overrides the value.
 | `--output-dir` | `.` | Holds `best.json`, `experiments.jsonl`, `winners/` and per-experiment working directories. |
 | `--candidates` | `100` | Candidates generated per experiment. |
 | `--timeout-seconds` | `2700` | Wall-clock budget (45 minutes). |
+| `--strategy-priors` | `off` | Whether the run carries operator priors across runs (issue #221). `seed` reads `strategy-priors.json` at startup, discounts it for age and source/corpus drift, seeds the strategy ledger with it, and writes this run's own decayed evidence back at the end; `off` — the default — neither reads nor writes it and is the cold-start arm `seed` is measured against. Any other value aborts the run. See [Transferable operator priors](#transferable-operator-priors). |
+| `--strategy-priors-path` | `<output-dir>/strategy-priors.json` | Priors file read at startup and written at the end under `--strategy-priors seed`. Point consecutive runs at one path to carry a single chain of evidence across output directories. |
+| `--strategy-priors-half-life-hours` | `24` | Half-life of prior confidence: the persisted evidence is scaled by `0.5 ^ (age / half-life)`, and by zero once it is older than the 168h (7-day) maximum age. Must be finite, greater than `0` and no more than that maximum; anything else aborts the run instead of reverting to the default. Recorded in the journal `runHeader` under `seed`. |
 | `--min-improvement` | `1e-6` | Absolute score delta required to accept, strict `>`. |
 | `--screen-sample-rate` | `0.05` | Scorer subsample for the screen phase. `1` (or `>= 1`) disables screening. |
 | `--screen-promote-threshold` | `1e-6` | Minimum sample-score Δ before a candidate earns a full-corpus score. Stays in force under `--screen-promote-gate noise-aware` as that gate's absolute floor. |
@@ -919,6 +922,57 @@ journalled per experiment as `strategyAllocation` and totalled by `report`. The
 mechanism and the paired A/B protocol —
 `scripts/run-strategy-allocation-ab.sh`, compared on score improvement per wall
 hour — are [`docs/strategy-allocation.md`](docs/strategy-allocation.md).
+
+### Transferable operator priors
+
+Lamarck runs are deliberately short, because the champion they are handed goes
+stale — so every run re-discovers which mutation families are currently
+productive, even though earlier journals already measured that.
+`--strategy-priors seed` (issue #221) carries the **operator-level** half of
+that knowledge forward: one decayed evidence row per strategy — trials,
+screen→promote conversions, accepts, full-corpus score gain and measured scorer
+cost — persisted to `strategy-priors.json` and used to initialise the next run's
+strategy ledger. `--strategy-priors off` — the default — starts cold and is the
+arm the seeded run is measured against.
+
+This is not graft replay and not the failed-candidate cache: the file carries no
+creature, no mutation, no focus neuron and no scalar, so **no historical
+candidate can be replayed even in principle**. Every candidate is still
+generated, screened and scored exactly as it would be on a cold start; what
+transfers is which *kinds* of experiment have paid.
+
+A prior is folded in scaled by a confidence, the product of three discounts:
+
+- **Age** — `0.5 ^ (age / --strategy-priors-half-life-hours)`, and exactly zero
+  beyond the 168h maximum age.
+- **Corpus** — the training-data fingerprint must match, or the evidence keeps
+  `0.25`. A corpus that could not be fingerprinted at either end counts as a
+  mismatch: unconfirmed is not confirmed.
+- **Source creature** — the same creature keeps full confidence, the same
+  topology with different weights keeps `0.5`, and a drifted topology keeps
+  `0.25`.
+
+The scaled mass is then capped at **25 trials per arm**, so however long the
+history behind a prior is it is worth a fraction of one batch of the run's own
+measurement. From there the ordinary `--strategy-evidence-decay` discounts the
+prior alongside everything else once per experiment, so its share of an arm's
+standing falls geometrically as the run measures its own evidence — which is
+what lets a handful of contradicting experiments take the allocation back. The
+exploration floor is untouched and still mandatory.
+
+Priors move slots, so they act **only under `--strategy-allocation adaptive`**;
+a seeded run under the default fixed split warns and changes nothing. At the end
+of the run the file is replaced by what that run itself measured — the inherited
+rows are subtracted back out, so a nightly chain cannot re-stamp week-old
+evidence as fresh — unless the file already there could not be read, in which
+case it is refused and left untouched rather than overwritten with less history.
+
+What was seeded, and the confidence behind it, is journalled once as a
+`strategyPriors` line and reported by `report` under `strategyAllocation.priors`
+with a per-strategy `priorTrials` / `priorShare` split, so prior-driven standing
+is never read as fresh evidence. The mechanism and the paired A/B protocol —
+`scripts/run-strategy-priors-ab.sh`, compared on score improvement per wall hour
+— are [`docs/strategy-priors.md`](docs/strategy-priors.md).
 
 ### Mirrored (antithetic) sampling
 
@@ -1576,6 +1630,11 @@ Every following line is one experiment:
 A `cacheStandDown` line is written if the cache stops paying — see
 [Failed-candidate cache economics](#failed-candidate-cache-economics).
 
+A `strategyPriors` line is written once, before the first experiment, whenever
+`--strategy-priors seed` is in force — including when nothing usable was found,
+so a refused prior is never mistaken for a cold start. See
+[Transferable operator priors](#transferable-operator-priors).
+
 Summarise strategy economics from a journal with the `report` subcommand:
 
 ```bash
@@ -1955,6 +2014,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 | [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98) | Five economics arms are wired up (`multi-seed`, `output-neuron`, `backprop-cap`, `candidate-quotas`, `focus-count` in `scripts/run-followup-economics.sh`) but still **unmeasured on an idle exclusive-box run**: each needs the production creature and exclusive use of the scorer. A shared-box **local calibration campaign** already has journals for an output-0 slice, a backprop-cap arm and a second seed — mined for screen/promote pairing only; see [`docs/screen-calibration.md`](docs/screen-calibration.md) and the campaign disambiguation in [`docs/followup-economics.md`](docs/followup-economics.md). |
 | Adaptive strategy allocation ([#218](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/218)) | Shipped **opt-in** (`--strategy-allocation adaptive`, `fixed` by default). The paired A/B is scripted (`scripts/run-strategy-allocation-ab.sh`) but **not yet run**: it needs exclusive box time on the production creature and corpus, so no `scoreImprovementPerWallHour` comparison exists yet. [`docs/strategy-allocation.md`](docs/strategy-allocation.md). |
 | Per-strategy screen thresholds ([#220](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/220)) | Shipped **opt-in** (`--screen-threshold-mode per-strategy`, `shared` by default). The offline comparison is in `report` (`screenThresholdReplay`) and the paired A/B is scripted (`scripts/run-screen-threshold-ab.sh`), but **not yet run**: it needs exclusive box time on the production creature and corpus, so no measured `scoreImprovementPerWallHour` comparison exists yet, and no false-negative rate has been measured on a production creature. [`docs/screen-thresholds.md`](docs/screen-thresholds.md). |
+| Transferable operator priors ([#221](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/221)) | Shipped **opt-in** (`--strategy-priors seed`, `off` by default). The paired cold-start-vs-seeded A/B is scripted (`scripts/run-strategy-priors-ab.sh`) but **not yet run**: it needs exclusive box time on the production creature and corpus, so no `scoreImprovementPerWallHour` comparison exists yet. [`docs/strategy-priors.md`](docs/strategy-priors.md). |
 | [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | **Fixed, pending release.** A sampled scorer call used to read and decode the whole corpus to score a twentieth of it; it now fetches only the records it scores, cutting the fixed cost of a screen call from **10 693 ms to 3 423 ms** ([`docs/scorer-fixed-cost.md`](docs/scorer-fixed-cost.md)). The change lives in NEAT-AI-core (`issue-scorer-sampled-read`) and NEAT-AI-scorer (`issue-lamarck-123-sampled-read`); a human must open those two PRs and cut a scorer release before a run picks it up ([#141](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/141)). The whole-run `scorerCallCost` re-measure on an idle box is owed then. |
 
 ## Repository layout
@@ -1988,6 +2048,7 @@ NEAT-AI-Lamarck/
     ├── propagate_layout.rs
     ├── candidates.rs
     ├── strategy_allocation.rs # adaptive candidate-budget allocation (issue #218)
+    ├── strategy_priors.rs   # operator priors carried across runs (issue #221)
     ├── mirror.rs             # mirrored (antithetic) ±δ pairs (issue #203)
     ├── followup.rs          # bounded local search after an accept (issue #219)
     ├── neighbourhood.rs     # bounded focus-region expansion (issue #222)

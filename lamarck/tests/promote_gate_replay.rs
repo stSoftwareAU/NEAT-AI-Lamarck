@@ -43,7 +43,8 @@ fn replay(name: &str, sigma_k: f64) -> PromoteGateReplay {
                 .expect("fixture experiment replays"),
             JournalLine::GraftReplay(_)
             | JournalLine::ScorerCalls(_)
-            | JournalLine::CacheStandDown(_) => {}
+            | JournalLine::CacheStandDown(_)
+            | JournalLine::StrategyPriors(_) => {}
         }
     }
     accumulator.finish()
