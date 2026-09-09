@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Builds against neat-core 0.13.0 — `CompiledNetwork`'s fields went private
+  (neat-core #625 / #633; GRQ #4724).** neat-core 0.12.0 made every
+  `CompiledNetwork` field private behind borrow-only accessors (neat-core #625 /
+  #633) and 0.13.0 followed the same day. Every GRQ host builds the Rust
+  consumers from the sibling neat-core at head, so `rust_scorer` failed to
+  compile fleet-wide within minutes and, with no fallback engine, the fleet
+  stopped scoring ([GRQ
+  #4724](https://github.com/stSoftwareAU/GRQ/issues/4724)). Lamarck was next in
+  line: `focus.rs` read `num_neurons` and `propagate_layout.rs` read
+  `activations` / `hint_values_buffer` directly. Those reads now go through
+  `num_neurons()`, `activations()` and `hint_values()`;
+  `neat-core.expected-version` acknowledges 0.13.0.
+
 ### Security
 
 - **A push-based advisory channel now covers the cargo dependencies
