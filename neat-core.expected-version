@@ -5,4 +5,16 @@
 # presents a breaking bump above this baseline — pre-1.0 a higher minor, or any
 # higher major — forcing a deliberate upgrade. Clear the gate by updating
 # `lamarck` for the breaking change and bumping this version to match neat-core.
-0.10.5
+#
+# 0.10.5 -> 0.13.0: acknowledge neat-core #633 (Issue #625, 0.12.0), which made
+# every `CompiledNetwork` field private behind borrow-only accessors so safe
+# code can no longer edit a validated network into an out-of-bounds SIMD read,
+# and 0.13.0 (#637, the security-scan milestone roll-up; nothing Lamarck names
+# changed). Lamarck read `num_neurons` (`focus.rs`) and `activations` /
+# `hint_values_buffer` (`propagate_layout.rs`) directly; those reads now go
+# through `num_neurons()`, `activations()` and `hint_values()`. Unhandled, the
+# same bump took the GRQ fleet down through rust_scorer (GRQ#4724); Lamarck was
+# next in line because GRQ builds it from the same sibling neat-core at head.
+# Verified by `cargo clippy --all-targets -- -D warnings` and the full test
+# suite against the sibling clone at 0.13.0 (59eb6e6).
+0.13.0

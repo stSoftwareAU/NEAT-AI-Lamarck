@@ -404,13 +404,13 @@ fn build_neuron_inputs(
 ) -> Vec<NeuronInput> {
     let mut neurons: Vec<NeuronInput> = Vec::with_capacity(layout.neuron_count);
     for (prop_idx, tmpl) in layout.neuron_templates.iter().enumerate() {
-        let activation = network.activations.get(prop_idx).copied().unwrap_or(0.0);
+        let activation = network.activations().get(prop_idx).copied().unwrap_or(0.0);
         let hint = if prop_idx < layout.input_count {
             activation
         } else {
             let rel = prop_idx - layout.input_count;
             network
-                .hint_values_buffer
+                .hint_values()
                 .get(rel)
                 .copied()
                 .unwrap_or(activation)
@@ -526,7 +526,7 @@ impl LearningScan<'_> {
         let normalise_gradients = &plan.normalise_gradients;
 
         if !layout.aggregates.is_empty() {
-            layout.linearise_aggregates(&network.activations, inward_counts, inward_indices);
+            layout.linearise_aggregates(network.activations(), inward_counts, inward_indices);
         }
 
         let neurons = build_neuron_inputs(layout, sparse, network);

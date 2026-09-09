@@ -729,7 +729,7 @@ impl FocusStatsScan {
             None
         };
 
-        let num_non_inputs = network.num_neurons.saturating_sub(creature.input);
+        let num_non_inputs = network.num_neurons().saturating_sub(creature.input);
         Ok(Self {
             focus_uuid: focus_uuid.to_string(),
             squash: neuron.squash.clone(),
