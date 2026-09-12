@@ -2166,6 +2166,13 @@ cargo build                  # fast rebuilds while developing
 cargo build --release        # production / GRQ host binary
 ```
 
+Fleet hosts do not run `cargo build` on every Lamarck stage.
+[`scripts/runlib.sh`](./scripts/runlib.sh) (Issue #236) installs
+`~/.cargo/bin/neat_ai_lamarck` and `.neat_ai_lamarck.version`, prints that
+path on stdout, and removes `target/` after a successful install. A second
+run on the same crate version prints `[neat_ai_lamarck] already installed
+v<x>` and runs no cargo command. It builds `--bin neat_ai_lamarck` only.
+
 Local gate (mirrors CI) — run it before opening a PR, with the prerequisites
 above installed:
 
