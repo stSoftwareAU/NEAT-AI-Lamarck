@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/runlib.sh` installs `~/.cargo/bin/neat_ai_lamarck` only on a
+  version change (Issue #236).** The fleet worker started calling this script
+  and every Lamarck host died because Develop had no file. The script stamps
+  `.neat_ai_lamarck.version`, prints the bin path on stdout, skips
+  `cargo build` when already installed, builds `--bin neat_ai_lamarck` only,
+  and removes `target/` after a successful install. Family-sync from
+  NEAT-AI-core still waits on core#680. Hermetic coverage:
+  `scripts/test-runlib.sh`.
+
+- **Acknowledges neat-core 0.14.0 through 0.17.0.** Lamarck does not name the
+  0.16.0 `PruneResult` fields or the 0.17.0 `prune_neuron` `IF` rewrite
+  (those are the Ockham pruning surface). `cargo check -p neat_ai_lamarck`
+  against sibling 0.17.0 is clean. `neat-core.expected-version` moves to
+  0.17.0 so the breaking-bump gate can pass and this install script can land.
+
 ### Fixed
 
 - **Builds against neat-core 0.13.0 — `CompiledNetwork`'s fields went private

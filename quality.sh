@@ -32,6 +32,9 @@ if [[ "$SHELLCHECK_FAILED" -ne 0 ]]; then
 fi
 echo "shellcheck: all scripts passed"
 
+echo "Checking scripts/runlib.sh already-installed contract (Issue #236)..."
+./scripts/test-runlib.sh
+
 echo "WHAT: TypeScript validity gate behaviour (Issue #167)..."
 ./scripts/test-typescript-check.sh
 
