@@ -29,6 +29,7 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--release",
     "--no-deps",
     "--test",
+    "--bin",
     "--user",
     "--workspace",
     // helper scripts under scripts/ (spell-check.sh, typescript-check.sh,

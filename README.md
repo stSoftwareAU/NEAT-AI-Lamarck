@@ -2171,7 +2171,7 @@ Fleet hosts do not run `cargo build` on every Lamarck stage.
 `~/.cargo/bin/neat_ai_lamarck` and `.neat_ai_lamarck.version`, prints that
 path on stdout, and removes `target/` after a successful install. A second
 run on the same crate version prints `[neat_ai_lamarck] already installed
-v<x>` and runs no cargo command. It builds `--bin neat_ai_lamarck` only.
+v<x>` and runs no cargo command. It builds the `neat_ai_lamarck` binary only.
 
 Local gate (mirrors CI) — run it before opening a PR, with the prerequisites
 above installed:
