@@ -13,9 +13,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and every Lamarck host died because Develop had no file. The script stamps
   `.neat_ai_lamarck.version`, prints the bin path on stdout, skips
   `cargo build` when already installed, builds `--bin neat_ai_lamarck` only,
-  and removes `target/` after a successful install. Family-sync from
-  NEAT-AI-core still waits on core#680. Hermetic coverage:
-  `scripts/test-runlib.sh`.
+  and removes `target/` after a successful install. Superseded below by the
+  canonical copy (Issue #234), which runs *no* cargo command on the
+  already-installed path. Hermetic coverage: `scripts/test-runlib.sh`.
+
+- **`scripts/runlib.sh` is now the canonical NEAT-AI-core copy, kept in sync by
+  CI (Issue #234, NEAT-AI-core#680).** The script has one home —
+  `scripts/runlib.sh` on NEAT-AI-core `Develop` — and every Rust sibling
+  carries a byte-for-byte copy, so behaviour changes are made in core and
+  copied outward, never edited downstream. The new `family-sync` job
+  (`.github/workflows/family-sync.yml`) fetches core's `Develop` copy on every
+  PR into `Develop` or `milestone/**`, compares it with `cmp`, and rewrites,
+  rebases and pushes a refresh when it differs; a fetch error, an empty fetch,
+  a `diff` fault, an unreachable origin or a rebase conflict all fail the job
+  rather than reporting a stale copy as in sync. The already-installed path now
+  runs **no** cargo command at all — not even `cargo metadata` — which is why
+  `lamarck/Cargo.toml` drops its explicit `[[bin]]` table: it restated cargo's
+  auto-discovery default, and the canonical script cannot read that shape
+  without falling back to `cargo metadata`. Target discovery is unchanged.
+  Coverage: `scripts/test-runlib.sh` (17 assertions),
+  `scripts/check-family-sync-workflow.sh` and
+  `scripts/test-check-family-sync-workflow.sh` (25 fixtures).
 
 - **Acknowledges neat-core 0.14.0 through 0.17.0.** Lamarck does not name the
   0.16.0 `PruneResult` fields or the 0.17.0 `prune_neuron` `IF` rewrite

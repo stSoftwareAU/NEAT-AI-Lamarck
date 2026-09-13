@@ -10,7 +10,9 @@
 #
 # There is no `paths:` filter on purpose. Drift arrives when *core* changes,
 # not when this PR touches scripts/, so gating on the PR's own paths would let
-# a stale copy through every PR that happens not to touch that directory.
+# a stale copy through every PR that happens not to touch that directory. The
+# branch filter is the repository convention (`Develop` and `milestone/**`, as
+# in ci.yml and version-increment.yml): a PR into any other base is not synced.
 #
 # A fetch error fails the job. A swallowed fetch would leave the stale copy in
 # place and report success — the exact "absence of a failure is not success"
@@ -98,7 +100,14 @@ jobs:
             exit 0
           fi
           echo "::notice::${CANONICAL_PATH} differs from ${CANONICAL_REPO}@${CANONICAL_REF} — refreshing it"
-          diff -u "$CANONICAL_PATH" "$CANONICAL_FILE" || true
+          # diff exits 1 for "files differ" — expected here — but 2 for trouble
+          # (an unreadable file). A blanket `|| true` would discard both.
+          diff_status=0
+          diff -u "$CANONICAL_PATH" "$CANONICAL_FILE" || diff_status=$?
+          if [ "$diff_status" -gt 1 ]; then
+            echo "::error::could not diff ${CANONICAL_PATH} against the canonical copy (diff exit ${diff_status})"
+            exit 1
+          fi
           cp "$CANONICAL_FILE" "$CANONICAL_PATH"
           chmod +x "$CANONICAL_PATH"
           echo "changed=true" >>"$GITHUB_OUTPUT"
@@ -127,9 +136,20 @@ jobs:
           "$GIT" -c core.hooksPath=/dev/null add "$CANONICAL_PATH"
           "$GIT" -c core.hooksPath=/dev/null commit -m "chore: sync scripts/runlib.sh from NEAT-AI-core Develop"
           AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_PAT" | "$BASE64" -w0)"
-          if ! git ls-remote --exit-code --heads origin "$PR_HEAD_REF" >/dev/null 2>&1; then
+          # `--exit-code` returns 2 for "no matching ref" but other non-zero
+          # codes for a transport or auth failure. Collapsing them all into
+          # "the branch is gone" would drop the refreshed copy and still exit 0
+          # — a network blip reported as success. stderr is kept, not discarded.
+          ls_remote_status=0
+          git ls-remote --exit-code --heads origin "$PR_HEAD_REF" >/dev/null ||
+            ls_remote_status=$?
+          if [ "$ls_remote_status" -eq 2 ]; then
             echo "::notice::Head branch '$PR_HEAD_REF' no longer exists; skipping push."
             exit 0
+          fi
+          if [ "$ls_remote_status" -ne 0 ]; then
+            echo "::error::could not reach origin to look up '$PR_HEAD_REF' (git ls-remote exit ${ls_remote_status})"
+            exit 1
           fi
           # Rebase onto whatever landed while this job ran — version-increment
           # pushes to the same branch — so a concurrent commit is not clobbered
@@ -137,7 +157,14 @@ jobs:
           "$GIT" -c core.hooksPath=/dev/null \
             -c http.https://github.com/.extraheader="$AUTH_HEADER" \
             fetch --no-tags origin "+refs/heads/${PR_HEAD_REF}:refs/remotes/origin/${PR_HEAD_REF}"
-          "$GIT" -c core.hooksPath=/dev/null rebase "refs/remotes/origin/${PR_HEAD_REF}"
+          if ! "$GIT" -c core.hooksPath=/dev/null rebase "refs/remotes/origin/${PR_HEAD_REF}"; then
+            # Already failing; leave no half-finished rebase behind for the
+            # next run to trip over. The exit 1 below is the real report.
+            "$GIT" -c core.hooksPath=/dev/null rebase --abort ||
+              echo "::warning::could not abort the conflicted rebase"
+            echo "::error::could not rebase the runlib.sh refresh onto origin/${PR_HEAD_REF} — scripts/runlib.sh was changed on the branch as well; reset it to the NEAT-AI-core Develop copy and push again"
+            exit 1
+          fi
           "$GIT" -c core.hooksPath=/dev/null \
             -c http.https://github.com/.extraheader="$AUTH_HEADER" \
             push origin "HEAD:$PR_HEAD_REF"

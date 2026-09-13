@@ -46,13 +46,27 @@ grep -v '^[[:space:]]*pull_request:' "$WORKFLOW" >"$NO_PR"
 assert_exit "no pull_request trigger → fail" 1 "$CHECK" "$NO_PR"
 
 PUSH_TRIGGER="$TMP_DIR/push-trigger.yml"
-sed -E 's|^(on:)$|\1\n  push:\n    branches: [Develop]|' "$WORKFLOW" >"$PUSH_TRIGGER"
+# awk, not `sed 's/…/\n/'`: a newline in a sed *replacement* is a GNU
+# extension, and BSD/macOS sed emits a literal `n` — silently mangling the
+# fixture so the assertion passes for the wrong reason.
+awk '
+  /^on:$/ { print; print "  push:"; print "    branches: [Develop]"; next }
+  { print }
+' "$WORKFLOW" >"$PUSH_TRIGGER"
 assert_exit "push trigger → fail" 1 "$CHECK" "$PUSH_TRIGGER"
 
 # Rule 2 — a paths filter would skip the PRs that do not touch scripts/, which
 # is most of them; drift arrives from core regardless of this PR's diff.
 PATHS_FILTER="$TMP_DIR/paths-filter.yml"
-sed -E 's|^([[:space:]]*)- "milestone/\*\*"$|\1- "milestone/**"\n\1paths:\n\1  - "scripts/**"|' "$WORKFLOW" >"$PATHS_FILTER"
+awk '
+  /^      - "milestone\/\*\*"$/ {
+    print
+    print "    paths:"
+    print "      - \"scripts/**\""
+    next
+  }
+  { print }
+' "$WORKFLOW" >"$PATHS_FILTER"
 assert_exit "paths filter → fail" 1 "$CHECK" "$PATHS_FILTER"
 
 # Rule 3 — the milestone glob, and prose about it is not a branch filter.
@@ -105,6 +119,17 @@ assert_exit "canonical repo not named → fail" 1 "$CHECK" "$WRONG_SOURCE"
 SWALLOWED="$TMP_DIR/swallowed-fetch.yml"
 grep -v '^[[:space:]]*exit 1$' "$WORKFLOW" >"$SWALLOWED"
 assert_exit "no non-zero exit on fetch error → fail" 1 "$CHECK" "$SWALLOWED"
+
+# The rule must name the *fetch*: other failure paths also carry an `exit 1`,
+# so a workflow that kept those but lost the fetch guard would otherwise pass.
+NO_FETCH_ERROR="$TMP_DIR/no-fetch-error.yml"
+grep -v '::error::could not fetch' "$WORKFLOW" >"$NO_FETCH_ERROR"
+assert_exit "fetch error path removed but other exits kept → fail" 1 "$CHECK" "$NO_FETCH_ERROR"
+
+# An empty fetch must not silently overwrite runlib.sh with nothing.
+NO_EMPTY_CHECK="$TMP_DIR/no-empty-check.yml"
+grep -v 'but it is empty' "$WORKFLOW" >"$NO_EMPTY_CHECK"
+assert_exit "empty-fetch guard removed → fail" 1 "$CHECK" "$NO_EMPTY_CHECK"
 
 # Rule 10 — byte comparison, not a grep or a timestamp.
 NO_CMP="$TMP_DIR/no-cmp.yml"

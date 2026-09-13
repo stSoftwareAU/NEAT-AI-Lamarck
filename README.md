@@ -2192,11 +2192,12 @@ behaviour changes are made in core and copied outward, **never** edited here. A
 downstream edit is reverted by the next sync.
 
 [`.github/workflows/family-sync.yml`](./.github/workflows/family-sync.yml) is
-what keeps the copy honest. On every PR it fetches core's `Develop` copy and
-compares it byte-for-byte; when the committed file differs it rewrites, commits
-and pushes the refresh onto the PR branch, so a stale copy is corrected before
-review rather than drifting silently. A fetch error fails the job — a swallowed
-fetch would leave a stale copy reported as in sync.
+what keeps the copy honest. On every PR into `Develop` or a `milestone/**`
+branch it fetches core's `Develop` copy and compares it byte-for-byte; when the
+committed file differs it rewrites, commits and pushes the refresh onto the PR
+branch, so a stale copy is corrected before review rather than drifting
+silently. A fetch error — or an empty fetch — fails the job; a swallowed fetch
+would leave a stale copy reported as in sync.
 
 ```mermaid
 flowchart TD
@@ -2210,11 +2211,14 @@ flowchart TD
     Push --> Review([PR carries the canonical copy])
 ```
 
-The job runs on **every** PR with no `paths:` filter: drift arrives when core
-changes, not when this PR touches `scripts/`. It pushes with the same auth
-chain as `version-increment.yml` (App token → `ACTIONS_PUSH` →
-`GITHUB_TOKEN`), skips forks, and rebases before pushing so a concurrent
-`version-increment` push is not clobbered. Because `version-increment.yml` is
+The job carries **no `paths:` filter**: drift arrives when core changes, not
+when this PR touches `scripts/`, so no PR is skipped for touching the wrong
+files. Its branch filter follows the repository convention used by `ci.yml` and
+`version-increment.yml` — `Develop` and `milestone/**` — so a PR into any other
+base branch is not synced. It pushes with the same auth chain as
+`version-increment.yml` (App token → `ACTIONS_PUSH` → `GITHUB_TOKEN`), skips
+forks, and rebases before pushing so a concurrent `version-increment` push is
+not clobbered; a rebase conflict fails the job with the file to reset named. Because `version-increment.yml` is
 paths-filtered to `lamarck/src/**`, `lamarck/Cargo.toml` and `Cargo.lock`, a
 runlib refresh does **not** bump the crate version.
 

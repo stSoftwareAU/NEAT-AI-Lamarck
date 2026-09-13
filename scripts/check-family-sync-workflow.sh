@@ -84,7 +84,7 @@ fi
 if has '^[[:space:]]*paths(-ignore)?:'; then
   fail "a 'paths:' filter would skip every PR that does not touch those paths, but runlib.sh drifts when NEAT-AI-core changes — remove the filter"
 else
-  ok "no paths filter — every PR is checked for drift"
+  ok "no paths filter — no PR is skipped for touching the wrong files"
 fi
 
 # 3. Milestone branch filter, as a real branch entry rather than prose.
@@ -147,11 +147,20 @@ else
   fail "the canonical source is not fully named — the job must fetch scripts/runlib.sh from stSoftwareAU/NEAT-AI-core Develop"
 fi
 
-# 9. A fetch error must fail the job.
-if has '::error::' && has '^[[:space:]]*exit 1[[:space:]]*$'; then
+# 9. A *fetch* error specifically must fail the job. Asking only for some
+# `exit 1` somewhere is too weak now that several failure paths carry one: the
+# fetch is the path whose silent success would publish a stale copy.
+if has '::error::could not fetch' && has '^[[:space:]]*exit 1[[:space:]]*$'; then
   ok "a fetch error exits non-zero"
 else
   fail "no explicit non-zero exit on a fetch error — a swallowed fetch would report a stale copy as in sync"
+fi
+
+# 9b. An empty fetch is a failed fetch wearing a success exit code.
+if has '::error::.*empty'; then
+  ok "an empty fetch is rejected"
+else
+  fail "an empty fetched file is not rejected — a truncated fetch would overwrite runlib.sh with nothing"
 fi
 
 # 10. Byte comparison.
