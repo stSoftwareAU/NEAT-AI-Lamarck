@@ -195,7 +195,7 @@ scripts/workflows, and said so.
   script and every multi-line `run:`. `actionlint` clean; both `uses:` pinned
   to 40-char SHAs with version comments (reusing the repo's existing audited
   pins); top-level `permissions: contents: read` with job-scoped
-  `contents: write`; `persist-credentials: false`; no `${{ github.* }}`
+  `contents: write`; checkout credential persistence disabled; no `${{ github.* }}`
   interpolated into a `run:` — `head.ref` goes through `env:`. Tests execute
   real code and assert exit codes, stdout and side effects. bash 3.2-safe array
   expansion; `du -sk` and `pwd -P` rather than GNU-only flags. `markdownlint`
@@ -215,8 +215,8 @@ Added / rewritten:
 - `scripts/test-check-family-sync-workflow.sh` — 25 assertions. Mutates the
   shipped workflow one rule at a time (missing trigger, added `push:` trigger,
   added `paths:` filter, lost milestone glob, milestone in a comment only,
-  `write-all`, no `contents: write`, lost fork guard, `persist-credentials:
-  true`, floating action tag, wrong canonical repo, swallowed fetch error,
+  `write-all`, no `contents: write`, lost fork guard, checkout credential
+  persistence re-enabled, floating action tag, wrong canonical repo, swallowed fetch error,
   removed empty-fetch guard, no `cmp`, no guard, guard lost on the pushing step
   only, nothing pushes, no rebase, broken auth chain, no strict bash, wrong
   commit subject) and asserts the validator's exit code.
