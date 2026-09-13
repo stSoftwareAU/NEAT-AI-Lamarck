@@ -22,4 +22,18 @@
 # pass and scripts/runlib.sh can land (Issue #236). Lamarck does not name
 # the 0.16.0 PruneResult fields or the 0.17.0 prune_neuron IF rewrite.
 # Verified by `cargo check -p neat_ai_lamarck` against sibling 0.17.0.
-0.17.0
+#
+# 0.17.0 -> 0.20.0: acknowledge 0.18.0-0.20.0 so the breaking-bump gate can pass
+# (PR #239). None of the three bumps touches an API Lamarck names:
+#   * 0.18.0 (core #684) and 0.19.0 (core #685, Issue #682) change pruning and
+#     `compile_creature`: the only public-surface change is a new
+#     `CreatureError::UnknownTargetUuid` variant, refusing a synapse whose
+#     `toUUID` names no listed neuron instead of silently dropping the edge.
+#     Lamarck matches on no `CreatureError` variant anywhere, so the addition is
+#     invisible to it, and every other added item is `pub(crate)`.
+#   * 0.19.1 bumps a `wasm-bench` dev dependency; 0.20.0 (core #689) changes
+#     only `scripts/runlib.sh`. Neither touches `neat-core/src`.
+# Verified against the sibling clone at 0.20.0 by
+# `cargo check --workspace --all-targets` and
+# `cargo test --workspace --all-features` (36 test binaries, 0 failures).
+0.20.0

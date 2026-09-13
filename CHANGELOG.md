@@ -43,6 +43,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The breaking-bump gate is green against neat-core 0.20.0 (PR #239).** Core
+  `Develop` moved 0.17.0 -> 0.20.0 while this branch was open, so
+  `scripts/check-neat-core-version.sh` failed on every PR in the repository.
+  Reviewed: 0.18.0 / 0.19.0 (core #684, #685) change pruning and
+  `compile_creature`, whose only public-surface change is the new
+  `CreatureError::UnknownTargetUuid` variant; 0.19.1 is a `wasm-bench` dev
+  dependency and 0.20.0 (core #689) touches only `scripts/runlib.sh`. Lamarck
+  matches on no `CreatureError` variant, so no Lamarck code change is needed;
+  `neat-core.expected-version` records 0.20.0 as handled, with
+  `cargo check --workspace --all-targets` and
+  `cargo test --workspace --all-features` clean against the sibling at 0.20.0.
+
 - **Builds against neat-core 0.13.0 — `CompiledNetwork`'s fields went private
   (neat-core #625 / #633; GRQ #4724).** neat-core 0.12.0 made every
   `CompiledNetwork` field private behind borrow-only accessors (neat-core #625 /
