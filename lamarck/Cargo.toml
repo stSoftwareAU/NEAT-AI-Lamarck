@@ -14,9 +14,12 @@ workspace = true
 name = "neat_ai_lamarck"
 path = "src/lib.rs"
 
-[[bin]]
-name = "neat_ai_lamarck"
-path = "src/main.rs"
+# No explicit `[[bin]]` table: cargo already auto-discovers `src/main.rs` as a
+# bin target named after the package, so such a table would restate the default
+# exactly. Spelling it out costs real work — the canonical
+# `scripts/runlib.sh` treats an explicit `[[bin]]` as a shape it cannot read
+# without cargo, so it falls back to `cargo metadata` on *every* invocation
+# instead of taking its no-cargo already-installed fast path (Issue #234).
 
 [dependencies]
 # Keep this sibling path aligned with NEAT-AI-scorer until/unless workspace
