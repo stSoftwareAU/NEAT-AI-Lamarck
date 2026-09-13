@@ -70,6 +70,17 @@ fetch-error exit code: 1
 rc=1
 ```
 
+### The job ran for real on this PR
+
+The `family-sync` job is live on PR #239 and passed in 6s
+([job log](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/actions/runs/34786367135/job/103802469591)).
+It fetched core's copy, compared it, and correctly took no action:
+
+```text
+Refresh scripts/runlib.sh when it differs
+OK   scripts/runlib.sh is byte-identical to stSoftwareAU/NEAT-AI-core@Develop
+```
+
 ### The `[[bin]]` removal is behaviour-preserving
 
 Real `cargo metadata --no-deps` target lists, with the NEAT-AI-core sibling
@@ -248,3 +259,29 @@ unmodified Develop checkout. Every stage after it was run individually and is
 listed above. Recorded with evidence on
 [#235](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/235), which owns
 that root cause.
+
+## CI status on this PR
+
+Every check passes except **Project Validation** (and the **CI Required
+Checks** aggregator that depends on it). Project Validation fails at its
+`Gate on unhandled breaking neat-core bump` step:
+
+```text
+FAIL: breaking neat-core bump: 0.20.0 exceeds handled baseline 0.17.0 (pre-1.0 minor increased)
+```
+
+That is pre-existing and unrelated to this PR — it is red on every PR in this
+repository right now, and this diff touches neither of the gate's two inputs
+(`neat-core.expected-version`, `scripts/check-neat-core-version.sh`). Clearing
+it needs a deliberate PR that reviews core 0.18 → 0.20 and bumps the recorded
+baseline; that work is tracked on
+[#235](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/235), where the
+evidence is recorded.
+
+Because that step aborts the Project Validation job, the two new family-sync
+validator steps (which sit after it in `ci.yml`, alongside the existing pin and
+Dependabot gates) do not get to run in CI yet. They pass locally — see the Test
+Plan — and will run in CI as soon as the baseline gate is cleared.
+
+Notably, the new **Sync canonical runlib.sh from NEAT-AI-core** job is its own
+workflow, so it ran and passed independently.
