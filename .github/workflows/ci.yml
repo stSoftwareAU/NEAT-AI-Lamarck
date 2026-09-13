@@ -150,6 +150,7 @@ jobs:
             "SECURITY.md"
             "neat-core.expected-version"
             "scripts/runlib.sh"
+            ".github/workflows/family-sync.yml"
           )
           missing_files=()
           for file in "${required_files[@]}"; do
@@ -185,6 +186,12 @@ jobs:
 
       - name: Require a push-based Dependabot advisory channel for cargo (Issue #215)
         run: ./scripts/check-dependabot-config.sh
+
+      - name: WHAT — family-sync workflow validator behaviour (Issue #234)
+        run: ./scripts/test-check-family-sync-workflow.sh
+
+      - name: Validate the family-sync runlib.sh workflow (Issue #234)
+        run: ./scripts/check-family-sync-workflow.sh
 
       - name: WHAT — cargo-quality trigger overlap gate behaviour (Issue #213)
         run: ./scripts/test-check-cargo-quality-overlap.sh
