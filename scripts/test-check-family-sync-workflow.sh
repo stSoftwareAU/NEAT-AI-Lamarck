@@ -181,8 +181,12 @@ assert_exit "missing sync commit subject → fail" 1 "$CHECK" "$NO_SUBJECT"
 
 # Rule 8, second half — a job that fetches only runlib.sh leaves
 # family-pins.sh free to drift, and with it the pin it is supposed to move.
+# Dropping it from the fetch-target list alone must fail: the job still *runs*
+# `./scripts/family-pins.sh`, so a rule that merely greps the whole file for
+# the name would be satisfied by the copy it never refreshes.
 NO_FAMILY_PINS="$TMP_DIR/no-family-pins.yml"
-grep -v 'family-pins' "$WORKFLOW" >"$NO_FAMILY_PINS"
+sed -E 's|CANONICAL_PATHS: "scripts/runlib.sh scripts/family-pins.sh"|CANONICAL_PATHS: "scripts/runlib.sh"|' \
+  "$WORKFLOW" >"$NO_FAMILY_PINS"
 assert_exit "family-pins.sh never fetched → fail" 1 "$CHECK" "$NO_FAMILY_PINS"
 
 # Rule 15 — the pin move itself. The script may still be fetched and kept in
@@ -204,6 +208,39 @@ assert_exit "moved pin not staged → fail" 1 "$CHECK" "$NO_PIN_STAGED"
 NO_BUILD="$TMP_DIR/no-build.yml"
 grep -v '^[[:space:]]*cargo test' "$WORKFLOW" >"$NO_BUILD"
 assert_exit "moved pin never compiled → fail" 1 "$CHECK" "$NO_BUILD"
+
+# A build parked in an unrelated always-run step runs *before* the move, so it
+# must not satisfy the rule either.
+BUILD_ELSEWHERE="$TMP_DIR/build-elsewhere.yml"
+awk '
+  /^[[:space:]]*cargo test --workspace/ { next }
+  /^      - name: Move the neat-core pin to core.s latest release$/ {
+    print "      - name: Build before anything moves"
+    print "        run: |"
+    print "          set -euo pipefail"
+    print "          cargo build --workspace"
+    print
+    next
+  }
+  { print }
+' "$WORKFLOW" >"$BUILD_ELSEWHERE"
+assert_exit "build in an unrelated step → fail" 1 "$CHECK" "$BUILD_ELSEWHERE"
+
+# Rule 16, robustness — an earlier step whose body merely contains the word
+# "add" must not shadow the step that stages the moved pin.
+DECOY_ADD="$TMP_DIR/decoy-add.yml"
+awk '
+  /^      - name: Move the neat-core pin to core.s latest release$/ {
+    print "      - name: Decoy"
+    print "        run: |"
+    print "          set -euo pipefail"
+    print "          echo add nothing"
+    print
+    next
+  }
+  { print }
+' "$WORKFLOW" >"$DECOY_ADD"
+assert_exit "a decoy 'add' line does not shadow the staging rule → pass" 0 "$CHECK" "$DECOY_ADD"
 
 if [[ "$FAILS" -ne 0 ]]; then
   echo "test-check-family-sync-workflow: $FAILS failure(s)" >&2

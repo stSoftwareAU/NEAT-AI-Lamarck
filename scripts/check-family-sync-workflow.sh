@@ -149,10 +149,19 @@ if [[ "$unpinned" -eq 0 ]]; then
   ok "every action is pinned to a commit SHA"
 fi
 
-# 8. The canonical source is named, and both copied scripts with it. A job that
-# names only one of them leaves the other free to drift.
+# 8. The canonical source is named, and both copied scripts with it as *fetch
+# targets*. A job that names only one of them leaves the other free to drift —
+# and merely running `./scripts/family-pins.sh` is not fetching it, so the
+# search is narrowed to the lines that can declare a fetch target: a
+# `contents/<path>` API reference, or a `KEY: …` declaration (the `env:` list
+# the fetch loop walks).
+fetch_target_declared() {
+  grep -E 'contents/|^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:' "$BODY" | grep -q "$1"
+}
+
 if has 'stSoftwareAU/NEAT-AI-core' && has '(^|[^A-Za-z])Develop' \
-  && has 'scripts/runlib\.sh' && has 'scripts/family-pins\.sh'; then
+  && fetch_target_declared 'scripts/runlib\.sh' \
+  && fetch_target_declared 'scripts/family-pins\.sh'; then
   ok "fetches scripts/runlib.sh and scripts/family-pins.sh from stSoftwareAU/NEAT-AI-core Develop"
 else
   fail "the canonical source is not fully named — the job must fetch both scripts/runlib.sh and scripts/family-pins.sh from stSoftwareAU/NEAT-AI-core Develop"
@@ -256,20 +265,22 @@ fi
 # itself name both the manifest carrying the pin and the lockfile that follows
 # it.
 pin_paths_staged() {
-  local add_line var
-  add_line="$(grep -E '(^|[^[:alnum:]_-])add[[:space:]]' "$BODY" | head -n 1)"
-  [[ -n "$add_line" ]] || return 1
-  if [[ "$add_line" == *"lamarck/Cargo.toml"* && "$add_line" == *"Cargo.lock"* ]]; then
-    return 0
-  fi
-  # shellcheck disable=SC2016  # the `$`, `{` and `}` are literals to match/strip
-  for var in $(printf '%s\n' "$add_line" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' | tr -d '${}'); do
-    local definition
-    definition="$(grep -E "^[[:space:]]*${var}:" "$BODY" || true)"
-    if [[ "$definition" == *"lamarck/Cargo.toml"* && "$definition" == *"Cargo.lock"* ]]; then
+  local add_line var definition
+  # Every `git add` line is considered, not just the first: a step whose body
+  # merely contains the word "add" must not shadow the one that stages.
+  while IFS= read -r add_line; do
+    [[ -n "$add_line" ]] || continue
+    if [[ "$add_line" == *"lamarck/Cargo.toml"* && "$add_line" == *"Cargo.lock"* ]]; then
       return 0
     fi
-  done
+    # shellcheck disable=SC2016  # the `$`, `{` and `}` are literals to match/strip
+    for var in $(printf '%s\n' "$add_line" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' | tr -d '${}'); do
+      definition="$(grep -E "^[[:space:]]*${var}:" "$BODY" || true)"
+      if [[ "$definition" == *"lamarck/Cargo.toml"* && "$definition" == *"Cargo.lock"* ]]; then
+        return 0
+      fi
+    done
+  done < <(grep -E '(^|[^[:alnum:]_-])add[[:space:]]' "$BODY")
   return 1
 }
 
@@ -279,13 +290,33 @@ else
   fail "the commit does not stage lamarck/Cargo.toml and Cargo.lock — a moved pin would be discarded with the runner, and version-increment.yml would never see the bump"
 fi
 
-# 17. A moved pin must be compiled and tested where it arrives: a push made with
-# the default GITHUB_TOKEN starts no new workflow run, so nothing else in this
-# run would ever build it.
-if has '(^|[^[:alnum:]_-])cargo[[:space:]]+(test|build)([[:space:]]|$)'; then
-  ok "a moved pin is compiled and tested in this job"
+# 17. A moved pin must be compiled and tested *in the step that moves it*: a
+# push made with the default GITHUB_TOKEN starts no new workflow run, so
+# nothing else in this run would ever build it. A `cargo build` parked in some
+# unrelated always-run step would not: it would run before the move.
+pin_step_builds() {
+  awk '
+    /^[[:space:]]*-[[:space:]]*name:/ {
+      if (in_step && moves) { print (builds ? "builds" : "unbuilt") }
+      in_step = 1; moves = 0; builds = 0
+      next
+    }
+    !in_step { next }
+    /\.\/scripts\/family-pins\.sh/ { moves = 1 }
+    /(^|[^[:alnum:]_-])cargo[[:space:]]+(test|build)([[:space:]]|$)/ { builds = 1 }
+    END {
+      if (in_step && moves) { print (builds ? "builds" : "unbuilt") }
+    }
+  ' "$BODY"
+}
+
+build_verdicts="$(pin_step_builds)"
+if [[ -z "$build_verdicts" ]]; then
+  fail "no step moves the pin — nothing to build (see the family-pins.sh rule above)"
+elif printf '%s\n' "$build_verdicts" | grep -q 'unbuilt'; then
+  fail "the step that moves the pin does not build it — a breaking neat-core release would land on the branch with CI already green"
 else
-  fail "nothing builds the moved pin — a breaking neat-core release would land on the branch with CI already green"
+  ok "the step that moves the pin compiles and tests it"
 fi
 
 exit "$EXIT_CODE"

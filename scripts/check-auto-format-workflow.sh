@@ -5,10 +5,11 @@
 #   1. Run on `pull_request` events only.
 #   2. Declare minimal permissions (`contents: write`).
 #   3. Invoke `cargo fmt --all`.
-#   4. NOT move the `neat-core` pin (`cargo update -p neat-core`). Since
-#      Issue #235 the dependency is a git-tag pin on a core release and
-#      `family-sync.yml` is the one job that moves it, so a second mover here
-#      would race the commit that carries the matching `Cargo.lock` bump.
+#   4. NOT move the `neat-core` pin — in any spelling: `cargo update -p` /
+#      `--package neat-core`, or `family-pins.sh` itself. Since Issue #235 the
+#      dependency is a git-tag pin on a core release and `family-sync.yml` is
+#      the one job that moves it, so a second mover here would race the commit
+#      that carries the matching `Cargo.lock` bump.
 #   5. Gate commit/push behind a change-detection output (idempotent).
 #   6. Refuse to push onto a fork's PR branch.
 #   7. Use strict bash (`set -euo pipefail`).
@@ -82,8 +83,13 @@ else
   fail "no 'cargo fmt --all' invocation"
 fi
 
-if grep -qE '^[^#]*cargo[[:space:]]+update[[:space:]]+-p[[:space:]]+neat-core' "$WORKFLOW"; then
-  fail "'cargo update -p neat-core' here would race family-sync.yml, the one job that moves the neat-core pin (Issue #235)"
+# Every spelling of "move the pin", not just the one this workflow used to
+# carry: `-p` and `--package` are the same command, and `family-pins.sh` is the
+# mover itself. Matching only the old spelling would wave the equivalents
+# through.
+if grep -qE '^[^#]*cargo[[:space:]]+update([[:space:]]+[^#]*)?[[:space:]](-p|--package)[[:space:]]+neat-core' "$WORKFLOW" \
+  || grep -qE '^[^#]*family-pins\.sh' "$WORKFLOW"; then
+  fail "moving the neat-core pin here would race family-sync.yml, the one job that moves it (Issue #235)"
 else
   ok "the neat-core pin is left to family-sync.yml"
 fi

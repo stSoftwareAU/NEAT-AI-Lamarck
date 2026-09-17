@@ -197,6 +197,13 @@ jobs:
           fi
           "$GIT" -c core.hooksPath=/dev/null commit \
             -m "chore: sync from NEAT-AI-core Develop" -m "$body"
+          # A push made with the default GITHUB_TOKEN starts no new workflow
+          # run, so version-increment.yml does not see this commit and the
+          # crate version bump has to ride the next push to the branch. Say so
+          # rather than leaving the missing bump to be discovered after merge.
+          if [ "$PIN_MOVED" = "true" ] && [ "$PUSH_APP_CONFIGURED" != "true" ]; then
+            echo "::warning::the neat-core pin moved, but this push uses the fallback token — version-increment.yml will not run on it, so the crate version bumps on the next push to this branch"
+          fi
           AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_PAT" | "$BASE64" -w0)"
           # `--exit-code` returns 2 for "no matching ref" but other non-zero
           # codes for a transport or auth failure. Collapsing them all into

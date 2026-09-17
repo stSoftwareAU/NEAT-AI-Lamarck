@@ -63,12 +63,26 @@ assert_exit "missing 'cargo fmt --all' → fail" 1 "$CHECK" "$NO_FMT"
 
 # Moving the neat-core pin here would race family-sync.yml, which moves it and
 # commits the matching Cargo.lock in one go (Issue #235).
+# Every spelling of the move must fail, not just the one the workflow used to
+# carry — the long `--package` form is what family-pins.sh itself runs.
+insert_after_fmt() {
+  awk -v line="          $1" '
+    /^[[:space:]]*cargo fmt --all$/ { print; print line; next }
+    { print }
+  ' "$WORKFLOW"
+}
+
 MOVES_PIN="$TMP_DIR/moves-pin.yml"
-awk '
-  /^[[:space:]]*cargo fmt --all$/ { print; print "          cargo update -p neat-core"; next }
-  { print }
-' "$WORKFLOW" >"$MOVES_PIN"
+insert_after_fmt "cargo update -p neat-core" >"$MOVES_PIN"
 assert_exit "auto-format moves the neat-core pin → fail" 1 "$CHECK" "$MOVES_PIN"
+
+MOVES_PIN_LONG="$TMP_DIR/moves-pin-long.yml"
+insert_after_fmt "cargo update --package neat-core" >"$MOVES_PIN_LONG"
+assert_exit "auto-format moves the pin with --package → fail" 1 "$CHECK" "$MOVES_PIN_LONG"
+
+RUNS_FAMILY_PINS="$TMP_DIR/runs-family-pins.yml"
+insert_after_fmt "./scripts/family-pins.sh" >"$RUNS_FAMILY_PINS"
+assert_exit "auto-format runs family-pins.sh itself → fail" 1 "$CHECK" "$RUNS_FAMILY_PINS"
 
 # Unreadable path is an error, not a pass.
 assert_exit "missing workflow file → error" 2 "$CHECK" "$TMP_DIR/absent.yml"

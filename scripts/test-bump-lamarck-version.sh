@@ -126,6 +126,24 @@ git_q "$DOCS" commit --quiet -m "docs only"
 assert_bump "no src change → skip" 1 "$DOCS" --base-ref Develop
 assert_eq "docs-only leaves the version alone" "0.2.0" "$(manifest_version "$DOCS")"
 
+# --- a moved neat-core pin, no src change → bump (Issue #235) ------------
+# family-sync.yml moves the `neat-core` release pin and pushes the manifest and
+# lockfile change on its own. Remotes rebuild on a crate version change, so a
+# dependency move that left the version alone would ship a different binary
+# under an unchanged version — the pin must never move at an unchanged version.
+PIN="$TMP_ROOT/pin"
+make_repo "$PIN" "Develop" "0.5.1"
+git_q "$PIN" checkout --quiet -b issue-235
+printf 'neat-core = { git = "https://github.com/stSoftwareAU/NEAT-AI-core", tag = "v9.9.9" }\n' \
+  >>"$PIN/lamarck/Cargo.toml"
+printf 'source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v9.9.9#deadbeef"\n' \
+  >>"$PIN/Cargo.lock"
+git_q "$PIN" commit --quiet -am "move the neat-core pin"
+
+assert_bump "moved pin, no src change → bump" 0 "$PIN" --base-ref Develop
+assert_eq "a moved pin bumps the manifest patch" "0.5.2" "$(manifest_version "$PIN")"
+assert_eq "a moved pin syncs Cargo.lock" "0.5.2" "$(lock_version "$PIN")"
+
 # --- version behind base → loud failure, never a silent bump -------------
 DOWNGRADE="$TMP_ROOT/downgrade"
 make_repo "$DOWNGRADE" "Develop" "0.3.5"
