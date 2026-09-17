@@ -13,9 +13,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and every Lamarck host died because Develop had no file. The script stamps
   `.neat_ai_lamarck.version`, prints the bin path on stdout, skips
   `cargo build` when already installed, builds `--bin neat_ai_lamarck` only,
-  and removes `target/` after a successful install. Family-sync from
-  NEAT-AI-core still waits on core#680. Hermetic coverage:
-  `scripts/test-runlib.sh`.
+  and removes `target/` after a successful install. Superseded below by the
+  canonical copy (Issue #234), which runs *no* cargo command on the
+  already-installed path. Hermetic coverage: `scripts/test-runlib.sh`.
+
+- **`scripts/runlib.sh` is now the canonical NEAT-AI-core copy, kept in sync by
+  CI (Issue #234, NEAT-AI-core#680).** The script has one home —
+  `scripts/runlib.sh` on NEAT-AI-core `Develop` — and every Rust sibling
+  carries a byte-for-byte copy, so behaviour changes are made in core and
+  copied outward, never edited downstream. The new `family-sync` job
+  (`.github/workflows/family-sync.yml`) fetches core's `Develop` copy on every
+  PR into `Develop` or `milestone/**`, compares it with `cmp`, and rewrites,
+  rebases and pushes a refresh when it differs; a fetch error, an empty fetch,
+  a `diff` fault, an unreachable origin or a rebase conflict all fail the job
+  rather than reporting a stale copy as in sync. The already-installed path now
+  runs **no** cargo command at all — not even `cargo metadata`.
+  `lamarck/Cargo.toml` drops its explicit `[[bin]]` table, which restated
+  cargo's auto-discovery default (the canonical script reads a single
+  `[[bin]]` naming the crate since NEAT-AI-core#690, so the table was
+  redundant rather than costly). Target discovery is unchanged. The copy
+  carries core's toolchain bootstrap and gate (NEAT-AI-core#699-#701): with no
+  `rustc` it installs rustup from a digest-pinned installer, and a `rustc`
+  below the dependency graph's highest `rust-version` is moved forward with
+  rustup before the one build; the already-installed path never touches the
+  toolchain. Coverage: `scripts/test-runlib.sh` (26 assertions, with `rustc`
+  and `rustup` stubbed so no test reaches the real toolchain or the network),
+  `scripts/check-family-sync-workflow.sh` and
+  `scripts/test-check-family-sync-workflow.sh` (25 fixtures).
 
 - **Acknowledges neat-core 0.14.0 through 0.17.0.** Lamarck does not name the
   0.16.0 `PruneResult` fields or the 0.17.0 `prune_neuron` `IF` rewrite
@@ -24,6 +48,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   0.17.0 so the breaking-bump gate can pass and this install script can land.
 
 ### Fixed
+
+- **The breaking-bump gate is green against neat-core 0.22.5 (PR #239).** Core
+  `Develop` moved 0.17.0 -> 0.22.5 while this branch was open, so
+  `scripts/check-neat-core-version.sh` failed on every PR in the repository.
+  Reviewed: 0.18.0 / 0.19.0 (core #684, #685) change pruning and
+  `compile_creature`, whose only public-surface change is the new
+  `CreatureError::UnknownTargetUuid` variant; 0.19.1 is a `wasm-bench` dev
+  dependency and 0.20.0 (core #689) touches only `scripts/runlib.sh`; 0.21.0
+  (core #698, the Scan 20260911 milestone roll-up) reshapes `safe_zone` and
+  `range` around a crate-private `squash_profile` table and changes no public
+  item; 0.22.0 (core #703, Issue #688) adds `spliced_neurons` to
+  `CleanupOutcome`, `PruneResult` and `PruneResponse`, a
+  `CleanupOptions::splice_identity` field and the
+  `MAX_NET_NEW_SYNAPSES_PER_SPLICE` constant; 0.22.1-0.22.5
+  touch only `wasm-bench/Cargo.lock` and `scripts/runlib.sh`. Lamarck names
+  none of those items and matches on no `CreatureError` variant, so no Lamarck
+  code change is needed; `neat-core.expected-version` records 0.22.5 as
+  handled, with `cargo clippy --workspace --all-targets --all-features` and
+  `cargo test --workspace --all-features` clean against the sibling at 0.22.5.
 
 - **Builds against neat-core 0.13.0 — `CompiledNetwork`'s fields went private
   (neat-core #625 / #633; GRQ #4724).** neat-core 0.12.0 made every

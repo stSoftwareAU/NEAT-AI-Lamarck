@@ -23,6 +23,8 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--all",
     "--all-features",
     "--all-targets",
+    // `--bin neat_ai_lamarck` — how scripts/runlib.sh invokes cargo build.
+    "--bin",
     "--check",
     "--example",
     "--locked",

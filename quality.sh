@@ -32,7 +32,7 @@ if [[ "$SHELLCHECK_FAILED" -ne 0 ]]; then
 fi
 echo "shellcheck: all scripts passed"
 
-echo "Checking scripts/runlib.sh already-installed contract (Issue #236)..."
+echo "Checking the canonical scripts/runlib.sh contract (Issues #236, #234)..."
 ./scripts/test-runlib.sh
 
 echo "WHAT: TypeScript validity gate behaviour (Issue #167)..."
@@ -59,6 +59,12 @@ echo "WHAT: version-increment workflow validator behaviour (Issue #190)..."
 
 echo "Validating version-increment PR workflow (runlib / GRQ-taxation)..."
 ./scripts/check-version-increment-workflow.sh
+
+echo "WHAT: family-sync workflow validator behaviour (Issue #234)..."
+./scripts/test-check-family-sync-workflow.sh
+
+echo "Validating the family-sync runlib.sh workflow (Issue #234)..."
+./scripts/check-family-sync-workflow.sh
 
 echo "WHAT: lamarck version bump against the PR base branch (Issue #190)..."
 ./scripts/test-bump-lamarck-version.sh

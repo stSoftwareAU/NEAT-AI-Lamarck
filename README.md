@@ -2167,11 +2167,84 @@ cargo build --release        # production / GRQ host binary
 ```
 
 Fleet hosts do not run `cargo build` on every Lamarck stage.
-[`scripts/runlib.sh`](./scripts/runlib.sh) (Issue #236) installs
-`~/.cargo/bin/neat_ai_lamarck` and `.neat_ai_lamarck.version`, prints that
-path on stdout, and removes `target/` after a successful install. A second
-run on the same crate version prints `[neat_ai_lamarck] already installed
-v<x>` and runs no cargo command. It builds the `neat_ai_lamarck` binary only.
+[`scripts/runlib.sh`](./scripts/runlib.sh) (Issues #236, #234) installs the CLI
+to `~/.cargo/bin/neat_ai_lamarck`, writes the version stamp
+`~/.cargo/bin/.neat_ai_lamarck.version` beside it, prints that install path on
+stdout, and removes `target/` after a successful install. A second run on the
+same crate version prints `[neat_ai_lamarck] already installed v<x>` on stderr
+and runs **no** cargo command at all — not even `cargo metadata`. It builds
+`--bin neat_ai_lamarck` only. `CARGO_HOME` is honoured, so the install path
+follows it when set.
+
+There is no force flag: delete the stamp to force a rebuild.
+
+When it does build, the canonical script checks the toolchain first
+(NEAT-AI-core#699, #700, #701): with no `rustc` on `PATH` it installs rustup
+from a digest-pinned `rustup-init`, and a `rustc` below the highest
+`rust-version` in the resolved dependency graph is moved forward with
+`rustup update` (or, for an exact `rust-toolchain.toml` pin, the required
+version is installed and used for that one build without editing the pin).
+The already-installed path never touches the toolchain. `scripts/test-runlib.sh`
+stubs `rustc` and `rustup`, so the tests reach neither the real toolchain nor
+the network.
+
+```bash
+path="$(./scripts/runlib.sh)"   # stdout is the binary path, nothing else
+"$path" --help
+```
+
+#### Canonical `runlib.sh` and the family-sync job (Issue #234)
+
+`scripts/runlib.sh` has **one home** — `scripts/runlib.sh` on
+[NEAT-AI-core](https://github.com/stSoftwareAU/NEAT-AI-core) `Develop`
+(NEAT-AI-core#680). Every Rust sibling carries a byte-for-byte copy, so
+behaviour changes are made in core and copied outward, **never** edited here. A
+downstream edit is reverted by the next sync.
+
+[`.github/workflows/family-sync.yml`](./.github/workflows/family-sync.yml) is
+what keeps the copy honest. On every PR into `Develop` or a `milestone/**`
+branch it fetches core's `Develop` copy and compares it byte-for-byte; when the
+committed file differs it rewrites, commits and pushes the refresh onto the PR
+branch, so a stale copy is corrected before review rather than drifting
+silently. A fetch error — or an empty fetch — fails the job; a swallowed fetch
+would leave a stale copy reported as in sync.
+
+```mermaid
+flowchart TD
+    PR([PR opened / synchronised]) --> Fetch["Fetch scripts/runlib.sh<br/>from NEAT-AI-core Develop"]
+    Fetch -->|fetch error or empty| Fail["Job fails<br/>(never reported as in sync)"]
+    Fetch -->|fetched| Cmp{"cmp against the<br/>committed copy"}
+    Cmp -->|identical| Pass([No commit — already in sync])
+    Cmp -->|differs| Refresh["Rewrite scripts/runlib.sh"]
+    Refresh --> Rebase["Rebase onto origin/&lt;head&gt;"]
+    Rebase --> Push["Push 'chore: sync scripts/runlib.sh<br/>from NEAT-AI-core Develop'"]
+    Push --> Review([PR carries the canonical copy])
+```
+
+The job carries **no `paths:` filter**: drift arrives when core changes, not
+when this PR touches `scripts/`, so no PR is skipped for touching the wrong
+files. Its branch filter follows the repository convention used by `ci.yml` and
+`version-increment.yml` — `Develop` and `milestone/**` — so a PR into any other
+base branch is not synced. It pushes with the same auth chain as
+`version-increment.yml` (App token → `ACTIONS_PUSH` → `GITHUB_TOKEN`), skips
+forks, and rebases before pushing so a concurrent `version-increment` push is
+not clobbered; a rebase conflict fails the job with the file to reset named. Because `version-increment.yml` is
+paths-filtered to `lamarck/src/**`, `lamarck/Cargo.toml` and `Cargo.lock`, a
+runlib refresh does **not** bump the crate version.
+
+[`scripts/check-family-sync-workflow.sh`](./scripts/check-family-sync-workflow.sh)
+fails CI when the job is misdeclared — a lost fork guard, a `paths:` filter, an
+unpinned action, a swallowed fetch error, or a push that is no longer gated on
+the change-detection output.
+
+> **Note** — `lamarck/Cargo.toml` deliberately carries no `[[bin]]` table.
+> Cargo already auto-discovers `src/main.rs` as a bin target named after the
+> package, so the table would restate the default. The canonical script reads
+> one `[[bin]]` table that names the crate without running cargo
+> (NEAT-AI-core#690); any other shape — several tables, a table naming
+> something else, an `autobins` key — falls back to `cargo metadata` on every
+> fleet invocation, and `scripts/test-runlib.sh` runs the already-installed
+> case against this repository's own manifests so that regression fails CI.
 
 Local gate (mirrors CI) — run it before opening a PR, with the prerequisites
 above installed:
@@ -2180,10 +2253,11 @@ above installed:
 ./quality.sh < /dev/null
 ```
 
-It runs shellcheck, the TypeScript validity gate, the auto-format and
-version-increment workflow validators, the workflow install-pin and container
-pin gates, the Dependabot advisory-channel gate, codespell, cargo-deny, fmt
-`--check`, clippy with warnings denied, the tests, and rustdoc.
+It runs shellcheck, the `runlib.sh` install contract tests, the TypeScript
+validity gate, the auto-format, version-increment and family-sync workflow
+validators, the workflow install-pin and container pin gates, the Dependabot
+advisory-channel gate, codespell, cargo-deny, fmt `--check`, clippy with
+warnings denied, the tests, and rustdoc.
 
 CI runs on pull requests to `Develop` and includes fmt/clippy/tests/docs,
 cargo-deny, gitleaks, cargo-audit, dependency-review, Semgrep, markdownlint,
