@@ -73,6 +73,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   against sibling 0.17.0 is clean. `neat-core.expected-version` moves to
   0.17.0 so the breaking-bump gate can pass and this install script can land.
 
+### Changed
+
+- **`rand` moves from 0.9 to 0.10 (Issue #244, PR #243).** Dependabot's bump was
+  a breaking one: rand 0.10 renamed `RngCore` to `Rng` and moved the generator
+  helpers (`random`, `random_range`, `random_bool`) onto a new `RngExt` trait,
+  so every draw in `analysis.rs`, `candidates.rs`, `focus.rs`, `learning.rs`,
+  `promote_gate.rs`, `propagate_layout.rs`, `screen_thresholds.rs` and
+  `structural.rs` failed to resolve. The `impl Rng` bounds are unchanged —
+  `RngExt` is blanket-implemented for every `Rng` — so only the imports moved.
+  `StdRng` now draws through `chacha20` with the same output, and the suite
+  (including the seed-stability tests) passes unchanged. New coverage:
+  `structural::tests::random_uuid_v4_is_rfc4122_shaped_and_seed_reproducible`
+  pins the uuid contract across the trait move.
+
 ### Removed
 
 - **The sibling `NEAT-AI-core` checkout and the breaking-bump baseline

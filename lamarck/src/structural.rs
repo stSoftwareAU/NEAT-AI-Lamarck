@@ -7,7 +7,7 @@ use neat_core::{
     CompiledNetwork, CreatureExport, NeuronExport, SynapseExport, TrainingDataConfig,
     TrainingRecord,
 };
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::path::Path;
 
 /// Target |Δpre| ≈ this when the source sits at one standard deviation.
@@ -1226,6 +1226,46 @@ mod tests {
         {"fromUUID":"h1","toUUID":"o1","weight":1.0}
       ]
     }"#;
+
+    /// rand 0.10 moved the generator helpers off `Rng` onto `RngExt`, so every
+    /// draw in this crate resolves through a different trait (Issue #244). The
+    /// uuid contract must survive that move: RFC 4122 shape, the v4 version
+    /// nibble, the `10xx` variant nibble, and a seeded draw that repeats.
+    #[test]
+    fn random_uuid_v4_is_rfc4122_shaped_and_seed_reproducible() {
+        let uuid = random_uuid_v4(&mut StdRng::seed_from_u64(42));
+
+        assert_eq!(
+            uuid,
+            random_uuid_v4(&mut StdRng::seed_from_u64(42)),
+            "the same seed must redraw the same uuid"
+        );
+        assert_ne!(
+            uuid,
+            random_uuid_v4(&mut StdRng::seed_from_u64(43)),
+            "a different seed must draw a different uuid"
+        );
+
+        let groups: Vec<&str> = uuid.split('-').collect();
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "8-4-4-4-12 grouping: {uuid}"
+        );
+        assert!(
+            uuid.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
+            "hex digits only: {uuid}"
+        );
+        assert_eq!(
+            groups[2].chars().next(),
+            Some('4'),
+            "version nibble must be 4: {uuid}"
+        );
+        assert!(
+            matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+            "variant nibble must be 10xx: {uuid}"
+        );
+    }
 
     fn obs_with_corr(c0: f64, c1: f64) -> ObservationsStatistics {
         ObservationsStatistics {

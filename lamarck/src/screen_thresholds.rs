@@ -55,7 +55,7 @@
 use crate::candidates::CandidateStrategy;
 use crate::run::{ExperimentRecord, candidate_stem_index};
 use crate::scorer_cost::ScorerCallPhase;
-use rand::Rng;
+use rand::RngExt;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
