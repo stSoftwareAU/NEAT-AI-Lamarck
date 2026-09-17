@@ -14,7 +14,7 @@ use crate::structural::{
 use crate::tags::{CreatureMeta, serialize_creature_with_meta_compact};
 use crate::width::{assert_same_width, checked_creature_json};
 use neat_core::CreatureExport;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;

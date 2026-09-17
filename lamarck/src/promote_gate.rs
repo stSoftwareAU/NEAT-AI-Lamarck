@@ -450,7 +450,7 @@ pub fn screen_deltas(scores: &BTreeMap<String, f64>) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
 
     /// Deterministic standard-normal sample (Box–Muller on a seeded stream).
     fn normal_sample(n: usize, sigma: f64, seed: u64) -> Vec<f64> {
