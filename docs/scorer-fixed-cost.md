@@ -185,5 +185,7 @@ SIZES=0,1,29 RATES=0.05 REPEATS=3 \
 ```
 
 The scorer must be built from `issue-lamarck-123-sampled-read` beside a
-NEAT-AI-core checked out at `issue-scorer-sampled-read`; both are path
-dependencies of the same sibling layout this repo already assumes.
+NEAT-AI-core checked out at `issue-scorer-sampled-read`; that pair is
+NEAT-AI-scorer's own sibling layout. This repository no longer needs one —
+since Issue #235 its `neat-core` dependency is a git-tag pin on a core
+release.

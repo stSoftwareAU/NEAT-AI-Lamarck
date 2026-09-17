@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`neat-core` is pinned to a released git tag, and the pin is refreshed on
+  every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
+  `path = "../../NEAT-AI-core/neat-core"` dependency with
+  `{ git = "https://github.com/stSoftwareAU/NEAT-AI-core", tag = "v0.22.5" }`,
+  so the workspace builds in a bare clone with no `NEAT-AI-core` checkout
+  beside it. `scripts/family-pins.sh` — a byte-for-byte copy of core's
+  canonical script, kept in sync exactly as `runlib.sh` is — resolves core's
+  newest released `v<major>.<minor>.<patch>` tag, rewrites a lagging pin and
+  lets `Cargo.lock` follow. The `family-sync` job now syncs both canonical
+  scripts and runs `family-pins.sh` before pushing, so the pin moves only
+  through this repository's own PR; a moved pin is compiled and tested in that
+  same job, and the `Cargo.lock` it changes is one of the paths
+  `version-increment.yml` gates on, so the pin never moves at an unchanged
+  crate version — `scripts/bump-lamarck-version.sh` now triggers on
+  `lamarck/Cargo.toml` and `Cargo.lock` as well as `lamarck/src`, the same
+  paths `version-increment.yml` already filtered on, because a pin move touches
+  only the first two. `deny.toml` allows that one git source and keeps every
+  other denied, and `.github/dependabot.yml` excludes `neat-core` so nothing
+  else moves the pin. Coverage: `scripts/test-family-pins.sh` (15 hermetic
+  assertions on the copied script's rewrite contract), four new rules and seven
+  fixtures in `scripts/check-family-sync-workflow.sh` /
+  `scripts/test-check-family-sync-workflow.sh` (both canonical scripts fetched,
+  the pin actually moved, the manifest and lockfile staged, the moved pin built
+  in the step that moves it), and a moved-pin bump case in
+  `scripts/test-bump-lamarck-version.sh`.
+
 - **`scripts/runlib.sh` installs `~/.cargo/bin/neat_ai_lamarck` only on a
   version change (Issue #236).** The fleet worker started calling this script
   and every Lamarck host died because Develop had no file. The script stamps
@@ -46,6 +72,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (those are the Ockham pruning surface). `cargo check -p neat_ai_lamarck`
   against sibling 0.17.0 is clean. `neat-core.expected-version` moves to
   0.17.0 so the breaking-bump gate can pass and this install script can land.
+
+### Removed
+
+- **The sibling `NEAT-AI-core` checkout and the breaking-bump baseline
+  (Issue #235).** The `.github/actions/setup-neat-core` composite is retired
+  from `ci.yml`, `auto-format.yml`, `cargo-quality.yml`, `security.yml` and
+  `sbom.yml`; `scripts/check-neat-core-version.sh` and
+  `neat-core.expected-version` are deleted with the unpinned path dependency
+  they guarded. Tracking head is no longer possible, and a breaking core
+  release is now caught where the pin moves: the family-sync job compiles and
+  tests it. `auto-format.yml` no longer runs `cargo update -p neat-core` —
+  `check-auto-format-workflow.sh` now fails CI if it reappears, because a
+  second mover would race the commit that carries the matching `Cargo.lock`
+  bump.
 
 ### Fixed
 

@@ -18,10 +18,15 @@
 version: 2
 
 updates:
-  # `neat-core` is a path dependency on the sibling clone and is not resolved
-  # by Dependabot; the registry crates in `Cargo.lock` are what this covers.
+  # This covers the registry crates in `Cargo.lock`. `neat-core` is excluded
+  # below: it is a git-tag pin on a NEAT-AI-core release, and `family-sync.yml`
+  # — running the canonical `scripts/family-pins.sh` — is the one mover of that
+  # pin (Issue #235). A Dependabot PR moving it too would race the commit that
+  # carries the matching `Cargo.lock` change and crate version bump.
   - package-ecosystem: "cargo"
     directory: "/"
+    ignore:
+      - dependency-name: "neat-core"
     schedule:
       interval: "weekly"
       day: "monday"

@@ -7,17 +7,17 @@ not repeated (Issue #136).
 
 ## Building and the local gate
 
-The sibling-clone repository layout, the prerequisites, the cargo profiles, the
-gate you must run before opening a PR, and the two PR workflows that maintain
-formatting and the crate version are all described in
+The `neat-core` release pin, the prerequisites, the cargo profiles, the gate you
+must run before opening a PR, and the PR workflows that maintain formatting, the
+canonical scripts and the crate version are all described in
 [README › Build and quality gate](./README.md#build-and-quality-gate). Read
 that section before your first build, and edit **it** — not this file — when
 any of it changes.
 
-The [breaking-bump gate](./README.md#neat-core-breaking-bump-gate) is the part
-of that section you meet as a contributor rather than as a reader: clearing it
-is a deliberate acknowledgement, made in the same PR that updates Lamarck for
-the change.
+The [neat-core release pin](./README.md#neat-core-release-pin) is the part of
+that section you meet as a contributor rather than as a reader: the pin moves
+automatically on your PR, and the family-sync job compiles and tests the moved
+pin, so a breaking core release turns your PR red rather than merging unbuilt.
 
 ## Version bumping
 

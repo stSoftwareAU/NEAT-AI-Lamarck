@@ -37,4 +37,6 @@ ignore = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# neat-core is consumed as a released git tag from its own repository
+# (Issue #235); every other git source stays denied.
+allow-git = ["https://github.com/stSoftwareAU/NEAT-AI-core"]

@@ -3,20 +3,18 @@
 #
 # Responsibilities:
 #   * Emit the deterministic commit message the workflow uses when pushing
-#     rustfmt and/or Cargo.lock sync fixes back onto a PR branch.
+#     rustfmt fixes back onto a PR branch.
 #   * Detect whether the working tree has pending changes after `cargo fmt`
-#     and `cargo update -p neat-core` ran, so the workflow can commit only
-#     when needed (idempotent guard).
+#     ran, so the workflow can commit only when needed (idempotent guard).
 #
 # Running cargo is the workflow's job — this script does not invoke any
 # build tooling.
 set -euo pipefail
 
-COMMIT_MESSAGE="chore(fmt): apply rustfmt and sync neat-core lock
+COMMIT_MESSAGE="chore(fmt): apply rustfmt
 
-Automated by the auto-format PR job (rustfmt via cargo fmt; Cargo.lock
-synced to the checked-out NEAT-AI-core path dependency via
-\`cargo update -p neat-core\`) — see issue #33."
+Automated by the auto-format PR job (rustfmt via cargo fmt). The neat-core
+pin is moved by family-sync.yml, never here — see issues #33 and #235."
 
 usage() {
   cat <<'EOF'
@@ -71,8 +69,7 @@ case "$MODE" in
     ;;
 
   check-changes)
-    # Ignore untracked paths (e.g. the NEAT-AI-core checkout beside the
-    # workspace) — cargo cannot modify them as tracked files.
+    # Ignore untracked paths — cargo cannot modify them as tracked files.
     status_output="$(cd "$REPO_DIR" && git status --porcelain | grep -v '^??' || true)"
     if [[ -z "$status_output" ]]; then
       echo "clean: no formatting or lockfile changes detected"

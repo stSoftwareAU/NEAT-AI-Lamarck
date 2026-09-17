@@ -48,9 +48,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up NEAT-AI-core sibling (path dependency for neat-core)
-        uses: ./.github/actions/setup-neat-core
-
       - name: Fetch Develop for crate version floor
         run: |
           set -euo pipefail
@@ -127,9 +124,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up NEAT-AI-core sibling (path dependency for neat-core)
-        uses: ./.github/actions/setup-neat-core
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, frozen 2026-05-18
 
@@ -148,8 +142,8 @@ jobs:
             "lamarck/src/main.rs"
             ".github/CODEOWNERS"
             "SECURITY.md"
-            "neat-core.expected-version"
             "scripts/runlib.sh"
+            "scripts/family-pins.sh"
             ".github/workflows/family-sync.yml"
           )
           missing_files=()
@@ -165,9 +159,6 @@ jobs:
 
       - name: Validate Cargo workspace
         run: cargo metadata --no-deps --format-version 1 > /dev/null
-
-      - name: Gate on unhandled breaking neat-core bump
-        run: ./scripts/check-neat-core-version.sh
 
       - name: WHAT — workflow install pin gate behaviour (Issue #169)
         run: ./scripts/test-check-workflow-npm-pins.sh
@@ -187,10 +178,10 @@ jobs:
       - name: Require a push-based Dependabot advisory channel for cargo (Issue #215)
         run: ./scripts/check-dependabot-config.sh
 
-      - name: WHAT — family-sync workflow validator behaviour (Issue #234)
+      - name: WHAT — family-sync workflow validator behaviour (Issues #234, #235)
         run: ./scripts/test-check-family-sync-workflow.sh
 
-      - name: Validate the family-sync runlib.sh workflow (Issue #234)
+      - name: Validate the family-sync scripts/pin workflow (Issues #234, #235)
         run: ./scripts/check-family-sync-workflow.sh
 
       - name: WHAT — cargo-quality trigger overlap gate behaviour (Issue #213)
@@ -242,6 +233,9 @@ jobs:
 
       - name: Check scripts/runlib.sh already-installed contract
         run: ./scripts/test-runlib.sh
+
+      - name: Check the scripts/family-pins.sh contract (Issue #235)
+        run: ./scripts/test-family-pins.sh
 
   spell-check:
     name: Spell Check

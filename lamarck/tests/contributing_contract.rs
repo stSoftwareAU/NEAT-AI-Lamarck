@@ -185,8 +185,8 @@ const README_OWNED_FACTS: &[&str] = &[
     "auto-format.yml",
     "version-increment.yml",
     "cargo fmt",
-    // The breaking-bump acknowledgement rule.
-    "neat-core.expected-version",
+    // The neat-core release pin and the job that moves it (Issue #235).
+    "family-sync.yml",
 ];
 
 /// The build/gate mechanics live in the README only.

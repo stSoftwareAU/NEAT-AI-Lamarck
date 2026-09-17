@@ -1,18 +1,29 @@
-# Keep scripts/runlib.sh byte-identical to NEAT-AI-core's canonical copy
-# (Issue #234, NEAT-AI-core#680).
+# Keep the canonical NEAT-AI-core scripts byte-identical, and the neat-core
+# release pin current, on every PR (Issues #234 and #235; NEAT-AI-core#680,
+# NEAT-AI-core#681).
 #
-# `scripts/runlib.sh` has one home — `scripts/runlib.sh` on NEAT-AI-core
-# `Develop`. Every Rust sibling carries a byte-for-byte copy; behaviour changes
-# are made in core and copied outward, never edited downstream. This job is the
-# copying: on every PR it fetches core's Develop copy, and when the committed
-# file differs it rewrites, commits and pushes it onto the PR branch. A stale
-# copy is therefore refreshed before review rather than drifting silently.
+# `scripts/runlib.sh` and `scripts/family-pins.sh` have one home each — the
+# same path on NEAT-AI-core `Develop`. Every Rust sibling carries a
+# byte-for-byte copy; behaviour changes are made in core and copied outward,
+# never edited downstream. This job is the copying: on every PR it fetches
+# core's Develop copies, and when a committed file differs it rewrites, gates
+# and commits it onto the PR branch. A stale copy is therefore refreshed before
+# review rather than drifting silently.
+#
+# The same job then runs `scripts/family-pins.sh`, which moves the
+# `neat-core = { git = …, tag = "v<semver>" }` pin in `lamarck/Cargo.toml` to
+# core's newest release and lets `Cargo.lock` follow. The pin moves only here,
+# inside this repository's own PR, so a core release never reaches Lamarck
+# unbuilt: a moved pin is compiled and tested in this job, and the `Cargo.lock`
+# it changes is one of the paths `version-increment.yml` gates on, so the crate
+# version bumps with it.
 #
 # There is no `paths:` filter on purpose. Drift arrives when *core* changes,
 # not when this PR touches scripts/, so gating on the PR's own paths would let
-# a stale copy through every PR that happens not to touch that directory. The
-# branch filter is the repository convention (`Develop` and `milestone/**`, as
-# in ci.yml and version-increment.yml): a PR into any other base is not synced.
+# a stale copy — or a stale pin — through every PR that happens not to touch
+# that directory. The branch filter is the repository convention (`Develop` and
+# `milestone/**`, as in ci.yml and version-increment.yml): a PR into any other
+# base is not synced.
 #
 # A fetch error fails the job. A swallowed fetch would leave the stale copy in
 # place and report success — the exact "absence of a failure is not success"
@@ -20,8 +31,8 @@
 #
 # Push auth matches version-increment.yml (App token -> ACTIONS_PUSH ->
 # GITHUB_TOKEN). `version-increment.yml` is paths-filtered to `lamarck/src/**`,
-# `lamarck/Cargo.toml` and `Cargo.lock`, so a runlib refresh does not bump the
-# crate version.
+# `lamarck/Cargo.toml` and `Cargo.lock`, so a script refresh alone does not
+# bump the crate version but a moved pin does.
 name: Family Sync
 
 on:
@@ -43,9 +54,11 @@ concurrency:
 
 jobs:
   family-sync:
-    name: Sync canonical runlib.sh from NEAT-AI-core
+    name: Sync canonical scripts and the neat-core pin from NEAT-AI-core
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # A moved pin is compiled and tested in this job, so it needs the same
+    # budget the `quality` job gets rather than a bookkeeping job's.
+    timeout-minutes: 30
     # A fork's PR branch cannot be pushed to, and the token is not shared with
     # forks, so the job would fail rather than sync.
     if: github.event.pull_request.head.repo.full_name == github.repository
@@ -55,7 +68,8 @@ jobs:
       PUSH_APP_CONFIGURED: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID != '' && secrets.ACTIONS_PUSH_APP_PRIVATE_KEY != '' }}
       CANONICAL_REPO: stSoftwareAU/NEAT-AI-core
       CANONICAL_REF: Develop
-      CANONICAL_PATH: scripts/runlib.sh
+      CANONICAL_PATHS: "scripts/runlib.sh scripts/family-pins.sh"
+      PINNED_PATHS: "lamarck/Cargo.toml Cargo.lock"
 
     steps:
       - name: Checkout PR branch
@@ -65,56 +79,91 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Fail loud on a fetch error: a stale runlib.sh that silently passed as
-      # "in sync" is worse than a red job, because every sibling then drifts.
-      - name: Fetch the canonical runlib.sh from NEAT-AI-core
-        id: fetch
+      # `scripts/family-pins.sh` shells out to `cargo update` when it moves a
+      # pin, and a moved pin is tested here, so this job needs the toolchain
+      # the Cargo jobs already install.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, frozen 2026-05-18
+
+      # Fail loud on a fetch error: a stale copy that silently passed as "in
+      # sync" is worse than a red job, because every sibling then drifts.
+      - name: Refresh the canonical scripts when they differ
+        id: compare
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          dest="${RUNNER_TEMP}/canonical-runlib.sh"
-          if ! gh api \
-            -H "Accept: application/vnd.github.raw" \
-            "repos/${CANONICAL_REPO}/contents/${CANONICAL_PATH}?ref=${CANONICAL_REF}" \
-            >"$dest"; then
-            echo "::error::could not fetch ${CANONICAL_PATH} from ${CANONICAL_REPO}@${CANONICAL_REF}"
-            exit 1
-          fi
-          # An empty file is a failed fetch wearing a success exit code.
-          if [ ! -s "$dest" ]; then
-            echo "::error::fetched ${CANONICAL_PATH} from ${CANONICAL_REPO}@${CANONICAL_REF} but it is empty"
-            exit 1
-          fi
-          echo "canonical=${dest}" >>"$GITHUB_OUTPUT"
+          changed=false
+          for path in $CANONICAL_PATHS; do
+            dest="${RUNNER_TEMP}/canonical-$(basename "$path")"
+            if ! gh api \
+              -H "Accept: application/vnd.github.raw" \
+              "repos/${CANONICAL_REPO}/contents/${path}?ref=${CANONICAL_REF}" \
+              >"$dest"; then
+              echo "::error::could not fetch ${path} from ${CANONICAL_REPO}@${CANONICAL_REF}"
+              exit 1
+            fi
+            # An empty file is a failed fetch wearing a success exit code.
+            if [ ! -s "$dest" ]; then
+              echo "::error::fetched ${path} from ${CANONICAL_REPO}@${CANONICAL_REF} but it is empty"
+              exit 1
+            fi
+            if cmp -s "$dest" "$path"; then
+              echo "OK   ${path} is byte-identical to ${CANONICAL_REPO}@${CANONICAL_REF}"
+              continue
+            fi
+            echo "::notice::${path} differs from ${CANONICAL_REPO}@${CANONICAL_REF} — refreshing it"
+            # diff exits 1 for "files differ" — expected here — but 2 for
+            # trouble (an unreadable file). A blanket `|| true` would discard
+            # both.
+            diff_status=0
+            diff -u "$path" "$dest" || diff_status=$?
+            if [ "$diff_status" -gt 1 ]; then
+              echo "::error::could not diff ${path} against the canonical copy (diff exit ${diff_status})"
+              exit 1
+            fi
+            cp "$dest" "$path"
+            chmod +x "$path"
+            changed=true
+          done
+          echo "changed=${changed}" >>"$GITHUB_OUTPUT"
 
-      - name: Refresh scripts/runlib.sh when it differs
-        id: compare
-        env:
-          CANONICAL_FILE: ${{ steps.fetch.outputs.canonical }}
+      # The refreshed bytes are gated *here*, where they arrive. A push made
+      # with the default GITHUB_TOKEN starts no new workflow run, so the CI
+      # jobs of this run only ever saw the pre-refresh checkout — without this,
+      # a refreshed script could merge ungated.
+      - name: Gate the refreshed scripts
+        if: steps.compare.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          if cmp -s "$CANONICAL_FILE" "$CANONICAL_PATH"; then
-            echo "OK   ${CANONICAL_PATH} is byte-identical to ${CANONICAL_REPO}@${CANONICAL_REF}"
+          # shellcheck disable=SC2086  # a space-separated path list, on purpose
+          shellcheck --severity=warning -s bash $CANONICAL_PATHS
+          ./scripts/test-runlib.sh </dev/null
+          ./scripts/test-family-pins.sh </dev/null
+
+      - name: Move the neat-core pin to core's latest release
+        id: pins
+        run: |
+          set -euo pipefail
+          ./scripts/family-pins.sh
+          # shellcheck disable=SC2086  # a space-separated path list, on purpose
+          if git diff --quiet -- $PINNED_PATHS; then
+            echo "OK   the neat-core pin is already on ${CANONICAL_REPO}'s latest release"
             echo "changed=false" >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "::notice::${CANONICAL_PATH} differs from ${CANONICAL_REPO}@${CANONICAL_REF} — refreshing it"
-          # diff exits 1 for "files differ" — expected here — but 2 for trouble
-          # (an unreadable file). A blanket `|| true` would discard both.
-          diff_status=0
-          diff -u "$CANONICAL_PATH" "$CANONICAL_FILE" || diff_status=$?
-          if [ "$diff_status" -gt 1 ]; then
-            echo "::error::could not diff ${CANONICAL_PATH} against the canonical copy (diff exit ${diff_status})"
-            exit 1
-          fi
-          cp "$CANONICAL_FILE" "$CANONICAL_PATH"
-          chmod +x "$CANONICAL_PATH"
           echo "changed=true" >>"$GITHUB_OUTPUT"
+          # A moved pin is compiled and tested where it arrives, for the same
+          # reason the refreshed scripts are gated above: without this, a
+          # breaking core release would land on the branch with CI already
+          # green and nothing having built it.
+          cargo test --workspace --all-features -- --test-threads=2
 
       - name: Mint repo-scoped push token
         id: push-token
-        if: steps.compare.outputs.changed == 'true' && env.PUSH_APP_CONFIGURED == 'true'
+        if: >-
+          (steps.compare.outputs.changed == 'true' || steps.pins.outputs.changed == 'true')
+          && env.PUSH_APP_CONFIGURED == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3
         with:
           client-id: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID }}
@@ -122,19 +171,39 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
 
-      - name: Commit and push the refreshed runlib.sh
-        if: steps.compare.outputs.changed == 'true'
+      # One commit, one push: a refreshed script and a moved pin travel
+      # together, so neither can race the other onto the branch.
+      - name: Commit and push the refreshed scripts and the moved pin
+        if: steps.compare.outputs.changed == 'true' || steps.pins.outputs.changed == 'true'
         env:
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           GH_PAT: ${{ steps.push-token.outputs.token || secrets.ACTIONS_PUSH || secrets.GITHUB_TOKEN }}
+          SCRIPTS_REFRESHED: ${{ steps.compare.outputs.changed }}
+          PIN_MOVED: ${{ steps.pins.outputs.changed }}
         run: |
           set -euo pipefail
           GIT=/usr/bin/git
           BASE64=/usr/bin/base64
           "$GIT" -c core.hooksPath=/dev/null config user.name "github-actions[bot]"
           "$GIT" -c core.hooksPath=/dev/null config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          "$GIT" -c core.hooksPath=/dev/null add "$CANONICAL_PATH"
-          "$GIT" -c core.hooksPath=/dev/null commit -m "chore: sync scripts/runlib.sh from NEAT-AI-core Develop"
+          # shellcheck disable=SC2086  # space-separated path lists, on purpose
+          "$GIT" -c core.hooksPath=/dev/null add $CANONICAL_PATHS $PINNED_PATHS
+          body=""
+          if [ "$SCRIPTS_REFRESHED" = "true" ]; then
+            body="${body}Refresh ${CANONICAL_PATHS// /, } from ${CANONICAL_REPO}@${CANONICAL_REF} (Issues #234, #235)."$'\n'
+          fi
+          if [ "$PIN_MOVED" = "true" ]; then
+            body="${body}Move the neat-core pin to ${CANONICAL_REPO}'s latest release (Issue #235)."$'\n'
+          fi
+          "$GIT" -c core.hooksPath=/dev/null commit \
+            -m "chore: sync from NEAT-AI-core Develop" -m "$body"
+          # A push made with the default GITHUB_TOKEN starts no new workflow
+          # run, so version-increment.yml does not see this commit and the
+          # crate version bump has to ride the next push to the branch. Say so
+          # rather than leaving the missing bump to be discovered after merge.
+          if [ "$PIN_MOVED" = "true" ] && [ "$PUSH_APP_CONFIGURED" != "true" ]; then
+            echo "::warning::the neat-core pin moved, but this push uses the fallback token — version-increment.yml will not run on it, so the crate version bumps on the next push to this branch"
+          fi
           AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_PAT" | "$BASE64" -w0)"
           # `--exit-code` returns 2 for "no matching ref" but other non-zero
           # codes for a transport or auth failure. Collapsing them all into
@@ -162,7 +231,7 @@ jobs:
             # next run to trip over. The exit 1 below is the real report.
             "$GIT" -c core.hooksPath=/dev/null rebase --abort ||
               echo "::warning::could not abort the conflicted rebase"
-            echo "::error::could not rebase the runlib.sh refresh onto origin/${PR_HEAD_REF} — scripts/runlib.sh was changed on the branch as well; reset it to the NEAT-AI-core Develop copy and push again"
+            echo "::error::could not rebase the sync commit onto origin/${PR_HEAD_REF} — the same files were changed on the branch as well; reset them to the NEAT-AI-core Develop copies and push again"
             exit 1
           fi
           "$GIT" -c core.hooksPath=/dev/null \

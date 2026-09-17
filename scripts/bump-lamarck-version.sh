@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Bump lamarck/Cargo.toml patch version when lamarck/src/ changed vs a base ref.
+# Bump lamarck/Cargo.toml patch version when what the crate builds from changed
+# vs a base ref: its sources, its manifest, or the resolved dependency set in
+# Cargo.lock.
+#
+# The lockfile and manifest count because `neat-core` is a git-tag pin that
+# family-sync.yml moves to core's latest release (Issue #235). A moved pin
+# changes only those two files, and a remote rebuilds on a crate version change
+# — so bumping on source alone would ship a different binary under an unchanged
+# version. These are the same paths `version-increment.yml` triggers on.
 #
 # Mirrors GRQ-taxation's version-increment job / runlib.sh contract: remotes
 # rebuild when Cargo.toml version changes. Idempotent — skips when the PR
@@ -19,7 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MANIFEST="$REPO_ROOT/lamarck/Cargo.toml"
 LOCKFILE="$REPO_ROOT/Cargo.lock"
-SRC_PATH="lamarck/src"
+# bash 3.2 has no associative arrays; a plain list is all this needs.
+TRIGGER_PATHS=("lamarck/src" "lamarck/Cargo.toml" "Cargo.lock")
 BASE_REF="origin/Develop"
 CHECK_ONLY=0
 COMMIT_SUBJECT="chore: auto-increment versions for changed projects"
@@ -109,8 +118,8 @@ if [[ -n "$BASE_VERSION" && "$CURRENT_VERSION" != "$BASE_VERSION" ]]; then
   exit 1
 fi
 
-if git diff --quiet "${BASE_REF}...HEAD" -- "$SRC_PATH"; then
-  echo "OK   no changes under $SRC_PATH vs $BASE_REF — skip"
+if git diff --quiet "${BASE_REF}...HEAD" -- "${TRIGGER_PATHS[@]}"; then
+  echo "OK   no changes under ${TRIGGER_PATHS[*]} vs $BASE_REF — skip"
   exit 1
 fi
 
@@ -125,7 +134,7 @@ fi
 NEW_VERSION="$major.$minor.$((patch + 1))"
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
-  echo "WOULD bump $CURRENT_VERSION -> $NEW_VERSION (src changes vs $BASE_REF)"
+  echo "WOULD bump $CURRENT_VERSION -> $NEW_VERSION (build-input changes vs $BASE_REF)"
   exit 0
 fi
 

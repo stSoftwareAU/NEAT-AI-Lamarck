@@ -2055,7 +2055,6 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 NEAT-AI-Lamarck/
 ├── Cargo.toml
 ├── rust-toolchain.toml
-├── neat-core.expected-version
 ├── quality.sh
 ├── deny.toml
 ├── SECURITY.md
@@ -2124,17 +2123,18 @@ This section is the single source of truth for building and gating the
 repository; [`CONTRIBUTING.md`](./CONTRIBUTING.md) links here rather than
 keeping a second copy (Issue #136).
 
-Clone **NEAT-AI-core** beside this repository:
+No sibling checkout is needed. `neat-core` is a **git dependency pinned to a
+released tag** in [`lamarck/Cargo.toml`](./lamarck/Cargo.toml) (Issue #235):
 
-```text
-parent/
-  NEAT-AI-core/
-  NEAT-AI-Lamarck/
+```toml
+neat-core = { git = "https://github.com/stSoftwareAU/NEAT-AI-core", tag = "v0.22.5" }
 ```
 
-The `neat-core` path dependency in [`lamarck/Cargo.toml`](./lamarck/Cargo.toml)
-resolves to `../../NEAT-AI-core/neat-core`, so the sibling layout is what makes
-the build work.
+Cargo resolves it from the tag and records the exact commit in `Cargo.lock`, so
+`cargo build` works in a bare clone of this repository alone. The pin moves only
+through this repository's own PR — see
+[Canonical scripts and the family-sync job](#canonical-scripts-and-the-family-sync-job-issues-234-and-235)
+— and `deny.toml` allows that one git source, leaving every other denied.
 
 ### Prerequisites
 
@@ -2193,32 +2193,46 @@ path="$(./scripts/runlib.sh)"   # stdout is the binary path, nothing else
 "$path" --help
 ```
 
-#### Canonical `runlib.sh` and the family-sync job (Issue #234)
+#### Canonical scripts and the family-sync job (Issues #234 and #235)
 
-`scripts/runlib.sh` has **one home** — `scripts/runlib.sh` on
-[NEAT-AI-core](https://github.com/stSoftwareAU/NEAT-AI-core) `Develop`
-(NEAT-AI-core#680). Every Rust sibling carries a byte-for-byte copy, so
-behaviour changes are made in core and copied outward, **never** edited here. A
-downstream edit is reverted by the next sync.
+`scripts/runlib.sh` and `scripts/family-pins.sh` each have **one home** — the
+same path on [NEAT-AI-core](https://github.com/stSoftwareAU/NEAT-AI-core)
+`Develop` (NEAT-AI-core#680 and #681). Every Rust sibling carries a
+byte-for-byte copy, so behaviour changes are made in core and copied outward,
+**never** edited here. A downstream edit is reverted by the next sync.
 
 [`.github/workflows/family-sync.yml`](./.github/workflows/family-sync.yml) is
-what keeps the copy honest. On every PR into `Develop` or a `milestone/**`
-branch it fetches core's `Develop` copy and compares it byte-for-byte; when the
-committed file differs it rewrites, commits and pushes the refresh onto the PR
-branch, so a stale copy is corrected before review rather than drifting
-silently. A fetch error — or an empty fetch — fails the job; a swallowed fetch
-would leave a stale copy reported as in sync.
+what keeps both copies honest. On every PR into `Develop` or a `milestone/**`
+branch it fetches core's `Develop` copies and compares them byte-for-byte; when
+a committed file differs it rewrites it, re-lints it and re-runs its contract
+tests where the new bytes arrive. A fetch error — or an empty fetch — fails the
+job; a swallowed fetch would leave a stale copy reported as in sync.
+
+The same job then runs `scripts/family-pins.sh`, which resolves core's newest
+released `v<major>.<minor>.<patch>` tag, rewrites the pin in
+`lamarck/Cargo.toml` when it is behind, and runs a scoped `cargo update` so
+`Cargo.lock` follows. A moved pin is **compiled and tested in this
+job**: a push made with the default `GITHUB_TOKEN` starts no new workflow run,
+so without that a breaking core release would land on the branch with CI already
+green. Everything that changed — refreshed scripts, moved pin, updated lockfile
+— travels in one commit, pushed onto the PR branch.
 
 ```mermaid
 flowchart TD
-    PR([PR opened / synchronised]) --> Fetch["Fetch scripts/runlib.sh<br/>from NEAT-AI-core Develop"]
+    PR([PR opened / synchronised]) --> Fetch["Fetch scripts/runlib.sh and<br/>scripts/family-pins.sh from<br/>NEAT-AI-core Develop"]
     Fetch -->|fetch error or empty| Fail["Job fails<br/>(never reported as in sync)"]
-    Fetch -->|fetched| Cmp{"cmp against the<br/>committed copy"}
-    Cmp -->|identical| Pass([No commit — already in sync])
-    Cmp -->|differs| Refresh["Rewrite scripts/runlib.sh"]
-    Refresh --> Rebase["Rebase onto origin/&lt;head&gt;"]
-    Rebase --> Push["Push 'chore: sync scripts/runlib.sh<br/>from NEAT-AI-core Develop'"]
-    Push --> Review([PR carries the canonical copy])
+    Fetch -->|fetched| Cmp{"cmp against the<br/>committed copies"}
+    Cmp -->|identical| Pins
+    Cmp -->|differs| Refresh["Rewrite the copy,<br/>shellcheck + contract tests"]
+    Refresh --> Pins["Run scripts/family-pins.sh"]
+    Pins -->|pin already latest| Clean{"anything changed?"}
+    Pins -->|pin moved| Build["cargo test the moved pin"]
+    Build --> Clean
+    Clean -->|no| Pass([No commit — already in sync])
+    Clean -->|yes| Rebase["Rebase onto origin/&lt;head&gt;"]
+    Rebase --> Push["Push 'chore: sync from<br/>NEAT-AI-core Develop'"]
+    Push --> Bump["version-increment.yml sees<br/>lamarck/Cargo.toml + Cargo.lock<br/>→ patch bump"]
+    Bump --> Review([PR carries the canonical copies<br/>and core's latest release])
 ```
 
 The job carries **no `paths:` filter**: drift arrives when core changes, not
@@ -2228,14 +2242,21 @@ files. Its branch filter follows the repository convention used by `ci.yml` and
 base branch is not synced. It pushes with the same auth chain as
 `version-increment.yml` (App token → `ACTIONS_PUSH` → `GITHUB_TOKEN`), skips
 forks, and rebases before pushing so a concurrent `version-increment` push is
-not clobbered; a rebase conflict fails the job with the file to reset named. Because `version-increment.yml` is
-paths-filtered to `lamarck/src/**`, `lamarck/Cargo.toml` and `Cargo.lock`, a
-runlib refresh does **not** bump the crate version.
+not clobbered; a rebase conflict fails the job with the files to reset named.
+Because `version-increment.yml` is paths-filtered to `lamarck/src/**`,
+`lamarck/Cargo.toml` and `Cargo.lock`, a script refresh alone does **not** bump
+the crate version, while a moved pin does — so the pin never moves at an
+unchanged version.
 
 [`scripts/check-family-sync-workflow.sh`](./scripts/check-family-sync-workflow.sh)
 fails CI when the job is misdeclared — a lost fork guard, a `paths:` filter, an
-unpinned action, a swallowed fetch error, or a push that is no longer gated on
-the change-detection output.
+unpinned action, a swallowed fetch error, a push that is no longer gated on the
+change-detection output, a pin that is never moved or never staged, or a moved
+pin that nothing compiles.
+[`scripts/test-family-pins.sh`](./scripts/test-family-pins.sh) pins the contract
+the copied `family-pins.sh` must keep: a non-family or commented-out
+declaration is left byte-for-byte alone, and a pin it cannot rewrite fails loud
+instead of reading as "already current".
 
 > **Note** — `lamarck/Cargo.toml` deliberately carries no `[[bin]]` table.
 > Cargo already auto-discovers `src/main.rs` as a bin target named after the
@@ -2253,7 +2274,8 @@ above installed:
 ./quality.sh < /dev/null
 ```
 
-It runs shellcheck, the `runlib.sh` install contract tests, the TypeScript
+It runs shellcheck, the `runlib.sh` install and `family-pins.sh` pin-rewrite
+contract tests, the TypeScript
 validity gate, the auto-format, version-increment and family-sync workflow
 validators, the workflow install-pin and container pin gates, the Dependabot
 advisory-channel gate, codespell, cargo-deny, fmt `--check`, clippy with
@@ -2420,12 +2442,11 @@ against throwaway config fixtures.
 
 PRs also run an auto-format / housekeeping job
 (`.github/workflows/auto-format.yml`, Issue #33). The job runs
-`cargo fmt --all` and then `cargo update -p neat-core` so `Cargo.lock`
-tracks the checked-out NEAT-AI-core path dependency (workers otherwise
-rewrite the lock on every `cargo build` and `model_fetch` resets it). If the
-working tree changes, the fix is committed and pushed back. The job
-deliberately does **not** bump `neat-core.expected-version` — the
-breaking-bump gate stays a human acknowledgement. It fires on PRs into
+`cargo fmt --all`; if the working tree changes, the fix is committed and pushed
+back. It deliberately does **not** touch the `neat-core` pin — `family-sync.yml`
+is the one job that moves it, so the move always arrives with the `Cargo.lock`
+change `version-increment.yml` gates on, and the validator fails CI if a
+`cargo update -p neat-core` reappears here (Issue #235). It fires on PRs into
 `Develop` **and** `milestone/**`, so milestone sub-issue PRs are formatted
 before they merge into the milestone branch rather than only at the rollup
 PR (Issue #168). The workflow is validated by
@@ -2434,8 +2455,12 @@ behaviour — including the milestone filter rule — is exercised by
 `scripts/test-check-auto-format-workflow.sh`.
 
 A second PR job (`.github/workflows/version-increment.yml`) bumps the
-`lamarck/Cargo.toml` patch version on source changes so remote `runlib`-style
-installs rebuild. Like auto-format it fires on PRs into `Develop` **and**
+`lamarck/Cargo.toml` patch version when what the crate builds from changes —
+its sources, its manifest, or the resolved dependency set in `Cargo.lock` — so
+remote `runlib`-style installs rebuild. The lockfile counts because a moved
+`neat-core` pin changes only the manifest and the lockfile (Issue #235): the
+pin must never move at an unchanged version, or remotes keep the stale
+binary. Like auto-format it fires on PRs into `Develop` **and**
 `milestone/**`, and it diffs against the branch the PR actually targets rather
 than a hardcoded `origin/Develop` — otherwise the second and later sub-issue
 PRs on a milestone branch read "already ahead of base" and merge under an
@@ -2450,20 +2475,23 @@ bump works off any base branch.
 
 ```mermaid
 flowchart TD
-    PR["PR touches lamarck/src/**"] --> Filter{"base branch is<br/>Develop or milestone/**?"}
+    PR["PR touches lamarck/src/**,<br/>lamarck/Cargo.toml or Cargo.lock"] --> Filter{"base branch is<br/>Develop or milestone/**?"}
     Filter -->|no| Skip["workflow does not run"]
     Filter -->|yes| Fetch["fetch origin/&lt;PR base ref&gt;<br/>(fails loud if missing)"]
     Fetch --> Bump["bump-lamarck-version.sh<br/>--base-ref origin/&lt;PR base ref&gt;"]
     Bump -->|behind base| Fail["exit 2 — downgrade refused"]
-    Bump -->|already ahead / no src change| Noop["exit 1 — skip, idempotent"]
+    Bump -->|already ahead / no build-input change| Noop["exit 1 — skip, idempotent"]
     Bump -->|equal to base| Patch["patch++ in Cargo.toml + Cargo.lock"]
     Patch --> Push["commit + push to the PR head branch"]
     Push --> Remote["remote runlib install sees a new version → rebuilds"]
 ```
 
-### neat-core breaking-bump gate
+### neat-core release pin
 
-The `neat-core` path dependency is unpinned. CI fails when the sibling
-neat-core presents a breaking SemVer bump above
-[`neat-core.expected-version`](./neat-core.expected-version). Clear the gate by
-updating Lamarck for the change and bumping that baseline in the same PR.
+`neat-core` is pinned to a released `v<semver>` tag (Issue #235), so head is
+never tracked blindly and no `NEAT-AI-core` checkout is needed beside this
+repository. `family-sync.yml` moves the pin to core's latest release on every
+PR and **compiles and tests the moved pin in that same job**, so a breaking core
+release turns the PR red where it arrives rather than after merge. The baseline
+file `neat-core.expected-version` and its gate `check-neat-core-version.sh` are
+gone with the path dependency they guarded.

@@ -35,18 +35,14 @@ echo "shellcheck: all scripts passed"
 echo "Checking the canonical scripts/runlib.sh contract (Issues #236, #234)..."
 ./scripts/test-runlib.sh
 
+echo "Checking the canonical scripts/family-pins.sh contract (Issue #235)..."
+./scripts/test-family-pins.sh
+
 echo "WHAT: TypeScript validity gate behaviour (Issue #167)..."
 ./scripts/test-typescript-check.sh
 
 echo "Type-checking TypeScript sources (Issue #167)..."
 ./scripts/typescript-check.sh
-
-if [ -f "./../NEAT-AI-core/Cargo.toml" ]; then
-  echo "Gating on unhandled breaking neat-core bump..."
-  ./scripts/check-neat-core-version.sh
-else
-  echo "sibling ../NEAT-AI-core not found — skipping neat-core version gate (CI runs this for real)"
-fi
 
 echo "WHAT: auto-format workflow validator behaviour (Issue #168)..."
 ./scripts/test-check-auto-format-workflow.sh
@@ -60,10 +56,10 @@ echo "WHAT: version-increment workflow validator behaviour (Issue #190)..."
 echo "Validating version-increment PR workflow (runlib / GRQ-taxation)..."
 ./scripts/check-version-increment-workflow.sh
 
-echo "WHAT: family-sync workflow validator behaviour (Issue #234)..."
+echo "WHAT: family-sync workflow validator behaviour (Issues #234, #235)..."
 ./scripts/test-check-family-sync-workflow.sh
 
-echo "Validating the family-sync runlib.sh workflow (Issue #234)..."
+echo "Validating the family-sync scripts/pin workflow (Issues #234, #235)..."
 ./scripts/check-family-sync-workflow.sh
 
 echo "WHAT: lamarck version bump against the PR base branch (Issue #190)..."
