@@ -12,7 +12,7 @@ use neat_core::{
     TrainingDataConfig, apply_get_range, parse_squash_name, parse_synapse_type,
     propagate_topological_loop,
 };
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 

@@ -3,7 +3,7 @@
 use crate::backprop::{BackpropConfig, LearningSignal};
 use crate::learning::squash_derivative;
 use neat_core::{CompiledNetwork, CreatureExport, TrainingDataConfig};
-use rand::Rng;
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
