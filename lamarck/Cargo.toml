@@ -23,9 +23,11 @@ path = "src/lib.rs"
 # cannot read without `cargo metadata` fails there (Issue #234).
 
 [dependencies]
-# Keep this sibling path aligned with NEAT-AI-scorer until/unless workspace
-# orchestration changes. CI will need to check out NEAT-AI-core beside this repo.
-neat-core = { path = "../../NEAT-AI-core/neat-core" }
+# neat-core is consumed as a released git tag, never as a sibling path: the pin
+# moves only through this repository's own PR, where `scripts/family-pins.sh`
+# refreshes it to core's latest release and CI judges the result (Issue #235).
+# Keep it on one line — that is the form family-pins.sh rewrites.
+neat-core = { git = "https://github.com/stSoftwareAU/NEAT-AI-core", tag = "v0.22.5" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

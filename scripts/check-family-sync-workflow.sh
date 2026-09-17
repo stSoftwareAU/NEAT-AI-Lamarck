@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Validate the family-sync PR workflow (Issue #234).
+# Validate the family-sync PR workflow (Issues #234 and #235).
 #
-# `scripts/runlib.sh` is a byte-identical copy of NEAT-AI-core's canonical
-# script. The family-sync job is what keeps it that way, so a misdeclared job
-# means silent drift: the copy rots while CI stays green. This gate fails the
-# build instead.
+# `scripts/runlib.sh` and `scripts/family-pins.sh` are byte-identical copies of
+# NEAT-AI-core's canonical scripts, and the `neat-core` dependency is a git-tag
+# pin on core's latest release. The family-sync job is what keeps all three
+# current, so a misdeclared job means silent drift: the copies rot and the pin
+# sticks while CI stays green. This gate fails the build instead.
 #
 # The workflow must:
 #    1. Run on `pull_request` events, and not on `push`.
@@ -16,7 +17,7 @@
 #    5. Refuse to push onto a fork's PR branch.
 #    6. Disable checkout credential persistence.
 #    7. Pin every `uses:` to a 40-character commit SHA.
-#    8. Fetch the canonical copy from NEAT-AI-core's `Develop`.
+#    8. Fetch both canonical copies from NEAT-AI-core's `Develop`.
 #    9. Fail non-zero on a fetch error — never leave a stale copy reported as
 #       in sync.
 #   10. Compare byte-for-byte (`cmp`) rather than by mtime or by grep.
@@ -24,6 +25,14 @@
 #   12. Rebase before pushing, so a concurrent push is not clobbered.
 #   13. Use the App token -> ACTIONS_PUSH -> GITHUB_TOKEN auth chain.
 #   14. Use strict bash (`set -euo pipefail`).
+#   15. Run `scripts/family-pins.sh`, so the neat-core pin moves to core's
+#       latest release before the push.
+#   16. Stage `lamarck/Cargo.toml` and `Cargo.lock`, so a moved pin actually
+#       reaches the PR branch — and, through the paths `version-increment.yml`
+#       gates on, carries a crate version bump with it.
+#   17. Compile and test a moved pin in this job: a push made with the default
+#       GITHUB_TOKEN starts no new workflow run, so a breaking core release
+#       would otherwise land on the branch with nothing having built it.
 #
 # Exit codes: 0 the workflow satisfies every rule, 1 at least one rule is
 # broken, 2 invalid invocation.
@@ -140,11 +149,13 @@ if [[ "$unpinned" -eq 0 ]]; then
   ok "every action is pinned to a commit SHA"
 fi
 
-# 8. The canonical source is named.
-if has 'stSoftwareAU/NEAT-AI-core' && has '(^|[^A-Za-z])Develop' && has 'scripts/runlib\.sh'; then
-  ok "fetches scripts/runlib.sh from stSoftwareAU/NEAT-AI-core Develop"
+# 8. The canonical source is named, and both copied scripts with it. A job that
+# names only one of them leaves the other free to drift.
+if has 'stSoftwareAU/NEAT-AI-core' && has '(^|[^A-Za-z])Develop' \
+  && has 'scripts/runlib\.sh' && has 'scripts/family-pins\.sh'; then
+  ok "fetches scripts/runlib.sh and scripts/family-pins.sh from stSoftwareAU/NEAT-AI-core Develop"
 else
-  fail "the canonical source is not fully named — the job must fetch scripts/runlib.sh from stSoftwareAU/NEAT-AI-core Develop"
+  fail "the canonical source is not fully named — the job must fetch both scripts/runlib.sh and scripts/family-pins.sh from stSoftwareAU/NEAT-AI-core Develop"
 fi
 
 # 9. A *fetch* error specifically must fail the job. Asking only for some
@@ -225,10 +236,56 @@ else
 fi
 
 # The commit subject doubles as the idempotency grep target.
-if has 'chore: sync scripts/runlib\.sh from NEAT-AI-core Develop'; then
+if has 'chore: sync from NEAT-AI-core Develop'; then
   ok "sync commit subject present"
 else
-  fail "missing the 'chore: sync scripts/runlib.sh from NEAT-AI-core Develop' commit subject"
+  fail "missing the 'chore: sync from NEAT-AI-core Develop' commit subject"
+fi
+
+# 15. The pin move itself. Without this the job syncs the scripts and leaves
+# `neat-core` pinned to whatever release it was pinned to when the branch was
+# cut — the unmoved pin this repository stopped tolerating in Issue #235.
+if has '\./scripts/family-pins\.sh'; then
+  ok "runs scripts/family-pins.sh — the neat-core pin moves to core's latest release"
+else
+  fail "the job never runs ./scripts/family-pins.sh — the neat-core pin would never move off the release the branch was cut at"
+fi
+
+# 16. A moved pin has to be staged to reach the branch. It may be named
+# literally on the `git add` line or through a variable, but that variable must
+# itself name both the manifest carrying the pin and the lockfile that follows
+# it.
+pin_paths_staged() {
+  local add_line var
+  add_line="$(grep -E '(^|[^[:alnum:]_-])add[[:space:]]' "$BODY" | head -n 1)"
+  [[ -n "$add_line" ]] || return 1
+  if [[ "$add_line" == *"lamarck/Cargo.toml"* && "$add_line" == *"Cargo.lock"* ]]; then
+    return 0
+  fi
+  # shellcheck disable=SC2016  # the `$`, `{` and `}` are literals to match/strip
+  for var in $(printf '%s\n' "$add_line" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' | tr -d '${}'); do
+    local definition
+    definition="$(grep -E "^[[:space:]]*${var}:" "$BODY" || true)"
+    if [[ "$definition" == *"lamarck/Cargo.toml"* && "$definition" == *"Cargo.lock"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if pin_paths_staged; then
+  ok "lamarck/Cargo.toml and Cargo.lock are staged — a moved pin reaches the PR branch"
+else
+  fail "the commit does not stage lamarck/Cargo.toml and Cargo.lock — a moved pin would be discarded with the runner, and version-increment.yml would never see the bump"
+fi
+
+# 17. A moved pin must be compiled and tested where it arrives: a push made with
+# the default GITHUB_TOKEN starts no new workflow run, so nothing else in this
+# run would ever build it.
+if has '(^|[^[:alnum:]_-])cargo[[:space:]]+(test|build)([[:space:]]|$)'; then
+  ok "a moved pin is compiled and tested in this job"
+else
+  fail "nothing builds the moved pin — a breaking neat-core release would land on the branch with CI already green"
 fi
 
 exit "$EXIT_CODE"

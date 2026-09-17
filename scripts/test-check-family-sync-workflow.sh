@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # WHAT: check-family-sync-workflow.sh refuses a misdeclared family-sync job
-# (Issue #234).
+# (Issues #234 and #235).
 #
-# `scripts/runlib.sh` is a byte-identical copy of NEAT-AI-core's canonical
-# script, and the family-sync job is the only thing keeping it that way. Every
-# rule below is a way that job can be broken while CI still looks green, so the
-# validator must catch each one. These tests mutate the shipped workflow one
-# rule at a time and assert the validator's exit code.
+# `scripts/runlib.sh` and `scripts/family-pins.sh` are byte-identical copies of
+# NEAT-AI-core's canonical scripts, and the `neat-core` git-tag pin is moved to
+# core's latest release by the second of them. The family-sync job is the only
+# thing keeping all three current. Every rule below is a way that job can be
+# broken while CI still looks green, so the validator must catch each one.
+# These tests mutate the shipped workflow one rule at a time and assert the
+# validator's exit code.
 #
 # Runs the real validator against generated fixtures; asserts exit codes only.
 set -euo pipefail
@@ -138,7 +140,7 @@ assert_exit "no cmp byte comparison → fail" 1 "$CHECK" "$NO_CMP"
 
 # Rule 11 — the idempotency guard; without it every PR gets an empty commit.
 NO_GUARD="$TMP_DIR/no-guard.yml"
-grep -v "steps\.compare\.outputs\.changed" "$WORKFLOW" >"$NO_GUARD"
+grep -vE "steps\.(compare|pins)\.outputs\.changed" "$WORKFLOW" >"$NO_GUARD"
 assert_exit "no change-detection guard → fail" 1 "$CHECK" "$NO_GUARD"
 
 # Losing the guard on the *pushing* step alone must still fail: the
@@ -146,7 +148,7 @@ assert_exit "no change-detection guard → fail" 1 "$CHECK" "$NO_GUARD"
 # step is guarded would wave this through and commit an empty change per PR.
 PUSH_UNGUARDED="$TMP_DIR/push-unguarded.yml"
 awk '
-  /^      - name: Commit and push the refreshed runlib\.sh$/ { in_push = 1; print; next }
+  /^      - name: Commit and push the refreshed scripts and the moved pin$/ { in_push = 1; print; next }
   in_push && /^[[:space:]]*if: steps\.compare\.outputs\.changed/ { in_push = 0; next }
   { print }
 ' "$WORKFLOW" >"$PUSH_UNGUARDED"
@@ -174,8 +176,34 @@ assert_exit "no set -euo pipefail → fail" 1 "$CHECK" "$NO_STRICT"
 
 # The commit subject is the idempotency grep target.
 NO_SUBJECT="$TMP_DIR/no-subject.yml"
-sed -E 's|chore: sync scripts/runlib\.sh from NEAT-AI-core Develop|chore: update things|' "$WORKFLOW" >"$NO_SUBJECT"
+sed -E 's|chore: sync from NEAT-AI-core Develop|chore: update things|' "$WORKFLOW" >"$NO_SUBJECT"
 assert_exit "missing sync commit subject → fail" 1 "$CHECK" "$NO_SUBJECT"
+
+# Rule 8, second half — a job that fetches only runlib.sh leaves
+# family-pins.sh free to drift, and with it the pin it is supposed to move.
+NO_FAMILY_PINS="$TMP_DIR/no-family-pins.yml"
+grep -v 'family-pins' "$WORKFLOW" >"$NO_FAMILY_PINS"
+assert_exit "family-pins.sh never fetched → fail" 1 "$CHECK" "$NO_FAMILY_PINS"
+
+# Rule 15 — the pin move itself. The script may still be fetched and kept in
+# sync; if the job never runs it, the pin stays on whatever release the branch
+# was cut at.
+NO_PIN_MOVE="$TMP_DIR/no-pin-move.yml"
+grep -v '^[[:space:]]*\./scripts/family-pins\.sh$' "$WORKFLOW" >"$NO_PIN_MOVE"
+assert_exit "family-pins.sh fetched but never run → fail" 1 "$CHECK" "$NO_PIN_MOVE"
+
+# Rule 16 — a moved pin that is not staged dies with the runner, and
+# version-increment.yml never sees the Cargo.lock change that bumps the crate.
+NO_PIN_STAGED="$TMP_DIR/no-pin-staged.yml"
+# shellcheck disable=SC2016  # the workflow's own `$VAR` text, not an expansion
+sed -E 's|add \$CANONICAL_PATHS \$PINNED_PATHS|add $CANONICAL_PATHS|' "$WORKFLOW" >"$NO_PIN_STAGED"
+assert_exit "moved pin not staged → fail" 1 "$CHECK" "$NO_PIN_STAGED"
+
+# Rule 17 — a push made with the default GITHUB_TOKEN starts no new workflow
+# run, so a moved pin nothing compiles would merge with CI green.
+NO_BUILD="$TMP_DIR/no-build.yml"
+grep -v '^[[:space:]]*cargo test' "$WORKFLOW" >"$NO_BUILD"
+assert_exit "moved pin never compiled → fail" 1 "$CHECK" "$NO_BUILD"
 
 if [[ "$FAILS" -ne 0 ]]; then
   echo "test-check-family-sync-workflow: $FAILS failure(s)" >&2

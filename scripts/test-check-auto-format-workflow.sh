@@ -61,6 +61,15 @@ NO_FMT="$TMP_DIR/no-fmt.yml"
 grep -v 'cargo fmt --all' "$WORKFLOW" >"$NO_FMT"
 assert_exit "missing 'cargo fmt --all' → fail" 1 "$CHECK" "$NO_FMT"
 
+# Moving the neat-core pin here would race family-sync.yml, which moves it and
+# commits the matching Cargo.lock in one go (Issue #235).
+MOVES_PIN="$TMP_DIR/moves-pin.yml"
+awk '
+  /^[[:space:]]*cargo fmt --all$/ { print; print "          cargo update -p neat-core"; next }
+  { print }
+' "$WORKFLOW" >"$MOVES_PIN"
+assert_exit "auto-format moves the neat-core pin → fail" 1 "$CHECK" "$MOVES_PIN"
+
 # Unreadable path is an error, not a pass.
 assert_exit "missing workflow file → error" 2 "$CHECK" "$TMP_DIR/absent.yml"
 
