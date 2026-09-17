@@ -2178,6 +2178,16 @@ follows it when set.
 
 There is no force flag: delete the stamp to force a rebuild.
 
+When it does build, the canonical script checks the toolchain first
+(NEAT-AI-core#699, #700, #701): with no `rustc` on `PATH` it installs rustup
+from a digest-pinned `rustup-init`, and a `rustc` below the highest
+`rust-version` in the resolved dependency graph is moved forward with
+`rustup update` (or, for an exact `rust-toolchain.toml` pin, the required
+version is installed and used for that one build without editing the pin).
+The already-installed path never touches the toolchain. `scripts/test-runlib.sh`
+stubs `rustc` and `rustup`, so the tests reach neither the real toolchain nor
+the network.
+
 ```bash
 path="$(./scripts/runlib.sh)"   # stdout is the binary path, nothing else
 "$path" --help
@@ -2229,9 +2239,12 @@ the change-detection output.
 
 > **Note** — `lamarck/Cargo.toml` deliberately carries no `[[bin]]` table.
 > Cargo already auto-discovers `src/main.rs` as a bin target named after the
-> package, and the canonical script treats an explicit `[[bin]]` as a shape it
-> cannot read without cargo — which would cost a `cargo metadata` call on every
-> fleet invocation instead of the no-cargo fast path.
+> package, so the table would restate the default. The canonical script reads
+> one `[[bin]]` table that names the crate without running cargo
+> (NEAT-AI-core#690); any other shape — several tables, a table naming
+> something else, an `autobins` key — falls back to `cargo metadata` on every
+> fleet invocation, and `scripts/test-runlib.sh` runs the already-installed
+> case against this repository's own manifests so that regression fails CI.
 
 Local gate (mirrors CI) — run it before opening a PR, with the prerequisites
 above installed:

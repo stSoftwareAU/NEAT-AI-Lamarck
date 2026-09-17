@@ -36,4 +36,23 @@
 # Verified against the sibling clone at 0.20.0 by
 # `cargo check --workspace --all-targets` and
 # `cargo test --workspace --all-features` (36 test binaries, 0 failures).
-0.20.0
+#
+# 0.20.0 -> 0.22.5: acknowledge 0.21.0-0.22.5, which landed while PR #239 was
+# open. Neither breaking bump touches an API Lamarck names:
+#   * 0.21.0 (core #698, the Scan 20260911 milestone roll-up) reshapes
+#     `safe_zone` and `range` around a crate-private `squash_profile` table
+#     (`pub(crate)` throughout); `apply_safe_zone_adjustment` keeps its
+#     signature and no public item is added, removed or renamed.
+#   * 0.22.0 (core #703, Issue #688) splices out the IDENTITY neurons the IF
+#     rewrite leaves behind: `CleanupOutcome`, `PruneResult` and
+#     `PruneResponse` gain a `spliced_neurons: Vec<String>` field,
+#     `CleanupOptions` gains `splice_identity: bool`, and
+#     `MAX_NET_NEW_SYNAPSES_PER_SPLICE` is new. Lamarck constructs none of
+#     those structs and reads none of those fields.
+#   * 0.21.1, 0.21.2, 0.22.1-0.22.5 touch only `scripts/runlib.sh`,
+#     `scripts/family-pins.sh` and `wasm-bench/Cargo.lock`; nothing under
+#     `neat-core/src` changes.
+# Verified against the sibling clone at 0.22.5 (771ad13) by
+# `cargo clippy --workspace --all-targets --all-features -- -D warnings` and
+# `cargo test --workspace --all-features` (36 test binaries, 0 failures).
+0.22.5
