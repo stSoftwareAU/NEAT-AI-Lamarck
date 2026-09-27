@@ -202,8 +202,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "neat-core"
-version = "0.22.5"
-source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.22.5#771ad136ed106d1a13a3388e6634c451f4256f5f"
+version = "0.22.11"
+source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.22.11#88de51285c135ad27d8ccb55489e39fbb196b4bf"
 dependencies = [
  "serde",
  "serde_json",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "neat_ai_lamarck"
-version = "0.1.39"
+version = "0.1.40"
 dependencies = [
  "clap",
  "neat-core",
