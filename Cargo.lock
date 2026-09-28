@@ -202,8 +202,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "neat-core"
-version = "0.22.11"
-source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.22.11#88de51285c135ad27d8ccb55489e39fbb196b4bf"
+version = "0.22.15"
+source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.22.15#840cb99c406733303f6b445a0a5b7d54bad71d97"
 dependencies = [
  "serde",
  "serde_json",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "neat_ai_lamarck"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "clap",
  "neat-core",
@@ -261,9 +261,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom",
