@@ -13,7 +13,9 @@
 #   5. Gate commit/push behind a change-detection output (idempotent).
 #   6. Refuse to push onto a fork's PR branch.
 #   7. Use strict bash (`set -euo pipefail`).
-#   8. Authenticate the push with ACTIONS_PUSH (GITHUB_TOKEN fallback).
+#   8. Push through the shared `./.github/actions/bot-push` action, which owns
+#      the App token -> ACTIONS_PUSH -> GITHUB_TOKEN chain (Issue #252;
+#      `check-bot-push-action.sh` validates the action and its callers).
 #   9. Include a `milestone/<slug>` glob in the branch filter so milestone
 #      sub-issue PRs are gated too (Issue #168).
 set -euo pipefail
@@ -113,10 +115,10 @@ else
   fail "no 'set -euo pipefail' in run: blocks — failures may be swallowed"
 fi
 
-if grep -qE 'secrets\.ACTIONS_PUSH[[:space:]]*\|\|[[:space:]]*secrets\.GITHUB_TOKEN' "$WORKFLOW"; then
-  ok "push authenticates with ACTIONS_PUSH (GITHUB_TOKEN fallback)"
+if grep -qE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*"?\./\.github/actions/bot-push"?[[:space:]]*$' "$WORKFLOW"; then
+  ok "pushes through ./.github/actions/bot-push (App -> ACTIONS_PUSH -> GITHUB_TOKEN, Issue #252)"
 else
-  fail "no 'secrets.ACTIONS_PUSH || secrets.GITHUB_TOKEN' — bot pushes will gate PR checks behind Approve and run"
+  fail "the push does not go through ./.github/actions/bot-push — a hand-rolled push drifts from the shared auth chain and rebase (Issue #252)"
 fi
 
 exit "$EXIT_CODE"

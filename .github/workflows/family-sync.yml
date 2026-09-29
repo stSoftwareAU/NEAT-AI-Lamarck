@@ -29,8 +29,9 @@
 # place and report success — the exact "absence of a failure is not success"
 # shape this repository refuses.
 #
-# Push auth matches version-increment.yml (App token -> ACTIONS_PUSH ->
-# GITHUB_TOKEN). `version-increment.yml` is paths-filtered to `lamarck/src/**`,
+# Pushes through the shared `.github/actions/bot-push` action (Issue #252):
+# App token -> ACTIONS_PUSH -> GITHUB_TOKEN, rebased before the push.
+# `version-increment.yml` is paths-filtered to `lamarck/src/**`,
 # `lamarck/Cargo.toml` and `Cargo.lock`, so a script refresh alone does not
 # bump the crate version but a moved pin does.
 name: Family Sync
@@ -159,35 +160,16 @@ jobs:
           # green and nothing having built it.
           cargo test --workspace --all-features -- --test-threads=2
 
-      - name: Mint repo-scoped push token
-        id: push-token
-        if: >-
-          (steps.compare.outputs.changed == 'true' || steps.pins.outputs.changed == 'true')
-          && env.PUSH_APP_CONFIGURED == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3
-        with:
-          client-id: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID }}
-          private-key: ${{ secrets.ACTIONS_PUSH_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-
-      # One commit, one push: a refreshed script and a moved pin travel
-      # together, so neither can race the other onto the branch.
-      - name: Commit and push the refreshed scripts and the moved pin
+      # Resolve the commit message here so the push step runs no repository
+      # script alongside the push token.
+      - name: Compose the sync commit message
+        id: message
         if: steps.compare.outputs.changed == 'true' || steps.pins.outputs.changed == 'true'
         env:
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          GH_PAT: ${{ steps.push-token.outputs.token || secrets.ACTIONS_PUSH || secrets.GITHUB_TOKEN }}
           SCRIPTS_REFRESHED: ${{ steps.compare.outputs.changed }}
           PIN_MOVED: ${{ steps.pins.outputs.changed }}
         run: |
           set -euo pipefail
-          GIT=/usr/bin/git
-          BASE64=/usr/bin/base64
-          "$GIT" -c core.hooksPath=/dev/null config user.name "github-actions[bot]"
-          "$GIT" -c core.hooksPath=/dev/null config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # shellcheck disable=SC2086  # space-separated path lists, on purpose
-          "$GIT" -c core.hooksPath=/dev/null add $CANONICAL_PATHS $PINNED_PATHS
           body=""
           if [ "$SCRIPTS_REFRESHED" = "true" ]; then
             body="${body}Refresh ${CANONICAL_PATHS// /, } from ${CANONICAL_REPO}@${CANONICAL_REF} (Issues #234, #235)."$'\n'
@@ -195,8 +177,6 @@ jobs:
           if [ "$PIN_MOVED" = "true" ]; then
             body="${body}Move the neat-core pin to ${CANONICAL_REPO}'s latest release (Issue #235)."$'\n'
           fi
-          "$GIT" -c core.hooksPath=/dev/null commit \
-            -m "chore: sync from NEAT-AI-core Develop" -m "$body"
           # A push made with the default GITHUB_TOKEN starts no new workflow
           # run, so version-increment.yml does not see this commit and the
           # crate version bump has to ride the next push to the branch. Say so
@@ -204,36 +184,25 @@ jobs:
           if [ "$PIN_MOVED" = "true" ] && [ "$PUSH_APP_CONFIGURED" != "true" ]; then
             echo "::warning::the neat-core pin moved, but this push uses the fallback token — version-increment.yml will not run on it, so the crate version bumps on the next push to this branch"
           fi
-          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_PAT" | "$BASE64" -w0)"
-          # `--exit-code` returns 2 for "no matching ref" but other non-zero
-          # codes for a transport or auth failure. Collapsing them all into
-          # "the branch is gone" would drop the refreshed copy and still exit 0
-          # — a network blip reported as success. stderr is kept, not discarded.
-          ls_remote_status=0
-          git ls-remote --exit-code --heads origin "$PR_HEAD_REF" >/dev/null ||
-            ls_remote_status=$?
-          if [ "$ls_remote_status" -eq 2 ]; then
-            echo "::notice::Head branch '$PR_HEAD_REF' no longer exists; skipping push."
-            exit 0
-          fi
-          if [ "$ls_remote_status" -ne 0 ]; then
-            echo "::error::could not reach origin to look up '$PR_HEAD_REF' (git ls-remote exit ${ls_remote_status})"
-            exit 1
-          fi
-          # Rebase onto whatever landed while this job ran — version-increment
-          # pushes to the same branch — so a concurrent commit is not clobbered
-          # and the push needs no force.
-          "$GIT" -c core.hooksPath=/dev/null \
-            -c http.https://github.com/.extraheader="$AUTH_HEADER" \
-            fetch --no-tags origin "+refs/heads/${PR_HEAD_REF}:refs/remotes/origin/${PR_HEAD_REF}"
-          if ! "$GIT" -c core.hooksPath=/dev/null rebase "refs/remotes/origin/${PR_HEAD_REF}"; then
-            # Already failing; leave no half-finished rebase behind for the
-            # next run to trip over. The exit 1 below is the real report.
-            "$GIT" -c core.hooksPath=/dev/null rebase --abort ||
-              echo "::warning::could not abort the conflicted rebase"
-            echo "::error::could not rebase the sync commit onto origin/${PR_HEAD_REF} — the same files were changed on the branch as well; reset them to the NEAT-AI-core Develop copies and push again"
-            exit 1
-          fi
-          "$GIT" -c core.hooksPath=/dev/null \
-            -c http.https://github.com/.extraheader="$AUTH_HEADER" \
-            push origin "HEAD:$PR_HEAD_REF"
+          {
+            echo "commit_message<<SYNC_COMMIT_MESSAGE_EOF"
+            echo "chore: sync from NEAT-AI-core Develop"
+            echo
+            printf '%s' "$body"
+            echo "SYNC_COMMIT_MESSAGE_EOF"
+          } >>"$GITHUB_OUTPUT"
+
+      # One commit, one push: a refreshed script and a moved pin travel
+      # together, so neither can race the other onto the branch. The shared
+      # bot-push action (Issue #252) rebases onto whatever version-increment
+      # pushed while this job ran, so a concurrent commit is not clobbered.
+      - name: Commit and push the refreshed scripts and the moved pin
+        if: steps.compare.outputs.changed == 'true' || steps.pins.outputs.changed == 'true'
+        uses: ./.github/actions/bot-push
+        with:
+          branch: ${{ github.event.pull_request.head.ref }}
+          commit-message: ${{ steps.message.outputs.commit_message }}
+          add-paths: ${{ env.CANONICAL_PATHS }} ${{ env.PINNED_PATHS }}
+          app-client-id: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID }}
+          app-private-key: ${{ secrets.ACTIONS_PUSH_APP_PRIVATE_KEY }}
+          push-pat: ${{ secrets.ACTIONS_PUSH }}

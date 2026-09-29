@@ -56,6 +56,12 @@ echo "WHAT: version-increment workflow validator behaviour (Issue #190)..."
 echo "Validating version-increment PR workflow (runlib / GRQ-taxation)..."
 ./scripts/check-version-increment-workflow.sh
 
+echo "WHAT: shared bot-push action validator behaviour (Issue #252)..."
+./scripts/test-check-bot-push-action.sh
+
+echo "Validating the shared bot-push action and its callers (Issue #252)..."
+./scripts/check-bot-push-action.sh
+
 echo "WHAT: family-sync workflow validator behaviour (Issues #234, #235)..."
 ./scripts/test-check-family-sync-workflow.sh
 

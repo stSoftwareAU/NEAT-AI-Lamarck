@@ -84,6 +84,12 @@ RUNS_FAMILY_PINS="$TMP_DIR/runs-family-pins.yml"
 insert_after_fmt "./scripts/family-pins.sh" >"$RUNS_FAMILY_PINS"
 assert_exit "auto-format runs family-pins.sh itself → fail" 1 "$CHECK" "$RUNS_FAMILY_PINS"
 
+# The push goes through the shared bot-push action (Issue #252); a workflow
+# that swaps it for a hand-rolled push must fail.
+HAND_ROLLED="$TMP_DIR/hand-rolled-push.yml"
+sed -E 's|uses: \./\.github/actions/bot-push|uses: ./.github/actions/my-own-push|' "$WORKFLOW" >"$HAND_ROLLED"
+assert_exit "push not through the bot-push action → fail" 1 "$CHECK" "$HAND_ROLLED"
+
 # Unreadable path is an error, not a pass.
 assert_exit "missing workflow file → error" 2 "$CHECK" "$TMP_DIR/absent.yml"
 

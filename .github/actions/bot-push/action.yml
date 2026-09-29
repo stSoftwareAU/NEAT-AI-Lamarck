@@ -1,0 +1,114 @@
+# Commit the working-tree changes a bot job made and push them to a PR branch
+# (Issue #252).
+#
+# The one home of the bot-push logic that auto-format.yml, version-increment.yml
+# and family-sync.yml share: mint a repo-scoped App token, commit, and push with
+# the App token -> ACTIONS_PUSH -> GITHUB_TOKEN fallback chain. Before this
+# action each workflow carried its own copy, and the copies had already drifted.
+# `scripts/check-bot-push-action.sh` validates this file and refuses a workflow
+# that grows its own copy back.
+#
+# Hardening, kept in one place:
+#   - git and base64 run from absolute paths, every git call disables hooks, and
+#     no repository script runs while the token is in the environment;
+#   - the token reaches git only as a per-command `extraheader`, never on disk;
+#   - a head branch deleted while the job ran is a notice, but an unreachable
+#     origin is an error — a network blip is never reported as success;
+#   - the commit is rebased onto whatever landed while the job ran, so a
+#     concurrent bot push is neither clobbered nor force-pushed over.
+#
+# Composite actions cannot read `secrets`, so callers pass them as inputs.
+name: Bot push
+description: Commit working-tree changes and push them to a PR branch with the App -> ACTIONS_PUSH -> GITHUB_TOKEN chain.
+
+inputs:
+  branch:
+    description: The PR head branch to push to.
+    required: true
+  commit-message:
+    description: The full commit message (subject, blank line, optional body).
+    required: true
+  add-paths:
+    description: Space-separated paths to stage; empty stages every tracked modification.
+    required: false
+    default: ""
+  app-client-id:
+    description: The push App's client id (secrets.ACTIONS_PUSH_APP_CLIENT_ID); empty skips the mint.
+    required: false
+    default: ""
+  app-private-key:
+    description: The push App's private key (secrets.ACTIONS_PUSH_APP_PRIVATE_KEY); empty skips the mint.
+    required: false
+    default: ""
+  push-pat:
+    description: The org ACTIONS_PUSH PAT, used when no App token was minted; empty falls back to GITHUB_TOKEN.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Mint repo-scoped push token
+      id: push-token
+      if: inputs.app-client-id != '' && inputs.app-private-key != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3
+      with:
+        client-id: ${{ inputs.app-client-id }}
+        private-key: ${{ inputs.app-private-key }}
+        repositories: ${{ github.event.repository.name }}
+        permission-contents: write
+
+    - name: Commit and push
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        ADD_PATHS: ${{ inputs.add-paths }}
+        GH_PAT: ${{ steps.push-token.outputs.token || inputs.push-pat || github.token }}
+      run: |
+        set -euo pipefail
+        GIT=/usr/bin/git
+        BASE64=/usr/bin/base64
+        "$GIT" -c core.hooksPath=/dev/null config user.name "github-actions[bot]"
+        "$GIT" -c core.hooksPath=/dev/null config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        if [ -n "$ADD_PATHS" ]; then
+          # shellcheck disable=SC2086  # a space-separated path list, on purpose
+          "$GIT" -c core.hooksPath=/dev/null add -- $ADD_PATHS
+        else
+          "$GIT" -c core.hooksPath=/dev/null add -u
+        fi
+        "$GIT" -c core.hooksPath=/dev/null commit -m "$COMMIT_MESSAGE"
+        AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_PAT" | "$BASE64" -w0)"
+        # `--exit-code` returns 2 for "no matching ref" but other non-zero codes
+        # for a transport or auth failure; only the former means the branch is
+        # gone. stderr is kept, not discarded.
+        ls_remote_status=0
+        "$GIT" -c core.hooksPath=/dev/null \
+          -c http.https://github.com/.extraheader="$AUTH_HEADER" \
+          ls-remote --exit-code --heads origin "$BRANCH" >/dev/null ||
+          ls_remote_status=$?
+        if [ "$ls_remote_status" -eq 2 ]; then
+          echo "::notice::Head branch '$BRANCH' no longer exists; skipping push."
+          exit 0
+        fi
+        if [ "$ls_remote_status" -ne 0 ]; then
+          echo "::error::could not reach origin to look up '$BRANCH' (git ls-remote exit ${ls_remote_status})"
+          exit 1
+        fi
+        # Rebase onto whatever another bot job pushed while this one ran, so
+        # the push needs no force and clobbers nothing. --autostash keeps a
+        # tracked change outside add-paths from blocking the rebase.
+        "$GIT" -c core.hooksPath=/dev/null \
+          -c http.https://github.com/.extraheader="$AUTH_HEADER" \
+          fetch --no-tags origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
+        if ! "$GIT" -c core.hooksPath=/dev/null rebase --autostash "refs/remotes/origin/${BRANCH}"; then
+          # Already failing; leave no half-finished rebase behind. The exit 1
+          # below is the real report.
+          "$GIT" -c core.hooksPath=/dev/null rebase --abort ||
+            echo "::warning::could not abort the conflicted rebase"
+          echo "::error::could not rebase the bot commit onto origin/${BRANCH} — the same files were changed on the branch as well; resolve them on the branch and push again"
+          exit 1
+        fi
+        "$GIT" -c core.hooksPath=/dev/null \
+          -c http.https://github.com/.extraheader="$AUTH_HEADER" \
+          push origin "HEAD:$BRANCH"
