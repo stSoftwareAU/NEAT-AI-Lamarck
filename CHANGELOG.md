@@ -75,6 +75,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The security workflow no longer compiles cargo-audit on every run (Issue
+  #253).** `security.yml` now installs a prebuilt, version-pinned
+  `cargo-audit@0.22.2` via `taiki-e/install-action` before
+  `rustsec/audit-check`. The action only runs `cargo install cargo-audit` when
+  the tool is missing from PATH, so the ~3 min from-source compile no longer
+  runs. There is no cache involved, so nothing can go stale or be poisoned.
+
 - **`rand` moves from 0.9 to 0.10 (Issue #244, PR #243).** Dependabot's bump was
   a breaking one: rand 0.10 renamed `RngCore` to `Rng` and moved the generator
   helpers (`random`, `random_range`, `random_bool`) onto a new `RngExt` trait,
