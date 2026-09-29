@@ -2513,7 +2513,7 @@ sequenceDiagram
     W->>A: branch, commit-message, add-paths, App secrets, ACTIONS_PUSH
     A->>A: mint App token (if configured), else ACTIONS_PUSH, else GITHUB_TOKEN
     A->>A: git add + commit
-    A->>O: ls-remote (exit 2 → branch gone, skip; other → fail)
+    A->>O: ls-remote (exit 2 → branch gone, skip — other → fail)
     A->>O: fetch, rebase onto origin/branch (conflict → abort, fail)
     A->>O: push HEAD:branch (never forced)
 ```
