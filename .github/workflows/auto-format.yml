@@ -42,13 +42,6 @@ jobs:
     # Skip forks — neither GITHUB_TOKEN nor ACTIONS_PUSH can push to a
     # fork's branch. Formatting on fork PRs is the author's responsibility.
     if: github.event.pull_request.head.repo.full_name == github.repository
-    env:
-      # The `secrets` context is unavailable in a step-level `if:`, so the
-      # push App's configured/not-configured state is hoisted to a job-level
-      # env flag. Until an organisation admin creates the App and stores its
-      # secrets this is 'false': the mint step is skipped and the push falls
-      # back to ACTIONS_PUSH / GITHUB_TOKEN.
-      PUSH_APP_CONFIGURED: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID != '' && secrets.ACTIONS_PUSH_APP_PRIVATE_KEY != '' }}
 
     steps:
       - name: Checkout PR branch
@@ -70,8 +63,8 @@ jobs:
           cargo fmt --all
 
       # Resolve the commit message here, not in the push step below: the
-      # helper is PR-head code, so running it alongside $GH_PAT would hand
-      # the org PAT straight to an attacker-editable script.
+      # helper is PR-head code, so running it alongside the push token would
+      # hand the org PAT straight to an attacker-editable script.
       - name: Detect formatting / lockfile changes
         id: detect
         run: |
@@ -87,34 +80,15 @@ jobs:
             echo "AUTO_FORMAT_COMMIT_MESSAGE_EOF"
           } >>"$GITHUB_OUTPUT"
 
-      - name: Mint repo-scoped push token
-        id: push-token
-        if: steps.detect.outputs.changed == 'true' && env.PUSH_APP_CONFIGURED == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3
-        with:
-          client-id: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID }}
-          private-key: ${{ secrets.ACTIONS_PUSH_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-
-      # Push with the minted repo-scoped token, falling back to the org-level
-      # ACTIONS_PUSH PAT (then GITHUB_TOKEN). git and base64 are pinned to
-      # absolute paths; every git invocation disables repository hooks; no
-      # repository script runs in this step (PAT hardening).
+      # Commit and push through the shared bot-push action (Issue #252): the
+      # App token -> ACTIONS_PUSH -> GITHUB_TOKEN chain and the push hardening
+      # live there, once, for every bot job. No repository script runs in it.
       - name: Commit and push rustfmt / lock sync fixes
         if: steps.detect.outputs.changed == 'true'
-        env:
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          COMMIT_MESSAGE: ${{ steps.detect.outputs.commit_message }}
-          GH_PAT: ${{ steps.push-token.outputs.token || secrets.ACTIONS_PUSH || secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          GIT=/usr/bin/git
-          BASE64=/usr/bin/base64
-          "$GIT" -c core.hooksPath=/dev/null config user.name "github-actions[bot]"
-          "$GIT" -c core.hooksPath=/dev/null config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          "$GIT" -c core.hooksPath=/dev/null commit -am "$COMMIT_MESSAGE"
-          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_PAT" | "$BASE64" -w0)"
-          "$GIT" -c core.hooksPath=/dev/null \
-            -c http.https://github.com/.extraheader="$AUTH_HEADER" \
-            push origin "HEAD:$PR_HEAD_REF"
+        uses: ./.github/actions/bot-push
+        with:
+          branch: ${{ github.event.pull_request.head.ref }}
+          commit-message: ${{ steps.detect.outputs.commit_message }}
+          app-client-id: ${{ secrets.ACTIONS_PUSH_APP_CLIENT_ID }}
+          app-private-key: ${{ secrets.ACTIONS_PUSH_APP_PRIVATE_KEY }}
+          push-pat: ${{ secrets.ACTIONS_PUSH }}

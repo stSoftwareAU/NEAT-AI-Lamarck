@@ -81,6 +81,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `rustsec/audit-check`. The action only runs `cargo install cargo-audit` when
   the tool is missing from PATH, so the ~3 min from-source compile no longer
   runs. There is no cache involved, so nothing can go stale or be poisoned.
+- **One shared bot-push action replaces three copies (Issue #252).**
+  `auto-format.yml`, `version-increment.yml` and `family-sync.yml` each carried
+  their own "mint push token" and "commit and push" steps. They now call
+  `.github/actions/bot-push`, which holds the App token → `ACTIONS_PUSH` →
+  `GITHUB_TOKEN` chain and the push hardening in one place. As a result, all
+  three jobs now get the rebase-before-push and the
+  deleted-branch-versus-unreachable-origin handling that only `family-sync`
+  used to have. `scripts/check-bot-push-action.sh` (and its behaviour test
+  `scripts/test-check-bot-push-action.sh`) validates the action and refuses a
+  workflow that grows its own push logic back.
 
 - **`rand` moves from 0.9 to 0.10 (Issue #244, PR #243).** Dependabot's bump was
   a breaking one: rand 0.10 renamed `RngCore` to `Rng` and moved the generator

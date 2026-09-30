@@ -22,15 +22,17 @@
 #       in sync.
 #   10. Compare byte-for-byte (`cmp`) rather than by mtime or by grep.
 #   11. Gate commit/push behind a change-detection output (idempotent).
-#   12. Rebase before pushing, so a concurrent push is not clobbered.
-#   13. Use the App token -> ACTIONS_PUSH -> GITHUB_TOKEN auth chain.
-#   14. Use strict bash (`set -euo pipefail`).
-#   15. Run `scripts/family-pins.sh`, so the neat-core pin moves to core's
+#   12. Push through the shared `./.github/actions/bot-push` action (Issue
+#       #252), which rebases before pushing and owns the App token ->
+#       ACTIONS_PUSH -> GITHUB_TOKEN chain. `check-bot-push-action.sh`
+#       validates the action and that this caller passes it the secrets.
+#   13. Use strict bash (`set -euo pipefail`).
+#   14. Run `scripts/family-pins.sh`, so the neat-core pin moves to core's
 #       latest release before the push.
-#   16. Stage `lamarck/Cargo.toml` and `Cargo.lock`, so a moved pin actually
+#   15. Stage `lamarck/Cargo.toml` and `Cargo.lock`, so a moved pin actually
 #       reaches the PR branch — and, through the paths `version-increment.yml`
 #       gates on, carries a crate version bump with it.
-#   17. Compile and test a moved pin in this job: a push made with the default
+#   16. Compile and test a moved pin in this job: a push made with the default
 #       GITHUB_TOKEN starts no new workflow run, so a breaking core release
 #       would otherwise land on the branch with nothing having built it.
 #
@@ -206,6 +208,7 @@ pushing_step_is_guarded() {
     !in_step { next }
     /^[[:space:]]*if:[[:space:]]*.*steps\.[A-Za-z0-9_-]+\.outputs\./ { has_guard = 1 }
     /git[^|]*push[[:space:]]+origin|[[:space:]]push[[:space:]]+origin/ { has_push = 1 }
+    /uses:[[:space:]]*"?\.\/\.github\/actions\/bot-push"?[[:space:]]*$/ { has_push = 1 }
     END {
       if (in_step && has_push) { print (has_guard ? "guarded" : "unguarded") }
     }
@@ -221,23 +224,15 @@ else
   ok "the pushing step is conditional on change-detection output (idempotent guard)"
 fi
 
-# 12. Rebase before push.
-if has '(^|[^[:alnum:]_-])rebase([[:space:]]|$)'; then
-  ok "the branch is rebased before the push"
+# 12. The push goes through the shared action, which rebases first and owns
+# the auth chain — a hand-rolled push here is the copy Issue #252 removed.
+if has '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*"?\./\.github/actions/bot-push"?[[:space:]]*$'; then
+  ok "pushes through ./.github/actions/bot-push (rebase + App -> ACTIONS_PUSH -> GITHUB_TOKEN)"
 else
-  fail "no rebase before push — a commit pushed by another job while this ran would be clobbered or the push rejected"
+  fail "the push does not go through ./.github/actions/bot-push — a hand-rolled push drifts from the shared rebase and auth chain"
 fi
 
-# 13. Push auth chain.
-if has 'steps\.[A-Za-z0-9_-]+\.outputs\.token[[:space:]]*\|\|' \
-  && has 'secrets\.ACTIONS_PUSH[[:space:]]*\|\|' \
-  && has 'secrets\.GITHUB_TOKEN'; then
-  ok "push auth falls back App token -> ACTIONS_PUSH -> GITHUB_TOKEN"
-else
-  fail "push auth chain is not App token -> ACTIONS_PUSH -> GITHUB_TOKEN"
-fi
-
-# 14. Strict bash.
+# 13. Strict bash.
 if has 'set -euo pipefail'; then
   ok "strict bash (set -euo pipefail) present"
 else
@@ -251,7 +246,7 @@ else
   fail "missing the 'chore: sync from NEAT-AI-core Develop' commit subject"
 fi
 
-# 15. The pin move itself. Without this the job syncs the scripts and leaves
+# 14. The pin move itself. Without this the job syncs the scripts and leaves
 # `neat-core` pinned to whatever release it was pinned to when the branch was
 # cut — the unmoved pin this repository stopped tolerating in Issue #235.
 if has '\./scripts/family-pins\.sh'; then
@@ -260,13 +255,13 @@ else
   fail "the job never runs ./scripts/family-pins.sh — the neat-core pin would never move off the release the branch was cut at"
 fi
 
-# 16. A moved pin has to be staged to reach the branch. It may be named
-# literally on the `git add` line or through a variable, but that variable must
-# itself name both the manifest carrying the pin and the lockfile that follows
-# it.
+# 15. A moved pin has to be staged to reach the branch. It may be named
+# literally on the `git add` / `add-paths:` line or through a variable
+# (`$VAR` or `${{ env.VAR }}`), but that variable must itself name both the
+# manifest carrying the pin and the lockfile that follows it.
 pin_paths_staged() {
   local add_line var definition
-  # Every `git add` line is considered, not just the first: a step whose body
+  # Every staging line is considered, not just the first: a step whose body
   # merely contains the word "add" must not shadow the one that stages.
   while IFS= read -r add_line; do
     [[ -n "$add_line" ]] || continue
@@ -274,13 +269,15 @@ pin_paths_staged() {
       return 0
     fi
     # shellcheck disable=SC2016  # the `$`, `{` and `}` are literals to match/strip
-    for var in $(printf '%s\n' "$add_line" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' | tr -d '${}'); do
+    for var in $(printf '%s\n' "$add_line" \
+      | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|env\.[A-Za-z_][A-Za-z0-9_]*' \
+      | sed 's/^env\.//' | tr -d '${}'); do
       definition="$(grep -E "^[[:space:]]*${var}:" "$BODY" || true)"
       if [[ "$definition" == *"lamarck/Cargo.toml"* && "$definition" == *"Cargo.lock"* ]]; then
         return 0
       fi
     done
-  done < <(grep -E '(^|[^[:alnum:]_-])add[[:space:]]' "$BODY")
+  done < <(grep -E '(^|[^[:alnum:]_-])add[[:space:]]|^[[:space:]]*add-paths:' "$BODY")
   return 1
 }
 
@@ -290,7 +287,7 @@ else
   fail "the commit does not stage lamarck/Cargo.toml and Cargo.lock — a moved pin would be discarded with the runner, and version-increment.yml would never see the bump"
 fi
 
-# 17. A moved pin must be compiled and tested *in the step that moves it*: a
+# 16. A moved pin must be compiled and tested *in the step that moves it*: a
 # push made with the default GITHUB_TOKEN starts no new workflow run, so
 # nothing else in this run would ever build it. A `cargo build` parked in some
 # unrelated always-run step would not: it would run before the move.

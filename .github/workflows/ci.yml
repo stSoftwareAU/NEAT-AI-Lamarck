@@ -145,6 +145,7 @@ jobs:
             "scripts/runlib.sh"
             "scripts/family-pins.sh"
             ".github/workflows/family-sync.yml"
+            ".github/actions/bot-push/action.yml"
           )
           missing_files=()
           for file in "${required_files[@]}"; do
@@ -177,6 +178,12 @@ jobs:
 
       - name: Require a push-based Dependabot advisory channel for cargo (Issue #215)
         run: ./scripts/check-dependabot-config.sh
+
+      - name: WHAT — shared bot-push action validator behaviour (Issue #252)
+        run: ./scripts/test-check-bot-push-action.sh
+
+      - name: Validate the shared bot-push action and its callers (Issue #252)
+        run: ./scripts/check-bot-push-action.sh
 
       - name: WHAT — family-sync workflow validator behaviour (Issues #234, #235)
         run: ./scripts/test-check-family-sync-workflow.sh

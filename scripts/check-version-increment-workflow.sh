@@ -12,6 +12,9 @@
 #      sub-issue PRs are bumped too (Issue #190).
 #   8. Diff against the PR's own base branch rather than a hardcoded
 #      `origin/Develop` (Issue #190).
+#   9. Push through the shared `./.github/actions/bot-push` action, which owns
+#      the App token -> ACTIONS_PUSH -> GITHUB_TOKEN chain (Issue #252;
+#      `check-bot-push-action.sh` validates the action and its callers).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -116,6 +119,12 @@ if grep -qE 'chore: auto-increment versions for changed projects' "$WORKFLOW"; t
   ok "auto-increment commit subject present (idempotency grep target)"
 else
   fail "missing auto-increment commit subject"
+fi
+
+if grep -qE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*"?\./\.github/actions/bot-push"?[[:space:]]*$' "$WORKFLOW"; then
+  ok "pushes through ./.github/actions/bot-push (App -> ACTIONS_PUSH -> GITHUB_TOKEN, Issue #252)"
+else
+  fail "the push does not go through ./.github/actions/bot-push — a hand-rolled push drifts from the shared auth chain and rebase (Issue #252)"
 fi
 
 exit "$EXIT_CODE"
