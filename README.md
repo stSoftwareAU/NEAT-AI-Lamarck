@@ -2111,7 +2111,7 @@ here, because this README is the single source of truth for the architecture
 ## Development rules
 
 - Rust edition 2024.
-- Pin the Rust toolchain, matching NEAT-AI-scorer (`1.98.0`).
+- Pin the Rust toolchain to the NEAT-AI family floor (`1.99.0`, NEAT-AI-core#747) and keep `rust-version` in `lamarck/Cargo.toml` equal to it.
 - Use TDD for behaviour changes.
 - Keep dependencies modest and justified.
 - Prefer streaming training-data analysis; the corpus is large.
