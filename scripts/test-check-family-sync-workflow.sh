@@ -156,20 +156,28 @@ assert_exit "push step loses its guard → fail" 1 "$CHECK" "$PUSH_UNGUARDED"
 
 # A workflow that never pushes cannot sync anything.
 NO_PUSH="$TMP_DIR/no-push.yml"
-grep -v 'push origin' "$WORKFLOW" >"$NO_PUSH"
+grep -v 'uses: ./.github/actions/bot-push' "$WORKFLOW" >"$NO_PUSH"
 assert_exit "nothing pushes to origin → fail" 1 "$CHECK" "$NO_PUSH"
 
-# Rule 12 — rebase before push.
-NO_REBASE="$TMP_DIR/no-rebase.yml"
-grep -v 'rebase' "$WORKFLOW" >"$NO_REBASE"
-assert_exit "no rebase before push → fail" 1 "$CHECK" "$NO_REBASE"
+# Rule 12 — the push goes through the shared bot-push action (Issue #252),
+# which rebases and owns the auth chain. A hand-rolled push that skips it —
+# guarded, so rule 11 alone would pass — must still fail.
+HAND_ROLLED="$TMP_DIR/hand-rolled-push.yml"
+awk '
+  /^        uses: \.\/\.github\/actions\/bot-push$/ {
+    print "        run: |"
+    print "          set -euo pipefail"
+    print "          /usr/bin/git push origin \"HEAD:$PR_HEAD_REF\""
+    skip = 1
+    next
+  }
+  skip && /^        with:$/ { next }
+  skip && /^          / { next }
+  { skip = 0; print }
+' "$WORKFLOW" >"$HAND_ROLLED"
+assert_exit "hand-rolled push instead of the bot-push action → fail" 1 "$CHECK" "$HAND_ROLLED"
 
-# Rule 13 — the push auth chain.
-NO_FALLBACK="$TMP_DIR/no-fallback.yml"
-sed -E 's|GH_PAT: .*|GH_PAT: ${{ secrets.GITHUB_TOKEN }}|' "$WORKFLOW" >"$NO_FALLBACK"
-assert_exit "push auth without the App/ACTIONS_PUSH chain → fail" 1 "$CHECK" "$NO_FALLBACK"
-
-# Rule 14 — strict bash.
+# Rule 13 — strict bash.
 NO_STRICT="$TMP_DIR/no-strict.yml"
 grep -v 'set -euo pipefail' "$WORKFLOW" >"$NO_STRICT"
 assert_exit "no set -euo pipefail → fail" 1 "$CHECK" "$NO_STRICT"
@@ -189,21 +197,22 @@ sed -E 's|CANONICAL_PATHS: "scripts/runlib.sh scripts/family-pins.sh"|CANONICAL_
   "$WORKFLOW" >"$NO_FAMILY_PINS"
 assert_exit "family-pins.sh never fetched → fail" 1 "$CHECK" "$NO_FAMILY_PINS"
 
-# Rule 15 — the pin move itself. The script may still be fetched and kept in
+# Rule 14 — the pin move itself. The script may still be fetched and kept in
 # sync; if the job never runs it, the pin stays on whatever release the branch
 # was cut at.
 NO_PIN_MOVE="$TMP_DIR/no-pin-move.yml"
 grep -v '^[[:space:]]*\./scripts/family-pins\.sh$' "$WORKFLOW" >"$NO_PIN_MOVE"
 assert_exit "family-pins.sh fetched but never run → fail" 1 "$CHECK" "$NO_PIN_MOVE"
 
-# Rule 16 — a moved pin that is not staged dies with the runner, and
+# Rule 15 — a moved pin that is not staged dies with the runner, and
 # version-increment.yml never sees the Cargo.lock change that bumps the crate.
 NO_PIN_STAGED="$TMP_DIR/no-pin-staged.yml"
 # shellcheck disable=SC2016  # the workflow's own `$VAR` text, not an expansion
-sed -E 's|add \$CANONICAL_PATHS \$PINNED_PATHS|add $CANONICAL_PATHS|' "$WORKFLOW" >"$NO_PIN_STAGED"
+sed -E 's|add-paths: \$\{\{ env\.CANONICAL_PATHS \}\} \$\{\{ env\.PINNED_PATHS \}\}|add-paths: ${{ env.CANONICAL_PATHS }}|' \
+  "$WORKFLOW" >"$NO_PIN_STAGED"
 assert_exit "moved pin not staged → fail" 1 "$CHECK" "$NO_PIN_STAGED"
 
-# Rule 17 — a push made with the default GITHUB_TOKEN starts no new workflow
+# Rule 16 — a push made with the default GITHUB_TOKEN starts no new workflow
 # run, so a moved pin nothing compiles would merge with CI green.
 NO_BUILD="$TMP_DIR/no-build.yml"
 grep -v '^[[:space:]]*cargo test' "$WORKFLOW" >"$NO_BUILD"
@@ -226,7 +235,7 @@ awk '
 ' "$WORKFLOW" >"$BUILD_ELSEWHERE"
 assert_exit "build in an unrelated step → fail" 1 "$CHECK" "$BUILD_ELSEWHERE"
 
-# Rule 16, robustness — an earlier step whose body merely contains the word
+# Rule 15, robustness — an earlier step whose body merely contains the word
 # "add" must not shadow the step that stages the moved pin.
 DECOY_ADD="$TMP_DIR/decoy-add.yml"
 awk '

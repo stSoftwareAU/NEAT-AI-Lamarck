@@ -2239,10 +2239,10 @@ The job carries **no `paths:` filter**: drift arrives when core changes, not
 when this PR touches `scripts/`, so no PR is skipped for touching the wrong
 files. Its branch filter follows the repository convention used by `ci.yml` and
 `version-increment.yml` — `Develop` and `milestone/**` — so a PR into any other
-base branch is not synced. It pushes with the same auth chain as
-`version-increment.yml` (App token → `ACTIONS_PUSH` → `GITHUB_TOKEN`), skips
+base branch is not synced. It pushes through the shared
+[bot-push action](#shared-bot-push-action) like the other bot jobs, skips
 forks, and rebases before pushing so a concurrent `version-increment` push is
-not clobbered; a rebase conflict fails the job with the files to reset named.
+not clobbered; a rebase conflict fails the job rather than force-pushing.
 Because `version-increment.yml` is paths-filtered to `lamarck/src/**`,
 `lamarck/Cargo.toml` and `Cargo.lock`, a script refresh alone does **not** bump
 the crate version, while a moved pin does — so the pin never moves at an
@@ -2484,6 +2484,38 @@ flowchart TD
     Bump -->|equal to base| Patch["patch++ in Cargo.toml + Cargo.lock"]
     Patch --> Push["commit + push to the PR head branch"]
     Push --> Remote["remote runlib install sees a new version → rebuilds"]
+```
+
+### Shared bot-push action
+
+`auto-format.yml`, `version-increment.yml` and `family-sync.yml` all commit
+their changes back to the PR branch through one composite action,
+[`.github/actions/bot-push`](./.github/actions/bot-push/action.yml)
+(Issue #252). Previously each workflow carried its own copy of the token mint and the
+push, and the copies had already drifted apart. The action mints a repo-scoped
+App token, then commits the paths it is given (or every tracked modification)
+and pushes with the App token → `ACTIONS_PUSH` → `GITHUB_TOKEN` fallback chain.
+It uses absolute `git`/`base64` paths, disables hooks and passes the token only
+as a per-command `extraheader`. A head branch deleted mid-run is skipped, but an
+unreachable origin fails the job. The commit is rebased onto whatever another
+bot job pushed in the meantime, never force-pushed.
+`scripts/check-bot-push-action.sh` (run from `quality.sh` and CI) validates the
+action. It also fails when a workflow grows its own push logic back, or calls
+the action without the push secrets. `scripts/test-check-bot-push-action.sh`
+exercises each rule.
+
+```mermaid
+sequenceDiagram
+    participant W as Bot workflow (auto-format / version-increment / family-sync)
+    participant A as .github/actions/bot-push
+    participant O as origin (PR head branch)
+    W->>W: make changes, resolve commit message (no token in scope)
+    W->>A: branch, commit-message, add-paths, App secrets, ACTIONS_PUSH
+    A->>A: mint App token (if configured), else ACTIONS_PUSH, else GITHUB_TOKEN
+    A->>A: git add + commit
+    A->>O: ls-remote (exit 2 → branch gone, skip — other → fail)
+    A->>O: fetch, rebase onto origin/branch (conflict → abort, fail)
+    A->>O: push HEAD:branch (never forced)
 ```
 
 ### neat-core release pin
