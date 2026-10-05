@@ -113,10 +113,10 @@ install_toolchain_shims() {
   cat >"${bin_dir}/rustc" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "-vV" ]]; then
-  printf 'rustc 1.98.0 (797e8a9bc 2026-08-05)\nbinary: rustc\ncommit-hash: 797e8a9bc\ncommit-date: 2026-08-05\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 21.1.0\n'
+  printf 'rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 21.1.0\n'
   exit 0
 fi
-echo "rustc 1.98.0 (797e8a9bc 2026-08-05)"
+echo "rustc 1.99.0 (b940084d7 2026-09-28)"
 EOF
   chmod +x "${bin_dir}/rustc"
   cat >"${bin_dir}/rustup" <<'EOF'
