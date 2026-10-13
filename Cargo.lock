@@ -202,8 +202,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "neat-core"
-version = "0.23.0"
-source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.0#0d3231b8e654356f1c444c85d31beccb82354c07"
+version = "0.23.1"
+source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.1#8f8fbd856b65de793e0d74c5910ed65860923a61"
 dependencies = [
  "serde",
  "serde_json",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "neat_ai_lamarck"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "clap",
  "neat-core",
@@ -340,9 +340,9 @@ dependencies = [
 
 [[package]]
 name = "signal-hook"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
+checksum = "b29ffa27d3d59a049bb328258de100f8012848d1b08d444e08bbc02ac468435e"
 dependencies = [
  "libc",
  "signal-hook-registry",
