@@ -202,8 +202,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "neat-core"
-version = "0.23.1"
-source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.1#8f8fbd856b65de793e0d74c5910ed65860923a61"
+version = "0.23.2"
+source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.2#1d44889e405e4e0cfb553321b44cc39e7d771f5f"
 dependencies = [
  "serde",
  "serde_json",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "neat_ai_lamarck"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "clap",
  "neat-core",
@@ -327,9 +327,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
  "itoa",
  "memchr",
