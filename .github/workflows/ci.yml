@@ -34,7 +34,7 @@ env:
 
 jobs:
   quality:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Quality Checks
     needs: [validation]
     runs-on: ubuntu-latest
@@ -110,12 +110,12 @@ jobs:
       checks: write
       pull-requests: write
     uses: ./.github/workflows/security.yml
-    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     with:
       include-dependency-review: false
 
   validation:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Project Validation
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -200,7 +200,7 @@ jobs:
         run: ./scripts/check-cargo-quality-overlap.sh
 
   shell-checks:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Shell Script Quality
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -248,7 +248,7 @@ jobs:
         run: ./scripts/test-family-pins.sh
 
   spell-check:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Spell Check
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -266,7 +266,7 @@ jobs:
         run: ./scripts/spell-check.sh
 
   typescript-check:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: TypeScript Validity
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -291,7 +291,7 @@ jobs:
   ci-required:
     name: CI Required Checks
     needs: [validation, quality, security, shell-checks, spell-check, typescript-check]
-    if: ${{ (always()) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
