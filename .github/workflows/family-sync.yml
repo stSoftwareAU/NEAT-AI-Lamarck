@@ -38,7 +38,7 @@ name: Family Sync
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - Develop
       # Milestone sub-issue PRs merge into `milestone/<slug>` and never touch
@@ -62,7 +62,7 @@ jobs:
     timeout-minutes: 30
     # A fork's PR branch cannot be pushed to, and the token is not shared with
     # forks, so the job would fail rather than sync.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: ${{ (github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     permissions:
       contents: write
     env:
