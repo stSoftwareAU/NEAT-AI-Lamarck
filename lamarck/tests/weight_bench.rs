@@ -230,6 +230,7 @@ fn smoke_manifest_end_to_end() {
 }
 
 #[test]
+#[ignore = "CMA-ES at D=100 takes ~40s in a debug build; run with --release -- --ignored"]
 fn extrapolation_flag_on_rows_for_large_dimension() {
     let mut m = tiny_manifest();
     m.dimensions = vec![100];

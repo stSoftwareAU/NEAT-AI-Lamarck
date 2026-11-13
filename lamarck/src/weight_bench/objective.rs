@@ -67,7 +67,7 @@ impl WeightObjective {
                 creature.synapses.len()
             )));
         }
-        if records.is_empty() || records.len() % width != 0 {
+        if records.is_empty() || !records.len().is_multiple_of(width) {
             return Err(BenchError::InvalidConfig(format!(
                 "records must be a non-empty multiple of the record width {width}"
             )));
@@ -112,7 +112,7 @@ impl WeightObjective {
             creature.synapses[i].weight = w;
         }
         let width = creature.input + creature.output;
-        if records.is_empty() || records.len() % width != 0 {
+        if records.is_empty() || !records.len().is_multiple_of(width) {
             return Err("records are empty or not a multiple of the record width".into());
         }
         let mut net = compile_creature(&creature).map_err(|e| e.to_string())?;
