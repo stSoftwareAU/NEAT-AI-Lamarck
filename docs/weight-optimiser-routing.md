@@ -41,9 +41,10 @@ times the dimension **and** the probe's plateau share plus kink share is at most
 
 ## Predeclared protocol
 
-The manifest is fixed in code (`predeclared_manifest`) and committed as
-[`manifest.json`](evidence/weight-router/manifest.json) before any result was
-read.
+The manifest is fixed in code (`predeclared_manifest` in
+`lamarck/src/weight_bench/experiment.rs`) before the run, and every run echoes
+the manifest it used to `manifest.json` (the committed copy is
+[`manifest.json`](evidence/weight-router/manifest.json)).
 
 * **Families.** Hidden squash `tanh` (smooth), `relu` (kinks) and `hard-tanh`
   (kinks and plateaus).
@@ -73,6 +74,9 @@ read.
 * **Calibration.** Grid search on calibration seeds only: `minBudgetMultiple` in
   `{10, 30, 100, never}` by `maxNonSmoothShare` in `{0.25, 0.5, 0.75, 1.01}`,
   minimising the mean normalised loss of the arm each row would be routed to.
+  Calibration scores each routed row with that arm's full-budget calibration
+  result, so it does not charge the router's 17 probe evaluations; validation
+  runs the router itself and does charge them.
   Calibrated result: `minBudgetMultiple` 10, `maxNonSmoothShare` 0.25,
   `probeAxes` 8.
 * **Metric.** Normalised loss, final over start, on the screening records;
