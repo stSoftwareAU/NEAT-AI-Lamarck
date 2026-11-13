@@ -5,7 +5,9 @@
 //! creature is the teacher with every weight nudged, i.e. an already-fit
 //! creature that is slightly off.
 
-use neat_core::{CreatureExport, parse_creature_json};
+use std::path::PathBuf;
+
+use neat_core::{CreatureExport, TrainingDataConfig, TrainingDataIterator, parse_creature_json};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -37,14 +39,19 @@ pub enum Family {
     Relu,
     /// `HARD_TANH`.
     HardTanh,
+    /// A real creature and fixed records supplied by the caller (see
+    /// [`problem_from_corpus`]); not a synthetic family.
+    Corpus,
 }
 
 impl Family {
-    fn squash_name(self) -> &'static str {
+    /// Squash name of a synthetic family; `None` for [`Family::Corpus`].
+    fn squash_name(self) -> Option<&'static str> {
         match self {
-            Self::Tanh => "TANH",
-            Self::Relu => "RELU",
-            Self::HardTanh => "HARD_TANH",
+            Self::Tanh => Some("TANH"),
+            Self::Relu => Some("RELU"),
+            Self::HardTanh => Some("HARD_TANH"),
+            Self::Corpus => None,
         }
     }
 
@@ -53,6 +60,8 @@ impl Family {
             Self::Tanh => x.tanh(),
             Self::Relu => x.max(0.0),
             Self::HardTanh => x.clamp(-1.0, 1.0),
+            // Never reached for a built problem; identity is harmless.
+            Self::Corpus => x,
         }
     }
 }
@@ -140,6 +149,11 @@ pub fn build_problem(spec: &ProblemSpec) -> Result<Problem, BenchError> {
             spec.dimension
         )));
     }
+    let Some(squash) = spec.family.squash_name() else {
+        return Err(BenchError::InvalidConfig(
+            "corpus problems come from problem_from_corpus, not build_problem".into(),
+        ));
+    };
     let mut rng = StdRng::seed_from_u64(spec.seed);
     let taps: Vec<Vec<usize>> = (0..HIDDEN)
         .map(|_| choose(&mut rng, INPUTS, FAN_IN))
@@ -176,7 +190,7 @@ pub fn build_problem(spec: &ProblemSpec) -> Result<Problem, BenchError> {
     for h in 0..HIDDEN {
         neurons.push(format!(
             r#"{{"type":"hidden","uuid":"h{h}","bias":0.0,"squash":"{}"}}"#,
-            spec.family.squash_name()
+            squash
         ));
         for (k, &i) in taps[h].iter().enumerate() {
             let w = w_in[h][k] + rng.random_range(-START_PERTURBATION..START_PERTURBATION);
@@ -203,6 +217,121 @@ pub fn build_problem(spec: &ProblemSpec) -> Result<Problem, BenchError> {
     Ok(Problem {
         spec: *spec,
         creature,
+        synapse_indices,
+        screening,
+        full,
+        held_out,
+        preparation_evaluations,
+    })
+}
+
+/// A real creature plus fixed training records, for representative runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorpusSpec {
+    /// Creature JSON file.
+    pub creature: PathBuf,
+    /// Training-data directory.
+    pub training_data: PathBuf,
+    /// Records (from the start of the window) used for screening.
+    pub screening_records: usize,
+    /// Records (from the end of the window) held out.
+    pub held_out_records: usize,
+    /// Most records read from the corpus, in file order.
+    pub max_records: usize,
+}
+
+/// Load the creature and up to `max_records` packed records (inputs then
+/// outputs), in file order.
+pub fn load_corpus(spec: &CorpusSpec) -> Result<(CreatureExport, Vec<f32>), BenchError> {
+    let bad = |m: String| BenchError::InvalidConfig(m);
+    if spec.screening_records == 0 || spec.held_out_records == 0 {
+        return Err(bad(format!(
+            "corpus screeningRecords ({}) and heldOutRecords ({}) must both be positive",
+            spec.screening_records, spec.held_out_records
+        )));
+    }
+    let text = std::fs::read_to_string(&spec.creature)
+        .map_err(|e| bad(format!("corpus creature {}: {e}", spec.creature.display())))?;
+    let creature = crate::width::load_creature(&text)
+        .map_err(|e| bad(format!("corpus creature {}: {e}", spec.creature.display())))?;
+    let config = TrainingDataConfig::new(creature.input, creature.output);
+    let training = |e: String| {
+        bad(format!(
+            "corpus training data {}: {e}",
+            spec.training_data.display()
+        ))
+    };
+    let mut iter = TrainingDataIterator::new(&spec.training_data, config)
+        .map_err(|e| training(e.to_string()))?;
+    let width = creature.input + creature.output;
+    let mut packed: Vec<f32> = Vec::new();
+    let mut count = 0usize;
+    while count < spec.max_records {
+        let Some(record) = iter.next_record().map_err(|e| training(e.to_string()))? else {
+            break;
+        };
+        if record.inputs.len() < creature.input || record.outputs.len() < creature.output {
+            continue;
+        }
+        packed.extend_from_slice(&record.inputs[..creature.input]);
+        packed.extend_from_slice(&record.outputs[..creature.output]);
+        count += 1;
+    }
+    debug_assert_eq!(packed.len(), count * width);
+    let needed = spec.screening_records + spec.held_out_records;
+    if count < needed {
+        return Err(bad(format!(
+            "corpus has {count} usable records but screeningRecords + heldOutRecords needs {needed} ({} + {})",
+            spec.screening_records, spec.held_out_records
+        )));
+    }
+    Ok((creature, packed))
+}
+
+/// Build a problem from a loaded corpus: screening is the first
+/// `screening_records`, held-out is the last `held_out_records` of the window,
+/// and full is everything except the held-out tail.
+pub fn problem_from_corpus(
+    creature: &CreatureExport,
+    packed: &[f32],
+    spec: &CorpusSpec,
+    dimension: usize,
+    seed: u64,
+) -> Result<Problem, BenchError> {
+    if !(MIN_DIMENSION..=MAX_DIMENSION).contains(&dimension) {
+        return Err(BenchError::InvalidConfig(format!(
+            "dimension {dimension} outside {MIN_DIMENSION}..={MAX_DIMENSION}"
+        )));
+    }
+    if dimension > creature.synapses.len() {
+        return Err(BenchError::InvalidConfig(format!(
+            "dimension {dimension} exceeds the creature's {} synapses",
+            creature.synapses.len()
+        )));
+    }
+    let width = creature.input + creature.output;
+    let total = packed.len() / width;
+    let needed = spec.screening_records + spec.held_out_records;
+    if spec.screening_records == 0 || spec.held_out_records == 0 || total < needed {
+        return Err(BenchError::InvalidConfig(format!(
+            "corpus has {total} records but screeningRecords + heldOutRecords needs {needed} ({} + {})",
+            spec.screening_records, spec.held_out_records
+        )));
+    }
+    let held_start = (total - spec.held_out_records) * width;
+    let screening = packed[..spec.screening_records * width].to_vec();
+    let full = packed[..held_start].to_vec();
+    let held_out = packed[held_start..total * width].to_vec();
+    let (synapse_indices, preparation_evaluations) =
+        select_influential(creature, &screening, dimension)?;
+    Ok(Problem {
+        spec: ProblemSpec {
+            family: Family::Corpus,
+            dimension,
+            seed,
+        },
+        creature: creature.clone(),
         synapse_indices,
         screening,
         full,

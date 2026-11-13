@@ -2,7 +2,9 @@
 
 use neat_ai_lamarck::weight_bench::experiment::ALLOWED_BUDGET_MULTIPLES;
 use neat_ai_lamarck::weight_bench::probes::LandscapeProbe;
-use neat_ai_lamarck::weight_bench::suite::{Family, Problem, ProblemSpec};
+use neat_ai_lamarck::weight_bench::suite::{
+    CorpusSpec, Family, Problem, ProblemSpec, load_corpus, problem_from_corpus,
+};
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, CMA_SIGMA0, CalibrationRow, Manifest, ROUTER_PROBE_AXES,
     RouterRule, WeightObjective, build_problem, calibrate, cma_es, is_extrapolation,
@@ -47,6 +49,7 @@ fn tiny_manifest() -> Manifest {
         validation_seeds: vec![1001],
         bootstrap_resamples: 200,
         bootstrap_seed: 266,
+        corpus: None,
     }
 }
 
@@ -256,4 +259,144 @@ fn select_influential_contract() {
     assert_eq!(idx.len(), 20);
     assert!(idx.windows(2).all(|w| w[0] < w[1]));
     assert_eq!(evals, n + 1);
+}
+
+/// Writes a creature (8 inputs, 4 TANH hiddens reading every input, one
+/// IDENTITY output: 36 synapses) and 600 deterministic records.
+fn corpus_fixture(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::io::Write;
+    let mut neurons = Vec::new();
+    let mut synapses = Vec::new();
+    for h in 0..4 {
+        neurons.push(format!(
+            r#"{{"type":"hidden","uuid":"h{h}","bias":0.0,"squash":"TANH"}}"#
+        ));
+        for i in 0..8 {
+            let w = ((h * 8 + i) % 11) as f64 * 0.1 - 0.5;
+            synapses.push(format!(
+                r#"{{"fromUUID":"input-{i}","toUUID":"h{h}","weight":{w}}}"#
+            ));
+        }
+        let w = 0.3 + h as f64 * 0.1;
+        synapses.push(format!(
+            r#"{{"fromUUID":"h{h}","toUUID":"o1","weight":{w}}}"#
+        ));
+    }
+    neurons.push(r#"{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}"#.to_string());
+    let json = format!(
+        r#"{{"semanticVersion":"4.0.0","forwardOnly":true,"input":8,"output":1,"neurons":[{}],"synapses":[{}]}}"#,
+        neurons.join(","),
+        synapses.join(",")
+    );
+    let creature = dir.join("creature.json");
+    std::fs::write(&creature, json).unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let mut file = std::io::BufWriter::new(std::fs::File::create(data.join("0.bin")).unwrap());
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for _ in 0..600 {
+        for _ in 0..=8 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let v = ((state >> 11) as f64 / (1u64 << 53) as f64) as f32 * 2.0 - 1.0;
+            file.write_all(&v.to_le_bytes()).unwrap();
+        }
+    }
+    file.flush().unwrap();
+    (creature, data)
+}
+
+fn corpus_spec(dir: &std::path::Path, screening: usize, held_out: usize) -> CorpusSpec {
+    let (creature, training_data) = corpus_fixture(dir);
+    CorpusSpec {
+        creature,
+        training_data,
+        screening_records: screening,
+        held_out_records: held_out,
+        max_records: 600,
+    }
+}
+
+fn corpus_manifest(spec: CorpusSpec) -> Manifest {
+    Manifest {
+        families: vec![Family::Corpus],
+        corpus: Some(spec),
+        bootstrap_resamples: 50,
+        ..tiny_manifest()
+    }
+}
+
+#[test]
+fn corpus_manifest_runs_within_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = run_manifest(&corpus_manifest(corpus_spec(dir.path(), 128, 128))).unwrap();
+    assert_eq!(
+        results.coverage.planned_runs,
+        results.coverage.completed_runs
+    );
+    assert_eq!(results.coverage.failed_runs, 0);
+    assert!(results.runs.iter().all(|r| r.family == Family::Corpus));
+    assert!(results.runs.iter().all(|r| r.evaluations_used <= r.budget));
+    let routers: Vec<_> = results
+        .runs
+        .iter()
+        .filter(|r| r.phase == "validation" && r.arm == Arm::Router)
+        .collect();
+    assert_eq!(routers.len(), 1);
+    assert_eq!(routers[0].probe_evaluations, 17);
+}
+
+#[test]
+fn corpus_with_too_few_records_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    // Positive control: the same files are accepted with a feasible split.
+    assert!(run_manifest(&corpus_manifest(corpus_spec(dir.path(), 128, 128))).is_ok());
+    let err = run_manifest(&corpus_manifest(corpus_spec(dir.path(), 400, 400))).unwrap_err();
+    match err {
+        BenchError::InvalidConfig(m) => assert!(m.contains("800"), "{m}"),
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+#[test]
+fn corpus_and_families_must_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = corpus_spec(dir.path(), 128, 128);
+    let mixed = Manifest {
+        corpus: Some(spec),
+        ..tiny_manifest()
+    };
+    let no_spec = Manifest {
+        families: vec![Family::Corpus],
+        ..tiny_manifest()
+    };
+    for m in [mixed, no_spec] {
+        match run_manifest(&m).unwrap_err() {
+            BenchError::InvalidConfig(msg) => assert!(msg.contains("corpus"), "{msg}"),
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn corpus_problem_splits_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = corpus_spec(dir.path(), 128, 128);
+    let (creature, packed) = load_corpus(&spec).unwrap();
+    assert_eq!(packed.len(), 600 * 9);
+    let p = problem_from_corpus(&creature, &packed, &spec, 20, 7).unwrap();
+    assert_eq!(p.screening.len(), 128 * 9);
+    assert_eq!(p.held_out.len(), 128 * 9);
+    assert_eq!(p.full.len(), (600 - 128) * 9);
+    assert_eq!(p.held_out[..], packed[(600 - 128) * 9..]);
+    assert_eq!(p.full[..128 * 9], p.screening[..]);
+    assert!(
+        build_problem(&ProblemSpec {
+            family: Family::Corpus,
+            dimension: 20,
+            seed: 1
+        })
+        .is_err()
+    );
 }

@@ -12,7 +12,8 @@ use super::probes::probe_landscape;
 use super::router::{Arm, CalibrationRow, ROUTER_PROBE_AXES, RouterRule, calibrate, run_arm};
 use super::stats::{bootstrap_ci_mean, mean, median};
 use super::suite::{
-    Family, MAX_DIMENSION, MIN_DIMENSION, Problem, ProblemSpec, build_problem, is_extrapolation,
+    CorpusSpec, Family, MAX_DIMENSION, MIN_DIMENSION, Problem, ProblemSpec, build_problem,
+    is_extrapolation, load_corpus, problem_from_corpus,
 };
 
 /// Budget multiples (of the dimension) the experiment may use.
@@ -39,6 +40,9 @@ pub struct Manifest {
     pub bootstrap_resamples: usize,
     /// Seed of the bootstrap RNG.
     pub bootstrap_seed: u64,
+    /// A real creature and records; when set, `families` must be `[Corpus]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus: Option<CorpusSpec>,
 }
 
 impl Manifest {
@@ -50,6 +54,15 @@ impl Manifest {
             || self.budget_multiples.is_empty()
         {
             return bad("families, dimensions and budgetMultiples must be non-empty".into());
+        }
+        match &self.corpus {
+            Some(_) if self.families != [Family::Corpus] => {
+                return bad("a corpus manifest must declare families exactly [corpus]".into());
+            }
+            None if self.families.contains(&Family::Corpus) => {
+                return bad("family corpus needs a corpus specification in the manifest".into());
+            }
+            _ => {}
         }
         if let Some(d) = self
             .dimensions
@@ -100,6 +113,7 @@ pub fn predeclared_manifest() -> Manifest {
         validation_seeds: (1001..=1012).collect(),
         bootstrap_resamples: 2000,
         bootstrap_seed: 266,
+        corpus: None,
     }
 }
 
@@ -339,14 +353,23 @@ fn problems(
     seeds: &[u64],
     mut visit: impl FnMut(&Problem, &WeightObjective) -> Result<(), BenchError>,
 ) -> Result<(), BenchError> {
+    let corpus = match &m.corpus {
+        Some(spec) => Some((spec, load_corpus(spec)?)),
+        None => None,
+    };
     for &family in &m.families {
         for &dimension in &m.dimensions {
             for &seed in seeds {
-                let problem = build_problem(&ProblemSpec {
-                    family,
-                    dimension,
-                    seed,
-                })?;
+                let problem = match &corpus {
+                    Some((spec, (creature, packed))) => {
+                        problem_from_corpus(creature, packed, spec, dimension, seed)?
+                    }
+                    None => build_problem(&ProblemSpec {
+                        family,
+                        dimension,
+                        seed,
+                    })?,
+                };
                 let objective = WeightObjective::new(
                     problem.creature.clone(),
                     problem.synapse_indices.clone(),

@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Offline benchmark of budget-aware routing between local weight optimisers
+  (Issue #266).** New `lamarck/src/weight_bench/` module and
+  `weight_router_bench` example compare the current refinement, an in-repo
+  CMA-ES and a probe-then-route rule under explicit evaluation budgets, on a
+  predeclared synthetic suite with calibration and validation seeds kept apart.
+  Opt-in and offline: nothing in the optimisation loop calls it and no default
+  changed. On the synthetic suite CMA-ES beat the refinement in 20 of 27 cells,
+  but the router always routed to CMA-ES and never beat it, so it is not ported.
+  The AMM method (arXiv 2611.06879) is not implemented because the paper could
+  not be retrieved, and the representative run on the production corpus has not
+  been made. Write-up and committed evidence:
+  `docs/weight-optimiser-routing.md`, `docs/evidence/weight-router/`.
+
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
   `path = "../../NEAT-AI-core/neat-core"` dependency with
