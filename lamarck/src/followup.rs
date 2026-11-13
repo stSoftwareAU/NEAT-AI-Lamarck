@@ -40,7 +40,9 @@ const SQUASH_ALTERNATIVES: usize = 3;
 /// backs half of it out (the weakening control), and `+1.0` takes a full second
 /// step. All three are relative to the winning move, so a tiny accepted nudge
 /// produces tiny probes and a large one produces large probes.
-const STEP_FRACTIONS: [f64; 3] = [0.5, -0.5, 1.0];
+///
+/// The weight bench's refinement arm (`weight_bench::refine`) replays these too.
+pub const STEP_FRACTIONS: [f64; 3] = [0.5, -0.5, 1.0];
 
 /// The accepted winner a follow-up burst is exploring around.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
