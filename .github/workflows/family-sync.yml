@@ -137,8 +137,11 @@ jobs:
         if: steps.compare.outputs.changed == 'true'
         run: |
           set -euo pipefail
+          # Local replays of this step run without the job's `env:`; the
+          # fallback must equal CANONICAL_PATHS (check-family-sync-workflow.sh).
+          gate_paths="${CANONICAL_PATHS:-scripts/runlib.sh scripts/family-pins.sh}"
           # shellcheck disable=SC2086  # a space-separated path list, on purpose
-          shellcheck --severity=warning -s bash $CANONICAL_PATHS
+          shellcheck --severity=warning -s bash $gate_paths
           ./scripts/test-runlib.sh </dev/null
           ./scripts/test-family-pins.sh </dev/null
 
