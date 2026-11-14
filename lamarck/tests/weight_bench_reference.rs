@@ -207,8 +207,13 @@ fn many_seeds() -> Manifest {
     m
 }
 
+/// Start loss other than 1.0, so raw and normalised (final over start) columns
+/// differ and a test fails if the code reads the raw one.
+const START_LOSS: f64 = 2.0;
+
 /// A row whose screening and held-out columns carry different values, so a
-/// test fails if the code reads the wrong column.
+/// test fails if the code reads the wrong column. `screening` and `held_out`
+/// are the normalised losses; the raw finals are `START_LOSS` times those.
 fn fixture(arm: Arm, seed: u64, screening: f64, held_out: f64) -> RunRow {
     RunRow {
         family: Family::Tanh,
@@ -218,15 +223,15 @@ fn fixture(arm: Arm, seed: u64, screening: f64, held_out: f64) -> RunRow {
         seed,
         phase: "validation".into(),
         arm,
-        start_screening_loss: Some(1.0),
-        final_screening_loss: Some(screening),
+        start_screening_loss: Some(START_LOSS),
+        final_screening_loss: Some(START_LOSS * screening),
         normalised_screening_loss: Some(screening),
         evaluations_used: 200,
         preparation_evaluations: 21,
-        full_loss_start: Some(1.0),
-        full_loss_final: Some(screening),
-        held_out_loss_start: Some(1.0),
-        held_out_loss_final: Some(held_out),
+        full_loss_start: Some(START_LOSS),
+        full_loss_final: Some(START_LOSS * screening),
+        held_out_loss_start: Some(START_LOSS),
+        held_out_loss_final: Some(START_LOSS * held_out),
         normalised_held_out_loss: Some(held_out),
         confirmation_evaluations: 5,
         extrapolation: false,

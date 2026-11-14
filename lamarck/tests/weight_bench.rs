@@ -353,7 +353,7 @@ fn corpus_manifest(spec: CorpusSpec) -> Manifest {
 #[test]
 fn corpus_manifest_runs_within_budget() {
     let dir = tempfile::tempdir().unwrap();
-    let results = run_manifest(&corpus_manifest(corpus_spec(dir.path(), 128, 128))).unwrap();
+    let results = run_manifest(&corpus_manifest(corpus_spec(dir.path(), 128, 96))).unwrap();
     assert_eq!(
         results.coverage.planned_runs,
         results.coverage.completed_runs
@@ -363,8 +363,8 @@ fn corpus_manifest_runs_within_budget() {
     assert!(results.runs.iter().all(|r| r.evaluations_used <= r.budget));
     assert_eq!(results.runs.len(), 2);
     // Wiring check: each row starts from the creature's own weights on the
-    // window's first 128 screening and last 128 held-out records.
-    let spec = corpus_spec(dir.path(), 128, 128);
+    // window's first 128 screening and last 96 held-out records.
+    let spec = corpus_spec(dir.path(), 128, 96);
     let (creature, packed) = load_corpus(&spec).unwrap();
     let p = problem_from_corpus(&creature, &packed, &spec, 20, 1001).unwrap();
     let o =
@@ -389,18 +389,18 @@ fn corpus_with_too_few_records_is_rejected() {
         BenchError::InvalidConfig(m) => assert!(m.contains("800"), "{m}"),
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
-    // Boundary: 300 + 300 needs exactly the 600 records on offer.
-    let spec = corpus_spec(dir.path(), 300, 300);
+    // Boundary: 350 + 250 needs exactly the 600 records on offer.
+    let spec = corpus_spec(dir.path(), 350, 250);
     let (creature, packed) = load_corpus(&spec).unwrap();
     assert_eq!(packed.len(), 600 * 9);
     assert!(problem_from_corpus(&creature, &packed, &spec, 20, 7).is_ok());
-    match load_corpus(&corpus_spec(dir.path(), 301, 300)).unwrap_err() {
+    match load_corpus(&corpus_spec(dir.path(), 351, 250)).unwrap_err() {
         BenchError::InvalidConfig(m) => assert!(m.contains("601"), "{m}"),
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
     // problem_from_corpus refuses a window too short for the split on its own.
     let short = CorpusSpec {
-        screening_records: 301,
+        screening_records: 351,
         ..spec
     };
     match problem_from_corpus(&creature, &packed, &short, 20, 7).unwrap_err() {
@@ -432,13 +432,14 @@ fn corpus_and_families_must_agree() {
 #[test]
 fn corpus_problem_splits_records() {
     let dir = tempfile::tempdir().unwrap();
-    let spec = corpus_spec(dir.path(), 128, 128);
+    // Unequal counts, so reading the wrong one for either slice changes a result.
+    let spec = corpus_spec(dir.path(), 128, 96);
     let (creature, packed) = load_corpus(&spec).unwrap();
     assert_eq!(packed.len(), 600 * 9);
     let p = problem_from_corpus(&creature, &packed, &spec, 20, 7).unwrap();
     assert_eq!(p.screening[..], packed[..128 * 9]);
-    assert_eq!(p.held_out[..], packed[(600 - 128) * 9..]);
-    assert_eq!(p.full.len(), (600 - 128) * 9);
+    assert_eq!(p.held_out[..], packed[(600 - 96) * 9..]);
+    assert_eq!(p.full.len(), (600 - 96) * 9);
     // Full and held-out are disjoint and together cover the window exactly.
     let all = [&p.full[..], &p.held_out[..]].concat();
     assert_eq!(all[..], packed[..]);
