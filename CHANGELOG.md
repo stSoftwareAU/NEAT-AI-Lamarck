@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tasks (`minPairedTasks`) and goes `inconclusive` if any run behind it failed.
   The example runner stamps every report with `versions.sourceCommit` and
   `versions.sourceTreeDirty` as well as the crate version (both `null` when the
-  library is called without the runner).
+  library is called without the runner, or when git is unavailable).
   Files mode refuses validation creatures that duplicate each other (same
   fingerprint) and refuses to run without an explicit `OUT_DIR`. Reproduce with
   `cargo run --release --example local_rules_bench`; the method, protocol and
