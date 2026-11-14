@@ -264,8 +264,8 @@ on a quiet machine, and keep the results private.
   - a real 18-run smoke against the serve binary;
   - `--bench /bin/false`, which writes RunRow-shaped failure rows and exits 1;
   - the key set of a failure row matches a real row.
-- `./quality.sh < /dev/null` passed at `2c0028a` ("All quality checks
-  passed!"). It is re-run on the final head before the push.
+- `./quality.sh < /dev/null` passed at `98a561b`, the last code and evidence
+  commit plus this summary ("All quality checks passed!").
 
 Not done:
 
