@@ -58,6 +58,11 @@ impl Manifest {
         {
             return bad("families, dimensions and budgetMultiples must be non-empty".into());
         }
+        unique("families", &self.families)?;
+        unique("dimensions", &self.dimensions)?;
+        unique("budgetMultiples", &self.budget_multiples)?;
+        unique("calibrationSeeds", &self.calibration_seeds)?;
+        unique("validationSeeds", &self.validation_seeds)?;
         match &self.corpus {
             Some(_) if self.families != [Family::Corpus] => {
                 return bad("a corpus manifest must declare families exactly [corpus]".into());
@@ -104,6 +109,13 @@ impl Manifest {
         }
         Ok(())
     }
+}
+
+fn unique<T: Eq + std::hash::Hash>(field: &str, values: &[T]) -> Result<(), BenchError> {
+    if values.iter().collect::<HashSet<_>>().len() != values.len() {
+        return Err(BenchError::InvalidConfig(format!("duplicate entry in {field}")));
+    }
+    Ok(())
 }
 
 /// The manifest declared for issue #266.
@@ -374,11 +386,11 @@ pub(super) fn finish_row(
             row.held_out_loss_start = Some(held_s);
             row.held_out_loss_final = Some(held_f);
             row.normalised_held_out_loss = Some(ratio(held_f, held_s));
-            row.confirmation_evaluations = confirmations.get();
-            debug_assert_eq!(row.confirmation_evaluations, CONFIRMATION_EVALUATIONS);
+            debug_assert_eq!(confirmations.get(), CONFIRMATION_EVALUATIONS);
         }
         Err(e) => row.error = Some(e.to_string()),
     }
+    row.confirmation_evaluations = confirmations.get();
     row
 }
 
@@ -607,6 +619,7 @@ pub(super) fn summarise_cells(
                                         && r.arm == arm
                                         && r.seed == seed
                                 })
+                                .filter(|r| r.error.is_none())
                                 .map_or((None, None), |r| {
                                     (r.normalised_screening_loss, r.normalised_held_out_loss)
                                 })
@@ -702,4 +715,38 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
         runs,
         cells,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_confirmations_keep_the_calls_already_spent() {
+        let (problem, objective) = build_one(
+            &None, Family::Tanh, CorpusRole::Validation, 20, 1001,
+        ).unwrap();
+        for (invalid_full, expected_calls) in [(true, 2), (false, 4)] {
+            let mut failed = problem.clone();
+            if invalid_full {
+                failed.full.clear();
+            } else {
+                failed.held_out.clear();
+            }
+            let row = finish_row(&failed, &objective, 10, "validation", Arm::AmmReference, 0, |obj| {
+                obj.eval(&obj.start())?;
+                Ok(Arm::AmmReference)
+            });
+            assert_eq!(row.evaluations_used, 1);
+            assert_eq!(row.error.as_deref(), Some("evaluation failed: records are empty or not a multiple of the record width"));
+            assert_eq!(row.confirmation_evaluations, expected_calls);
+        }
+        let control = finish_row(&problem, &objective, 10, "validation", Arm::AmmReference, 0, |obj| {
+            obj.eval(&obj.start())?;
+            Ok(Arm::AmmReference)
+        });
+        assert_eq!(control.error, None);
+        assert_eq!(control.confirmation_evaluations, 5);
+        assert_eq!(control.normalised_screening_loss, Some(1.0));
+    }
 }

@@ -30,7 +30,7 @@ pub const MAX_DIMENSION: usize = 100;
 pub const EXTRAPOLATION_ABOVE: usize = 40;
 
 /// Hidden-neuron squash family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Family {
     /// `TANH`.

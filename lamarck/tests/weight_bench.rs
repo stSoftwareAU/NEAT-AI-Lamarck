@@ -201,6 +201,50 @@ fn manifest_validation() {
 }
 
 #[test]
+fn manifest_rejects_duplicate_trial_identifiers() {
+    let control = tiny_manifest();
+    assert!(control.validate().is_ok());
+    for field in ["families", "dimensions", "budgetMultiples", "calibrationSeeds", "validationSeeds"] {
+        let mut value = serde_json::to_value(&control).unwrap();
+        let items = value[field].as_array_mut().unwrap();
+        items.push(items[0].clone());
+        let manifest: Manifest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            manifest.validate(),
+            Err(BenchError::InvalidConfig(format!("duplicate entry in {field}")))
+        );
+    }
+}
+
+#[test]
+fn objective_requires_distinct_weights() {
+    let (p, _) = problem(Family::Tanh, 1);
+    let selected = p.synapse_indices[0];
+    assert!(WeightObjective::new(p.creature.clone(), vec![selected], &p.screening).is_ok());
+    assert_eq!(
+        WeightObjective::new(p.creature.clone(), vec![selected, selected], &p.screening)
+            .err(),
+        Some(BenchError::InvalidConfig("synapse indices must be distinct".into()))
+    );
+}
+
+#[test]
+fn objective_requires_nonzero_record_dimensions() {
+    let (p, _) = problem(Family::Tanh, 1);
+    let selected = p.synapse_indices[0];
+    assert!(WeightObjective::new(p.creature.clone(), vec![selected], &p.screening).is_ok());
+    for (input, output) in [(0, 0), (0, 1), (1, 0)] {
+        let mut creature = p.creature.clone();
+        creature.input = input;
+        creature.output = output;
+        assert_eq!(
+            WeightObjective::new(creature, vec![selected], &[1.0]).err(),
+            Some(BenchError::InvalidConfig("creature input and output must both be positive".into()))
+        );
+    }
+}
+
+#[test]
 fn extrapolation_boundary() {
     assert!(!is_extrapolation(40));
     assert!(is_extrapolation(41));

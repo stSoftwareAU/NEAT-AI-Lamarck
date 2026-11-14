@@ -2,6 +2,7 @@
 //! selection.
 
 use std::fmt;
+use std::collections::HashSet;
 
 use neat_core::{CreatureExport, compile_creature, mse_sum_batch_packed};
 
@@ -46,12 +47,18 @@ pub struct WeightObjective {
 
 impl WeightObjective {
     /// Build an objective over `synapse_indices` of `creature`, scored on the
-    /// packed `records` (per record: inputs then outputs).
+    /// packed `records` (per record: inputs then outputs). Both dimensions must
+    /// be positive and each selected synapse must be a distinct axis.
     pub fn new(
         creature: CreatureExport,
         synapse_indices: Vec<usize>,
         records: &[f32],
     ) -> Result<Self, BenchError> {
+        if creature.input == 0 || creature.output == 0 {
+            return Err(BenchError::InvalidConfig(
+                "creature input and output must both be positive".into(),
+            ));
+        }
         let width = creature.input + creature.output;
         if synapse_indices.is_empty() {
             return Err(BenchError::InvalidConfig(
@@ -66,6 +73,11 @@ impl WeightObjective {
                 "synapse index {bad} out of range (creature has {})",
                 creature.synapses.len()
             )));
+        }
+        if synapse_indices.iter().collect::<HashSet<_>>().len() != synapse_indices.len() {
+            return Err(BenchError::InvalidConfig(
+                "synapse indices must be distinct".into(),
+            ));
         }
         if records.is_empty() || !records.len().is_multiple_of(width) {
             return Err(BenchError::InvalidConfig(format!(

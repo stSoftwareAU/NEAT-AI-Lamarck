@@ -319,6 +319,26 @@ fn coverage_counts_failed_rows_and_missing_runs() {
 }
 
 #[test]
+fn failed_reference_with_completed_metrics_is_excluded_from_pairs() {
+    let m = many_seeds();
+    let runs = in_process_rows();
+    let mut reference = reference_rows(-0.3);
+    let control = summarise_reference(&m, &runs, &reference).unwrap();
+    assert_eq!(control.cells[0].comparisons[0].screening.wins, 6);
+    // The driver can receive a complete server row, then record an AMM error.
+    reference[0].error = Some("amm: RuntimeError: reference failed after evaluation".into());
+    let result = summarise_reference(&m, &runs, &reference).unwrap();
+    assert_eq!(result.coverage.failed_runs, 1);
+    assert_eq!(result.total_evaluations, control.total_evaluations);
+    for comparison in &result.cells[0].comparisons {
+        assert_eq!(comparison.screening.wins, 5);
+        assert_eq!(comparison.screening.failures, 1);
+        assert_eq!(comparison.held_out.wins, 5);
+        assert_eq!(comparison.held_out.failures, 1);
+    }
+}
+
+#[test]
 fn malformed_reference_sets_are_refused() {
     let m = many_seeds();
     let runs = in_process_rows();

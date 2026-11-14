@@ -30,6 +30,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -86,55 +87,66 @@ def run_one(args):
     cmd = [bench, "--manifest", manifest_path, "--serve-reference",
            "--family", family, "--dimension", str(dimension),
            "--seed", str(seed), "--budget-multiple", str(multiple)]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, bufsize=1)
     try:
-        header_line = proc.stdout.readline()
-        if not header_line:
-            _, err = proc.communicate()
-            return failure(run, f"no header from server: {stderr_cause(err)}")
-        header = json.loads(header_line)
-        start = np.array(header["start"], dtype=float)
-        h = header["boxHalfWidth"]
+        # A file cannot fill a stderr pipe while the client waits on stdout.
+        with tempfile.TemporaryFile(mode="w+t") as errors, subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=errors, text=True, bufsize=1,
+        ) as proc:
+            try:
+                header_line = proc.stdout.readline()
+                if not header_line:
+                    proc.wait()
+                    errors.seek(0)
+                    return failure(run, f"no header from server: {stderr_cause(errors.read())}")
+                header = json.loads(header_line)
+                start = np.array(header["start"], dtype=float)
+                h = header["boxHalfWidth"]
 
-        def f(x):
-            proc.stdin.write(json.dumps([float(v) for v in x]) + "\n")
-            proc.stdin.flush()
-            reply = json.loads(proc.stdout.readline() or '{"error":"server closed"}')
-            if "error" in reply:
-                raise RuntimeError(reply["error"])
-            return float(reply["loss"])
+                def f(x):
+                    proc.stdin.write(json.dumps([float(v) for v in x]) + "\n")
+                    proc.stdin.flush()
+                    reply = json.loads(proc.stdout.readline() or '{"error":"server closed"}')
+                    if "error" in reply:
+                        raise RuntimeError(reply["error"])
+                    return float(reply["loss"])
 
-        raised = None
-        try:
-            amm_optimizer.minimize(f, x0=start, budget=header["budget"],
-                                   bounds=(start - h, start + h),
-                                   seed=np.random.SeedSequence(header["seed"]))
-        except Exception as exc:  # recorded on the row, never swallowed
-            raised = f"{type(exc).__name__}: {exc}"
+                raised = None
+                try:
+                    amm_optimizer.minimize(f, x0=start, budget=header["budget"],
+                                           bounds=(start - h, start + h), config=PRESET,
+                                           seed=np.random.SeedSequence(header["seed"]))
+                except Exception as exc:  # recorded on the row, never swallowed
+                    raised = f"{type(exc).__name__}: {exc}"
 
-        try:
-            proc.stdin.write("done\n")
-            proc.stdin.flush()
-        except BrokenPipeError:
-            pass
-        row = None
-        for line in proc.stdout:
-            if line.startswith('{"row"'):
-                row = json.loads(line)["row"]
-        err = proc.stderr.read()
-        code = proc.wait()
-        if row is None:
-            return failure(run, f"server exit {code} without a row: {stderr_cause(err)}")
-        if raised:  # the AMM cause leads; keep the server's error after it
-            row["error"] = f"amm: {raised}" + (
-                f"; server: {row['error']}" if row.get("error") else "")
-        return row
-    except Exception as exc:
-        proc.kill()
+                try:
+                    proc.stdin.write("done\n")
+                    proc.stdin.flush()
+                except BrokenPipeError as exc:
+                    raised = raised or f"BrokenPipeError: {exc}"
+                row = None
+                for line in proc.stdout:
+                    if line.startswith('{"row"'):
+                        row = json.loads(line)["row"]
+                code = proc.wait()
+                errors.seek(0)
+                err = errors.read()
+                if row is None:
+                    return failure(run, f"server exit {code} without a row; costs incomplete: {stderr_cause(err)}")
+                faults = []
+                if raised:
+                    faults.append(f"amm: {raised}")
+                if row["error"]:
+                    faults.append(f"server: {row['error']}")
+                if code:
+                    faults.append(f"server exit {code}: {stderr_cause(err)}")
+                row["error"] = "; ".join(faults) or None
+                return row
+            except Exception as exc:
+                proc.kill()
+                return failure(run, f"{type(exc).__name__}: {exc}; costs incomplete")
+    except OSError as exc:
         return failure(run, f"{type(exc).__name__}: {exc}")
-    finally:
-        proc.wait()
 
 
 def main():
