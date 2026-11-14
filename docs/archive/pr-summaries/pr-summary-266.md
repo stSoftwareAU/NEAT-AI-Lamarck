@@ -77,7 +77,7 @@ flowchart LR
 
 ## Merge verification
 
-- GitHub CI and remote push are not yet verified. The worker pre-push toolchain diagnostic above remains unresolved; no guard was bypassed.
+- Normal push passed the worker gate (`1 changed-file checks, 0 pre-flight commands`) and reached the remote branch. GitHub CI is not yet verified. The direct toolchain probe failure above is recorded separately; no guard was bypassed.
 
 Skipped: the full archived synthetic campaign was not repeated in this run;
 only the compatibility subset was rerun. Representative inputs, production
