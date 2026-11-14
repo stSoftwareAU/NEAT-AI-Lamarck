@@ -179,6 +179,13 @@ Lamarck gives the gradient the least authority it can: the learning signal
 delta, and the `backprop` strategy is skipped outright when no blame reached the
 focus. Nothing a gradient suggests is accepted without a full-corpus score.
 
+An opt-in research harness (issue #268) asks whether sparse symbolic local
+update rules can beat that sparse backprop refinement at an equal record budget,
+with the cost of discovering the rules counted. It is not wired into
+`run_optimisation` or the CLI, and its synthetic verdict is `negative`: the rules
+lose to sparse backprop at every step count once the meta-search is included.
+See [`docs/local-rules.md`](docs/local-rules.md).
+
 ### Statistically informed variants
 
 Building offspring from measured statistics rather than from crossover is the

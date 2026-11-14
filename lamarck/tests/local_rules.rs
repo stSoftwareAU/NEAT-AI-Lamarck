@@ -4,10 +4,16 @@
 use std::collections::BTreeMap;
 
 use neat_ai_lamarck::local_rules::{
-    ActivationFamily, Feature, Manifest, NEAT_CORE_TAG, RuleSet, SparseRule, Task, TaskGroup,
-    TaskSpec, Verdict, apply_rule_steps, build_task, derivative_free, local_residual,
-    matched_count, mse, run_manifest, sparse_backprop, verdict,
+    ActivationFamily, Feature, Manifest, NEAT_CORE_TAG, RuleSet, SparseRule,
+    TASK_GENERATOR_VERSION, Task, TaskGroup, TaskSpec, Verdict, apply_rule_steps, build_task,
+    derivative_free, local_residual, matched_count, mse, run_files, run_manifest, sparse_backprop,
+    verdict,
 };
+
+/// The shared corpus writer: `write_sample` lays out the training-data format
+/// that `open_training_scan` reads, so files-mode tests reuse it.
+#[path = "../examples/support/mod.rs"]
+mod support;
 
 fn task(seed: u64) -> Task {
     let spec = TaskSpec {
@@ -236,4 +242,119 @@ fn neat_core_tag_matches_cargo_manifest() {
         .and_then(|rest| rest.split('"').next())
         .expect("tag attribute");
     assert_eq!(NEAT_CORE_TAG, tag);
+}
+
+/// Reduced files-mode protocol: small record counts keep the corpus tiny.
+fn reduced_files_manifest() -> Manifest {
+    let mut m = reduced_manifest();
+    m.train_records = 16;
+    m.held_out_records = 16;
+    m
+}
+
+/// Records a files run reads: calibration training, validation training, held-out.
+fn files_records(manifest: &Manifest) -> usize {
+    2 * manifest.train_records + manifest.held_out_records
+}
+
+#[test]
+fn files_run_completes_and_names_its_source() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manifest = reduced_files_manifest();
+    support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
+    let calibration = task(1).parent;
+    let validation = [task(2).parent];
+    let report =
+        run_files(&manifest, &calibration, &validation, dir.path()).expect("files run completes");
+    assert_eq!(report.coverage.completed, report.coverage.planned);
+    assert_eq!(report.coverage.failed, 0);
+    assert!(
+        report.comparisons.iter().any(|c| c.group == "files"),
+        "no comparison for group files"
+    );
+    let summary = report.summary_json().expect("summary serialises");
+    let json: serde_json::Value = serde_json::from_str(&summary).expect("summary parses");
+    assert_eq!(json["dataSource"]["kind"], "files");
+    assert!(json["dataSource"]["corpusKey"].is_string());
+    assert!(json["dataSource"]["calibrationCreature"].is_string());
+    assert_eq!(
+        json["dataSource"]["validationCreatures"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let temp = dir.path().display().to_string();
+    assert!(
+        !summary.contains(&temp),
+        "summary leaks the temp dir path {temp}"
+    );
+}
+
+#[test]
+fn files_run_refuses_a_short_corpus_and_accepts_a_full_one() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manifest = reduced_files_manifest();
+    let calibration = task(1).parent;
+    let validation = [task(2).parent];
+    support::write_sample(dir.path(), files_records(&manifest) - 1, manifest.inputs);
+    let err = run_files(&manifest, &calibration, &validation, dir.path())
+        .expect_err("a short corpus is refused");
+    assert_eq!(
+        err,
+        "training data holds 47 records but the protocol needs 48: 16 calibration, 16 validation training and 16 held-out"
+    );
+    support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
+    run_files(&manifest, &calibration, &validation, dir.path())
+        .expect("the same call succeeds with enough records");
+}
+
+#[test]
+fn files_run_refuses_the_calibration_creature_as_validation() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manifest = reduced_files_manifest();
+    let calibration = task(1).parent;
+    let validation = [calibration.clone()];
+    let err = run_files(&manifest, &calibration, &validation, dir.path())
+        .expect_err("transfer to the calibration creature is refused");
+    assert_eq!(
+        err,
+        "validation creature 0 is the calibration creature (same fingerprint); validation must use a different creature"
+    );
+}
+
+#[test]
+fn files_run_refuses_no_validation_creatures_and_mismatched_widths() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manifest = reduced_files_manifest();
+    let calibration = task(1).parent;
+    let err = run_files(&manifest, &calibration, &[], dir.path())
+        .expect_err("an empty validation list is refused");
+    assert_eq!(err, "files run needs at least one validation creature");
+    let spec = TaskSpec {
+        seed: 2,
+        hidden_width: 4,
+        hidden_squash: "TANH".to_string(),
+    };
+    let narrow = build_task(spec, 2, 64, 64)
+        .expect("two-input task builds")
+        .parent;
+    let err = run_files(&manifest, &calibration, &[narrow], dir.path())
+        .expect_err("a width mismatch is refused");
+    assert_eq!(
+        err,
+        "validation creature 0 has input/output 2/1, but the calibration creature has 3/1"
+    );
+}
+
+#[test]
+fn synthetic_summary_carries_the_search_trace_and_source() {
+    let report = run_manifest(&reduced_manifest()).expect("reduced run");
+    let summary = report.summary_json().expect("summary serialises");
+    let json: serde_json::Value = serde_json::from_str(&summary).expect("summary parses");
+    let trace = json["searchTrace"]
+        .as_array()
+        .expect("searchTrace is an array");
+    assert!(!trace.is_empty(), "searchTrace is empty");
+    assert_eq!(json["dataSource"]["kind"], "synthetic");
+    assert_eq!(json["dataSource"]["generator"], TASK_GENERATOR_VERSION);
 }

@@ -37,11 +37,14 @@ pub struct TaskSpec {
     pub hidden_squash: String,
 }
 
-/// A synthetic task: the student parent plus its train and held-out records.
+/// A task: the parent creature plus its train and held-out records.
 #[derive(Clone, Debug)]
 pub struct Task {
-    /// The parameters that generated this task.
-    pub spec: TaskSpec,
+    /// Label of the task within its group: `seed:width:squash` for a synthetic
+    /// task, a creature index for a task built from files.
+    pub name: String,
+    /// The parameters that generated a synthetic task; `None` for a file task.
+    pub spec: Option<TaskSpec>,
     /// The student creature that every arm starts from.
     pub parent: CreatureExport,
     /// Records the update arms may train on.
@@ -86,7 +89,8 @@ pub fn build_task(
     }
     let held_out = records.split_off(train_records);
     Ok(Task {
-        spec,
+        name: format!("{}:{}:{}", spec.seed, spec.hidden_width, spec.hidden_squash),
+        spec: Some(spec),
         parent,
         train: records,
         held_out,

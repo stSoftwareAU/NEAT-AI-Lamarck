@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Sparse symbolic local update rules are tested as an opt-in research harness, with a negative synthetic verdict (Issue #268).**
+  `lamarck/src/local_rules/` discovers one sparse rule per activation family on
+  calibration tasks only, then scores it on untouched validation tasks against
+  Lamarck's sparse backprop and a derivative-free (1+1) search at an equal record
+  budget, with the meta-search cost charged in full. Nothing in
+  `run_optimisation` or the CLI calls it, so defaults are unchanged. On the
+  synthetic fixtures (`docs/evidence/local-rules/summary.json`) the overall verdict
+  is `negative`: the rules are worse than both primary baselines at every step
+  count once the meta-search is included. Reproduce with
+  `cargo run --release --example local_rules_bench`; the method, protocol and
+  results are in [`docs/local-rules.md`](docs/local-rules.md).
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
   `path = "../../NEAT-AI-core/neat-core"` dependency with

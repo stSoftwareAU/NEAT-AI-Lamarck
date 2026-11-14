@@ -4,6 +4,10 @@
     "neatCoreTag": "v0.23.4",
     "taskGeneratorVersion": "local-rules-synthetic-v1"
   },
+  "dataSource": {
+    "kind": "synthetic",
+    "generator": "local-rules-synthetic-v1"
+  },
   "manifest": {
     "inputs": 3,
     "trainRecords": 64,
@@ -86,6 +90,1016 @@
   "metaCost": {
     "recordUnits": 1622016
   },
+  "searchTrace": [
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "W*0.5",
+      "score": 1.1890830861156534,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "WYY*2 + XR*-1 + Y*-0.5",
+      "score": 3.358560854405551,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "WYY*-0.5 + XYY*0.5",
+      "score": 1.0011235839249535,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "R*1 + XR*2 + Y*2",
+      "score": 0.6766299140541935,
+      "accepted": true
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "WYY*-0.5 + W*2 + XR*2",
+      "score": 0.31431499869028656,
+      "accepted": true
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "WYY*-1 + XR*1 + W*2",
+      "score": 0.5920924616420106,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "XY*2 + Y*1",
+      "score": 4.910775831724873,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "Y*-1 + XR*2 + X*-0.5",
+      "score": 0.37820753066827284,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "XYY*-0.5 + R*-2 + XR*-2",
+      "score": 6.31723661920099,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "R*1 + XR*2",
+      "score": 0.2529196010802931,
+      "accepted": true
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "W*-0.5 + YR*1 + XYY*0.5",
+      "score": 1.3544298854950911,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "XYY*-0.5 + WYY*0.5",
+      "score": 1.062294903290649,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "WYY*-0.5",
+      "score": 0.9737268842417672,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "W*-2",
+      "score": 0.6892145737600763,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "XY*-0.5",
+      "score": 0.812619994375767,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "identity",
+      "candidate": "XYY*-0.5",
+      "score": 1.0314142810199025,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XYY*-2 + XR*1 + Y*1",
+      "score": 0.2631361437287045,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XY*-0.5 + WYY*1 + XR*-0.5",
+      "score": 0.2561664042580746,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XY*-0.5 + WYY*-1",
+      "score": 0.2574678441540108,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XR*0.5 + WYY*-1",
+      "score": 0.2537281974368064,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XR*-1 + X*1 + R*1",
+      "score": 0.24560940380766225,
+      "accepted": true
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XYY*-0.5 + XR*-0.5 + WYY*-1",
+      "score": 0.25454420627637053,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XY*0.5 + XR*-1 + Y*-0.5",
+      "score": 0.24250878413925903,
+      "accepted": true
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "R*1 + W*2 + XYY*1",
+      "score": 0.24520972377797387,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "R*2 + XR*-0.5 + X*1",
+      "score": 0.24560940380766225,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "YR*-0.5",
+      "score": 0.2529196010802931,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XY*1",
+      "score": 0.24430603964920586,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XY*-0.5 + YR*0.5 + X*0.5",
+      "score": 0.250729783793313,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "WYY*-2 + Y*2 + XR*-1",
+      "score": 0.26955336770006566,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "XYY*1 + X*-0.5",
+      "score": 0.25810730605976273,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "R*2",
+      "score": 0.2529196010802931,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "tanh",
+      "candidate": "X*-0.5",
+      "score": 0.2598003531279753,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "X*2",
+      "score": 0.2394852843750568,
+      "accepted": true
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "Y*-2 + X*-0.5 + R*0.5",
+      "score": 0.24960070036174772,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "XYY*-2 + XR*1 + R*1",
+      "score": 0.24290752707783297,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "XR*-0.5 + R*0.5",
+      "score": 0.24250878413925903,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "WYY*-0.5 + XY*-1",
+      "score": 0.2427126924773655,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "XR*-2",
+      "score": 0.24250878413925903,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "XYY*1 + XY*-1",
+      "score": 0.24304559813240917,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "Y*0.5 + XR*0.5 + YR*0.5",
+      "score": 0.24196173676064892,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "X*-2 + XR*-2",
+      "score": 0.24650667024245784,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "YR*-1 + W*1 + WYY*-1",
+      "score": 0.2479040285426328,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "XY*0.5",
+      "score": 0.24217340729456738,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "Y*-0.5 + XR*-1 + R*2",
+      "score": 0.24354537244025923,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "XY*-2",
+      "score": 0.24408307835499393,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "XR*2 + WYY*-2 + XY*1",
+      "score": 0.23955641609907669,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "R*-0.5",
+      "score": 0.24250878413925903,
+      "accepted": false
+    },
+    {
+      "round": 0,
+      "family": "logistic",
+      "candidate": "W*2",
+      "score": 0.25676548889952716,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "XY*-2 + Y*1 + W*0.5",
+      "score": 0.8095342446120373,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "X*1 + XY*-0.5 + XR*-1",
+      "score": 2.3615068391692673,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "R*0.5 + YR*0.5",
+      "score": 0.4984943853816931,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "WYY*-0.5",
+      "score": 0.9905859995871177,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "XYY*-0.5",
+      "score": 1.0539294394455505,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "WYY*-1 + Y*-1",
+      "score": 0.7005419174140975,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "W*-1 + Y*2 + WYY*0.5",
+      "score": 4.800371797357592,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "XY*-0.5 + WYY*-2 + Y*-2",
+      "score": 0.6439868274952489,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "R*-0.5 + WYY*-2",
+      "score": 2.2297058213601924,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "WYY*1",
+      "score": 1.1089512759209668,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "X*-2 + XY*-0.5",
+      "score": 5.442516484096245,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "R*2",
+      "score": 0.3688550261151345,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "XY*2",
+      "score": 4.757661434356228,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "YR*-2 + Y*0.5 + W*0.5",
+      "score": 2.6276761445831096,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "XY*-1 + R*2",
+      "score": 0.3860939596574079,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "identity",
+      "candidate": "W*1 + R*1 + XR*2",
+      "score": 0.26228913193781456,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "YR*-0.5 + XYY*-1",
+      "score": 0.2512364216342515,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "W*0.5 + YR*-0.5 + X*1",
+      "score": 0.24433214913728168,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "XR*-0.5 + X*-1 + Y*-1",
+      "score": 0.25154764667659474,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "XR*-0.5 + YR*-0.5",
+      "score": 0.24989610131609086,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "XR*-1",
+      "score": 0.24989610131609086,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "WYY*1 + Y*-1 + XYY*-0.5",
+      "score": 0.23774916291481266,
+      "accepted": true
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "Y*-1 + XYY*2",
+      "score": 0.231536351565474,
+      "accepted": true
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "X*0.5",
+      "score": 0.2451837645636851,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "YR*0.5 + W*-2",
+      "score": 0.2551342132953213,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "X*-1 + R*-2",
+      "score": 0.2620953450101286,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "YR*-0.5",
+      "score": 0.24989610131609086,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "Y*-1",
+      "score": 0.23767306192525184,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "X*-2",
+      "score": 0.26252606559055547,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "X*-0.5 + XR*-2 + XYY*-1",
+      "score": 0.2570681050211814,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "XY*0.5 + YR*-1",
+      "score": 0.24567215671559217,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "tanh",
+      "candidate": "W*0.5 + XR*2 + Y*-1",
+      "score": 0.23435253196472483,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "YR*0.5 + R*-0.5 + XY*2",
+      "score": 0.23338953620623337,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "XYY*-2 + YR*-0.5 + WYY*-1",
+      "score": 0.23390526812693796,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "Y*-1 + W*-2",
+      "score": 0.22915441918726703,
+      "accepted": true
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "X*-1",
+      "score": 0.23739741018983856,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "R*2 + WYY*1 + X*-0.5",
+      "score": 0.23706963602355408,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "XY*-2 + Y*1",
+      "score": 0.23584708103397367,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "XY*-0.5 + X*-0.5 + YR*-0.5",
+      "score": 0.23629375547164552,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "Y*2",
+      "score": 0.23266169874439213,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "Y*-2 + XR*-0.5 + XYY*-1",
+      "score": 0.24104413681981351,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "Y*-2 + WYY*0.5",
+      "score": 0.24198314440879723,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "XY*0.5 + X*2 + W*-0.5",
+      "score": 0.22933399221596923,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "R*-0.5",
+      "score": 0.23455985132967622,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "W*-0.5 + X*0.5 + R*-1",
+      "score": 0.23111401491412112,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "W*-0.5 + YR*-1",
+      "score": 0.2320322632678858,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "YR*-2 + X*-0.5 + XR*1",
+      "score": 0.23582392860696427,
+      "accepted": false
+    },
+    {
+      "round": 1,
+      "family": "logistic",
+      "candidate": "XYY*-0.5",
+      "score": 0.2346478001719515,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "YR*-0.5",
+      "score": 1.0882683094568302,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "XYY*-1 + XR*-2",
+      "score": 5.483875752591652,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "XR*-1 + YR*-0.5 + X*2",
+      "score": 2.2479838803052616,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "Y*-2 + R*-0.5",
+      "score": 0.8618124461789212,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "R*-1 + XY*1 + WYY*-0.5",
+      "score": 5.644515935259959,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "XYY*-1",
+      "score": 1.0722700332776491,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "XYY*-2 + XR*-1 + WYY*-2",
+      "score": 3.4055895437205135,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "X*1",
+      "score": 1.3210309719189899,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "X*-0.5 + YR*-2",
+      "score": 2.1031761750755167,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "XR*-0.5 + R*-2",
+      "score": 6.066699225053241,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "YR*0.5",
+      "score": 1.2039020447639472,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "W*-1 + Y*2 + XY*2",
+      "score": 4.780681219687214,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "XR*-0.5",
+      "score": 1.9154846277257098,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "W*-0.5 + XY*-1",
+      "score": 0.6578456993419508,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "XY*-2",
+      "score": 0.6168730915635043,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "identity",
+      "candidate": "XYY*-1 + Y*-1",
+      "score": 0.6800039000536027,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "Y*-0.5",
+      "score": 0.24128621326527833,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "W*0.5 + Y*-1",
+      "score": 0.23197059958651786,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "XR*-0.5 + R*2",
+      "score": 0.2475141689378839,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "W*2 + XR*0.5",
+      "score": 0.23807486113593546,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "XY*0.5 + WYY*-1 + XR*1",
+      "score": 0.24429618190102026,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "XY*0.5 + YR*-2",
+      "score": 0.2432902243373852,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "XR*-2 + Y*2 + WYY*2",
+      "score": 0.25784589802034447,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "Y*-2 + WYY*-2 + XYY*-0.5",
+      "score": 0.2307422859111116,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "Y*-2 + WYY*2 + X*-2",
+      "score": 0.23208167042095207,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "WYY*0.5",
+      "score": 0.24707388767830393,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "YR*0.5 + X*0.5 + XYY*-0.5",
+      "score": 0.2435521319438131,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "WYY*-2 + X*-0.5 + R*-2",
+      "score": 0.2572099666108833,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "XY*0.5",
+      "score": 0.2432902243373852,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "YR*-1 + XR*2",
+      "score": 0.2475141689378839,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "XYY*-0.5 + YR*-1 + Y*-2",
+      "score": 0.2281030141158538,
+      "accepted": true
+    },
+    {
+      "round": 2,
+      "family": "tanh",
+      "candidate": "X*0.5 + YR*0.5 + XYY*0.5",
+      "score": 0.2420641228313013,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "XR*1 + Y*-1",
+      "score": 0.23609612821311546,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "R*2",
+      "score": 0.23350844625826297,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "Y*-2 + XYY*-2 + WYY*0.5",
+      "score": 0.2401808438652868,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "WYY*0.5 + YR*2",
+      "score": 0.23415472595614345,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "Y*2",
+      "score": 0.2316102936729789,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "XYY*-2 + W*2",
+      "score": 0.24930029074826196,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "R*1",
+      "score": 0.23350844625826297,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "X*1 + XR*-1 + W*-0.5",
+      "score": 0.22928891762613834,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "WYY*1 + R*-1 + YR*2",
+      "score": 0.23485091919673418,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "W*-2",
+      "score": 0.2265161104505308,
+      "accepted": true
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "XYY*0.5 + YR*-1",
+      "score": 0.2334270132112111,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "Y*-2",
+      "score": 0.24038164219689342,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "XYY*2 + X*1",
+      "score": 0.23181137569756388,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "R*2 + W*-2 + XYY*2",
+      "score": 0.22616476055524598,
+      "accepted": true
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "XY*-0.5 + Y*-0.5",
+      "score": 0.23486311329407525,
+      "accepted": false
+    },
+    {
+      "round": 2,
+      "family": "logistic",
+      "candidate": "X*-2",
+      "score": 0.2375063323614618,
+      "accepted": false
+    }
+  ],
   "runs": [
     {
       "task": "same-width:101:4:TANH",

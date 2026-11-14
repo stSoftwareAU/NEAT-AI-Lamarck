@@ -12,6 +12,7 @@
 mod apply;
 mod baselines;
 mod experiment;
+mod files;
 mod manifest;
 mod rule;
 mod search;
@@ -21,9 +22,10 @@ mod tasks;
 pub use apply::{Cost, apply_rule_steps, mse};
 pub use baselines::{derivative_free, matched_count, sparse_backprop};
 pub use experiment::{
-    Comparison, Coverage, Failure, OverallVerdict, PairedDifference, Report, RunRow, run_manifest,
-    write_outputs,
+    Comparison, Coverage, DataSource, Failure, OverallVerdict, PairedDifference, Report, RunRow,
+    run_manifest, write_outputs,
 };
+pub use files::run_files;
 pub use manifest::{Manifest, NEAT_CORE_TAG, TaskGroup, Versions};
 pub use rule::{
     ActivationFamily, Feature, LocalObservation, RuleSet, SparseRule, describe, local_residual,
