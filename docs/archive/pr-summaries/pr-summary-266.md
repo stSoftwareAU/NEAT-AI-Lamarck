@@ -41,6 +41,10 @@ Part of #266.
   probes included, to the same `BudgetedObjective`. The comparison
   (`summarise_reference`) reuses the existing paired bootstrap and verdict rule
   rather than a second copy in Python.
+- Corpus mode splits the loaded window into a calibration half and a
+  validation half (`CorpusRole` in `suite.rs`). Calibration seeds never see
+  the records that validation and the AMM reference are judged on, which
+  matches the disjoint seeds the synthetic suite already uses.
 
 ### Essential Design Decisions
 
@@ -161,13 +165,16 @@ on a quiet machine, and keep the results private.
   success/failure criteria — evidence: `predeclared_manifest`,
   `Manifest::validate`, `verdict` in `lamarck/src/weight_bench/experiment.rs` —
   reviewer: met
-- **partial** — Identify code/model/data versions; separate calibration from
+- **met** — Identify code/model/data versions; separate calibration from
   untouched validation and count all preparation/search costs — evidence:
   `lamarck/tests/weight_bench.rs::total_evaluations_count_confirmations_and_preparation_once_per_problem`,
+  `lamarck/tests/weight_bench.rs::corpus_problem_splits_records`,
+  `lamarck/tests/weight_bench.rs::corpus_manifest_runs_within_budget`,
   `crateVersion` in `summary.json`, `amm-meta.json` — reviewer: partial —
-  reason: the count and version gaps the reviewer found are fixed in this diff,
-  but corpus mode still builds the same problem for calibration and validation
-  seeds, so its validation is not untouched.
+  reason: the reviewer found three gaps: the evaluation count, the versions,
+  and corpus mode building the same problem for both phases. All three are
+  fixed in this diff, the last by the calibration and validation halves in
+  `problem_from_corpus`.
 - **met** — Provide deterministic positive/negative correctness tests for new
   behaviour and pass the repository's normal quality checks — evidence:
   `lamarck/tests/weight_bench_reference.rs`, `lamarck/tests/weight_bench.rs`,
@@ -250,8 +257,19 @@ on a quiet machine, and keep the results private.
     which asserts the smoke total against an independently computed figure (5
     confirmations per row, preparation once per problem) and would fail with
     the old count of 4;
-  - the earlier 15 tests are unchanged, and the diff removes no line from this
-    file.
+  - corpus calibration and validation use disjoint halves of the window:
+    - `corpus_problem_splits_records` checks each role's screening, held-out
+      and full records against literal slices of the 600-record fixture;
+    - `corpus_manifest_runs_within_budget` checks that the calibration and
+      validation refine rows have different starting screening and held-out
+      losses. This failed (`Some(0.40842782244970616)` on both sides) when
+      `calibration_phase` was temporarily given `CorpusRole::Validation`, and
+      passed once it was restored;
+    - `corpus_with_too_few_records_is_rejected` checks that 400/400 needs
+      1600, and at the boundary accepts 150/150 (exactly 600) for both roles
+      and refuses 151/150 (needs 602);
+  - this whole file is new relative to `Develop`, so no existing test was
+    edited.
 - Run on the head: `cargo test --test weight_bench --test weight_bench_reference`
   passed (16 passed with 1 ignored, and 10 passed). The ignored test is
   `extrapolation_flag_on_rows_for_large_dimension`, about 40 s in debug, run
@@ -264,14 +282,16 @@ on a quiet machine, and keep the results private.
   - a real 18-run smoke against the serve binary;
   - `--bench /bin/false`, which writes RunRow-shaped failure rows and exits 1;
   - the key set of a failure row matches a real row.
-- `./quality.sh < /dev/null` passed at `98a561b`, the last code and evidence
-  commit plus this summary ("All quality checks passed!").
+- `./quality.sh < /dev/null` passed at `f6c6839`, the last code commit, with
+  this summary in the working tree ("All quality checks passed!"). It also
+  passed at `5859c34` before the corpus split. That suggests the earlier
+  attempt's pre-push block was environmental, but the block was not
+  reproduced here.
 
 Not done:
 
 - the representative private-corpus run (owner step);
 - an AMM box-size sensitivity sweep;
-- separating calibration from validation in corpus mode;
 - a refine arm that calls the full candidate pipeline;
 - the router and probe removal decision.
 
