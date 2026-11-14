@@ -16,9 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Opt-in and offline: nothing in the optimisation loop calls it and no default
   changed. On the synthetic suite CMA-ES beat the refinement in 20 of 27 cells,
   but the router always routed to CMA-ES and never beat it, so it is not ported.
-  The AMM method (arXiv 2611.06879) is not implemented because the paper could
-  not be retrieved, and the representative run on the production corpus has not
-  been made. Write-up and committed evidence:
+  The AMM method (arXiv 2611.06879) was run as an offline reference arm
+  through its authors' pinned implementation (scratch Python environment, no new
+  dependency, never in CI) and lost in all 27 cells against refine, CMA-ES and
+  the router; nothing is ported. The representative run on the production corpus
+  has not been made. Write-up and committed evidence:
   `docs/weight-optimiser-routing.md`, `docs/evidence/weight-router/`.
 
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on

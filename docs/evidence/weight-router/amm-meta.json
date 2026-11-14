@@ -1,0 +1,15 @@
+{
+  "ammVersion": "0.7.0",
+  "ammCommit": "74d39b4f7988a1f1aa8b40a2a0c3ee547f251107",
+  "preset": "c46",
+  "configHash": "2153948ebed51150",
+  "numpy": "2.5.4",
+  "scipy": "1.18.1",
+  "python": "3.13.5",
+  "bench": "/tmp/exec-a-target/release/examples/weight_router_bench",
+  "manifest": "/tmp/wrb-full/manifest.json",
+  "planned": 324,
+  "completed": 324,
+  "failed": 0,
+  "wallSeconds": 98.522
+}

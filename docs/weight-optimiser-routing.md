@@ -5,8 +5,11 @@ this code: it runs only when the `weight_router_bench` example (or a test)
 drives it, so ordinary runs are unchanged. No default was changed and nothing
 was ported. The synthetic suite has been run and is reported below; the
 **representative run on the private production creature and corpus has not been
-made**. AMM (arXiv 2611.06879) is **not implemented**, because the paper could
-not be retrieved from the build sandbox (see [Outstanding](#outstanding)).
+made**. AMM (arXiv 2611.06879) is **not ported and not reimplemented**. It was
+run as an offline reference arm through its authors' implementation and lost in
+all 27 cells (see [AMM reference results](#amm-reference-results)). The arXiv
+page itself could not be fetched from the build sandbox (see
+[Outstanding](#outstanding)).
 
 The code is [`lamarck/src/weight_bench/`](../lamarck/src/weight_bench/mod.rs),
 the driver is
@@ -33,7 +36,7 @@ alone.
 | `lamarck-refine` | The current refinement replayed on a fixed weight set. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), tries the mirrored pair `x ± delta` as `mirror.rs` does, and accepts the better one only if it strictly improves. After an accept it probes the #219 follow-up `STEP_FRACTIONS` (`[0.5, -0.5, 1.0]`, from `followup.rs`) along the winning move and takes the best strict improvement. |
 | `cma-es` | Full-covariance (mu/mu_w, lambda)-CMA-ES, written in-repo with no third-party dependency. Strategy parameters are Hansen's tutorial defaults (arXiv:1604.00772); the eigendecomposition is a cyclic Jacobi method. Initial step size `CMA_SIGMA0 = 0.05`, deliberately equal to the refinement's step scale so neither arm starts with a larger search radius. |
 | `router` | Spends `2 * probe_axes + 1` evaluations probing the landscape, then runs `lamarck-refine` or `cma-es` on the remaining budget. The probe is charged to the **same** budget. The chosen arm re-evaluates the start, one further counted evaluation. |
-| AMM | **Missing.** Not implemented; see [Outstanding](#outstanding). |
+| AMM (reference only) | Adaptive Multi Mode, run offline through its authors' reference implementation, not reimplemented here and not ported. It needs a known budget and a finite box, spends a counted part of the budget on online probes and routes the rest among several engines. See [AMM reference](#amm-reference). |
 
 The router picks CMA-ES iff the total budget is at least `minBudgetMultiple`
 times the dimension **and** the probe's plateau share plus kink share is at most
@@ -99,6 +102,46 @@ the manifest it used to `manifest.json` (the committed copy is
   confirmation evaluations per run (`CONFIRMATION_EVALUATIONS`). The probe and
   the start re-evaluation come out of the router's budget.
 
+## AMM reference
+
+The paper is "Adaptive Multi Mode: Budget-Aware Routing of Optimizers By Online
+Landscape Probes", Benjamin Jacob Bodner, arXiv 2611.06879 (submitted 4 Nov
+2026). The arXiv page could not be fetched from the sandbox ("proxy refused the
+connection"); the title and abstract came from web search. The method is
+therefore pinned through its authors' reference implementation rather than the
+PDF: `BjBodner/amm-optimizer` (Apache-2.0), commit
+`74d39b4f7988a1f1aa8b40a2a0c3ee547f251107`, version 0.7.0, default
+configuration preset `c46`, the configuration frozen for the paper (config hash
+`2153948ebed51150`, checked at start-up by the driver). AMM spends a counted part
+of the budget on online probes (curvature, plateau, separability, kink, basin,
+fractal) and routes the rest among quasi-Newton (SLSQP, L-BFGS-B), trust-region
+(COBYQA), coordinate, multistart (MLSL) and population (CMA-ES family, ATM
+sampler) engines. It needs a known budget and a finite box. Its authors
+developed and measured it on COCO/bbob at D 2 to 40 and budgets 10 to 1000 x D,
+so D=100 is extrapolation for AMM as well.
+
+No dependency is added to the repository. AMM runs in a scratch Python 3.13
+environment built by
+[`scripts/amm-reference-env.sh`](../scripts/amm-reference-env.sh) from
+sha256-pinned numpy 2.5.4 and scipy 1.18.1 wheels and the pinned AMM tarball. It
+is opt-in, offline and never part of CI.
+
+Protocol:
+
+* The Rust bench serves the exact same budgeted objective
+  (`--serve-reference`, one JSON line per evaluation). The budget is enforced by
+  `BudgetedObjective`, so AMM's probes are counted inside the same budget.
+* Only validation seeds 1001 to 1012 are served; calibration seeds are refused.
+* AMM gets `x0` = the start weights, budget = the same multiple x D, box = start
+  ± `REFERENCE_BOX_HALF_WIDTH` (`0.5`, predeclared before the run, not tuned) and
+  seed = the arm seed via `numpy.random.SeedSequence`.
+* `--compare-reference` uses the same paired bootstrap (2000 resamples, seed
+  266) and the same predeclared verdict rule as the main experiment, and pairs
+  AMM against refine, AMM against CMA-ES and AMM against the router.
+* The serve mode honours `--creature` and `--training-data` too (the manifest
+  the flags select is used), so the same reference can be run on a corpus
+  manifest. That has not been done.
+
 ## How to run
 
 ```bash
@@ -122,6 +165,18 @@ records are the last M of the loaded window, and the full set is the loaded
 window minus the held-out records. Seeds then vary only the arms' random
 streams.
 
+AMM reference (offline, opt-in; needs network once to fetch the pinned
+artefacts). Run the base bench first, then:
+
+```bash
+scripts/amm-reference-env.sh /tmp/amm-env   # prints PYTHONPATH=...
+env PYTHONPATH=... python3 scripts/amm-reference.py \
+  --bench target/release/examples/weight_router_bench \
+  --manifest /tmp/wrb-full/manifest.json --out-dir /tmp/amm-out --jobs 18
+target/release/examples/weight_router_bench /tmp/wrb-full \
+  --compare-reference /tmp/amm-out/amm-runs.jsonl
+```
+
 The run writes `manifest.json`, `runs.jsonl` and `summary.json` to `OUT_DIR`
 (default `weight-router-bench`):
 
@@ -133,7 +188,13 @@ The run writes `manifest.json`, `runs.jsonl` and `summary.json` to `OUT_DIR`
 
 `runs.jsonl` (about 830 KB) is not committed. The committed
 [`summary.json`](evidence/weight-router/summary.json) carries the per-cell paired
-distributions.
+distributions. The AMM reference adds three committed files:
+
+| File | Contents |
+|------|----------|
+| [`amm-runs.jsonl`](evidence/weight-router/amm-runs.jsonl) | One `RunRow` per AMM validation run (324). |
+| [`amm-meta.json`](evidence/weight-router/amm-meta.json) | AMM version, commit, preset and config hash, numpy, scipy and Python versions, coverage and wall time. |
+| [`reference-summary.json`](evidence/weight-router/reference-summary.json) | Coverage, total evaluations and per-cell paired comparisons of AMM against refine, CMA-ES and router, with verdicts. |
 
 ## Results (synthetic suite only)
 
@@ -209,13 +270,70 @@ and the last two columns are the router verdicts.
    held-out +0.0066). At 100D the mean differences are about 0.001 to 0.004 in
    size. The data do not say why.
 
+## AMM reference results
+
+Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 854,676
+evaluations (budgeted, preparation and confirmation). AMM took 98.5 s wall with
+18 workers on a shared, parallel container, so the time is indicative only.
+
+**Verdict: `amm-reference-worse` in all 27 cells against each of refine, CMA-ES
+and router** (81 of 81 comparisons; 0 better, 0 inconclusive).
+
+Median normalised screening loss (final over start, lower is better) on the
+validation seeds, and AMM's held-out loss:
+
+| Family | D | Budget | refine | cma-es | router | AMM | AMM held-out |
+|---|---|---|---|---|---|---|---|
+| hard-tanh | 20 | 10D | 0.4242 | 0.2324 | 0.2364 | 0.7336 | 0.7391 |
+| hard-tanh | 20 | 30D | 0.1840 | 0.1692 | 0.1692 | 0.3459 | 0.3809 |
+| hard-tanh | 20 | 100D | 0.1501 | 0.1488 | 0.1488 | 0.2872 | 0.2927 |
+| hard-tanh | 40 | 10D | 0.2491 | 0.1498 | 0.1524 | 0.8473 | 0.8467 |
+| hard-tanh | 40 | 30D | 0.1040 | 0.0972 | 0.0972 | 0.2673 | 0.3030 |
+| hard-tanh | 40 | 100D | 0.0722 | 0.0705 | 0.0705 | 0.2716 | 0.3255 |
+| hard-tanh | 100 (extrapolation) | 10D | 0.1754 | 0.1039 | 0.1039 | 0.9316 | 0.9366 |
+| hard-tanh | 100 (extrapolation) | 30D | 0.0428 | 0.0547 | 0.0547 | 0.1927 | 0.2663 |
+| hard-tanh | 100 (extrapolation) | 100D | 0.0176 | 0.0158 | 0.0158 | 0.2077 | 0.2651 |
+| relu | 20 | 10D | 0.4814 | 0.2898 | 0.2898 | 0.8605 | 0.8711 |
+| relu | 20 | 30D | 0.2497 | 0.2450 | 0.2453 | 0.3841 | 0.4380 |
+| relu | 20 | 100D | 0.2215 | 0.2212 | 0.2213 | 0.4202 | 0.4691 |
+| relu | 40 | 10D | 0.3354 | 0.1927 | 0.1957 | 0.8789 | 0.8913 |
+| relu | 40 | 30D | 0.1338 | 0.1257 | 0.1257 | 0.3244 | 0.3886 |
+| relu | 40 | 100D | 0.0945 | 0.0944 | 0.0944 | 0.3330 | 0.4232 |
+| relu | 100 (extrapolation) | 10D | 0.2098 | 0.1095 | 0.1095 | 0.9511 | 0.9488 |
+| relu | 100 (extrapolation) | 30D | 0.0489 | 0.0568 | 0.0568 | 0.2071 | 0.3255 |
+| relu | 100 (extrapolation) | 100D | 0.0225 | 0.0211 | 0.0211 | 0.2328 | 0.3435 |
+| tanh | 20 | 10D | 0.3496 | 0.2083 | 0.2151 | 0.7039 | 0.7690 |
+| tanh | 20 | 30D | 0.1413 | 0.1503 | 0.1503 | 0.2861 | 0.3101 |
+| tanh | 20 | 100D | 0.1208 | 0.1203 | 0.1203 | 0.3055 | 0.3286 |
+| tanh | 40 | 10D | 0.2188 | 0.1286 | 0.1297 | 0.7429 | 0.7164 |
+| tanh | 40 | 30D | 0.0850 | 0.0714 | 0.0714 | 0.2322 | 0.2777 |
+| tanh | 40 | 100D | 0.0550 | 0.0515 | 0.0515 | 0.2272 | 0.2708 |
+| tanh | 100 (extrapolation) | 10D | 0.1117 | 0.0756 | 0.0756 | 0.8845 | 0.9272 |
+| tanh | 100 (extrapolation) | 30D | 0.0366 | 0.0368 | 0.0370 | 0.1622 | 0.1963 |
+| tanh | 100 (extrapolation) | 100D | 0.0157 | 0.0139 | 0.0139 | 0.1728 | 0.2134 |
+
+Interpretation (a negative finding, stated carefully). On this suite, under the
+predeclared box, AMM as published is a poor fit for local weight refinement from
+a good incumbent. At 10D it barely improves on the start (0.70 to 0.95), and from
+30D to 100D it hardly improves further while the local arms do. A likely reason,
+offered as a **hypothesis, not a finding**: AMM is a box-global method whose
+probes and engines scale to the box, here ±0.5 around the start, whereas the
+local arms take steps of 0.05. A box-size sensitivity sweep was **not** run,
+because choosing a box after seeing these results would be post-hoc.
+
+Consequence: nothing from AMM is ported, its probes do not justify a port and,
+per the issue, the in-repo router stays unported too. No default changed. The
+synthetic suite does not demonstrate any NEAT-AI benefit either way; the
+representative run on the private corpus remains an owner step.
+
 ## Outstanding
 
-* **AMM reproduction.** The paper (<https://arxiv.org/abs/2611.06879>) could not
-  be retrieved from the sandbox: the web fetch reported "proxy refused the
-  connection" and a direct request to `export.arxiv.org` failed with "CONNECT
-  tunnel failed, response 403". AMM's method is therefore not pinned, and
-  comparing against a guess would be misleading, so it is not implemented.
+* **AMM reproduction: done via the reference implementation.** The method is
+  pinned through the authors' code (commit above), not the paper. The arXiv
+  page and PDF still cannot be fetched from the sandbox, so the paper has not
+  been read here and the reference implementation's behaviour is taken as the
+  method. The box-size sensitivity of AMM was not run (it would be post-hoc),
+  so the box-scale explanation above remains a hypothesis.
 * **Representative corpus run (owner step).** Run the corpus mode above on the
   private production creature and corpus, on a quiet machine. No such run has
   been made. Private results stay private.

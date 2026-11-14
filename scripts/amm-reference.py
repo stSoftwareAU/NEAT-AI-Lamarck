@@ -95,9 +95,9 @@ def run_one(args):
         try:
             amm_optimizer.minimize(f, x0=start, budget=header["budget"],
                                    bounds=(start - h, start + h),
-                                   seed=header["seed"])
+                                   seed=np.random.SeedSequence(header["seed"]))
         except Exception as exc:  # recorded on the row, never swallowed
-            raised = str(exc) or type(exc).__name__
+            raised = f"{type(exc).__name__}: {exc}"
 
         try:
             proc.stdin.write("done\n")
@@ -112,8 +112,9 @@ def run_one(args):
         code = proc.wait()
         if row is None:
             return failure(run, f"server exit {code} without a row: {stderr_cause(err)}")
-        if raised and not row.get("error"):
-            row["error"] = f"amm: {raised}"
+        if raised:  # the AMM cause leads; keep the server's error after it
+            row["error"] = f"amm: {raised}" + (
+                f"; server: {row['error']}" if row.get("error") else "")
         return row
     except Exception as exc:
         proc.kill()
