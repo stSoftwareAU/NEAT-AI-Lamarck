@@ -15,9 +15,17 @@ is a hypothesis to test, not an established improvement.
 
 The idea is attributed to arXiv 2611.10386, "Pruning DNA Sequence" (Satter,
 Islam and Islam, v1 published 7 November 2026). The paper text could not be
-read from the sandbox: `curl` to `arxiv.org`, `export.arxiv.org`, Semantic
+read from the sandbox. `curl` to `arxiv.org`, `export.arxiv.org`, Semantic
 Scholar, alphaXiv and Hugging Face all failed with "CONNECT tunnel failed,
-response 403". Its method is therefore pinned from the authors' released code,
+response 403". On a retry on 14 November, the web-fetch tool's proxy refused
+the abstract, the PDF, alphaXiv and Hugging Face. The repository README says
+it holds "the pretraining, fine-tuning, frozen-probing and analysis scripts
+behind every result in the paper", but it does not cite the arXiv ID ("Paper:
+coming soon on arXiv"). The link comes the other way: `gh search code
+2611.10386` found third-party copies of the arXiv abstract, and that text names this
+repository as the paper's code. The arXiv listing (seen through a web search)
+gives the title, the authors and the v1 date. The method is therefore pinned from the
+authors' released code,
 <https://github.com/FaiasPromit/pruning-dna-sequence> at commit
 `804aedb94fda8c531f1e6406f62de769d045ebad` (`dnabert2/pretraining/run_mlm.py`,
 `run_epoch_end_pruning`, and the `SP_*` / `RP_20%` configs):
@@ -36,6 +44,39 @@ response 403". Its method is therefore pinned from the authors' released code,
   Index, the share of the unpruned run's sequence processing avoided.
 - **Budget.** A pruned run keeps the unpruned run's epoch count, so savings
   come from processing fewer sequences per epoch.
+- **Data Savings Index** (`analysis/compute_dsi.py`).
+  DSI = 1 - (n_1 + ... + n_k) / (I * n_0). Here n_i is the batches trained in
+  epoch i, n_0 is one unpruned epoch, and I is the unpruned baseline's epoch
+  count (47 for DB2-MSG). It is the same quantity as one minus the
+  per-run `processedShare` this harness writes to `runs.jsonl`.
+- **DSI-targeted SP** (`run_mlm_dsi_targeted.py`, `build_dsi_schedule`; the
+  `DSI_20%`, `DSI_50%` and `DSI_80%` configs). This variant drops the
+  threshold. A schedule fixes how many sequences stay active each epoch, and
+  at each epoch end the highest-accuracy active sequences are removed until
+  that count is reached. The first `warmup_epochs` (1) epochs stay complete.
+  After that the retained share is `rho^((k - W)^(1/g))`, with `rho` found by
+  bisection so the final DSI equals `target_dsi`. The steepness g is 1 by
+  default, 4 front-loaded and 0.35 back-loaded. A `linear` mode is capped at
+  DSI 0.5 when W = 1. Removal is still permanent.
+- **Baselines the paper compares against**, each pinned at the same commit:
+  - **InfoBatch** (`infobatch.py`, `Info_*` configs with `infobatch_r` 0.5
+    and `infobatch_delta` 0.875). The score is each sequence's mean MLM loss
+    from the last epoch it was processed in. Every epoch, a sequence scoring
+    below the mean loss is skipped with probability r, re-drawn each epoch,
+    so nothing is removed for good. Kept below-mean sequences have their loss
+    scaled by 1/(1 - r). For the last (1 - delta) share of epochs, pruning is
+    off.
+  - **B-PAS** (`run_mlm_bpas.py`, `BPAS_*` configs). Fixed global batches are
+    removed for good once their mean layer-output standard deviation changes
+    by at most `delta_s * exp(alpha * i)` between epochs.
+  - **EL2N** (`run_mlm_el2n.py`). This is SP with EL2N in place of accuracy,
+    removing sequences whose EL2N lies in `[lower, upper]`.
+
+Of these, InfoBatch is the closest to the issue's scheme, which skips records
+temporarily and on a per-epoch basis. Unlike InfoBatch, the tested scheme does
+not rescale the kept easy records and has no full-data annealing tail. It
+picks the hardest records by EWMA up to a fixed count, rather than dropping
+below-mean records by a coin flip.
 
 The scheme tested here is the one the issue describes, and it differs from SP
 on purpose: a per-record error EWMA instead of a windowed accuracy (refinement
@@ -211,12 +252,57 @@ These are findings on this synthetic suite only.
    validation phase (2,952,000) and about 100 times the 43,500 passes easy-75
    saves per run, so at this scale the search does not pay for itself.
 
-This is a negative and inconclusive result. Nothing is ported, and the module
-stays opt-in only until the representative run decides whether to remove it.
+This is a negative and inconclusive result. Nothing is ported, and no success
+is claimed.
+
+## Maintenance cost
+
+The negative synthetic result means no part of `record_skip/` has earned a
+place in the run loop. The harness stays only as the instrument for the one
+outstanding representative run. Optional code inside it that fed no reported
+result was removed:
+
+- the mean forgetting increase in `RunOutcome`, which no table, test or
+  summary read (forgetting is still recorded as `forgottenShare`);
+- `DifficultyTracker::is_protected`, `DifficultyTracker::strata` and
+  `StratumEdges::bins`, which had no callers;
+- the unused first argument of `stats::verdict`;
+- `Serialize` on `DifficultyScope` and `ScheduleConfig`, and `Deserialize` on
+  `Verdict`, which were never used;
+- the `LEARNING_RATE` re-export from `experiment`. `arm_label`, `stats::mean`
+  and `stats::bootstrap_mean_ci` became private to the module.
+
+None of this changes the experiment. Re-running the synthetic suite after the
+removal reproduces the committed `summary.json` and `manifest.json` byte for
+byte. Only the uncommitted `runs.jsonl` changes shape: each row loses its
+`meanForgettingIncrease` key.
+
+Kept on purpose:
+
+- the per-stratum validation MSE (`strataValidationMse` in each
+  `runs.jsonl` row), because the issue asks for stratum error;
+- the per-epoch `ensure_scope` check in `refine` (the issue forbids sharing
+  stale difficulty scores);
+- the `StrataLength` refusal (input validation on a public constructor,
+  covered by a test);
+- corpus mode (the representative run needs it);
+- every field of `summary.json` (changing them would break the committed
+  evidence).
+
+**Removal rule.** Delete `lamarck/src/record_skip/`,
+`lamarck/examples/record_skip_bench.rs`, `lamarck/tests/record_skip.rs`,
+`pub mod record_skip;` in `lib.rs` and the README row in either of these
+cases:
+
+- the representative run gives no easy-skip arm a `better` verdict against
+  both matched random skipping and full data;
+- the run has not been made by the next release after this one merges.
+
+Keep the findings in this document. The commit that deletes the code is the
+pointer back to it.
 
 ## Outstanding
 
 - Run the representative experiment on the private creature and corpus, on a
   quiet machine. This is an owner step, and the results stay private.
-- Remove `record_skip/` if the representative run does not earn its
-  maintenance cost.
+- Apply the removal rule above.

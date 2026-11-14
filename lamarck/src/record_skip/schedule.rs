@@ -4,11 +4,10 @@ use std::fmt;
 
 use rand::Rng;
 use rand::seq::index;
-use serde::Serialize;
 
 /// Identity of the parent creature and corpus a set of difficulty scores
 /// belongs to. Scores are never reused across a different scope.
-#[derive(Clone, PartialEq, Debug, Serialize)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct DifficultyScope {
     /// Fingerprint of the (immutable) parent creature.
     pub parent_fingerprint: u64,
@@ -73,7 +72,7 @@ impl fmt::Display for ScheduleError {
 impl std::error::Error for ScheduleError {}
 
 /// Tunables for the difficulty schedule.
-#[derive(Clone, PartialEq, Debug, Serialize)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct ScheduleConfig {
     /// EWMA smoothing factor, in (0, 1].
     pub ewma_alpha: f64,
@@ -179,11 +178,6 @@ impl StratumEdges {
             max,
             bins: bins.max(1),
         }
-    }
-
-    /// Number of bins.
-    pub fn bins(&self) -> usize {
-        self.bins
     }
 
     /// Bin for `value`; out-of-range values clamp to the end bins.
@@ -312,16 +306,6 @@ impl DifficultyTracker {
     /// Records in protected (rare) strata.
     pub fn protected_count(&self) -> usize {
         self.protected.iter().filter(|&&p| p).count()
-    }
-
-    /// Whether record `i` is protected.
-    pub fn is_protected(&self, i: usize) -> bool {
-        self.protected[i]
-    }
-
-    /// Stratum of each record.
-    pub fn strata(&self) -> &[u16] {
-        &self.strata
     }
 
     /// Choose the records to process in `epoch`.

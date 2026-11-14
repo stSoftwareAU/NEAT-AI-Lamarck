@@ -429,11 +429,27 @@ fn files_mode_runs_and_load_corpus_checks_counts() {
 
 #[test]
 fn verdict_rules() {
-    let d = [0.0];
-    assert_eq!(verdict(&d, (-0.2, -0.1), &[-0.01]), Verdict::Better);
-    assert_eq!(verdict(&d, (-0.2, -0.1), &[0.01]), Verdict::Inconclusive);
-    assert_eq!(verdict(&d, (0.1, 0.2), &[-0.01]), Verdict::Worse);
-    assert_eq!(verdict(&d, (-0.1, 0.1), &[-0.01]), Verdict::Inconclusive);
+    assert_eq!(verdict((-0.2, -0.1), &[-0.01]), Verdict::Better);
+    assert_eq!(verdict((-0.2, -0.1), &[0.01]), Verdict::Inconclusive);
+    // No rare-stratum data means the guard cannot pass, so no `better`.
+    assert_eq!(verdict((-0.2, -0.1), &[]), Verdict::Inconclusive);
+    assert_eq!(verdict((0.1, 0.2), &[-0.01]), Verdict::Worse);
+    assert_eq!(verdict((-0.1, 0.1), &[-0.01]), Verdict::Inconclusive);
+}
+
+#[test]
+fn tracker_refuses_strata_that_do_not_match_record_count() {
+    let err = DifficultyTracker::new(scope(3), vec![0; 2], config(0.5, 0.0, 0.0)).unwrap_err();
+    assert_eq!(
+        err,
+        ScheduleError::StrataLength {
+            expected: 3,
+            found: 2
+        }
+    );
+    assert!(err.to_string().contains("strata length 2"));
+    // Allowed control: matching lengths are accepted.
+    assert!(DifficultyTracker::new(scope(3), vec![0; 3], config(0.5, 0.0, 0.0)).is_ok());
 }
 
 #[test]

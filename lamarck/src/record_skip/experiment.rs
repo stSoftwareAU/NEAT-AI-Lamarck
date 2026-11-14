@@ -16,7 +16,7 @@ use crate::memo::creature_fingerprint;
 use crate::propagate_layout::LearningPlan;
 
 pub use super::corpus::{BenchRecord, Corpus, load_corpus, synthetic_corpus, synthetic_parent};
-pub use super::manifest::{GridPoint, LEARNING_RATE, Manifest};
+pub use super::manifest::{GridPoint, Manifest};
 use super::schedule::{
     DifficultyScope, DifficultyTracker, ScheduleConfig, SkipPolicy, StratumEdges, rare_flags,
 };
@@ -60,8 +60,6 @@ pub struct RunOutcome {
     pub schedule_ops: u64,
     /// Share of observed records whose error rose after their last visit.
     pub forgotten_share: f64,
-    /// Mean positive error increase over observed records.
-    pub mean_forgetting_increase: f64,
     /// Parent creature fingerprint.
     pub parent_fingerprint: String,
     /// Corpus key.
@@ -69,7 +67,7 @@ pub struct RunOutcome {
 }
 
 /// Arm label for a policy.
-pub fn arm_label(policy: &SkipPolicy) -> String {
+fn arm_label(policy: &SkipPolicy) -> String {
     match policy {
         SkipPolicy::Full => "full".to_string(),
         SkipPolicy::EasySkip { reduction } => {
@@ -178,13 +176,12 @@ pub fn refine(
         return Err("refinement diverged: non-finite MSE".to_string());
     }
 
-    let bins = edges.bins();
     let val_strata: Vec<u16> = corpus
         .validation
         .iter()
         .map(|r| edges.assign(r.outputs[0]))
         .collect();
-    let mut sums = vec![(0.0f64, 0usize); bins];
+    let mut sums = vec![(0.0f64, 0usize); manifest.strata_bins.max(1)];
     for (s, e) in val_strata.iter().zip(&val_errors) {
         let slot = &mut sums[usize::from(*s)];
         slot.0 += e;
@@ -203,23 +200,19 @@ pub fn refine(
         .collect();
     let rare_mse = (!rare.is_empty()).then(|| mean(&rare));
 
-    let (mut observed, mut forgotten, mut increase) = (0usize, 0usize, 0.0f64);
+    let (mut observed, mut forgotten) = (0usize, 0usize);
     for (i, final_err) in train_errors.iter().enumerate() {
         if let Some(last) = tracker.last_seen(i) {
             observed += 1;
             if *final_err > last + manifest.forgetting_tolerance {
                 forgotten += 1;
             }
-            increase += (final_err - last).max(0.0);
         }
     }
-    let (forgotten_share, mean_increase) = if observed == 0 {
-        (0.0, 0.0)
+    let forgotten_share = if observed == 0 {
+        0.0
     } else {
-        (
-            forgotten as f64 / observed as f64,
-            increase / observed as f64,
-        )
+        forgotten as f64 / observed as f64
     };
 
     let full = matches!(policy, SkipPolicy::Full);
@@ -240,7 +233,6 @@ pub fn refine(
         revisit_passes,
         schedule_ops: ops,
         forgotten_share,
-        mean_forgetting_increase: mean_increase,
         parent_fingerprint: format!("{:016x}", own_scope.parent_fingerprint),
         corpus_key: corpus.key.clone(),
     })
@@ -669,7 +661,7 @@ fn compare(
         control_record_passes: opt(mean(&cp)),
         treatment_forgotten_share: opt(mean(&tf)),
         control_forgotten_share: opt(mean(&cf)),
-        verdict: verdict(&diffs, ci, &rare),
+        verdict: verdict(ci, &rare),
         validation_diffs: diffs,
     }
 }

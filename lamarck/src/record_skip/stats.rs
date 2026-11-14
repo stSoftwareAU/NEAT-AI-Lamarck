@@ -2,10 +2,10 @@
 
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Mean of `xs`; NaN when empty.
-pub fn mean(xs: &[f64]) -> f64 {
+pub(super) fn mean(xs: &[f64]) -> f64 {
     if xs.is_empty() {
         return f64::NAN;
     }
@@ -15,7 +15,7 @@ pub fn mean(xs: &[f64]) -> f64 {
 /// 95% percentile bootstrap interval of the mean of `diffs`.
 ///
 /// Deterministic for a given `seed`. Returns `(NaN, NaN)` for empty input.
-pub fn bootstrap_mean_ci(diffs: &[f64], resamples: usize, seed: u64) -> (f64, f64) {
+pub(super) fn bootstrap_mean_ci(diffs: &[f64], resamples: usize, seed: u64) -> (f64, f64) {
     if diffs.is_empty() || resamples == 0 {
         return (f64::NAN, f64::NAN);
     }
@@ -37,7 +37,7 @@ pub fn bootstrap_mean_ci(diffs: &[f64], resamples: usize, seed: u64) -> (f64, f6
 }
 
 /// Outcome of a paired comparison (lower error is better).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Verdict {
     /// Treatment is credibly better with no rare-stratum regression.
@@ -48,9 +48,10 @@ pub enum Verdict {
     Inconclusive,
 }
 
-/// Verdict on `diffs` (treatment minus control error) given their CI and the
-/// rare-stratum validation differences used as a regression guard.
-pub fn verdict(_diffs: &[f64], ci: (f64, f64), guard_diffs: &[f64]) -> Verdict {
+/// Verdict on a paired comparison, given the 95% CI of its treatment-minus-control
+/// error differences and the rare-stratum validation differences used as a
+/// regression guard.
+pub fn verdict(ci: (f64, f64), guard_diffs: &[f64]) -> Verdict {
     if ci.1 < 0.0 && !guard_diffs.is_empty() && mean(guard_diffs) <= 0.0 {
         Verdict::Better
     } else if ci.0 > 0.0 {

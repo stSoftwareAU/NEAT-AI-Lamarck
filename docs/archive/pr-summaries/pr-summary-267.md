@@ -16,9 +16,12 @@ and nothing was ported.
 
 The source paper's text (arXiv 2611.10386) was still unreachable from the
 sandbox. Its method, Sequence Pruning, is pinned from the authors' released
-code at a fixed commit, and `docs/easy-record-skipping.md` says how the tested
-scheme differs from it. The representative (private) run is outstanding.
-Part of #267.
+code at a fixed commit, along with its DSI-targeted variant and the
+InfoBatch, B-PAS and EL2N baselines. `docs/easy-record-skipping.md` says how
+the tested scheme differs from them. After the negative synthetic result,
+optional harness code that fed no reported result was removed. The
+representative (private) run is outstanding, and the doc now carries an explicit
+removal rule for the whole harness. Part of #267.
 
 The branch also carries two CI-plumbing commits, cherry-picked unchanged from
 the #268 branch (`98e7b28`, `5614dd8`). Without them the worker could not push
@@ -78,8 +81,21 @@ this branch at all:
   (`run_epoch_end_pruning`). At each epoch end it **permanently** removes
   sequences whose windowed accuracy lies in `[lower, 1.0]`. It has no revisits
   and no strata, and its `RP` control is a random subset fixed before
-  training. The scheme tested here is the issue's own (temporary EWMA skipping
-  at fixed reductions), so SP is documented but not run as an arm.
+  training. The same commit also pins:
+  - DSI-targeted SP (`run_mlm_dsi_targeted.py`): a geometric or linear
+    schedule of active counts, filled by removing the highest-accuracy
+    sequences;
+  - the DSI formula (`analysis/compute_dsi.py`);
+  - InfoBatch (`infobatch.py`, r 0.5, delta 0.875): below-mean-loss sequences
+    are skipped by a per-epoch coin flip, with 1/(1 - r) rescaling and a
+    full-data tail;
+  - B-PAS and EL2N.
+
+  InfoBatch is the closest to the issue's temporary skipping. The scheme
+  tested here is the issue's own (temporary EWMA skipping at fixed
+  reductions), so SP and InfoBatch are documented but not run as arms. On a
+  retry on 14 November, the web-fetch tool's proxy also refused the arXiv
+  abstract and PDF, alphaXiv and Hugging Face.
 - No `stSoftwareAU` repository named Backpropagation exists (`gh repo list
   stSoftwareAU`). Lamarck's refinement lives in this repository.
 - The synthetic run took 15 s wall in release, on a shared, parallel
@@ -145,22 +161,31 @@ results private. That run decides whether `record_skip/` stays or is removed.
 
 ## Acceptance Criteria
 
-- **missing** — Read and pin the full method before reproducing it — reason:
-  the method is pinned from the authors' code at `804aedb` (see
-  `docs/easy-record-skipping.md`, "Source"), but the paper text itself is still
-  unreadable from the sandbox (HTTP 403 from the proxy). Anything stated only
-  in the PDF is unchecked.
-- **missing** — Do not claim success before representative runs — reason: no
-  representative run on a real creature and corpus has been made. The corpus
-  mode exists, but the private corpus is not in this repository, so that run
-  is the owner step above. No success is claimed.
-- **missing** — remove optional code that does not earn its maintenance cost —
-  reason: the synthetic result is negative or inconclusive. Whether to remove
-  `record_skip/` waits on the representative run.
+<!-- vibe-spec-review inputs="diff+issue-body" -->
+
+- **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source": SP, DSI-targeted SP, DSI, InfoBatch, B-PAS and EL2N pinned from the authors' code at `804aedb`, with how the repository is tied to the arXiv ID) — reviewer: partial — reason: the paper text was never readable from the sandbox (the proxy refused it again this run), and the pin was committed after the synthetic run, not before it.
+- **met** — Do not claim success before representative runs — evidence: `docs/easy-record-skipping.md` (Status, Findings), the README #267 row, the CHANGELOG entry and `lamarck/src/record_skip/mod.rs` all say synthetic-only, negative or inconclusive, with the representative run outstanding — reviewer: met
+- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost": what was removed, what was kept and why, and a removal rule); `lamarck/src/record_skip/{experiment,schedule,stats}.rs`; `lamarck/tests/record_skip.rs::tracker_refuses_strata_that_do_not_match_record_count`; a re-run reproduces `summary.json` byte for byte — reviewer: partial — reason: optional code inside the harness was removed, but the harness itself (about 2,050 lines, `pub mod record_skip`) still ships, with its removal deferred to the owner's representative run or the next release.
+- **met** — Opt-in only; parents immutable; no default change — evidence: `lamarck/tests/record_skip.rs::refine_full_lowers_train_mse_and_keeps_parent` — reviewer: met
+- **met** — Reuse the existing refinement mechanism — evidence: `lamarck/src/record_skip/experiment.rs` (`LearningPlan`, `LearningScan`, `apply_learnings`, `calculate_learning_rate`) — reviewer: met
+- **partial** — Predeclare controls, seeds, sample size, compute limits and criteria; identify versions; count all preparation costs — evidence: `docs/evidence/record-skip/manifest.json`, `stats.rs::verdict` — reviewer: partial — reason: no compute limit is declared, versions carry no git SHA, and the learning-rate sweep is not counted in the cost table.
+- **met** — Deterministic positive and negative tests; normal quality checks pass — evidence: `lamarck/tests/record_skip.rs` (17 tests); `./quality.sh` exit 0 — reviewer: met
+- **met** — Reproducible command and manifest, machine-readable results with paired distributions, uncertainty, failures and coverage — evidence: `docs/evidence/record-skip/summary.json` (228/228) — reviewer: met
+- **partial** — Record stratum error and forgetting — evidence: `strataValidationMse`, `rareStratumValidationMse` and `forgottenShare` in each `runs.jsonl` row — reviewer: partial — reason: `summary.json` aggregates only the rare-stratum error, and `runs.jsonl` is not committed.
+- **partial** — Integrate the update path with Backpropagation if it owns refinement — evidence: `lamarck/src/record_skip/experiment.rs` uses Lamarck's port of the update path — reviewer: partial — reason: the README names NEAT-AI (TypeScript) as the current backpropagation implementation, and the doc does not say whether that repository owns refinement.
+- **met** — Application-agnostic public code; private results stay private — evidence: `lamarck/src/record_skip/corpus.rs` (synthetic fixtures only); corpus-mode results are marked private — reviewer: met
+- **unrequested** — the `.github/actions/rust-toolchain` action, its use in `ci.yml`, `cargo-quality.yml` and `family-sync.yml`, the `CANONICAL_PATHS` fallback with its check rule and tests, and the #268 CHANGELOG entry — reviewer: unrequested — reason: cherry-picked unchanged from the #268 branch; without them the worker's pre-push gate refuses every Rust change on this branch.
+
+## Standards Review
+
+<!-- vibe-standards-review inputs="diff+CODING-STANDARDS.md" -->
+
+- **violation** — CONTRIBUTING.md "Version bumping" (bump the patch version when `lamarck/src/` changes) — evidence: `lamarck/Cargo.toml:3` — reason: not fixed in this diff. The committed evidence records crate `0.1.46`, and the PR bot's auto-increment bumps the version on the PR.
+- **clean** — there is no CODING-STANDARDS.md, so the review used CONTRIBUTING.md. Clean: the CHANGELOG `[Unreleased]` entry; every removed item is confirmed gone by grep; every kept item is present; the doc's removed/kept lists match the code; the test changes include allowed controls; the removal-rule targets exist.
 
 ## Test Plan
 
-- Added `lamarck/tests/record_skip.rs` with 16 tests, all passing:
+- Added `lamarck/tests/record_skip.rs` with 17 tests, all passing:
   - `ewma_blends_observations`: literal EWMA value.
   - `full_and_warmup_keep_everything`.
   - `easy_skip_keeps_the_hardest`.
@@ -183,10 +208,15 @@ results private. That run decides whether `record_skip/` stays or is removed.
     calibration rows.
   - `files_mode_runs_and_load_corpus_checks_counts`: too few records are
     rejected, next to a positive control on the same files.
-  - `verdict_rules`.
+  - `verdict_rules`: includes a case with an empty rare-stratum guard, which
+    can never be `better`.
+  - `tracker_refuses_strata_that_do_not_match_record_count`: the refusal,
+    next to an allowed control.
   - `neat_core_tag_matches_cargo_toml`.
-- `timeout 1500 ./quality.sh < /dev/null` passed on the head (exit 0, "All
-  quality checks passed!"). That includes clippy
+- `timeout 1500 ./quality.sh < /dev/null` passed (exit 0, "All quality
+  checks passed!") on this run's tree, before `strataValidationMse` was
+  restored. After the restore, `cargo fmt`, clippy `-D warnings`, the 17
+  `record_skip` tests and the byte-for-byte evidence re-run all passed again. That includes clippy
   `-D warnings`, the full test suite (`readme_contract`, `docs_link_targets`),
   rustdoc and codespell.
 - `scripts/test-check-family-sync-workflow.sh` gains two negative cases (no
@@ -195,13 +225,25 @@ results private. That run decides whether `record_skip/` stays or is removed.
   `scripts/check-family-sync-workflow.sh`, `check-bot-push-action.sh`,
   `check-cargo-quality-overlap.sh` and `actionlint`. The gate step's
   ShellCheck, run under `env -i` with no `CANONICAL_PATHS`, came back clean.
-- No existing assertion was edited or removed. Outside `record_skip/` and its
+- Optional-code removal (criterion 3): the unread `meanForgettingIncrease`
+  field,
+  three dead accessors, the unused `verdict` argument, three unused serde
+  derives and one re-export were removed, and three helpers became private.
+  After that, `cargo run --release --example record_skip_bench --
+  /tmp/rsb-recheck` reproduced the committed `summary.json` and
+  `manifest.json` byte for byte (`cmp` exit 0). Running `cargo test
+  --release < /dev/null` passed in full, and so did `cargo clippy --release
+  --all-targets -- -D warnings`.
+- The only assertions edited are the four `verdict_rules` calls, which drop
+  the removed unused argument and keep the expected verdicts. No assertion
+  was removed. Outside `record_skip/` and its
   tests, the source changes are `pub mod record_skip;` in `lamarck/src/lib.rs`
   and the rule added to `scripts/check-family-sync-workflow.sh`.
 
 Not done: reading the paper text (the method is pinned from its code), running
-SP itself as an arm, the representative corpus run, and the keep-or-remove
-decision (see above). Remaining risk: the synthetic outcome may not carry over
+SP or InfoBatch as an arm, the representative corpus run, and deleting the
+harness itself (the removal rule in `docs/easy-record-skipping.md` decides
+that). Remaining risk: the synthetic outcome may not carry over
 to real creatures and corpora.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
