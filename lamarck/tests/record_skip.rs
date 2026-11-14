@@ -3,8 +3,8 @@
 use std::io::Write;
 
 use neat_ai_lamarck::record_skip::experiment::{
-    BenchRecord, CorpusSource, Manifest, NEAT_CORE_TAG, Row, load_corpus, refine, run_manifest,
-    synthetic_corpus, synthetic_parent, write_outputs,
+    BenchRecord, CorpusSource, GridPoint, Manifest, Row, load_corpus, neat_core_tag,
+    neat_core_tag_from, refine, run_manifest, synthetic_corpus, synthetic_parent, write_outputs,
 };
 use neat_ai_lamarck::record_skip::schedule::{
     DifficultyScope, DifficultyTracker, ScheduleConfig, ScheduleError, SkipPolicy, output_strata,
@@ -337,6 +337,43 @@ fn manifest_refusals() {
     let mut m = Manifest::smoke();
     m.epochs = 0;
     assert!(m.validate().unwrap_err().contains("epochs"));
+
+    let mut m = Manifest::smoke();
+    m.warmup_epochs = 0;
+    assert!(m.validate().unwrap_err().contains("warmupEpochs"));
+
+    for bad in [-0.1, 1.0, f64::NAN] {
+        let mut m = Manifest::smoke();
+        m.rare_stratum_share = bad;
+        assert!(m.validate().unwrap_err().contains("rareStratumShare"));
+    }
+    let mut m = Manifest::smoke();
+    m.rare_stratum_share = 0.0;
+    assert!(m.validate().is_ok());
+
+    for bad in [0.0, -0.5, 1.5, f64::NAN] {
+        let mut m = Manifest::smoke();
+        m.calibration_grid[0] = GridPoint {
+            ewma_alpha: bad,
+            revisit_share: 0.1,
+        };
+        assert!(m.validate().unwrap_err().contains("ewmaAlpha"));
+    }
+    for bad in [-0.1, 1.0, f64::NAN] {
+        let mut m = Manifest::smoke();
+        m.calibration_grid[0] = GridPoint {
+            ewma_alpha: 0.5,
+            revisit_share: bad,
+        };
+        assert!(m.validate().unwrap_err().contains("revisitShare"));
+    }
+    // Allowed controls: the inclusive upper bound of alpha and a zero revisit share.
+    let mut m = Manifest::smoke();
+    m.calibration_grid[0] = GridPoint {
+        ewma_alpha: 1.0,
+        revisit_share: 0.0,
+    };
+    assert!(m.validate().is_ok());
 }
 
 fn tiny() -> Manifest {
@@ -453,11 +490,20 @@ fn tracker_refuses_strata_that_do_not_match_record_count() {
 }
 
 #[test]
-fn neat_core_tag_matches_cargo_toml() {
+fn reported_neat_core_tag_follows_the_cargo_toml_pin() {
+    // Read the pin from the manifest at test time, so a moved pin cannot break this.
     let path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
     let toml = std::fs::read_to_string(path).unwrap();
-    assert!(
-        toml.contains(&format!("tag = \"{NEAT_CORE_TAG}\"")),
-        "NEAT_CORE_TAG {NEAT_CORE_TAG} out of step with Cargo.toml"
-    );
+    let tag = neat_core_tag_from(&toml);
+    assert!(tag.starts_with('v'), "{tag}");
+    assert_eq!(neat_core_tag(), tag);
+
+    let report = run_manifest(&tiny(), &CorpusSource::Synthetic).unwrap();
+    assert_eq!(report.versions.neat_core_tag, tag);
+
+    // The parser follows whatever tag the manifest carries.
+    let moved =
+        "[dependencies]\nother = { tag = \"v9\" }\nneat-core = { git = \"u\", tag = \"v9.9.9\" }\n";
+    assert_eq!(neat_core_tag_from(moved), "v9.9.9");
+    assert_eq!(neat_core_tag_from("[dependencies]\n"), "unknown");
 }

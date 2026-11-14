@@ -169,7 +169,7 @@ results private. That run decides whether `record_skip/` stays or is removed.
 - **met** — Opt-in only; parents immutable; no default change — evidence: `lamarck/tests/record_skip.rs::refine_full_lowers_train_mse_and_keeps_parent` — reviewer: met
 - **met** — Reuse the existing refinement mechanism — evidence: `lamarck/src/record_skip/experiment.rs` (`LearningPlan`, `LearningScan`, `apply_learnings`, `calculate_learning_rate`) — reviewer: met
 - **partial** — Predeclare controls, seeds, sample size, compute limits and criteria; identify versions; count all preparation costs — evidence: `docs/evidence/record-skip/manifest.json`, `stats.rs::verdict` — reviewer: partial — reason: no compute limit is declared, versions carry no git SHA, and the learning-rate sweep is not counted in the cost table.
-- **met** — Deterministic positive and negative tests; normal quality checks pass — evidence: `lamarck/tests/record_skip.rs` (17 tests); `./quality.sh` exit 0 — reviewer: met
+- **met** — Deterministic positive and negative tests; normal quality checks pass — evidence: `lamarck/tests/record_skip.rs` (17 tests) and `lamarck/src/record_skip/experiment.rs` (2 unit tests for the run-failure path: `refused_grid_point_is_reported_beside_a_valid_one`, `all_failed_calibration_names_the_first_failure`); `neat_core_tag` is read from `lamarck/Cargo.toml`, so a moved pin cannot fail a test (`reported_neat_core_tag_follows_the_cargo_toml_pin`) — reviewer: met
 - **met** — Reproducible command and manifest, machine-readable results with paired distributions, uncertainty, failures and coverage — evidence: `docs/evidence/record-skip/summary.json` (228/228) — reviewer: met
 - **partial** — Record stratum error and forgetting — evidence: `strataValidationMse`, `rareStratumValidationMse` and `forgottenShare` in each `runs.jsonl` row — reviewer: partial — reason: `summary.json` aggregates only the rare-stratum error, and `runs.jsonl` is not committed.
 - **partial** — Integrate the update path with Backpropagation if it owns refinement — evidence: `lamarck/src/record_skip/experiment.rs` uses Lamarck's port of the update path — reviewer: partial — reason: the README names NEAT-AI (TypeScript) as the current backpropagation implementation, and the doc does not say whether that repository owns refinement.
@@ -185,7 +185,8 @@ results private. That run decides whether `record_skip/` stays or is removed.
 
 ## Test Plan
 
-- Added `lamarck/tests/record_skip.rs` with 17 tests, all passing:
+- Added `lamarck/tests/record_skip.rs` with 17 tests and two unit tests in
+  `lamarck/src/record_skip/experiment.rs`, all passing:
   - `ewma_blends_observations`: literal EWMA value.
   - `full_and_warmup_keep_everything`.
   - `easy_skip_keeps_the_hardest`.
@@ -212,11 +213,27 @@ results private. That run decides whether `record_skip/` stays or is removed.
     can never be `better`.
   - `tracker_refuses_strata_that_do_not_match_record_count`: the refusal,
     next to an allowed control.
-  - `neat_core_tag_matches_cargo_toml`.
+  - `reported_neat_core_tag_follows_the_cargo_toml_pin`: the reported tag is
+    parsed from `lamarck/Cargo.toml` (`include_str!`), not typed in, so the
+    automated pin refresh in Family Sync cannot turn it red. The test reads the
+    tag from the manifest at test time, compares it with
+    `BenchReport.versions.neat_core_tag`, and checks the parser on a moved tag.
+  - Unit `refused_grid_point_is_reported_beside_a_valid_one`: a grid point
+    with `ewmaAlpha: 0.0` beside a valid one. It asserts the failed rows (arm,
+    seed, phase, error text), `coverage.failed` 2 and `completed` 8, the
+    `nPairs` 0 and null `meanTrainDiff` entry, the valid point chosen, and the
+    two error lines in `runs.jsonl`.
+  - Unit `all_failed_calibration_names_the_first_failure`: with every
+    calibration run refused, the returned error names the first failure.
+  - `manifest_refusals` now also covers `warmupEpochs` 0, `rareStratumShare`
+    out of range, and grid `ewmaAlpha` and `revisitShare` out of range, each
+    with an allowed control. `Manifest::validate` refuses them up front, so
+    the unit tests reach the run-failure path through the private
+    `run_validated`.
 - `timeout 1500 ./quality.sh < /dev/null` passed (exit 0, "All quality
   checks passed!") on this run's tree, before `strataValidationMse` was
   restored. After the restore, `cargo fmt`, clippy `-D warnings`, the 17
-  `record_skip` tests and the byte-for-byte evidence re-run all passed again. That includes clippy
+  `record_skip` tests (plus the 2 unit tests after the review fix) and the byte-for-byte evidence re-run all passed again. That includes clippy
   `-D warnings`, the full test suite (`readme_contract`, `docs_link_targets`),
   rustdoc and codespell.
 - `scripts/test-check-family-sync-workflow.sh` gains two negative cases (no

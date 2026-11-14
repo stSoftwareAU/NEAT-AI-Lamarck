@@ -146,6 +146,29 @@ impl Manifest {
         if !(self.learning_rate > 0.0 && self.learning_rate.is_finite()) {
             return Err("learningRate must be positive and finite".to_string());
         }
+        if self.warmup_epochs == 0 {
+            return Err("warmupEpochs must be at least 1".to_string());
+        }
+        if !(0.0..1.0).contains(&self.rare_stratum_share) {
+            return Err(format!(
+                "rareStratumShare {} must be in [0, 1)",
+                self.rare_stratum_share
+            ));
+        }
+        for g in &self.calibration_grid {
+            if !(g.ewma_alpha > 0.0 && g.ewma_alpha <= 1.0) {
+                return Err(format!(
+                    "calibrationGrid ewmaAlpha {} must be in (0, 1]",
+                    g.ewma_alpha
+                ));
+            }
+            if !(0.0..1.0).contains(&g.revisit_share) {
+                return Err(format!(
+                    "calibrationGrid revisitShare {} must be in [0, 1)",
+                    g.revisit_share
+                ));
+            }
+        }
         Ok(())
     }
 }

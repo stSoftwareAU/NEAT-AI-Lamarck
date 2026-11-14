@@ -22,9 +22,30 @@ use super::schedule::{
 };
 use super::stats::{Verdict, bootstrap_mean_ci, mean, verdict};
 
-/// neat-core tag this crate is built against. Must match `lamarck/Cargo.toml`
-/// (asserted by a test).
-pub const NEAT_CORE_TAG: &str = "v0.23.4";
+/// The manifest this crate was built from. The neat-core pin is read from it, so
+/// the reported tag follows the pin when the automated refresh moves it.
+const CARGO_TOML: &str = include_str!("../../Cargo.toml");
+
+/// neat-core tag this crate is built against, read from `lamarck/Cargo.toml`.
+pub fn neat_core_tag() -> String {
+    neat_core_tag_from(CARGO_TOML)
+}
+
+/// Extract the `tag` of the `neat-core` dependency from manifest text, or
+/// `unknown` when the dependency carries no tag.
+pub fn neat_core_tag_from(manifest: &str) -> String {
+    manifest
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with("neat-core") && l[9..].trim_start().starts_with('='))
+        .and_then(|l| {
+            let rest = &l[l.find("tag")? + 3..];
+            let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+            let rest = rest.strip_prefix('"')?;
+            Some(rest[..rest.find('"')?].to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 /// Result of one refinement run.
 #[derive(Clone, Debug, Serialize)]
@@ -504,6 +525,12 @@ fn schedule_for(m: &Manifest, g: &GridPoint) -> ScheduleConfig {
 /// Run calibration then validation per the manifest.
 pub fn run_manifest(manifest: &Manifest, source: &CorpusSource) -> Result<BenchReport, String> {
     manifest.validate()?;
+    run_validated(manifest, source)
+}
+
+/// Run an already validated manifest. Split out so tests can drive the
+/// run-failure path with values `Manifest::validate` refuses up front.
+fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchReport, String> {
     let mut runner = Runner {
         manifest,
         source,
@@ -552,7 +579,19 @@ pub fn run_manifest(manifest: &Manifest, source: &CorpusSource) -> Result<BenchR
             best = Some(i);
         }
     }
-    let best = best.ok_or("calibration produced no matched pairs; cannot choose a schedule")?;
+    let best = best.ok_or_else(|| {
+        let first = runner.rows.iter().find_map(|r| match r {
+            Row::Failed(f) => Some(format!(
+                "; first failure: {} seed {} {}: {}",
+                f.arm, f.seed, f.phase, f.error
+            )),
+            Row::Ok(_) => None,
+        });
+        format!(
+            "calibration produced no matched pairs; cannot choose a schedule{}",
+            first.unwrap_or_default()
+        )
+    })?;
     let chosen = manifest.calibration_grid[best];
     let sched = schedule_for(manifest, &chosen);
 
@@ -598,7 +637,7 @@ pub fn run_manifest(manifest: &Manifest, source: &CorpusSource) -> Result<BenchR
         manifest: manifest.clone(),
         versions: Versions {
             crate_version: env!("CARGO_PKG_VERSION").to_string(),
-            neat_core_tag: NEAT_CORE_TAG.to_string(),
+            neat_core_tag: neat_core_tag(),
         },
         source: source_desc,
         chosen_schedule: ChosenSchedule {
@@ -683,4 +722,89 @@ pub fn write_outputs(dir: &Path, report: &BenchReport) -> Result<(), String> {
     }
     write("runs.jsonl", lines)?;
     write("summary.json", report.summary_json()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tiny() -> Manifest {
+        Manifest {
+            train_records: 100,
+            validation_records: 50,
+            reductions: vec![0.5],
+            calibration_seeds: vec![1],
+            validation_seeds: vec![1001, 1002],
+            ..Manifest::smoke()
+        }
+    }
+
+    fn failed(rows: &[Row]) -> Vec<&FailureRow> {
+        rows.iter()
+            .filter_map(|r| match r {
+                Row::Failed(f) => Some(f),
+                Row::Ok(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn refused_grid_point_is_reported_beside_a_valid_one() {
+        let mut m = tiny();
+        m.calibration_grid = vec![
+            GridPoint {
+                ewma_alpha: 0.0,
+                revisit_share: 0.1,
+            },
+            GridPoint {
+                ewma_alpha: 0.5,
+                revisit_share: 0.1,
+            },
+        ];
+        // Control: the public entry point refuses the bad grid point up front.
+        assert!(m.validate().unwrap_err().contains("ewmaAlpha"));
+
+        let report = run_validated(&m, &CorpusSource::Synthetic).unwrap();
+        // 1 seed * 1 reduction * 2 grid * 2 arms + 2 seeds * 3 arms.
+        assert_eq!(report.coverage.planned, 10);
+        assert_eq!(report.coverage.failed, 2);
+        assert_eq!(report.coverage.completed, 8);
+
+        let fails = failed(&report.rows);
+        assert_eq!(fails.len(), 2);
+        let arms: Vec<&str> = fails.iter().map(|f| f.arm.as_str()).collect();
+        assert_eq!(arms, ["random-50", "easy-50"]);
+        for f in &fails {
+            assert_eq!((f.seed, f.phase.as_str()), (1, "calibration"));
+            assert!(f.error.contains("ewma_alpha"), "{}", f.error);
+        }
+
+        assert_eq!(report.calibration[0].n_pairs, 0);
+        assert!(report.calibration[0].mean_train_diff.is_none());
+        assert_eq!(report.calibration[1].n_pairs, 1);
+        assert!(report.calibration[1].mean_train_diff.is_some());
+        assert_eq!(report.chosen_schedule.ewma_alpha, 0.5);
+
+        let dir = tempfile::tempdir().unwrap();
+        write_outputs(dir.path(), &report).unwrap();
+        let runs = std::fs::read_to_string(dir.path().join("runs.jsonl")).unwrap();
+        assert_eq!(runs.lines().count(), 10);
+        let error_lines = runs.lines().filter(|l| l.contains("\"error\"")).count();
+        assert_eq!(error_lines, 2);
+    }
+
+    #[test]
+    fn all_failed_calibration_names_the_first_failure() {
+        let mut m = tiny();
+        m.warmup_epochs = 0;
+        assert!(m.validate().unwrap_err().contains("warmupEpochs"));
+
+        let err = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        assert!(err.contains("no matched pairs"), "{err}");
+        assert!(
+            err.contains("first failure: random-50 seed 1 calibration"),
+            "{err}"
+        );
+        assert!(err.contains("warmup_epochs"), "{err}");
+    }
 }
