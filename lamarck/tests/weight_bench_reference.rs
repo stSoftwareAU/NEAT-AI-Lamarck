@@ -352,3 +352,37 @@ fn malformed_reference_sets_are_refused() {
         Err(BenchError::InvalidConfig(_))
     ));
 }
+
+#[test]
+fn hand_built_error_row_with_null_fields_counts_as_failed() {
+    let m = many_seeds();
+    let runs = in_process_rows();
+    let mut reference = reference_rows(-0.3);
+    let mut failed = fixture(Arm::AmmReference, SEEDS[0], 0.0);
+    failed.start_screening_loss = None;
+    failed.final_screening_loss = None;
+    failed.normalised_screening_loss = None;
+    failed.evaluations_used = 0;
+    failed.preparation_evaluations = 0;
+    failed.full_loss_start = None;
+    failed.full_loss_final = None;
+    failed.held_out_loss_start = None;
+    failed.held_out_loss_final = None;
+    failed.normalised_held_out_loss = None;
+    failed.confirmation_evaluations = 0;
+    failed.error = Some("server gave no row".into());
+    // It must survive the JSON round trip the script and the example use.
+    let text = serde_json::to_string(&failed).unwrap();
+    let failed: RunRow = serde_json::from_str(&text).unwrap();
+    assert!(failed.routed_to.is_none());
+    reference[0] = failed;
+
+    let r = summarise_reference(&m, &runs, &reference).unwrap();
+    assert_eq!(r.coverage.completed_runs, 5);
+    assert_eq!(r.coverage.failed_runs, 1);
+    assert_eq!(r.total_evaluations, 5 * (200 + 21 + 4));
+    let c = &r.cells[0].comparisons[0];
+    assert_eq!(c.screening.failures, 1);
+    assert_eq!(c.held_out.failures, 1);
+    assert_eq!(c.screening.paired_differences.len(), 5);
+}

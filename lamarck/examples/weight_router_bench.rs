@@ -9,8 +9,9 @@
 //! ```
 //!
 //! Writes `OUT_DIR/manifest.json`, `OUT_DIR/runs.jsonl` (one run per line) and
-//! `OUT_DIR/summary.json`. `OUT_DIR` defaults to `weight-router-bench`. The
-//! default manifest is the predeclared one; `--manifest` reads a JSON manifest;
+//! `OUT_DIR/summary.json` (which carries the `crateVersion` that produced it;
+//! `--compare-reference` writes `OUT_DIR/reference-summary.json` with it too).
+//! `OUT_DIR` defaults to `weight-router-bench`. The default manifest is the predeclared one; `--manifest` reads a JSON manifest;
 //! `--smoke` runs one tiny cell.
 //!
 //! Corpus mode: `--creature` and `--training-data` (both required together)
@@ -116,7 +117,11 @@ fn compare_reference(out_dir: &Path, amm_rows: &Path) -> Result<(), String> {
     let reference = read_rows(amm_rows)?;
     let results = summarise_reference(&manifest, &runs, &reference).map_err(|e| e.to_string())?;
     let path = out_dir.join("reference-summary.json");
-    let pretty = serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?;
+    let mut value = serde_json::to_value(&results).map_err(|e| e.to_string())?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("crateVersion".into(), json!(env!("CARGO_PKG_VERSION")));
+    }
+    let pretty = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     fs::write(&path, pretty).map_err(|e| format!("{}: {e}", path.display()))?;
     print_cells(&results.cells);
     println!(
@@ -247,6 +252,7 @@ fn run() -> Result<(), String> {
     write("runs.jsonl", lines)?;
     let summary = json!({
         "formatVersion": results.format_version,
+        "crateVersion": env!("CARGO_PKG_VERSION"),
         "manifest": results.manifest,
         "calibratedRule": results.calibrated_rule,
         "totalEvaluations": results.total_evaluations,

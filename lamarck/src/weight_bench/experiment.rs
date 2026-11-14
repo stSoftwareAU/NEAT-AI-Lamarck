@@ -19,9 +19,11 @@ use super::suite::{
 
 /// Budget multiples (of the dimension) the experiment may use.
 pub const ALLOWED_BUDGET_MULTIPLES: [usize; 3] = [10, 30, 100];
-/// Confirmation evaluations per successful run (full and held-out records, at
-/// the start and at the best point).
-pub const CONFIRMATION_EVALUATIONS: usize = 4;
+/// Confirmation evaluations per successful run: the start on the screening
+/// records, then the start and the best point on the full records, then the
+/// start and the best point on the held-out records. The row records the
+/// number of calls actually made; this constant states the expectation.
+pub const CONFIRMATION_EVALUATIONS: usize = 5;
 
 /// What to run. Declared before any result is seen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,7 +150,9 @@ pub struct RunRow {
     pub evaluations_used: usize,
     /// Router only: evaluations the landscape probe spent.
     pub probe_evaluations: usize,
-    /// Evaluations spent choosing the free weights.
+    /// Evaluations spent choosing the free weights. This is the cost of
+    /// building the row's problem, so it is repeated on every row of that
+    /// problem; totals count it once per problem built.
     pub preparation_evaluations: usize,
     /// Full-record loss at the start.
     pub full_loss_start: Option<f64>,
@@ -250,7 +254,9 @@ pub struct ExperimentResults {
     pub calibrated_rule: RouterRule,
     /// Evaluations spent by the probe-only calibration passes.
     pub calibration_probe_evaluations: usize,
-    /// Budgeted + preparation + confirmation + calibration-probe evaluations.
+    /// Budgeted + confirmation evaluations of every row, plus the
+    /// calibration-probe evaluations, plus preparation counted once per
+    /// problem built (not once per row).
     pub total_evaluations: usize,
     /// Planned versus completed runs.
     pub coverage: Coverage,
@@ -327,6 +333,7 @@ pub(super) fn finish_row(
 ) -> RunRow {
     let mut row = blank_row(problem, multiple, phase, arm);
     let mut budgeted = BudgetedObjective::new(objective, row.budget);
+    let confirmations = std::cell::Cell::new(0usize);
     let outcome = optimise(&mut budgeted);
     row.evaluations_used = budgeted.used();
     let result = outcome.and_then(|routed| {
@@ -335,6 +342,7 @@ pub(super) fn finish_row(
             .ok_or_else(|| BenchError::Evaluation("no evaluation completed".into()))?;
         let start = budgeted.start();
         let confirm = |x: &[f64], records: &[f32]| {
+            confirmations.set(confirmations.get() + 1);
             objective
                 .loss_on(x, records)
                 .map_err(BenchError::Evaluation)
@@ -366,7 +374,8 @@ pub(super) fn finish_row(
             row.held_out_loss_start = Some(held_s);
             row.held_out_loss_final = Some(held_f);
             row.normalised_held_out_loss = Some(ratio(held_f, held_s));
-            row.confirmation_evaluations = CONFIRMATION_EVALUATIONS;
+            row.confirmation_evaluations = confirmations.get();
+            debug_assert_eq!(row.confirmation_evaluations, CONFIRMATION_EVALUATIONS);
         }
         Err(e) => row.error = Some(e.to_string()),
     }
@@ -431,6 +440,7 @@ struct Calibration {
     rows: Vec<RunRow>,
     table: Vec<CalibrationRow>,
     probe_evaluations: usize,
+    preparation_evaluations: usize,
 }
 
 /// Phase 1: both fixed arms plus a probe-only pass on the calibration seeds.
@@ -444,9 +454,11 @@ fn calibration_phase(m: &Manifest) -> Result<Calibration, BenchError> {
         rows: Vec::new(),
         table: Vec::new(),
         probe_evaluations: 0,
+        preparation_evaluations: 0,
     };
     problems(m, &m.calibration_seeds, |problem, objective| {
         let dimension = problem.spec.dimension;
+        out.preparation_evaluations += problem.preparation_evaluations;
         let mut probe_obj =
             BudgetedObjective::new(objective, 2 * ROUTER_PROBE_AXES.min(dimension) + 1);
         let probe = probe_landscape(&mut probe_obj, ROUTER_PROBE_AXES);
@@ -488,9 +500,11 @@ fn calibration_phase(m: &Manifest) -> Result<Calibration, BenchError> {
 }
 
 /// Phase 2: all three arms on the validation seeds.
-fn validation_phase(m: &Manifest, rule: &RouterRule) -> Result<Vec<RunRow>, BenchError> {
+fn validation_phase(m: &Manifest, rule: &RouterRule) -> Result<(Vec<RunRow>, usize), BenchError> {
     let mut rows = Vec::new();
+    let mut preparation = 0;
     problems(m, &m.validation_seeds, |problem, objective| {
+        preparation += problem.preparation_evaluations;
         for &multiple in &m.budget_multiples {
             for arm in [Arm::LamarckRefine, Arm::CmaEs, Arm::Router] {
                 rows.push(run_row(
@@ -505,7 +519,7 @@ fn validation_phase(m: &Manifest, rule: &RouterRule) -> Result<Vec<RunRow>, Benc
         }
         Ok(())
     })?;
-    Ok(rows)
+    Ok((rows, preparation))
 }
 
 fn summarise_metric(
@@ -637,7 +651,7 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
     m.validate()?;
     let calibration = calibration_phase(m)?;
     let calibrated_rule = calibrate(&calibration.table);
-    let validation = validation_phase(m, &calibrated_rule)?;
+    let (validation, validation_preparation) = validation_phase(m, &calibrated_rule)?;
 
     let mut runs = calibration.rows;
     runs.extend(validation);
@@ -646,10 +660,14 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
         * m.budget_multiples.len()
         * (m.calibration_seeds.len() * 2 + m.validation_seeds.len() * 3);
     let failed = runs.iter().filter(|r| r.error.is_some()).count();
+    // Preparation is a per-problem cost repeated on each of the problem's
+    // rows, so it is counted once per problem built, not summed over rows.
     let total_evaluations = calibration.probe_evaluations
+        + calibration.preparation_evaluations
+        + validation_preparation
         + runs
             .iter()
-            .map(|r| r.evaluations_used + r.preparation_evaluations + r.confirmation_evaluations)
+            .map(|r| r.evaluations_used + r.confirmation_evaluations)
             .sum::<usize>();
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
     let pairs = [

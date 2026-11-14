@@ -155,7 +155,10 @@ pub struct ReferenceResults {
     pub format_version: u32,
     /// The manifest the reference rows belong to.
     pub manifest: Manifest,
-    /// Budgeted + preparation + confirmation evaluations of the reference rows.
+    /// Budgeted + preparation + confirmation evaluations of the reference
+    /// rows. Each AMM run rebuilds its problem in its own serve process, so
+    /// preparation is correctly summed per row here (unlike the main
+    /// experiment, which builds each problem once).
     pub total_evaluations: usize,
     /// Planned versus finished reference runs; a planned run with no row is
     /// counted as neither completed nor failed.

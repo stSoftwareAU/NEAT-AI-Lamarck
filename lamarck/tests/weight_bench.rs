@@ -400,3 +400,34 @@ fn corpus_problem_splits_records() {
         .is_err()
     );
 }
+
+#[test]
+fn total_evaluations_count_confirmations_and_preparation_once_per_problem() {
+    let m = tiny_manifest();
+    let r = run_manifest(&m).unwrap();
+    // One calibration problem and one validation problem, each built once.
+    let prep = |seed| {
+        build_problem(&ProblemSpec {
+            family: Family::Tanh,
+            dimension: 20,
+            seed,
+        })
+        .unwrap()
+        .preparation_evaluations
+    };
+    let preparation = prep(1) + prep(1001);
+    assert!(preparation > 0);
+    // Two calibration rows and three validation rows, five confirmation
+    // evaluations each (screening start; full start and best; held-out start
+    // and best).
+    assert_eq!(r.runs.len(), 5);
+    assert!(r.runs.iter().all(|row| row.error.is_none()));
+    for row in &r.runs {
+        assert_eq!(row.confirmation_evaluations, 5);
+        assert_eq!(row.preparation_evaluations, prep(row.seed));
+    }
+    let used: usize = r.runs.iter().map(|row| row.evaluations_used).sum();
+    let probe = 2 * ROUTER_PROBE_AXES.min(20) + 1;
+    assert_eq!(r.calibration_probe_evaluations, probe);
+    assert_eq!(r.total_evaluations, used + 5 * 5 + preparation + probe);
+}

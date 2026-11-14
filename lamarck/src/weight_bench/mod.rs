@@ -13,10 +13,10 @@
 //!   the landscape, then hands the remaining budget to one of the two arms.
 //!
 //! AMM, the method of the paper arXiv 2611.06879, is deliberately NOT
-//! implemented in Rust: its method could not be retrieved and pinned, so
-//! comparing against a guess would be misleading. Instead the published
-//! optimiser runs offline (`scripts/amm-reference.py`) as a fourth,
-//! **amm-reference** arm. [`reference::serve_reference`] hands it the same
+//! reimplemented in Rust. It is run offline as a reference arm, pinned to its
+//! authors' implementation (`BjBodner/amm-optimizer` commit
+//! `74d39b4f7988a1f1aa8b40a2a0c3ee547f251107`, preset `c46`) via
+//! `scripts/amm-reference.py`, as a fourth **amm-reference** arm. [`reference::serve_reference`] hands it the same
 //! budgeted objective over a line protocol, and
 //! [`reference::summarise_reference`] compares its rows with the in-process
 //! arms using the same paired bootstrap. It only ever runs on validation seeds.

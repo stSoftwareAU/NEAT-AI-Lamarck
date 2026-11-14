@@ -27,6 +27,7 @@ AMM runs with its default configuration (preset c46, frozen for the paper).
 import argparse
 import concurrent.futures
 import json
+import os
 import subprocess
 import sys
 import time
@@ -52,15 +53,28 @@ def plan(manifest):
 
 
 def failure(run, why):
+    """A complete RunRow for a run that never produced one (camelCase, as serde reads it)."""
     family, dimension, seed, multiple = run
-    return {"family": family, "dimension": dimension, "seed": seed,
-            "budgetMultiple": multiple, "optimiser": "amm",
+    return {"family": family, "dimension": dimension,
+            "budgetMultiple": multiple, "budget": multiple * dimension,
+            "seed": seed, "phase": "validation", "arm": "amm-reference",
+            "routedTo": None, "startScreeningLoss": None,
+            "finalScreeningLoss": None, "normalisedScreeningLoss": None,
+            "evaluationsUsed": 0, "probeEvaluations": 0,
+            "preparationEvaluations": 0, "fullLossStart": None,
+            "fullLossFinal": None, "heldOutLossStart": None,
+            "heldOutLossFinal": None, "normalisedHeldOutLoss": None,
+            "confirmationEvaluations": 0,
+            # Mirrors EXTRAPOLATION_ABOVE in lamarck/src/weight_bench/suite.rs.
+            "extrapolation": dimension > 40,
             "error": f"amm run {family}/d{dimension}/seed{seed}/x{multiple}: {why}"}
 
 
 def stderr_cause(text):
+    """The bench prints `weight_router_bench: <error>` on failure; prefer that line."""
     lines = [x.strip() for x in text.splitlines() if x.strip()]
-    return lines[-1] if lines else "no stderr"
+    named = [x for x in lines if x.startswith("weight_router_bench:")]
+    return named[-1] if named else (lines[-1] if lines else "no stderr")
 
 
 def run_one(args):
@@ -148,7 +162,6 @@ def main():
         rows = list(pool.map(run_one, work))
     failed = sum(1 for r in rows if r.get("error"))
 
-    import os
     os.makedirs(a.out_dir, exist_ok=True)
     with open(os.path.join(a.out_dir, "amm-runs.jsonl"), "w") as fh:
         for r in rows:
