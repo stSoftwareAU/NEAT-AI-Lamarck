@@ -156,6 +156,7 @@ fn main() -> Result<(), String> {
     write_outputs(Path::new(&out), &report)?;
     let coverage = report.coverage;
     println!("overall verdict: {:?}", report.overall_verdict);
+    println!("success claim: {:?}", report.success_claim);
     println!(
         "coverage: planned {} completed {} failed {}",
         coverage.planned, coverage.completed, coverage.failed

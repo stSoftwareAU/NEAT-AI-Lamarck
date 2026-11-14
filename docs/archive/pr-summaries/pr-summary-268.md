@@ -6,16 +6,23 @@ This PR adds an opt-in, offline experiment for issue #268. It finds sparse
 symbolic local update rules for each activation family on calibration tasks,
 then compares them with Lamarck's own sparse backprop and with a
 derivative-free (1+1) search. Validation uses untouched tasks, and every arm
-gets the same total record budget, including the share of the rule search. The
-predeclared synthetic verdict is **`negative`**. Nothing in the optimiser, the
-CLI or any default changes. Two parts are still open: the representative run on
-a private creature and corpus, and pinning the paper's method. Part of #268.
+in the verdict gets the same total record budget, including the share of the
+rule search, rounded down to whole steps for the baselines. The
+predeclared synthetic verdict is **`negative`**. Every report also carries a
+`successClaim`. It is always `not-claimable-synthetic` for fixtures, and only
+`pending-owner-review` for a files run that earns its place, so the harness
+cannot claim success before a representative run. Nothing in the optimiser, the
+CLI or any default changes. Pinning the paper's full method is still open,
+because the paper could not be read from the sandbox. The representative run on
+a private creature and corpus is the owner's step. Part of #268.
 
 One change is outside the experiment itself. The Rust jobs in `ci.yml`
 (`quality`), `cargo-quality.yml` and `family-sync.yml` now install their
 toolchain through a new local action, `.github/actions/rust-toolchain`. It wraps
-the same pinned `dtolnay/rust-toolchain` step with the same components, so CI
-behaviour is unchanged. Without it, the worker's pre-push gate refused every
+the same pinned `dtolnay/rust-toolchain` step and asks for rustfmt and clippy.
+`ci.yml` and `cargo-quality.yml` already asked for those. `family-sync.yml` asked
+for none before, but `rust-toolchain.toml` lists both, and rustup honours that
+file, so CI still builds with the toolchain and components that file pins. The action's own `stable` install now also gets rustfmt and clippy in `family-sync`. Without it, the worker's pre-push gate refused every
 push of this branch (see Undiscoverable Facts). Because this branch now edits
 `family-sync.yml`, the gate also replays that workflow's ShellCheck step without
 the job's `env:`, and `set -u` stopped it on `CANONICAL_PATHS`. The step now
@@ -28,7 +35,7 @@ branch lands second merges it without a conflict.
 
 ### Intent and Rationale
 
-- The issue asks whether discovered local rules can stand in for current refinement. The harness answers that under a fixed protocol: seeds, sample size, limits and the verdict rule are set in `Manifest::predeclared()` before any run.
+- The issue asks whether discovered local rules can stand in for current refinement. The harness answers that under a fixed protocol: seeds, sample size, limits and the verdict rule are set in `Manifest::predeclared()`. It was committed together with the first recorded results (`2aa8f93`) and has not changed since. Git cannot show that it came before every run.
 - The sparse-backprop arm drives Lamarck's existing `LearningPlan`, `apply_learnings` and `calculate_learning_rate` with `sparse_ratio`. Current refinement is therefore what is measured, not a second copy of it.
 
 ### Essential Design Decisions
@@ -40,7 +47,7 @@ branch lands second merges it without a conflict.
 
 ### Undiscoverable Facts
 
-- arXiv 2611.12248 could not be read from the sandbox on 14 November 2026. Both `curl https://export.arxiv.org/abs/2611.12248` and `curl https://arxiv.org/pdf/2611.12248` failed with `CONNECT tunnel failed, response 403`. What is tested is the issue's description of the method.
+- arXiv 2611.12248 could not be read from the sandbox on 14 November 2026. `curl` of the export.arxiv.org abstract and the arxiv.org abstract and PDF failed with `CONNECT tunnel failed, response 403`. The fetch tool got "proxy refused the connection" on the arXiv abstract, HTML and PDF pages and on the alphaxiv and Hugging Face mirrors. Only web-search summaries came through. `docs/local-rules.md` section 2 records the outline they give: per-layer polynomial local losses over Penrose-diagram monomials, regressed against a global loss, with a Hadamard-product sparse prior and locality degree 1–3. It also records how this harness differs from that outline. The coefficient optimisation, the per-degree variable sets and the experimental settings were not found, so the method is not pinned. What is tested is the issue's description.
 - The worker's pre-push gate reads a job's `dtolnay/rust-toolchain@<ref>` ref as the `cargo +<ref>` toolchain (`jobToolchain` in VibeCoder `worker/deno/lib/ci_cargo_checks.ts`). Here the ref is the commit SHA `29eef336…`, and this host has no rustup, so its probe `cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version` exited 101 (`error: no such command: +…`). Three earlier runs of this issue ended there with no PR. That defect is in VibeCoder, which this repository does not depend on, so it cannot be fixed from here. The local action hides the ref from that inference. Running the worker's own `repoCiCargoChecks` on this checkout before the change planned three checks with `cargo +29eef…`; after it, plain `cargo clippy …` (`ci.yml`, `cargo-quality.yml`) and `cargo test --no-run …` (`family-sync.yml`).
 - The 13 November research shortlist the issue cites is not in this repository.
 
@@ -86,17 +93,43 @@ negative number means symbolic did better. n = 24 paired tasks per row.
 
 Once the search cost is counted, the rules lose to both baselines at every K.
 That is a negative finding on synthetic fixtures only, and it proves no benefit
-or harm on real creatures. The method write-up is `docs/local-rules.md`. The
+or harm on real creatures. `summary.json` records `"successClaim": "not-claimable-synthetic"`. Re-running
+the bench reproduces both files byte for byte. The method write-up is
+`docs/local-rules.md`. The
 `CHANGELOG.md` and `README.md` entries link to it.
 
 ## Acceptance Criteria
 
-- **missing** — "Do not claim success before representative runs" — reason: the representative run needs the private production creature and corpus, which are not in this repository. Owner step: run `cargo run --release --example local_rules_bench -- OUT_DIR --calibration-creature PATH --creature PATH --training-data DIR` on a quiet machine, keep the output private, and remove the harness unless the verdict is `earns-its-place`.
-- **missing** — "Read and pin the full method before reproducing it" — reason: arXiv 2611.12248 could not be reached from the sandbox (CONNECT tunnel 403), so what is tested is the issue's description and the paper's method is not pinned.
+<!-- vibe-spec-review inputs="diff+issue-body" -->
+
+- **met** — "Discover sparse polynomial rules from input, output, weight, local residual where legitimately available, and inexpensive products, per activation family" — evidence: `lamarck/src/local_rules/rule.rs` (`Feature`, `RuleSet`), `lamarck/src/local_rules/search.rs::discover` — reviewer: met
+- **met** — "Explicitly define how any residual is obtained: output error is not automatically local hidden-neuron information" — evidence: `lamarck/tests/local_rules.rs::local_residual_is_output_only`, `lamarck/tests/local_rules.rs::residual_only_rule_leaves_hidden_synapses_and_biases_alone` — reviewer: met
+- **met** — "Compare 5–20 update steps with sparse backprop and derivative-free correction under equal total budget including meta-search" — evidence: `lamarck/src/local_rules/manifest.rs` (`STEP_RANGE`), `lamarck/src/local_rules/baselines.rs` — reviewer: met
+- **met** — "Test transfer to new creatures/widths and held-out data" — evidence: `lamarck/src/local_rules/manifest.rs::predeclared`, `lamarck/tests/local_rules.rs::files_run_refuses_the_calibration_creature_as_validation` — reviewer: met
+- **met** — "Keep as isolated experiment; canonical implementations belong in the existing training engine" — evidence: `lamarck/src/lib.rs` (`pub mod local_rules` is the only wiring) — reviewer: met
+- **missing** — "Read and pin the full method before reproducing it" — evidence: `docs/local-rules.md` section 2 — reviewer: missing — reason: arXiv 2611.12248 cannot be fetched from the sandbox (403 / proxy refused), and only a search-summary outline is recorded; the coefficient optimisation, per-degree variables and experimental settings remain unread.
+- **met** — "First inspect current code, merged work and repository instructions. Reuse existing mechanisms" — evidence: `lamarck/src/local_rules/baselines.rs` (`LearningPlan`, `apply_learnings`, `calculate_learning_rate`), `lamarck/src/local_rules/files.rs` — reviewer: met
+- **met** — "Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change" — evidence: `lamarck/tests/local_rules.rs::parent_is_unchanged_by_every_arm` — reviewer: met
+- **met** — "Predeclare controls, seeds, sample size, compute limits and success/failure criteria" — evidence: `lamarck/src/local_rules/manifest.rs::predeclared`, `docs/evidence/local-rules/manifest.json` — reviewer: met
+- **partial** — "Identify code/model/data versions" — evidence: `docs/evidence/local-rules/summary.json` (`versions`) — reviewer: partial — reason: `crateVersion` 0.1.46 equals the base branch's and no commit SHA is recorded, so the code version is not uniquely identified.
+- **met** — "Separate calibration from untouched validation and count all preparation/search costs" — evidence: `lamarck/src/local_rules/manifest.rs::validate`, `lamarck/tests/local_rules.rs::manifest_refusals_name_their_cause` — reviewer: met
+- **partial** — "Provide deterministic positive/negative correctness tests for new behaviour" — evidence: `lamarck/tests/local_rules.rs` (19 tests) — reviewer: partial — reason: the predeclared verdict rule `overall()` has no direct test of its `EarnsItsPlace` and `Inconclusive` branches.
+- **met** — "Pass the repository's normal quality checks" — evidence: `./quality.sh < /dev/null` exit 0, "All quality checks passed!" — reviewer: met
+- **met** — "Research runs are separate from routine feature CI" — evidence: `lamarck/examples/local_rules_bench.rs`, tests use `reduced_manifest()` — reviewer: met
+- **met** — "Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage" — evidence: `docs/evidence/local-rules/summary.json`, `lamarck/tests/local_rules.rs::reduced_manifest_is_reproducible_and_fully_covered` — reviewer: met
+- **met** — "Fixtures alone do not demonstrate an optimisation benefit" — evidence: `docs/local-rules.md` sections 1 and 7 — reviewer: met
+- **met** — "Record negative findings" — evidence: `docs/local-rules.md` section 7, `CHANGELOG.md`, `docs/evidence/local-rules/summary.json` (`overallVerdict: negative`) — reviewer: met
+- **partial** — "Remove optional code that does not earn its maintenance cost" — evidence: `docs/local-rules.md` section 8 decision rule — reviewer: partial — reason: the module and evidence stay after a negative synthetic verdict; removal waits on the owner's representative run.
+- **met** — "Do not claim success before representative runs" — evidence: `lamarck/tests/local_rules.rs::synthetic_source_never_supports_a_success_claim`, `lamarck/tests/local_rules.rs::synthetic_report_is_not_claimable_as_a_success`, `lamarck/tests/local_rules.rs::files_report_claim_follows_its_source_and_verdict`, `lamarck/src/local_rules/experiment.rs::success_claim` — reviewer: met
+- **partial** — "Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private" — evidence: `lamarck/src/local_rules/files.rs`, `lamarck/tests/local_rules.rs::files_run_completes_and_names_its_source` — reviewer: partial — reason: files mode without OUT_DIR defaults to the tracked `docs/evidence/local-rules`, so a private run could overwrite the public evidence; only the doc says to keep OUT_DIR private.
+- **met** — "Leave unassigned until an implementer actively starts" — evidence: issue assigned with `work-on` while in progress — reviewer: met
+- **unrequested** — `.github/actions/rust-toolchain` local action used by `ci.yml`, `cargo-quality.yml` and `family-sync.yml` — reviewer: unrequested — reason: needed so the worker's pre-push gate can run plain `cargo` (see Undiscoverable Facts).
+- **unrequested** — `CANONICAL_PATHS` fallback in `family-sync.yml`, validator rule 17 and its two tests — reviewer: unrequested — reason: the gate replays that step without the job's `env:` once this branch edits the workflow.
+- **unrequested** — `CHANGELOG.md` Fixed entry for the toolchain action — reviewer: unrequested — reason: records the toolchain change.
 
 ## Test Plan
 
-- Added `lamarck/tests/local_rules.rs` with 16 tests:
+- Added `lamarck/tests/local_rules.rs` with 19 tests:
   - Positive: `delta_rule_lowers_training_mse`.
   - Hidden-residual negative, with an output-synapse positive control: `residual_only_rule_leaves_hidden_synapses_and_biases_alone`.
   - Immutable parents: `parent_is_unchanged_by_every_arm`.
@@ -110,12 +143,18 @@ or harm on real creatures. The method write-up is `docs/local-rules.md`. The
     - `files_run_refuses_the_calibration_creature_as_validation`.
     - `files_run_refuses_no_validation_creatures_and_mismatched_widths`.
   - Report contents: `synthetic_summary_carries_the_search_trace_and_source`.
-- `cargo test --test local_rules`: 16 passed.
-- `./quality.sh < /dev/null` at `5aa69ba`, which includes the toolchain action: exit 0, "All quality checks passed!". An earlier run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree, so the line was added. The later `CANONICAL_PATHS` commit changes only `family-sync.yml` and the two family-sync scripts. The checks that cover them, listed above, were run on it individually rather than through the full gate again.
+  - No success before a representative run:
+    - `synthetic_source_never_supports_a_success_claim`: every verdict on a synthetic source gives `NotClaimableSynthetic`. Positive controls: files with `EarnsItsPlace` gives `PendingOwnerReview`, and files with any other verdict gives `NoSuccess`.
+    - `synthetic_report_is_not_claimable_as_a_success`: a real reduced synthetic report has the claim, and its JSON contains `"successClaim": "not-claimable-synthetic"`.
+    - `files_report_claim_follows_its_source_and_verdict`.
+  - Red-check: I temporarily made synthetic plus `EarnsItsPlace` return `PendingOwnerReview`. `synthetic_source_never_supports_a_success_claim` failed (18 passed, 1 failed), and passed again once the change was reverted.
+- `cargo test --test local_rules < /dev/null`: 19 passed. `cargo clippy` with the CI `-D` flags and `cargo fmt --all -- --check` are clean.
+- `cargo run --release --example local_rules_bench < /dev/null`: the only change in `summary.json` is the added `successClaim` line, and `manifest.json` is unchanged. The verdict is still `Negative`, with 360 of 360 runs complete.
+- `./quality.sh < /dev/null` on the tree committed for the `successClaim` change: exit 0, "All quality checks passed!". An earlier run in this session failed at codespell on an Italian word in a new doc line, which was then replaced. An earlier run at `5aa69ba` also passed. An earlier run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree, so the line was added. That pass covers the `CANONICAL_PATHS` changes too.
 - I ran the three CI cargo checks the worker's scanner now plans, with their workflow env (`CARGO_BUILD_JOBS=2 RUSTFLAGS="-D warnings"` for clippy), on the installed cargo 1.99.1. `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::filter_next -D clippy::collapsible_if` and the same without `--workspace` found no issues, and `cargo test --no-run --workspace --all-features` exited 0.
 - Toolchain action: `actionlint` on `ci.yml`, `cargo-quality.yml` and `family-sync.yml` reported nothing. `scripts/check-family-sync-workflow.sh`, `scripts/test-check-family-sync-workflow.sh`, `scripts/check-bot-push-action.sh`, `scripts/check-cargo-quality-overlap.sh` and `scripts/test-check-cargo-quality-overlap.sh` passed. No validator rule was added for the toolchain action, because it does not alter what CI runs.
 - `CANONICAL_PATHS` fallback: `scripts/test-check-family-sync-workflow.sh` gains two rule-17 cases, "gate step without a CANONICAL_PATHS fallback → fail" and "gate step fallback differs from CANONICAL_PATHS → fail", both exit 1, and the script passes. I replayed the family-sync "Gate the refreshed scripts" step and `ci.yml`'s "Run ShellCheck" step with `env -i PATH="$PATH" HOME="$HOME" bash --noprofile --norc -eo pipefail`: both exited 0, the first with "15 passed, 0 failed".
 - No existing test was edited or removed.
-- Not done: the representative private-corpus run, and pinning the paper's method (both above).
+- Not done: pinning the paper's full method, which the sandbox cannot fetch. The representative private-corpus run is the owner's step.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

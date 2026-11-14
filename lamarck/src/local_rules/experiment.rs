@@ -162,6 +162,34 @@ pub enum DataSource {
     },
 }
 
+/// Whether a report may be cited as a success, kept apart from the verdict.
+///
+/// The verdict is the predeclared rule applied to the intervals; this says
+/// whether the data behind it can support a success claim at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SuccessClaim {
+    /// Synthetic fixtures never support a success claim, whatever the verdict.
+    NotClaimableSynthetic,
+    /// A files run whose verdict is `EarnsItsPlace`. The code cannot know
+    /// whether the supplied creature and corpus are representative, so the
+    /// owner must confirm before anything is called a success.
+    PendingOwnerReview,
+    /// A files run whose verdict is not `EarnsItsPlace`.
+    NoSuccess,
+}
+
+/// The success claim a report with this source and verdict supports.
+pub fn success_claim(source: &DataSource, verdict: OverallVerdict) -> SuccessClaim {
+    match (source, verdict) {
+        (DataSource::Synthetic { .. }, _) => SuccessClaim::NotClaimableSynthetic,
+        (DataSource::Files { .. }, OverallVerdict::EarnsItsPlace) => {
+            SuccessClaim::PendingOwnerReview
+        }
+        (DataSource::Files { .. }, _) => SuccessClaim::NoSuccess,
+    }
+}
+
 /// Everything one manifest run produces.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -188,6 +216,8 @@ pub struct Report {
     pub comparisons: Vec<Comparison>,
     /// Predeclared success rule applied to the comparisons.
     pub overall_verdict: OverallVerdict,
+    /// Whether the data source lets the verdict be cited as a success.
+    pub success_claim: SuccessClaim,
 }
 
 impl Report {
@@ -459,6 +489,7 @@ pub(super) fn run_protocol(
         failed: failures.len() as u64,
     };
     let overall_verdict = overall(&comparisons, &manifest.steps);
+    let success_claim = success_claim(&data_source, overall_verdict);
     Ok(Report {
         versions: Versions::current(),
         data_source,
@@ -471,5 +502,6 @@ pub(super) fn run_protocol(
         coverage,
         comparisons,
         overall_verdict,
+        success_claim,
     })
 }

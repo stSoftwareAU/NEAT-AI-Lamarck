@@ -4,10 +4,10 @@
 use std::collections::BTreeMap;
 
 use neat_ai_lamarck::local_rules::{
-    ActivationFamily, Feature, Manifest, NEAT_CORE_TAG, RuleSet, SparseRule,
-    TASK_GENERATOR_VERSION, Task, TaskGroup, TaskSpec, Verdict, apply_rule_steps, build_task,
-    derivative_free, local_residual, matched_count, mse, run_files, run_manifest, sparse_backprop,
-    verdict,
+    ActivationFamily, DataSource, Feature, Manifest, NEAT_CORE_TAG, OverallVerdict, RuleSet,
+    SparseRule, SuccessClaim, TASK_GENERATOR_VERSION, Task, TaskGroup, TaskSpec, Verdict,
+    apply_rule_steps, build_task, derivative_free, local_residual, matched_count, mse, run_files,
+    run_manifest, sparse_backprop, success_claim, verdict,
 };
 
 /// The shared corpus writer: `write_sample` lays out the training-data format
@@ -357,4 +357,68 @@ fn synthetic_summary_carries_the_search_trace_and_source() {
     assert!(!trace.is_empty(), "searchTrace is empty");
     assert_eq!(json["dataSource"]["kind"], "synthetic");
     assert_eq!(json["dataSource"]["generator"], TASK_GENERATOR_VERSION);
+}
+
+const VERDICTS: [OverallVerdict; 3] = [
+    OverallVerdict::EarnsItsPlace,
+    OverallVerdict::Negative,
+    OverallVerdict::Inconclusive,
+];
+
+#[test]
+fn synthetic_source_never_supports_a_success_claim() {
+    let synthetic = DataSource::Synthetic {
+        generator: TASK_GENERATOR_VERSION.to_string(),
+    };
+    for v in VERDICTS {
+        assert_eq!(
+            success_claim(&synthetic, v),
+            SuccessClaim::NotClaimableSynthetic,
+            "synthetic source with verdict {v:?}"
+        );
+    }
+    let files = DataSource::Files {
+        corpus_key: "corpus".to_string(),
+        calibration_creature: "aa".to_string(),
+        validation_creatures: vec!["bb".to_string()],
+    };
+    assert_eq!(
+        success_claim(&files, OverallVerdict::EarnsItsPlace),
+        SuccessClaim::PendingOwnerReview
+    );
+    assert_eq!(
+        success_claim(&files, OverallVerdict::Negative),
+        SuccessClaim::NoSuccess
+    );
+    assert_eq!(
+        success_claim(&files, OverallVerdict::Inconclusive),
+        SuccessClaim::NoSuccess
+    );
+}
+
+#[test]
+fn synthetic_report_is_not_claimable_as_a_success() {
+    let report = run_manifest(&reduced_manifest()).expect("reduced run");
+    assert_eq!(report.success_claim, SuccessClaim::NotClaimableSynthetic);
+    let summary = report.summary_json().expect("summary serialises");
+    assert!(
+        summary.contains(r#""successClaim": "not-claimable-synthetic""#),
+        "summary lacks the synthetic success claim"
+    );
+}
+
+#[test]
+fn files_report_claim_follows_its_source_and_verdict() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manifest = reduced_files_manifest();
+    support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
+    let calibration = task(1).parent;
+    let validation = [task(2).parent];
+    let report =
+        run_files(&manifest, &calibration, &validation, dir.path()).expect("files run completes");
+    assert_eq!(
+        report.success_claim,
+        success_claim(&report.data_source, report.overall_verdict)
+    );
+    assert_ne!(report.success_claim, SuccessClaim::NotClaimableSynthetic);
 }

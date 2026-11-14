@@ -23,7 +23,7 @@ pub use apply::{Cost, apply_rule_steps, mse};
 pub use baselines::{derivative_free, matched_count, sparse_backprop};
 pub use experiment::{
     Comparison, Coverage, DataSource, Failure, OverallVerdict, PairedDifference, Report, RunRow,
-    run_manifest, write_outputs,
+    SuccessClaim, run_manifest, success_claim, write_outputs,
 };
 pub use files::run_files;
 pub use manifest::{Manifest, NEAT_CORE_TAG, TaskGroup, Versions};

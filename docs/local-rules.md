@@ -24,15 +24,71 @@ beat Lamarck's current refinement. It is **opt-in and research only**:
 The synthetic verdict is `negative` (section 7). Fixtures alone do not
 demonstrate an optimisation benefit.
 
+**No success before a representative run.** Each report carries
+`successClaim` next to `overallVerdict`. `success_claim` in
+`lamarck/src/local_rules/experiment.rs` sets it from the data source alone and
+does not change the predeclared verdict rule:
+
+| Source | `overallVerdict` | `successClaim` |
+|---|---|---|
+| synthetic | any, even `earns-its-place` | `not-claimable-synthetic` |
+| files | `earns-its-place` | `pending-owner-review` |
+| files | `negative` or `inconclusive` | `no-success` |
+
+The code cannot tell whether a supplied creature and corpus are representative.
+So even the best files result is only `pending-owner-review` until the owner
+confirms it. The recorded synthetic run is `not-claimable-synthetic`.
+
 ## 2. Research starting point
 
 The starting point is arXiv [2611.12248](https://arxiv.org/abs/2611.12248).
-The full method could **not** be read from the sandbox on 14 November 2026:
-`curl https://export.arxiv.org/abs/2611.12248` and
-`curl https://arxiv.org/pdf/2611.12248` both failed with
-`CONNECT tunnel failed, response 403`. The method is therefore not pinned. What
-is tested is the issue's description of it. A reproduction of the paper is
-still open.
+The paper's full text could **not** be read from the sandbox on 14 November 2026.
+`curl` of `https://export.arxiv.org/abs/2611.12248`, `https://arxiv.org/abs/2611.12248`
+and `https://arxiv.org/pdf/2611.12248` failed with
+`CONNECT tunnel failed, response 403`. Fetching the abstract, HTML and PDF pages
+and the alphaxiv and Hugging Face mirrors failed with "proxy refused the
+connection". Only web-search summaries of those pages could be retrieved.
+
+**Outline from web-search summaries (secondary, not read from the paper, so not a pin of the full method):**
+
+- **Paper:** "A method to automatically discover symbolic local learning rules".
+  Andrea Perin (Aalto University), Fabio Anselmi (University of
+  Trieste), Stéphane Deny (Aalto University). Submitted 9 November 2026, in
+  cs.LG, cs.NE and stat.ML. The arXiv version number was not visible.
+- **Object learned:** a separate *local loss* per layer, not an update rule.
+  The update is that loss's gradient.
+- **Dictionary:** monomials of local tensor variables, enumerated using
+  Penrose tensor-diagram notation. A layer's local loss is a weighted sum of
+  its trace monomials.
+- **Fit:** the method regresses the monomial coefficients so that the layerwise
+  gradients together reduce a target global loss.
+- **Sparsity:** coefficients are formed as a Hadamard product, which acts as an
+  implicit sparse prior. The authors report that this improves results.
+- **Locality degree:** degree 1 is purely local, degree 2 is local but not
+  purely local, and degree 3 is global. Degree sweeps are run on
+  classification and reconstruction.
+- **Experiments:** classification, reconstruction and self-supervised tasks on
+  small multilayer networks and minimal datasets.
+- **Reported limitation:** loss falls more slowly under the discovered rules
+  than under backprop.
+
+**Not pinned.** How the coefficient regression is optimised was not found, for
+example whether the inner training loop is unrolled. Also missing: the exact
+variable set per degree, step counts, network sizes, datasets and
+hyperparameters. A faithful reproduction of the paper is therefore still open.
+
+**How this harness differs from that outline** (the left column is only as reliable as the search summaries):
+
+| Paper (as summarised) | This harness |
+|---|---|
+| Learns a per-layer polynomial *loss*, and updates follow its gradient | Learns a sparse linear *update rule* directly (section 3) |
+| Rules are per layer | Rules are per activation family, because NEAT creatures have no layers |
+| Penrose-diagram monomials of local tensors, degree 1–3 | Fixed library of 9 scalar per-synapse features (section 3), polynomial order up to 3 (`XYY`, `WYY`), each using only the synapse's own neurons, so purely local in the paper's degree-1 sense. The residual exists only on output neurons (section 4) |
+| Coefficients regressed against a global loss, with a Hadamard-product sparse prior | Seeded random sampling of sparse rules (at most 3 terms, coefficients from a fixed grid), keeping a candidate only when it lowers calibration training MSE (sections 3 and 6) |
+| No equal-budget accounting reported in the summaries | The meta-search cost is charged to the symbolic arm (section 5) |
+
+So this experiment tests the issue's description, which the summaries match
+only in outline. A negative result here does not refute the paper's method.
 
 ## 3. Rule language
 
@@ -250,6 +306,9 @@ a corpus key and creature fingerprints, never paths or record values. The
 validation group is labelled `files`.
 
 Keep `OUT_DIR` and its results private. Do not commit them.
+
+The runner prints `success claim:` after the verdict. A files run that
+`earns-its-place` reports `pending-owner-review`, never a success on its own.
 
 **Decision rule.** If the representative run is also not `earns-its-place`,
 remove `lamarck/src/local_rules/`, the example, its tests and the evidence. Until

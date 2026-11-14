@@ -16,7 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `run_optimisation` or the CLI calls it, so defaults are unchanged. On the
   synthetic fixtures (`docs/evidence/local-rules/summary.json`) the overall verdict
   is `negative`: the rules are worse than both primary baselines at every step
-  count once the meta-search is included. Reproduce with
+  count once the meta-search is included. Every report also carries
+  `successClaim`. A synthetic run is always `not-claimable-synthetic`, and a
+  files run that earns its place is only `pending-owner-review`, so no success
+  is claimed before a representative run. Reproduce with
   `cargo run --release --example local_rules_bench`; the method, protocol and
   results are in [`docs/local-rules.md`](docs/local-rules.md).
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
