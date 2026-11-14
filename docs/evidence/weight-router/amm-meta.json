@@ -7,9 +7,9 @@
   "scipy": "1.18.1",
   "python": "3.13.5",
   "bench": "/tmp/exec-a-target/release/examples/weight_router_bench",
-  "manifest": "/tmp/wrb-full/manifest.json",
+  "manifest": "/tmp/wrb-full2/manifest.json",
   "planned": 324,
   "completed": 324,
   "failed": 0,
-  "wallSeconds": 98.522
+  "wallSeconds": 100.2
 }

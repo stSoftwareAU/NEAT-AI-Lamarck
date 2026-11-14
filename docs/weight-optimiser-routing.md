@@ -97,10 +97,14 @@ the manifest it used to `manifest.json` (the committed copy is
 * **Compute limits.** Each run's evaluation budget is enforced by
   `BudgetedObjective`, which refuses (fails loud with `BudgetExhausted`) any
   evaluation past the limit.
-* **Cost accounting.** Total evaluations include preparation (145 per problem),
-  the calibration probe passes, the router's 17 probe evaluations per run and 4
-  confirmation evaluations per run (`CONFIRMATION_EVALUATIONS`). The probe and
-  the start re-evaluation come out of the router's budget.
+* **Cost accounting.** Total evaluations include preparation (145 per problem,
+  counted once per problem built), the calibration probe passes, the router's
+  17 probe evaluations per run and 5 confirmation evaluations per successful run
+  (`CONFIRMATION_EVALUATIONS`): the start on the screening records, the start
+  and the best point on the full records, and the start and the best point on the
+  held-out records. The probe and the start re-evaluation come out of the
+  router's budget. Each AMM serve process rebuilds its problem, so the AMM
+  reference total counts preparation once per AMM run.
 
 ## AMM reference
 
@@ -184,7 +188,7 @@ The run writes `manifest.json`, `runs.jsonl` and `summary.json` to `OUT_DIR`
 |------|----------|
 | `manifest.json` | The manifest that was run. |
 | `runs.jsonl` | One line per run, failures included: arm, routed-to arm, start and final screening, full and held-out losses, evaluations used, probe, preparation and confirmation evaluations, error. |
-| `summary.json` | Calibrated rule, total evaluations, coverage (planned, completed, failed runs) and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening and held-out loss, plus the verdict. |
+| `summary.json` | Crate version (`crateVersion`, 0.1.46), calibrated rule, total evaluations, coverage (planned, completed, failed runs) and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening and held-out loss, plus the verdict. |
 
 `runs.jsonl` (about 830 KB) is not committed. The committed
 [`summary.json`](evidence/weight-router/summary.json) carries the per-cell paired
@@ -194,14 +198,17 @@ distributions. The AMM reference adds three committed files:
 |------|----------|
 | [`amm-runs.jsonl`](evidence/weight-router/amm-runs.jsonl) | One `RunRow` per AMM validation run (324). |
 | [`amm-meta.json`](evidence/weight-router/amm-meta.json) | AMM version, commit, preset and config hash, numpy, scipy and Python versions, coverage and wall time. |
-| [`reference-summary.json`](evidence/weight-router/reference-summary.json) | Coverage, total evaluations and per-cell paired comparisons of AMM against refine, CMA-ES and router, with verdicts. |
+| [`reference-summary.json`](evidence/weight-router/reference-summary.json) | Crate version (`crateVersion`, 0.1.46), coverage, total evaluations and per-cell paired comparisons of AMM against refine, CMA-ES and router, with verdicts. |
 
 ## Results (synthetic suite only)
+
+The full suite and the AMM reference were run twice; re-running reproduced every
+cell exactly (determinism check), and the AMM losses were identical.
 
 Run with `cargo run --release --example weight_router_bench -- /tmp/wrb-full`:
 crate `neat_ai_lamarck` 0.1.46, neat-core tag v0.23.4, 13 min 34 s wall on a
 shared, parallel 7-core container, so the time is indicative only. Coverage was
-1404 of 1404 runs completed, 0 failed, and 3,704,685 evaluations in total.
+1404 of 1404 runs completed, 0 failed, and 3,528,609 evaluations in total.
 
 All 324 validation router runs routed to CMA-ES. Verdicts over the 27 cells (12
 paired validation seeds each):
@@ -272,8 +279,9 @@ and the last two columns are the router verdicts.
 
 ## AMM reference results
 
-Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 854,676
-evaluations (budgeted, preparation and confirmation). AMM took 98.5 s wall with
+Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 855,000
+evaluations (budgeted, preparation per AMM run and 5 confirmation evaluations
+per run). AMM took 100.2 s wall with
 18 workers on a shared, parallel container, so the time is indicative only.
 
 **Verdict: `amm-reference-worse` in all 27 cells against each of refine, CMA-ES

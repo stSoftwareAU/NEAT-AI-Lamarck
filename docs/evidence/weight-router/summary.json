@@ -4520,6 +4520,7 @@
     "failedRuns": 0,
     "plannedRuns": 1404
   },
+  "crateVersion": "0.1.46",
   "formatVersion": 1,
   "manifest": {
     "bootstrapResamples": 2000,
@@ -4564,5 +4565,5 @@
       1012
     ]
   },
-  "totalEvaluations": 3704685
+  "totalEvaluations": 3528609
 }
