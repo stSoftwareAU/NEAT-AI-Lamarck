@@ -1,3 +1,2 @@
-[allowlist]
-  description = "Allowlist for known false positives"
-  commits = []
+[extend]
+useDefault = true
