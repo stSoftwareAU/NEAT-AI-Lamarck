@@ -327,9 +327,10 @@ Kept on purpose:
 - the `StrataLength` refusal (input validation on a public constructor,
   covered by a test);
 - corpus mode (the representative run needs it);
-- every existing field of `summary.json`; the version 2 change only adds
-  fields (`chosenLearningRate`, `learningRateSweep`, `preparationCost`,
-  `compute`, `arms` and `versions.gitCommit`).
+- every other field of `summary.json`; the version 2 change adds
+  `chosenLearningRate`, `learningRateSweep`, `preparationCost`, `compute`,
+  `arms` and `versions.gitCommit`, and in the manifest echo replaces
+  `learningRate` with `learningRateGrid` and adds `maxRecordPasses`.
 
 **Removal rule.** Delete `lamarck/src/record_skip/`,
 `lamarck/examples/record_skip_bench.rs`, `lamarck/tests/record_skip.rs`,

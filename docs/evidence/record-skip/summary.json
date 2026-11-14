@@ -711,7 +711,7 @@
   },
   "versions": {
     "crate": "0.1.47",
-    "gitCommit": "ad6812f640577aecfe2c60a154452bb12dc73c79-dirty",
+    "gitCommit": "da4edffe5714531dbc16a3d905c6f962f2f9cc77",
     "neatCoreTag": "v0.23.4"
   }
 }
