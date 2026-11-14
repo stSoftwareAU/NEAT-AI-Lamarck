@@ -19,7 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   count once the meta-search is included. Every report also carries
   `successClaim`. A synthetic run is always `not-claimable-synthetic`, and a
   files run that earns its place is only `pending-owner-review`, so no success
-  is claimed before a representative run. Reproduce with
+  is claimed before a representative run. A comparison needs at least 8 paired
+  tasks (`minPairedTasks`) and goes `inconclusive` if any run behind it failed,
+  and files mode refuses to run without an explicit `OUT_DIR`. Reproduce with
   `cargo run --release --example local_rules_bench`; the method, protocol and
   results are in [`docs/local-rules.md`](docs/local-rules.md).
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on

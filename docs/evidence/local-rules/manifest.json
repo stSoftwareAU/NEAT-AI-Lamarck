@@ -70,5 +70,6 @@
   "bootstrapResamples": 2000,
   "bootstrapSeed": 7,
   "metaSeed": 11,
-  "successCriterion": "earns-its-place iff the symbolic arm is Better than BOTH primary baselines (sparse-backprop, derivative-free) at at least one K and Worse than neither at any K; negative iff Worse than sparse-backprop at every K; otherwise inconclusive."
+  "minPairedTasks": 8,
+  "successCriterion": "earns-its-place iff the symbolic arm is Better than BOTH primary baselines (sparse-backprop, derivative-free) at at least one K and Worse than neither at any K; negative iff Worse than sparse-backprop at every K; otherwise inconclusive. A comparison is Inconclusive when it has fewer than min_paired_tasks paired tasks, or when any run behind it failed (a failed run is never dropped silently and never counts as a win). A files run with fewer than min_paired_tasks validation creatures is refused."
 }

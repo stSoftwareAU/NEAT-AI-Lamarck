@@ -96,6 +96,10 @@ pub struct Manifest {
     pub bootstrap_seed: u64,
     /// Seed for rule discovery.
     pub meta_seed: u64,
+    /// Fewest paired tasks a comparison needs before its interval can give a
+    /// verdict. Fewer tasks, in a synthetic scope or a files run, are refused or
+    /// reported `Inconclusive`: a single difference has no uncertainty.
+    pub min_paired_tasks: usize,
     /// The predeclared success rule, applied in code as `overallVerdict`.
     pub success_criterion: String,
 }
@@ -134,10 +138,14 @@ impl Manifest {
             bootstrap_resamples: 2000,
             bootstrap_seed: 7,
             meta_seed: 11,
+            min_paired_tasks: 8,
             success_criterion: "earns-its-place iff the symbolic arm is Better than BOTH primary \
                 baselines (sparse-backprop, derivative-free) at at least one K and Worse than \
                 neither at any K; negative iff Worse than sparse-backprop at every K; otherwise \
-                inconclusive."
+                inconclusive. A comparison is Inconclusive when it has fewer than \
+                min_paired_tasks paired tasks, or when any run behind it failed (a failed run \
+                is never dropped silently and never counts as a win). A files run with fewer \
+                than min_paired_tasks validation creatures is refused."
                 .to_string(),
         }
     }
@@ -182,6 +190,21 @@ impl Manifest {
         }
         if !(self.sparse_ratio > 0.0 && self.sparse_ratio <= 1.0) {
             return Err("sparse_ratio must be in (0, 1]".to_string());
+        }
+        if self.min_paired_tasks < 2 {
+            return Err("min_paired_tasks must be at least 2".to_string());
+        }
+        let tasks = self.hidden_squashes.len()
+            * self
+                .validation_groups
+                .iter()
+                .map(|group| group.seeds.len())
+                .sum::<usize>();
+        if tasks < self.min_paired_tasks {
+            return Err(format!(
+                "{tasks} validation tasks, below min_paired_tasks {}",
+                self.min_paired_tasks
+            ));
         }
         if self.max_support == 0 {
             return Err("max_support must be at least 1".to_string());

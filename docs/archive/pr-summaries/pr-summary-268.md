@@ -7,11 +7,15 @@ symbolic local update rules for each activation family on calibration tasks,
 then compares them with Lamarck's own sparse backprop and with a
 derivative-free (1+1) search. Validation uses untouched tasks, and every arm
 in the verdict gets the same total record budget, including the share of the
-rule search, rounded down to whole steps for the baselines. The
+rule search, rounded down to whole steps for the baselines. A comparison needs
+at least 8 paired tasks and is `inconclusive` if any run behind it failed, so
+one number or the survivors of a failure cannot decide the verdict. The
 predeclared synthetic verdict is **`negative`**. Every report also carries a
 `successClaim`. It is always `not-claimable-synthetic` for fixtures, and only
 `pending-owner-review` for a files run that earns its place, so the harness
-cannot claim success before a representative run. Nothing in the optimiser, the
+cannot claim success before a representative run. Files mode also refuses to run
+without an explicit `OUT_DIR`, so a private run cannot overwrite the public
+evidence. Nothing in the optimiser, the
 CLI or any default changes. Pinning the paper's full method is still open,
 because the paper could not be read from the sandbox. The representative run on
 a private creature and corpus is the owner's step. Part of #268.
@@ -35,7 +39,7 @@ branch lands second merges it without a conflict.
 
 ### Intent and Rationale
 
-- The issue asks whether discovered local rules can stand in for current refinement. The harness answers that under a fixed protocol: seeds, sample size, limits and the verdict rule are set in `Manifest::predeclared()`. It was committed together with the first recorded results (`2aa8f93`) and has not changed since. Git cannot show that it came before every run.
+- The issue asks whether discovered local rules can stand in for current refinement. The harness answers that under a fixed protocol: seeds, sample size, limits and the verdict rule are set in `Manifest::predeclared()`. It was committed together with the first recorded results (`2aa8f93`). A later review round added `min_paired_tasks` and the failed-run rule to it. Neither changes a seed, a limit or any recorded number, because every synthetic comparison has at least 8 pairs and no failed run. Git cannot show that it came before every run.
 - The sparse-backprop arm drives Lamarck's existing `LearningPlan`, `apply_learnings` and `calculate_learning_rate` with `sparse_ratio`. Current refinement is therefore what is measured, not a second copy of it.
 
 ### Essential Design Decisions
@@ -43,6 +47,8 @@ branch lands second merges it without a conflict.
 - **Residual:** only an output neuron `k` has one, and it is `expected[k] − activation`. A hidden neuron has none, and features that use `r` are 0 there. Output error is never treated as local hidden-neuron information (`local_residual` in `lamarck/src/local_rules/rule.rs`).
 - **Budget:** cost is counted in record units. One forward pass is 1 unit, a forward pass plus an update is 2, and held-out measurement is never charged. Every unit spent in the meta-search is charged and amortised over the 24 validation tasks. The primary arms get the symbolic arm's cost plus that share. The `-app-only` arms leave the share out and are diagnostics, not part of the verdict.
 - **Backprop settings:** the sparse-backprop arm uses Lamarck's default `BackpropConfig` learning rate (0.01). The rule step uses `eta` = 0.05. The app-only "better" rows may partly reflect that difference, which is one reason they do not count.
+- **Sample size and failed runs:** `min_paired_tasks` is 8. A comparison with fewer paired tasks is `inconclusive`, and a files run with fewer validation creatures is refused. A run that errors or gives a non-finite MSE is recorded in `failures`, and the comparisons that lose a pair to it record `missing` above 0 and are `inconclusive`. The choice is that a failed run is never dropped silently and never counts as a win. The other option, counting a failed symbolic run as `worse`, would let one broken creature decide a verdict. The files-mode set is only as large as the number of `--creature` flags, and all of them share the same records and seed, so this limit is a floor on evidence and not a guarantee that the sample is representative.
+- **Private output:** files mode refuses to run without `OUT_DIR` (`resolve_out_dir`). Only synthetic mode defaults to the tracked `docs/evidence/local-rules`.
 - **Keeping the code:** the harness stays only as the reproducer until the owner's representative files-mode run. If that run is not `earns-its-place`, `lamarck/src/local_rules/`, the example, its tests and its evidence are removed. This is an assumption: the issue asks to remove code that does not earn its cost, but also says not to judge from fixtures alone.
 
 ### Undiscoverable Facts
@@ -73,7 +79,7 @@ flowchart LR
 Command: `cargo run --release --example local_rules_bench`. It writes
 `docs/evidence/local-rules/manifest.json` and `summary.json`. Coverage is 360 of
 360 planned runs completed, with 0 failures. The meta-search cost 1,622,016
-record units. Versions: crate 0.1.46, neat-core v0.23.4, task generator
+record units. Versions: crate 0.1.47, neat-core v0.23.4, task generator
 `local-rules-synthetic-v1`. The rules found were: identity `R*1 + XR*2`;
 logistic `R*2 + W*-2 + XYY*2`; tanh `XYY*-0.5 + YR*-1 + Y*-2`.
 
@@ -94,7 +100,11 @@ negative number means symbolic did better. n = 24 paired tasks per row.
 Once the search cost is counted, the rules lose to both baselines at every K.
 That is a negative finding on synthetic fixtures only, and it proves no benefit
 or harm on real creatures. `summary.json` records `"successClaim": "not-claimable-synthetic"`. Re-running
-the bench reproduces both files byte for byte. The method write-up is
+the bench at crate 0.1.47 reproduces both files byte for byte. The recorded
+`crateVersion` was 0.1.46 until the auto-increment commit bumped the crate, so
+the evidence was regenerated at 0.1.47. Its only changes are `crateVersion`,
+the new `minPairedTasks` and `missing` (0 everywhere) fields, and the longer
+`successCriterion` text. Every number and verdict is unchanged. The method write-up is
 `docs/local-rules.md`. The
 `CHANGELOG.md` and `README.md` entries link to it.
 
@@ -110,10 +120,10 @@ the bench reproduces both files byte for byte. The method write-up is
 - **missing** — "Read and pin the full method before reproducing it" — evidence: `docs/local-rules.md` section 2 — reviewer: missing — reason: arXiv 2611.12248 cannot be fetched from the sandbox (403 / proxy refused), and only a search-summary outline is recorded; the coefficient optimisation, per-degree variables and experimental settings remain unread.
 - **met** — "First inspect current code, merged work and repository instructions. Reuse existing mechanisms" — evidence: `lamarck/src/local_rules/baselines.rs` (`LearningPlan`, `apply_learnings`, `calculate_learning_rate`), `lamarck/src/local_rules/files.rs` — reviewer: met
 - **met** — "Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change" — evidence: `lamarck/tests/local_rules.rs::parent_is_unchanged_by_every_arm` — reviewer: met
-- **met** — "Predeclare controls, seeds, sample size, compute limits and success/failure criteria" — evidence: `lamarck/src/local_rules/manifest.rs::predeclared`, `docs/evidence/local-rules/manifest.json` — reviewer: met
-- **partial** — "Identify code/model/data versions" — evidence: `docs/evidence/local-rules/summary.json` (`versions`) — reviewer: partial — reason: `crateVersion` 0.1.46 equals the base branch's and no commit SHA is recorded, so the code version is not uniquely identified.
+- **met** — "Predeclare controls, seeds, sample size, compute limits and success/failure criteria" — evidence: `lamarck/src/local_rules/manifest.rs::predeclared` (`min_paired_tasks`, `success_criterion` with the failed-run rule), `docs/evidence/local-rules/manifest.json`, `lamarck/tests/local_rules.rs::manifest_predeclares_the_minimum_paired_sample`, `lamarck/tests/local_rules.rs::files_run_refuses_fewer_creatures_than_the_minimum_paired_sample` — reviewer: met
+- **partial** — "Identify code/model/data versions" — evidence: `docs/evidence/local-rules/summary.json` (`versions`) — reviewer: partial — reason: `crateVersion` is now 0.1.47, which differs from the base branch's 0.1.46, but no commit SHA is recorded, so the code version is not uniquely identified.
 - **met** — "Separate calibration from untouched validation and count all preparation/search costs" — evidence: `lamarck/src/local_rules/manifest.rs::validate`, `lamarck/tests/local_rules.rs::manifest_refusals_name_their_cause` — reviewer: met
-- **partial** — "Provide deterministic positive/negative correctness tests for new behaviour" — evidence: `lamarck/tests/local_rules.rs` (19 tests) — reviewer: partial — reason: the predeclared verdict rule `overall()` has no direct test of its `EarnsItsPlace` and `Inconclusive` branches.
+- **met** — "Provide deterministic positive/negative correctness tests for new behaviour" — evidence: `lamarck/tests/local_rules.rs` (28 tests), including `predeclared_verdict_follows_the_success_criterion`, `predeclared_verdict_ignores_other_groups_and_app_only_arms`, `baselines_get_the_symbolic_budget_plus_the_meta_share` and `a_failed_validation_run_is_recorded_and_never_decides_the_verdict` — reviewer: met
 - **met** — "Pass the repository's normal quality checks" — evidence: `./quality.sh < /dev/null` exit 0, "All quality checks passed!" — reviewer: met
 - **met** — "Research runs are separate from routine feature CI" — evidence: `lamarck/examples/local_rules_bench.rs`, tests use `reduced_manifest()` — reviewer: met
 - **met** — "Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage" — evidence: `docs/evidence/local-rules/summary.json`, `lamarck/tests/local_rules.rs::reduced_manifest_is_reproducible_and_fully_covered` — reviewer: met
@@ -121,7 +131,7 @@ the bench reproduces both files byte for byte. The method write-up is
 - **met** — "Record negative findings" — evidence: `docs/local-rules.md` section 7, `CHANGELOG.md`, `docs/evidence/local-rules/summary.json` (`overallVerdict: negative`) — reviewer: met
 - **partial** — "Remove optional code that does not earn its maintenance cost" — evidence: `docs/local-rules.md` section 8 decision rule — reviewer: partial — reason: the module and evidence stay after a negative synthetic verdict; removal waits on the owner's representative run.
 - **met** — "Do not claim success before representative runs" — evidence: `lamarck/tests/local_rules.rs::synthetic_source_never_supports_a_success_claim`, `lamarck/tests/local_rules.rs::synthetic_report_is_not_claimable_as_a_success`, `lamarck/tests/local_rules.rs::files_report_claim_follows_its_source_and_verdict`, `lamarck/src/local_rules/experiment.rs::success_claim` — reviewer: met
-- **partial** — "Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private" — evidence: `lamarck/src/local_rules/files.rs`, `lamarck/tests/local_rules.rs::files_run_completes_and_names_its_source` — reviewer: partial — reason: files mode without OUT_DIR defaults to the tracked `docs/evidence/local-rules`, so a private run could overwrite the public evidence; only the doc says to keep OUT_DIR private.
+- **met** — "Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private" — evidence: `lamarck/src/local_rules/experiment.rs::resolve_out_dir`, `lamarck/tests/local_rules.rs::out_dir_defaults_for_synthetic_mode_only`, `lamarck/tests/local_rules.rs::files_run_completes_and_names_its_source` — reviewer: met
 - **met** — "Leave unassigned until an implementer actively starts" — evidence: issue assigned with `work-on` while in progress — reviewer: met
 - **unrequested** — `.github/actions/rust-toolchain` local action used by `ci.yml`, `cargo-quality.yml` and `family-sync.yml` — reviewer: unrequested — reason: needed so the worker's pre-push gate can run plain `cargo` (see Undiscoverable Facts).
 - **unrequested** — `CANONICAL_PATHS` fallback in `family-sync.yml`, validator rule 17 and its two tests — reviewer: unrequested — reason: the gate replays that step without the job's `env:` once this branch edits the workflow.
@@ -129,7 +139,7 @@ the bench reproduces both files byte for byte. The method write-up is
 
 ## Test Plan
 
-- Added `lamarck/tests/local_rules.rs` with 19 tests:
+- Added `lamarck/tests/local_rules.rs` with 28 tests:
   - Positive: `delta_rule_lowers_training_mse`.
   - Hidden-residual negative, with an output-synapse positive control: `residual_only_rule_leaves_hidden_synapses_and_biases_alone`.
   - Immutable parents: `parent_is_unchanged_by_every_arm`.
@@ -142,19 +152,28 @@ the bench reproduces both files byte for byte. The method write-up is
     - `files_run_refuses_a_short_corpus_and_accepts_a_full_one`.
     - `files_run_refuses_the_calibration_creature_as_validation`.
     - `files_run_refuses_no_validation_creatures_and_mismatched_widths`.
+    - `files_run_refuses_fewer_creatures_than_the_minimum_paired_sample`: one creature is refused, and two (the reduced minimum) complete with n = 2 and `missing` = 0.
+    - `out_dir_defaults_for_synthetic_mode_only`: files mode with no `OUT_DIR` is refused with a message naming the tracked default, and the same call with an explicit `OUT_DIR` is accepted, as are both explicit synthetic and default synthetic.
+  - Verdict rule and sample size:
+    - `predeclared_verdict_follows_the_success_criterion`: `EarnsItsPlace`, `Negative` and `Inconclusive` branches, including better than only one baseline, better at one K but worse at another, and worse than backprop at only some K.
+    - `predeclared_verdict_ignores_other_groups_and_app_only_arms`: a Better group or app-only row cannot change the verdict, and the same rows with `all`-group primary Better do.
+    - `a_single_paired_task_cannot_decide_a_comparison`, `a_lost_run_makes_its_comparison_inconclusive` and `manifest_predeclares_the_minimum_paired_sample`.
+  - Budget: `baselines_get_the_symbolic_budget_plus_the_meta_share` checks each arm's steps and `record_units` on a reduced run, and that `meta_cost` equals the candidate count times calibration tasks times the per-task units.
+  - Failed runs: `a_failed_validation_run_is_recorded_and_never_decides_the_verdict` runs `run_files` with a creature whose synapse points at a missing neuron. All of its runs land in `failures`, the coverage counts add up, and every primary comparison that lost a pair is `inconclusive` and not `earns-its-place`.
   - Report contents: `synthetic_summary_carries_the_search_trace_and_source`.
   - No success before a representative run:
     - `synthetic_source_never_supports_a_success_claim`: every verdict on a synthetic source gives `NotClaimableSynthetic`. Positive controls: files with `EarnsItsPlace` gives `PendingOwnerReview`, and files with any other verdict gives `NoSuccess`.
     - `synthetic_report_is_not_claimable_as_a_success`: a real reduced synthetic report has the claim, and its JSON contains `"successClaim": "not-claimable-synthetic"`.
     - `files_report_claim_follows_its_source_and_verdict`.
   - Red-check: I temporarily made synthetic plus `EarnsItsPlace` return `PendingOwnerReview`. `synthetic_source_never_supports_a_success_claim` failed (18 passed, 1 failed), and passed again once the change was reverted.
-- `cargo test --test local_rules < /dev/null`: 19 passed. `cargo clippy` with the CI `-D` flags and `cargo fmt --all -- --check` are clean.
-- `cargo run --release --example local_rules_bench < /dev/null`: the only change in `summary.json` is the added `successClaim` line, and `manifest.json` is unchanged. The verdict is still `Negative`, with 360 of 360 runs complete.
-- `./quality.sh < /dev/null` on the tree committed for the `successClaim` change: exit 0, "All quality checks passed!". An earlier run in this session failed at codespell on an Italian word in a new doc line, which was then replaced. An earlier run at `5aa69ba` also passed. An earlier run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree, so the line was added. That pass covers the `CANONICAL_PATHS` changes too.
+  - Red-check for the budget: I temporarily multiplied the meta share by 0 in `run_arm`. `baselines_get_the_symbolic_budget_plus_the_meta_share` failed (27 passed, 1 failed), and the suite passed again once the change was reverted.
+- `cargo test --test local_rules < /dev/null`: 28 passed. `cargo clippy` with the CI `-D` flags and `cargo fmt --all -- --check` are clean.
+- `cargo run --release --example local_rules_bench < /dev/null`: regenerated at crate 0.1.47. The changes in `summary.json` are `crateVersion`, `minPairedTasks`, the longer `successCriterion` and `missing` (0) on each comparison, and `manifest.json` gains `minPairedTasks` and the same criterion text. The verdict is still `Negative`, with 360 of 360 runs complete, and every number is unchanged.
+- `./quality.sh < /dev/null` on the working tree for this review round: exit 0, "All quality checks passed!". An earlier run in this session failed at codespell on an Italian word in a new doc line, which was then replaced. An earlier run at `5aa69ba` also passed. An earlier run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree, so the line was added. That pass covers the `CANONICAL_PATHS` changes too.
 - I ran the three CI cargo checks the worker's scanner now plans, with their workflow env (`CARGO_BUILD_JOBS=2 RUSTFLAGS="-D warnings"` for clippy), on the installed cargo 1.99.1. `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::filter_next -D clippy::collapsible_if` and the same without `--workspace` found no issues, and `cargo test --no-run --workspace --all-features` exited 0.
 - Toolchain action: `actionlint` on `ci.yml`, `cargo-quality.yml` and `family-sync.yml` reported nothing. `scripts/check-family-sync-workflow.sh`, `scripts/test-check-family-sync-workflow.sh`, `scripts/check-bot-push-action.sh`, `scripts/check-cargo-quality-overlap.sh` and `scripts/test-check-cargo-quality-overlap.sh` passed. No validator rule was added for the toolchain action, because it does not alter what CI runs.
 - `CANONICAL_PATHS` fallback: `scripts/test-check-family-sync-workflow.sh` gains two rule-17 cases, "gate step without a CANONICAL_PATHS fallback → fail" and "gate step fallback differs from CANONICAL_PATHS → fail", both exit 1, and the script passes. I replayed the family-sync "Gate the refreshed scripts" step and `ci.yml`'s "Run ShellCheck" step with `env -i PATH="$PATH" HOME="$HOME" bash --noprofile --norc -eo pipefail`: both exited 0, the first with "15 passed, 0 failed".
-- No existing test was edited or removed.
+- No test was removed or skipped. In this review round I edited tests this PR added earlier: the files-mode tests now pass two validation creatures, because a run below `min_paired_tasks` is refused, and `files_run_refuses_no_validation_creatures_and_mismatched_widths` expects the new minimum-sample message for an empty list in place of "needs at least one validation creature". The base has no `local_rules` code, so no base test is changed.
 - Not done: pinning the paper's full method, which the sandbox cannot fetch. The representative private-corpus run is the owner's step.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

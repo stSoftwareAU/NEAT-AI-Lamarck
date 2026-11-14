@@ -182,6 +182,7 @@ Every value below is fixed in `Manifest::predeclared()` and recorded in
 | `bootstrapResamples` | 2000 |
 | `bootstrapSeed` | 7 |
 | `metaSeed` | 11 |
+| `minPairedTasks` | 8 |
 
 **Seeds and widths.** Calibration tasks drive rule discovery only. Validation
 seeds are disjoint from calibration seeds (checked in code), and validation
@@ -202,19 +203,43 @@ widths (2 and 8), so the 16 transfer tasks are pooled.
 
 | Field | Value |
 |-------|-------|
-| Crate version | `0.1.46` (`lamarck/Cargo.toml`) |
+| Crate version | `0.1.47` (`lamarck/Cargo.toml`) |
 | neat-core tag | `v0.23.4` |
 | Task generator | `local-rules-synthetic-v1` |
 
 **Success criterion** (`manifest.json`, quoted verbatim):
 
-> earns-its-place iff the symbolic arm is Better than BOTH primary baselines (sparse-backprop, derivative-free) at at least one K and Worse than neither at any K; negative iff Worse than sparse-backprop at every K; otherwise inconclusive.
+> earns-its-place iff the symbolic arm is Better than BOTH primary baselines (sparse-backprop, derivative-free) at at least one K and Worse than neither at any K; negative iff Worse than sparse-backprop at every K; otherwise inconclusive. A comparison is Inconclusive when it has fewer than min_paired_tasks paired tasks, or when any run behind it failed (a failed run is never dropped silently and never counts as a win). A files run with fewer than min_paired_tasks validation creatures is refused.
 
 **Verdict rule** for each paired comparison. The difference is symbolic minus
 baseline held-out MSE, so a negative value favours the symbolic arm. The 95%
 percentile bootstrap CI of the mean difference uses 2000 resamples with seed 7.
 The result is **Better** if the whole interval is below 0, **Worse** if the
 whole interval is above 0, and **inconclusive** otherwise.
+
+**Minimum sample and failed runs.** One paired difference gives a zero-width
+interval, so a verdict from it would be a sign test on a single number. The
+manifest therefore predeclares `minPairedTasks` = 8, and the same limit applies
+to every protocol:
+
+- A comparison with fewer than `minPairedTasks` paired tasks is
+  `inconclusive` (`paired_verdict` in `lamarck/src/local_rules/stats.rs`).
+- A files run with fewer than `minPairedTasks` validation creatures is refused
+  with a named error. `Manifest::validate` refuses a synthetic protocol with
+  fewer validation tasks, or a `minPairedTasks` below 2.
+- A run that errors or gives a non-finite MSE is listed under `failures` and
+  counted in `coverage.failed`. Each comparison records how many validation
+  tasks it lost to such runs in `missing`, and any `missing` above 0 makes that
+  comparison `inconclusive`. Failed runs therefore never vanish from a
+  comparison, and a failed symbolic run never counts as a win. A failure of the
+  symbolic arm affects every baseline at that K. A failure of one baseline
+  affects only that baseline's comparisons.
+- The overall verdict is `predeclared_verdict` over the `all`-group comparisons
+  of the two primary arms. The app-only arms and the per-group comparisons
+  never decide it.
+
+In the recorded synthetic run, every comparison has `missing` 0 and
+n = 8, 16 or 24, so the limit changes no verdict.
 
 ## 7. Results (synthetic, from `summary.json`)
 
@@ -305,7 +330,11 @@ calibration creature and share its widths. The report's `dataSource` holds only
 a corpus key and creature fingerprints, never paths or record values. The
 validation group is labelled `files`.
 
-Keep `OUT_DIR` and its results private. Do not commit them.
+Keep `OUT_DIR` and its results private. Do not commit them. Files mode refuses
+to run without `OUT_DIR`, naming the missing argument, so a private run cannot
+overwrite the tracked public evidence (`resolve_out_dir` in
+`lamarck/src/local_rules/experiment.rs`). Give at least `minPairedTasks` (8)
+`--creature` flags: a smaller run is refused.
 
 The runner prints `success claim:` after the verdict. A files run that
 `earns-its-place` reports `pending-owner-review`, never a success on its own.
@@ -320,6 +349,9 @@ then, the code is kept only as the reproducer.
 cargo run --release --example local_rules_bench -- [OUT_DIR]
 ```
 
-`OUT_DIR` defaults to `docs/evidence/local-rules`. Every seed is fixed in the
-manifest, so the synthetic run is deterministic. The runtime is small, a few
-seconds in release.
+In synthetic mode `OUT_DIR` defaults to `docs/evidence/local-rules`. Every seed
+is fixed in the manifest, so the synthetic run is deterministic. The runtime is
+small, a few seconds in release. A re-run reproduces `manifest.json` and
+`summary.json` byte for byte at the same crate version. The reports stamp
+`versions.crateVersion`, so a later version bump changes that one line and the
+evidence is then regenerated.

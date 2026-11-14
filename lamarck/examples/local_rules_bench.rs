@@ -13,12 +13,13 @@
 //! cargo run --release --example local_rules_bench -- [OUT_DIR]
 //! ```
 //!
-//! OUT_DIR defaults to `docs/evidence/local-rules`.
+//! OUT_DIR defaults to `docs/evidence/local-rules` in synthetic mode only.
 //!
 //! Usage, a real creature and corpus (files mode). The three flags go together:
 //! one calibration creature, one or more validation creatures (each a different
 //! creature), and the training-data directory. Records are never written into
-//! the report, only a corpus key and creature fingerprints:
+//! the report, only a corpus key and creature fingerprints. Files mode refuses to
+//! run without OUT_DIR, so a private run cannot overwrite the public evidence:
 //!
 //! ```text
 //! cargo run --release --example local_rules_bench -- OUT_DIR \
@@ -29,7 +30,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use neat_ai_lamarck::local_rules::{Manifest, Report, run_files, run_manifest, write_outputs};
+use neat_ai_lamarck::local_rules::{
+    Manifest, Report, resolve_out_dir, run_files, run_manifest, write_outputs,
+};
 use neat_ai_lamarck::width::load_creature;
 use neat_core::CreatureExport;
 
@@ -146,10 +149,7 @@ fn run(report_inputs: Option<FilesInputs>, manifest: &Manifest) -> Result<Report
 fn main() -> Result<(), String> {
     let args = parse_args(std::env::args().skip(1))?;
     let inputs = files_inputs(&args)?;
-    let out = args
-        .out
-        .clone()
-        .unwrap_or_else(|| "docs/evidence/local-rules".to_string());
+    let out = resolve_out_dir(inputs.is_some(), args.out.as_deref())?;
     let started = Instant::now();
     let manifest = Manifest::predeclared();
     let report = run(inputs, &manifest)?;

@@ -22,8 +22,9 @@ mod tasks;
 pub use apply::{Cost, apply_rule_steps, mse};
 pub use baselines::{derivative_free, matched_count, sparse_backprop};
 pub use experiment::{
-    Comparison, Coverage, DataSource, Failure, OverallVerdict, PairedDifference, Report, RunRow,
-    SuccessClaim, run_manifest, success_claim, write_outputs,
+    Comparison, Coverage, DEFAULT_OUT_DIR, DataSource, Failure, OverallVerdict, PairedDifference,
+    Report, RunRow, SuccessClaim, predeclared_verdict, resolve_out_dir, run_manifest,
+    success_claim, write_outputs,
 };
 pub use files::run_files;
 pub use manifest::{Manifest, NEAT_CORE_TAG, TaskGroup, Versions};
@@ -32,5 +33,5 @@ pub use rule::{
     rule_delta,
 };
 pub use search::{SearchStep, discover};
-pub use stats::{Verdict, bootstrap_mean_ci, mean, verdict};
+pub use stats::{Verdict, bootstrap_mean_ci, mean, paired_verdict, verdict};
 pub use tasks::{TASK_GENERATOR_VERSION, Task, TaskRecord, TaskSpec, build_task};

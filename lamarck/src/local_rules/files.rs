@@ -34,9 +34,6 @@ pub fn run_files(
     training_data: &Path,
 ) -> Result<Report, String> {
     manifest.validate()?;
-    if validation_creatures.is_empty() {
-        return Err("files run needs at least one validation creature".to_string());
-    }
     let (inputs, outputs) = (calibration_creature.input, calibration_creature.output);
     for (index, creature) in validation_creatures.iter().enumerate() {
         if (creature.input, creature.output) != (inputs, outputs) {
@@ -53,6 +50,14 @@ pub fn run_files(
                 "validation creature {index} is the calibration creature (same fingerprint); validation must use a different creature"
             ));
         }
+    }
+
+    if validation_creatures.len() < manifest.min_paired_tasks {
+        return Err(format!(
+            "files run has {} validation creatures, below the predeclared minimum of {} paired tasks",
+            validation_creatures.len(),
+            manifest.min_paired_tasks
+        ));
     }
 
     let train = manifest.train_records;

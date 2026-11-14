@@ -14,7 +14,7 @@ use super::baselines::{derivative_free, matched_count, sparse_backprop};
 use super::manifest::{Manifest, Versions};
 use super::rule::{RuleSet, describe};
 use super::search::{SearchStep, discover};
-use super::stats::{Verdict, bootstrap_mean_ci, mean, verdict};
+use super::stats::{Verdict, bootstrap_mean_ci, mean, paired_verdict};
 use super::tasks::{TASK_GENERATOR_VERSION, Task, TaskSpec, build_task};
 
 /// Calibration tasks and `(group, task)` validation pairs.
@@ -113,6 +113,9 @@ pub struct Comparison {
     pub primary: bool,
     /// Number of paired tasks.
     pub n: usize,
+    /// Validation tasks in this scope that have no pair because the symbolic or
+    /// baseline run failed. Any value above zero makes the verdict `Inconclusive`.
+    pub missing: usize,
     /// Mean paired difference (negative favours symbolic).
     pub mean_difference: f64,
     /// Lower bound of the bootstrap 95% interval.
@@ -224,6 +227,24 @@ impl Report {
     /// Pretty JSON of the whole report.
     pub fn summary_json(&self) -> Result<String, String> {
         serde_json::to_string_pretty(self).map_err(|e| e.to_string())
+    }
+}
+
+/// Tracked directory that holds the public synthetic evidence.
+pub const DEFAULT_OUT_DIR: &str = "docs/evidence/local-rules";
+
+/// The directory a run writes to.
+///
+/// Synthetic mode may default to the tracked public evidence. Files mode never
+/// does: its report names a private corpus and creatures, so an absent `out`
+/// is refused instead of overwriting the public files.
+pub fn resolve_out_dir(files_mode: bool, out: Option<&str>) -> Result<String, String> {
+    match (out, files_mode) {
+        (Some(dir), _) => Ok(dir.to_string()),
+        (None, false) => Ok(DEFAULT_OUT_DIR.to_string()),
+        (None, true) => Err(format!(
+            "files mode needs an explicit OUT_DIR, because the default {DEFAULT_OUT_DIR} holds the public evidence and a private run must not overwrite it"
+        )),
     }
 }
 
@@ -346,7 +367,10 @@ fn held_out_of(runs: &[RunRow], task: &str, k: u32, arm: &str) -> Option<f64> {
 }
 
 /// The predeclared success rule, applied to the `all`-group comparisons.
-fn overall(comparisons: &[Comparison], steps: &[u32]) -> OverallVerdict {
+///
+/// `steps` are the K values the comparisons cover. A K with no `all`
+/// comparison for an arm counts as neither Better nor Worse.
+pub fn predeclared_verdict(comparisons: &[Comparison], steps: &[u32]) -> OverallVerdict {
     let at = |arm: &str, k: u32| {
         comparisons
             .iter()
@@ -460,7 +484,12 @@ pub(super) fn run_protocol(
                         })
                     })
                     .collect();
+                let in_scope = names
+                    .iter()
+                    .filter(|(group, _)| scope == "all" || group == scope)
+                    .count();
                 let diffs: Vec<f64> = paired.iter().map(|p| p.difference).collect();
+                let missing = in_scope - diffs.len();
                 let ci = bootstrap_mean_ci(
                     &diffs,
                     manifest.bootstrap_resamples,
@@ -472,10 +501,11 @@ pub(super) fn run_protocol(
                     group: scope.to_string(),
                     primary: PRIMARY.contains(&baseline),
                     n: diffs.len(),
+                    missing,
                     mean_difference: mean(&diffs),
                     ci_low: ci.0,
                     ci_high: ci.1,
-                    verdict: verdict(ci),
+                    verdict: paired_verdict(ci, diffs.len(), manifest.min_paired_tasks, missing),
                     paired_differences: paired,
                 });
             }
@@ -488,7 +518,7 @@ pub(super) fn run_protocol(
         completed: runs.len() as u64,
         failed: failures.len() as u64,
     };
-    let overall_verdict = overall(&comparisons, &manifest.steps);
+    let overall_verdict = predeclared_verdict(&comparisons, &manifest.steps);
     let success_claim = success_claim(&data_source, overall_verdict);
     Ok(Report {
         versions: Versions::current(),

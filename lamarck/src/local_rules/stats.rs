@@ -54,3 +54,17 @@ pub fn verdict(ci: (f64, f64)) -> Verdict {
         Verdict::Inconclusive
     }
 }
+
+/// The comparison verdict: [`verdict`] on the interval, forced to `Inconclusive`
+/// when the comparison cannot support it.
+///
+/// A comparison with fewer than `min_paired` paired tasks has no real
+/// uncertainty (one difference gives a zero-width interval), and one with
+/// `missing` runs lost to failures would otherwise be decided on the survivors.
+pub fn paired_verdict(ci: (f64, f64), n: usize, min_paired: usize, missing: usize) -> Verdict {
+    if n < min_paired || missing > 0 {
+        Verdict::Inconclusive
+    } else {
+        verdict(ci)
+    }
+}

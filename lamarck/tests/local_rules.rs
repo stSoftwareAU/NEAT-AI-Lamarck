@@ -4,9 +4,10 @@
 use std::collections::BTreeMap;
 
 use neat_ai_lamarck::local_rules::{
-    ActivationFamily, DataSource, Feature, Manifest, NEAT_CORE_TAG, OverallVerdict, RuleSet,
-    SparseRule, SuccessClaim, TASK_GENERATOR_VERSION, Task, TaskGroup, TaskSpec, Verdict,
-    apply_rule_steps, build_task, derivative_free, local_residual, matched_count, mse, run_files,
+    ActivationFamily, Comparison, DEFAULT_OUT_DIR, DataSource, Feature, Manifest, NEAT_CORE_TAG,
+    OverallVerdict, RuleSet, SparseRule, SuccessClaim, TASK_GENERATOR_VERSION, Task, TaskGroup,
+    TaskSpec, Verdict, apply_rule_steps, build_task, derivative_free, local_residual,
+    matched_count, mse, paired_verdict, predeclared_verdict, resolve_out_dir, run_files,
     run_manifest, sparse_backprop, success_claim, verdict,
 };
 
@@ -209,6 +210,7 @@ fn reduced_manifest() -> Manifest {
     m.meta_rounds = 1;
     m.candidates_per_round = 4;
     m.bootstrap_resamples = 200;
+    m.min_paired_tasks = 2;
     m
 }
 
@@ -263,7 +265,7 @@ fn files_run_completes_and_names_its_source() {
     let manifest = reduced_files_manifest();
     support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
     let calibration = task(1).parent;
-    let validation = [task(2).parent];
+    let validation = [task(2).parent, task(3).parent];
     let report =
         run_files(&manifest, &calibration, &validation, dir.path()).expect("files run completes");
     assert_eq!(report.coverage.completed, report.coverage.planned);
@@ -281,7 +283,7 @@ fn files_run_completes_and_names_its_source() {
         json["dataSource"]["validationCreatures"]
             .as_array()
             .map(Vec::len),
-        Some(1)
+        Some(2)
     );
     let temp = dir.path().display().to_string();
     assert!(
@@ -295,7 +297,7 @@ fn files_run_refuses_a_short_corpus_and_accepts_a_full_one() {
     let dir = tempfile::tempdir().expect("temp dir");
     let manifest = reduced_files_manifest();
     let calibration = task(1).parent;
-    let validation = [task(2).parent];
+    let validation = [task(2).parent, task(3).parent];
     support::write_sample(dir.path(), files_records(&manifest) - 1, manifest.inputs);
     let err = run_files(&manifest, &calibration, &validation, dir.path())
         .expect_err("a short corpus is refused");
@@ -329,7 +331,10 @@ fn files_run_refuses_no_validation_creatures_and_mismatched_widths() {
     let calibration = task(1).parent;
     let err = run_files(&manifest, &calibration, &[], dir.path())
         .expect_err("an empty validation list is refused");
-    assert_eq!(err, "files run needs at least one validation creature");
+    assert_eq!(
+        err,
+        "files run has 0 validation creatures, below the predeclared minimum of 2 paired tasks"
+    );
     let spec = TaskSpec {
         seed: 2,
         hidden_width: 4,
@@ -413,7 +418,7 @@ fn files_report_claim_follows_its_source_and_verdict() {
     let manifest = reduced_files_manifest();
     support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
     let calibration = task(1).parent;
-    let validation = [task(2).parent];
+    let validation = [task(2).parent, task(3).parent];
     let report =
         run_files(&manifest, &calibration, &validation, dir.path()).expect("files run completes");
     assert_eq!(
@@ -421,4 +426,290 @@ fn files_report_claim_follows_its_source_and_verdict() {
         success_claim(&report.data_source, report.overall_verdict)
     );
     assert_ne!(report.success_claim, SuccessClaim::NotClaimableSynthetic);
+}
+
+#[test]
+fn out_dir_defaults_for_synthetic_mode_only() {
+    assert_eq!(
+        resolve_out_dir(false, None).expect("synthetic default"),
+        DEFAULT_OUT_DIR
+    );
+    let err = resolve_out_dir(true, None).expect_err("files mode without OUT_DIR is refused");
+    assert!(
+        err.starts_with("files mode needs an explicit OUT_DIR") && err.contains(DEFAULT_OUT_DIR),
+        "unhelpful refusal: {err}"
+    );
+    assert_eq!(
+        resolve_out_dir(true, Some("private")).expect("explicit files OUT_DIR"),
+        "private"
+    );
+    assert_eq!(
+        resolve_out_dir(false, Some("elsewhere")).expect("explicit synthetic OUT_DIR"),
+        "elsewhere"
+    );
+}
+
+#[test]
+fn a_single_paired_task_cannot_decide_a_comparison() {
+    let one_sided = (-1.0, -1.0);
+    assert_eq!(verdict(one_sided), Verdict::Better);
+    assert_eq!(paired_verdict(one_sided, 1, 2, 0), Verdict::Inconclusive);
+    assert_eq!(paired_verdict(one_sided, 2, 2, 0), Verdict::Better);
+    assert_eq!(paired_verdict((1.0, 1.0), 1, 2, 0), Verdict::Inconclusive);
+    assert_eq!(paired_verdict((1.0, 1.0), 2, 2, 0), Verdict::Worse);
+}
+
+#[test]
+fn a_lost_run_makes_its_comparison_inconclusive() {
+    assert_eq!(paired_verdict((-2.0, -1.0), 10, 2, 0), Verdict::Better);
+    assert_eq!(
+        paired_verdict((-2.0, -1.0), 10, 2, 1),
+        Verdict::Inconclusive
+    );
+    assert_eq!(paired_verdict((1.0, 2.0), 10, 2, 1), Verdict::Inconclusive);
+}
+
+#[test]
+fn manifest_predeclares_the_minimum_paired_sample() {
+    assert_eq!(Manifest::predeclared().min_paired_tasks, 8);
+    assert_eq!(
+        refusal(|m| m.min_paired_tasks = 1),
+        "min_paired_tasks must be at least 2"
+    );
+    assert_eq!(
+        refusal(|m| m.min_paired_tasks = 25),
+        "24 validation tasks, below min_paired_tasks 25"
+    );
+    let criterion = Manifest::predeclared().success_criterion;
+    assert!(
+        criterion.contains("min_paired_tasks") && criterion.contains("any run behind it failed")
+    );
+}
+
+#[test]
+fn files_run_refuses_fewer_creatures_than_the_minimum_paired_sample() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manifest = reduced_files_manifest();
+    support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
+    let calibration = task(1).parent;
+    let err = run_files(&manifest, &calibration, &[task(2).parent], dir.path())
+        .expect_err("one validation creature is below the minimum of two");
+    assert_eq!(
+        err,
+        "files run has 1 validation creatures, below the predeclared minimum of 2 paired tasks"
+    );
+    let report = run_files(
+        &manifest,
+        &calibration,
+        &[task(2).parent, task(3).parent],
+        dir.path(),
+    )
+    .expect("a run at the minimum completes");
+    assert!(
+        report
+            .comparisons
+            .iter()
+            .filter(|c| c.group == "files")
+            .all(|c| c.n == 2 && c.missing == 0)
+    );
+}
+
+fn comparison(arm: &str, k: u32, group: &str, verdict: Verdict) -> Comparison {
+    Comparison {
+        arm: arm.to_string(),
+        k,
+        group: group.to_string(),
+        primary: !arm.ends_with("app-only"),
+        n: 24,
+        missing: 0,
+        mean_difference: 0.0,
+        ci_low: 0.0,
+        ci_high: 0.0,
+        verdict,
+        paired_differences: Vec::new(),
+    }
+}
+
+/// `all`-group comparisons for K = 5, 10, 20 given each primary baseline's verdicts.
+fn all_group(backprop: [Verdict; 3], free: [Verdict; 3]) -> Vec<Comparison> {
+    let steps = [5, 10, 20];
+    let mut comparisons = Vec::new();
+    for (i, k) in steps.into_iter().enumerate() {
+        comparisons.push(comparison("sparse-backprop", k, "all", backprop[i]));
+        comparisons.push(comparison("derivative-free", k, "all", free[i]));
+    }
+    comparisons
+}
+
+#[test]
+fn predeclared_verdict_follows_the_success_criterion() {
+    use Verdict::{Better as B, Inconclusive as I, Worse as W};
+    let steps = [5, 10, 20];
+    let verdict_of = |backprop, free| predeclared_verdict(&all_group(backprop, free), &steps);
+    assert_eq!(
+        verdict_of([I, B, I], [I, B, I]),
+        OverallVerdict::EarnsItsPlace
+    );
+    assert_eq!(
+        verdict_of([B, B, B], [B, I, B]),
+        OverallVerdict::EarnsItsPlace
+    );
+    assert_eq!(verdict_of([W, W, W], [W, W, W]), OverallVerdict::Negative);
+    assert_eq!(verdict_of([W, W, W], [I, I, I]), OverallVerdict::Negative);
+    assert_eq!(
+        verdict_of([I, I, I], [I, I, I]),
+        OverallVerdict::Inconclusive
+    );
+    // Better than one baseline only is not enough.
+    assert_eq!(
+        verdict_of([B, B, B], [I, I, I]),
+        OverallVerdict::Inconclusive
+    );
+    // Better than both at one K, but Worse than one at another K.
+    assert_eq!(
+        verdict_of([B, I, W], [B, I, I]),
+        OverallVerdict::Inconclusive
+    );
+    assert_eq!(
+        verdict_of([B, I, I], [B, W, I]),
+        OverallVerdict::Inconclusive
+    );
+    // Worse than sparse backprop at only some K is not negative.
+    assert_eq!(
+        verdict_of([W, W, I], [W, W, W]),
+        OverallVerdict::Inconclusive
+    );
+}
+
+#[test]
+fn predeclared_verdict_ignores_other_groups_and_app_only_arms() {
+    use Verdict::{Better as B, Inconclusive as I};
+    let steps = [5];
+    let mut comparisons = vec![
+        comparison("sparse-backprop", 5, "all", I),
+        comparison("derivative-free", 5, "all", I),
+        comparison("sparse-backprop", 5, "same-width", B),
+        comparison("derivative-free", 5, "same-width", B),
+        comparison("sparse-backprop-app-only", 5, "all", B),
+        comparison("derivative-free-app-only", 5, "all", B),
+    ];
+    assert_eq!(
+        predeclared_verdict(&comparisons, &steps),
+        OverallVerdict::Inconclusive
+    );
+    comparisons[0].verdict = B;
+    comparisons[1].verdict = B;
+    assert_eq!(
+        predeclared_verdict(&comparisons, &steps),
+        OverallVerdict::EarnsItsPlace
+    );
+}
+
+#[test]
+fn baselines_get_the_symbolic_budget_plus_the_meta_share() {
+    let manifest = reduced_manifest();
+    let report = run_manifest(&manifest).expect("reduced run");
+    let n = manifest.train_records;
+    let unit = n as u64;
+    let k = u64::from(manifest.steps[0]);
+    let symbolic_units = 2 * k * unit;
+    // 2 squashes x 2 validation seeds.
+    let validation_tasks = 4u64;
+
+    // Meta cost: every candidate scores each calibration task with
+    // `calibration_steps` rule steps at 2 units plus two MSE passes at 1 unit.
+    let families: std::collections::BTreeSet<_> =
+        report.search_trace.iter().map(|s| s.family).collect();
+    let candidates = u64::from(manifest.meta_rounds)
+        * manifest.candidates_per_round as u64
+        * families.len() as u64;
+    assert_eq!(report.search_trace.len() as u64, candidates);
+    let calibration_tasks =
+        (manifest.calibration_seeds.len() * manifest.hidden_squashes.len()) as u64;
+    let per_task = 2 * u64::from(manifest.calibration_steps) * unit + 2 * unit;
+    assert_eq!(
+        report.meta_cost.record_units,
+        candidates * calibration_tasks * per_task
+    );
+    let share = report.meta_cost.record_units.div_ceil(validation_tasks);
+    assert!(share > 0);
+
+    let rows = |arm: &str| {
+        let rows: Vec<_> = report.runs.iter().filter(|r| r.arm == arm).collect();
+        assert_eq!(rows.len() as u64, validation_tasks, "rows for {arm}");
+        rows
+    };
+    for row in rows("symbolic") {
+        assert_eq!((row.steps, row.record_units), (k, symbolic_units));
+    }
+    for row in rows("sparse-backprop") {
+        let steps = (symbolic_units + share) / (2 * unit);
+        assert_eq!((row.steps, row.record_units), (steps, steps * 2 * unit));
+    }
+    for row in rows("derivative-free") {
+        let evals = (symbolic_units + share) / unit;
+        assert_eq!((row.steps, row.record_units), (evals, evals * unit));
+    }
+    for row in rows("sparse-backprop-app-only") {
+        let steps = symbolic_units / (2 * unit);
+        assert_eq!((row.steps, row.record_units), (steps, steps * 2 * unit));
+    }
+    for row in rows("derivative-free-app-only") {
+        let evals = symbolic_units / unit;
+        assert_eq!((row.steps, row.record_units), (evals, evals * unit));
+    }
+    for c in &report.comparisons {
+        assert_eq!((c.missing, c.n > 0), (0, true), "{} {}", c.arm, c.group);
+    }
+}
+
+#[test]
+fn a_failed_validation_run_is_recorded_and_never_decides_the_verdict() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manifest = reduced_files_manifest();
+    support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
+    let calibration = task(1).parent;
+    let mut broken = task(3).parent;
+    broken.synapses[0].to_uuid = "nowhere".to_string();
+    let report = run_files(
+        &manifest,
+        &calibration,
+        &[task(2).parent, broken],
+        dir.path(),
+    )
+    .expect("a run with one failing creature still reports");
+    let arms = 5 * manifest.steps.len() as u64;
+    assert_eq!(report.coverage.planned, 2 * arms);
+    assert_eq!(
+        report.coverage.failed, arms,
+        "every run of the broken creature fails"
+    );
+    assert_eq!(report.coverage.failed, report.failures.len() as u64);
+    assert_eq!(
+        report.coverage.completed + report.coverage.failed,
+        report.coverage.planned
+    );
+    assert!(
+        report
+            .failures
+            .iter()
+            .all(|f| f.task == "files:creature-1" && f.reason.contains("nowhere")),
+        "unexpected failures: {:?}",
+        report.failures
+    );
+    // The surviving creature alone must not carry the verdict.
+    for c in report.comparisons.iter().filter(|c| c.primary) {
+        assert_eq!(c.n + c.missing, 2, "{} at K {}", c.arm, c.k);
+        if c.missing > 0 {
+            assert_eq!(c.verdict, Verdict::Inconclusive, "{} at K {}", c.arm, c.k);
+        }
+    }
+    assert!(
+        report
+            .comparisons
+            .iter()
+            .any(|c| c.missing > 0 && c.primary),
+        "no primary comparison lost the failed run"
+    );
+    assert_ne!(report.overall_verdict, OverallVerdict::EarnsItsPlace);
 }
