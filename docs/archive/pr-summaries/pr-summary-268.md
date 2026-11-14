@@ -98,6 +98,7 @@ or harm on real creatures. The method write-up is `docs/local-rules.md`. The
   - Report contents: `synthetic_summary_carries_the_search_trace_and_source`.
 - `cargo test --test local_rules`: 16 passed.
 - `./quality.sh < /dev/null` on the head: exit 0, "All quality checks passed!". The first run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree. The line was added and the gate re-run.
+- I ran the CI cargo checks the pre-push gate lists, using the installed 1.99.1 toolchain. `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::filter_next -D clippy::collapsible_if` found no issues, and `cargo test --no-run --workspace --all-features` exited 0. The worker's pre-push gate itself refused the push: it ran `cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version`, which exited 101. That hash is the `dtolnay/rust-toolchain` action SHA from `.github/workflows/ci.yml:64`, not a toolchain name, so this is a fault in the worker's gate, not in this repository.
 - No existing test was edited or removed.
 - Not done: the representative private-corpus run, and pinning the paper's method (both above).
 
