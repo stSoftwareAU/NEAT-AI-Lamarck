@@ -236,6 +236,24 @@ fn smoke_manifest_end_to_end() {
     }
 }
 
+/// The mark is carried on every row and cell just past the boundary, and is
+/// absent at the boundary itself. D=41 is cheap enough for the routine gate.
+#[test]
+fn extrapolation_flag_marks_rows_and_cells_just_past_the_boundary() {
+    for (dimension, expected) in [(40, false), (41, true)] {
+        let mut m = tiny_manifest();
+        m.dimensions = vec![dimension];
+        let r = run_manifest(&m).unwrap();
+        assert!(!r.runs.is_empty());
+        assert!(
+            r.runs.iter().all(|row| row.extrapolation == expected),
+            "D={dimension}"
+        );
+        assert_eq!(r.cells.len(), 1);
+        assert_eq!(r.cells[0].extrapolation, expected, "D={dimension}");
+    }
+}
+
 #[test]
 #[ignore = "CMA-ES at D=100 takes ~40s in a debug build; run with --release -- --ignored"]
 fn extrapolation_flag_on_rows_for_large_dimension() {
@@ -244,6 +262,7 @@ fn extrapolation_flag_on_rows_for_large_dimension() {
     m.budget_multiples = vec![10];
     let r = run_manifest(&m).unwrap();
     assert!(r.runs.iter().all(|row| row.extrapolation));
+    assert!(r.cells.iter().all(|cell| cell.extrapolation));
 }
 
 #[test]

@@ -207,7 +207,9 @@ fn many_seeds() -> Manifest {
     m
 }
 
-fn fixture(arm: Arm, seed: u64, normalised: f64) -> RunRow {
+/// A row whose screening and held-out columns carry different values, so a
+/// test fails if the code reads the wrong column.
+fn fixture(arm: Arm, seed: u64, screening: f64, held_out: f64) -> RunRow {
     RunRow {
         family: Family::Tanh,
         dimension: 20,
@@ -217,38 +219,58 @@ fn fixture(arm: Arm, seed: u64, normalised: f64) -> RunRow {
         phase: "validation".into(),
         arm,
         start_screening_loss: Some(1.0),
-        final_screening_loss: Some(normalised),
-        normalised_screening_loss: Some(normalised),
+        final_screening_loss: Some(screening),
+        normalised_screening_loss: Some(screening),
         evaluations_used: 200,
         preparation_evaluations: 21,
         full_loss_start: Some(1.0),
-        full_loss_final: Some(normalised),
+        full_loss_final: Some(screening),
         held_out_loss_start: Some(1.0),
-        held_out_loss_final: Some(normalised),
-        normalised_held_out_loss: Some(normalised),
+        held_out_loss_final: Some(held_out),
+        normalised_held_out_loss: Some(held_out),
         confirmation_evaluations: 5,
         extrapolation: false,
         error: None,
     }
 }
 
-/// Refine and CMA-ES rows at about 0.8, with seed-to-seed variation.
+/// Refine and CMA-ES rows at about 0.8 on screening and 0.9 held out, with
+/// seed-to-seed variation.
 fn in_process_rows() -> Vec<RunRow> {
     let mut rows = Vec::new();
     for (i, &seed) in SEEDS.iter().enumerate() {
         for arm in [Arm::LamarckRefine, Arm::CmaEs] {
-            rows.push(fixture(arm, seed, 0.8 + 0.01 * i as f64));
+            rows.push(fixture(
+                arm,
+                seed,
+                0.8 + 0.01 * i as f64,
+                0.9 + 0.01 * i as f64,
+            ));
         }
     }
     rows
 }
 
-fn reference_rows(offset: f64) -> Vec<RunRow> {
+/// Reference rows offset from the in-process rows by `screening_offset` on
+/// screening and `held_out_offset` on held-out loss.
+fn reference_rows_split(screening_offset: f64, held_out_offset: f64) -> Vec<RunRow> {
     SEEDS
         .iter()
         .enumerate()
-        .map(|(i, &seed)| fixture(Arm::AmmReference, seed, 0.8 + 0.01 * i as f64 + offset))
+        .map(|(i, &seed)| {
+            fixture(
+                Arm::AmmReference,
+                seed,
+                0.8 + 0.01 * i as f64 + screening_offset,
+                0.9 + 0.01 * i as f64 + held_out_offset,
+            )
+        })
         .collect()
+}
+
+/// Both columns move together by `offset` (held out by half as much).
+fn reference_rows(offset: f64) -> Vec<RunRow> {
+    reference_rows_split(offset, offset / 2.0)
 }
 
 #[test]
@@ -272,6 +294,8 @@ fn clearly_better_and_worse_references_get_matching_verdicts() {
         assert_eq!(c.verdict, "amm-reference-better");
         assert_eq!(c.screening.wins, 6);
         assert!((c.screening.mean.unwrap() + 0.3).abs() < 1e-9);
+        assert!((c.held_out.mean.unwrap() + 0.15).abs() < 1e-9);
+        assert_eq!(c.held_out.wins, 6);
     }
 
     let worse = summarise_reference(&m, &runs, &reference_rows(0.3)).unwrap();
@@ -284,6 +308,43 @@ fn clearly_better_and_worse_references_get_matching_verdicts() {
     for c in &same.cells[0].comparisons {
         assert_eq!(c.verdict, "inconclusive");
         assert_eq!(c.screening.ties, 6);
+    }
+}
+
+/// The predeclared rule: a screening interval wholly below zero is only
+/// "better" when the held-out mean is not above zero.
+#[test]
+fn held_out_veto_turns_a_screening_win_inconclusive() {
+    let m = many_seeds();
+    let runs = in_process_rows();
+
+    // Screening clearly better, held-out slightly worse: vetoed.
+    let vetoed = summarise_reference(&m, &runs, &reference_rows_split(-0.3, 0.05)).unwrap();
+    for c in &vetoed.cells[0].comparisons {
+        assert_eq!(c.verdict, "inconclusive");
+        assert!((c.screening.mean.unwrap() + 0.3).abs() < 1e-9);
+        assert!((c.held_out.mean.unwrap() - 0.05).abs() < 1e-9);
+        assert!(c.screening.ci_high.unwrap() < 0.0);
+        assert_eq!(c.screening.wins, 6);
+        assert_eq!(c.held_out.losses, 6);
+    }
+
+    // Controls: a held-out mean exactly at zero and one below zero both keep
+    // the verdict "better".
+    for held_out_offset in [0.0, -0.05] {
+        let kept =
+            summarise_reference(&m, &runs, &reference_rows_split(-0.3, held_out_offset)).unwrap();
+        for c in &kept.cells[0].comparisons {
+            assert_eq!(c.verdict, "amm-reference-better", "{held_out_offset}");
+            assert!((c.held_out.mean.unwrap() - held_out_offset).abs() < 1e-9);
+        }
+    }
+
+    // The veto only guards "better": a screening loss stays "worse" whatever
+    // the held-out column says.
+    let worse = summarise_reference(&m, &runs, &reference_rows_split(0.3, -0.3)).unwrap();
+    for c in &worse.cells[0].comparisons {
+        assert_eq!(c.verdict, "amm-reference-worse");
     }
 }
 
@@ -368,7 +429,7 @@ fn hand_built_error_row_with_null_fields_counts_as_failed() {
     let m = many_seeds();
     let runs = in_process_rows();
     let mut reference = reference_rows(-0.3);
-    let mut failed = fixture(Arm::AmmReference, SEEDS[0], 0.0);
+    let mut failed = fixture(Arm::AmmReference, SEEDS[0], 0.0, 0.0);
     failed.start_screening_loss = None;
     failed.final_screening_loss = None;
     failed.normalised_screening_loss = None;
