@@ -20,6 +20,18 @@ code at a fixed commit, and `docs/easy-record-skipping.md` says how the tested
 scheme differs from it. The representative (private) run is outstanding.
 Part of #267.
 
+The branch also carries two CI-plumbing commits, cherry-picked unchanged from
+the #268 branch (`98e7b28`, `5614dd8`). Without them the worker could not push
+this branch at all:
+
+- `ci.yml`'s `quality` job, `cargo-quality.yml` and `family-sync.yml` now
+  install Rust through `.github/actions/rust-toolchain`. That composite action
+  wraps the same pinned `dtolnay/rust-toolchain` SHA with `rustfmt, clippy`.
+- The family-sync "Gate the refreshed scripts" step falls back to the job's
+  `CANONICAL_PATHS` list when the variable is unset.
+  `scripts/check-family-sync-workflow.sh` gains a rule that fails when the
+  fallback is missing or differs from the job's list.
+
 ## Spec
 
 ### Intent and Rationale
@@ -72,6 +84,17 @@ Part of #267.
   stSoftwareAU`). Lamarck's refinement lives in this repository.
 - The synthetic run took 15 s wall in release, on a shared, parallel
   container. The timing is indicative only.
+- All five earlier attempts on this issue died at the worker's pre-push gate
+  with "`cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version` exited
+  101: error: no such command: `+…`". The gate takes the `dtolnay/rust-toolchain`
+  ref as a toolchain name, and this host has no rustup. A local action has no
+  such ref, so the gate runs plain `cargo`. The gate also re-runs a changed
+  workflow's ShellCheck step without the job's `env:`, which is why the
+  `CANONICAL_PATHS` fallback is needed. That defect is in VibeCoder, which this
+  repository does not depend on. The other workflows (`ci.yml`'s `validation`
+  job, `auto-format`, `cargo-audit`, `sbom`, `security`) keep the inline step.
+- The CHANGELOG "Fixed" entry carried over from #268 still names Issue #268.
+  It was kept word for word so both branches merge cleanly.
 
 ## Evidence
 
@@ -166,8 +189,15 @@ results private. That run decides whether `record_skip/` stays or is removed.
   quality checks passed!"). That includes clippy
   `-D warnings`, the full test suite (`readme_contract`, `docs_link_targets`),
   rustdoc and codespell.
-- No existing test was edited or removed. The only change to existing source
-  is `pub mod record_skip;` in `lamarck/src/lib.rs`.
+- `scripts/test-check-family-sync-workflow.sh` gains two negative cases (no
+  `CANONICAL_PATHS` fallback; a stale fallback), each expecting exit 1, and the
+  real workflow is the passing control. The script passed, and so did
+  `scripts/check-family-sync-workflow.sh`, `check-bot-push-action.sh`,
+  `check-cargo-quality-overlap.sh` and `actionlint`. The gate step's
+  ShellCheck, run under `env -i` with no `CANONICAL_PATHS`, came back clean.
+- No existing assertion was edited or removed. Outside `record_skip/` and its
+  tests, the source changes are `pub mod record_skip;` in `lamarck/src/lib.rs`
+  and the rule added to `scripts/check-family-sync-workflow.sh`.
 
 Not done: reading the paper text (the method is pinned from its code), running
 SP itself as an arm, the representative corpus run, and the keep-or-remove
