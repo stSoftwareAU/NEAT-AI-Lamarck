@@ -179,6 +179,13 @@ Lamarck gives the gradient the least authority it can: the learning signal
 delta, and the `backprop` strategy is skipped outright when no blame reached the
 focus. Nothing a gradient suggests is accepted without a full-corpus score.
 
+An opt-in research harness (issue #268) asks whether sparse symbolic local
+update rules can beat that sparse backprop refinement at an equal record budget,
+with the cost of discovering the rules counted. It is not wired into
+`run_optimisation` or the CLI, and its synthetic verdict is `negative`: the rules
+lose to sparse backprop at every step count once the meta-search is included.
+See [`docs/local-rules.md`](docs/local-rules.md).
+
 ### Statistically informed variants
 
 Building offspring from measured statistics rather than from crossover is the
@@ -2093,6 +2100,7 @@ NEAT-AI-Lamarck/
     ├── run.rs
     ├── report.rs
     ├── failed_cache/        # opt-in unsuccessful-candidate cache (issues #88–#94)
+    ├── local_rules/         # opt-in local update-rule experiment (issue #268)
     ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── screen_thresholds.rs # per-strategy screen thresholds (issue #220)

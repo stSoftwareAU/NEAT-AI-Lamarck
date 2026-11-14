@@ -18,6 +18,8 @@ pub mod focus;
 pub mod followup;
 pub mod grafts;
 pub mod learning;
+/// Opt-in offline research harness: sparse symbolic local update rules (issue #268).
+pub mod local_rules;
 pub mod log;
 pub mod memetic;
 pub mod memo;
