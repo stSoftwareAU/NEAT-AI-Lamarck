@@ -674,12 +674,12 @@ fn a_failed_validation_run_is_recorded_and_never_decides_the_verdict() {
     let report = run_files(
         &manifest,
         &calibration,
-        &[task(2).parent, broken],
+        &[task(2).parent, broken, task(4).parent],
         dir.path(),
     )
     .expect("a run with one failing creature still reports");
     let arms = 5 * manifest.steps.len() as u64;
-    assert_eq!(report.coverage.planned, 2 * arms);
+    assert_eq!(report.coverage.planned, 3 * arms);
     assert_eq!(
         report.coverage.failed, arms,
         "every run of the broken creature fails"
@@ -697,19 +697,20 @@ fn a_failed_validation_run_is_recorded_and_never_decides_the_verdict() {
         "unexpected failures: {:?}",
         report.failures
     );
-    // The surviving creature alone must not carry the verdict.
-    for c in report.comparisons.iter().filter(|c| c.primary) {
-        assert_eq!(c.n + c.missing, 2, "{} at K {}", c.arm, c.k);
-        if c.missing > 0 {
-            assert_eq!(c.verdict, Verdict::Inconclusive, "{} at K {}", c.arm, c.k);
-        }
+    // Two sound creatures meet `min_paired_tasks` (2), so the sample alone
+    // would not make a comparison inconclusive: only the failed-run rule does.
+    assert_eq!(manifest.min_paired_tasks, 2);
+    let primary: Vec<_> = report.comparisons.iter().filter(|c| c.primary).collect();
+    assert!(!primary.is_empty());
+    for c in primary {
+        assert_eq!(
+            (c.n, c.missing),
+            (2, 1),
+            "{} at K {}: the broken creature is the one missing pair",
+            c.arm,
+            c.k
+        );
+        assert_eq!(c.verdict, Verdict::Inconclusive, "{} at K {}", c.arm, c.k);
     }
-    assert!(
-        report
-            .comparisons
-            .iter()
-            .any(|c| c.missing > 0 && c.primary),
-        "no primary comparison lost the failed run"
-    );
     assert_ne!(report.overall_verdict, OverallVerdict::EarnsItsPlace);
 }

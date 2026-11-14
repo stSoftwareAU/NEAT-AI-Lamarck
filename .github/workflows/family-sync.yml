@@ -83,8 +83,16 @@ jobs:
       # `scripts/family-pins.sh` shells out to `cargo update` when it moves a
       # pin, and a moved pin is tested here, so this job needs the toolchain
       # the Cargo jobs already install.
+      #
+      # This job checks out the PR branch, so a local `uses: ./.github/actions/…`
+      # would read the action from that branch and fail on any branch cut before
+      # the action existed. A plain `run:` step uses the runner's rustup and the
+      # `rust-toolchain.toml` pin (channel, rustfmt and clippy) and does not
+      # depend on the branch's contents beyond that file.
       - name: Install Rust toolchain
-        uses: ./.github/actions/rust-toolchain
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
 
       # Fail loud on a fetch error: a stale copy that silently passed as "in
       # sync" is worse than a red job, because every sibling then drifts.

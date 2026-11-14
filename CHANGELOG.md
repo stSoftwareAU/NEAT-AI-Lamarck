@@ -138,13 +138,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The Rust jobs install their toolchain through a local action, so the Vibe
   Coder pre-push gate can replay their cargo checks (Issue #268).** The
-  `ci.yml`'s `quality` job, `cargo-quality.yml` and the `family-sync` job now
-  use `./.github/actions/rust-toolchain`, which wraps the same pinned
+  `ci.yml`'s `quality` job and `cargo-quality.yml` now use
+  `./.github/actions/rust-toolchain`, which wraps the same pinned
   `dtolnay/rust-toolchain` step with `rustfmt, clippy`. The gate read that
   step's commit-SHA ref as a toolchain and ran `cargo +29eef336… --version`,
   which exits 101 on a host without rustup, so every Rust change was refused
   before it could be pushed. CI still compiles with the toolchain
-  `rust-toolchain.toml` pins; the other workflows keep their inline step.
+  `rust-toolchain.toml` pins; the other workflows keep their inline step. The
+  `family-sync` job checks out the PR branch, so it installs the toolchain with
+  a plain `rustup` step instead: a local action there would be read from a
+  branch cut before the action existed and fail.
 
 - **The breaking-bump gate is green against neat-core 0.22.5 (PR #239).** Core
   `Develop` moved 0.17.0 -> 0.22.5 while this branch was open, so

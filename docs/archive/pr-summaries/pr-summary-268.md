@@ -21,12 +21,18 @@ because the paper could not be read from the sandbox. The representative run on
 a private creature and corpus is the owner's step. Part of #268.
 
 One change is outside the experiment itself. The Rust jobs in `ci.yml`
-(`quality`), `cargo-quality.yml` and `family-sync.yml` now install their
+(`quality`) and `cargo-quality.yml` now install their
 toolchain through a new local action, `.github/actions/rust-toolchain`. It wraps
 the same pinned `dtolnay/rust-toolchain` step and asks for rustfmt and clippy.
-`ci.yml` and `cargo-quality.yml` already asked for those. `family-sync.yml` asked
-for none before, but `rust-toolchain.toml` lists both, and rustup honours that
-file, so CI still builds with the toolchain and components that file pins. The action's own `stable` install now also gets rustfmt and clippy in `family-sync`. Without it, the worker's pre-push gate refused every
+`ci.yml` and `cargo-quality.yml` already asked for those. Both pins and the
+components come from `rust-toolchain.toml`, which rustup honours, so CI still
+builds with the toolchain that file pins. `family-sync.yml` is the exception:
+it checks out the PR branch, so a local `uses: ./.github/actions/…` there would
+be read from a branch cut before the action existed and fail with "Can't find
+'action.yml'". It installs the toolchain with a plain `run:` step instead
+(`rustup show active-toolchain || rustup toolchain install`), which uses the
+runner's rustup and `rust-toolchain.toml` and keeps the `dtolnay` ref out of
+that job. Without the change, the worker's pre-push gate refused every
 push of this branch (see Undiscoverable Facts). Because this branch now edits
 `family-sync.yml`, the gate also replays that workflow's ShellCheck step without
 the job's `env:`, and `set -u` stopped it on `CANONICAL_PATHS`. The step now
@@ -54,7 +60,7 @@ branch lands second merges it without a conflict.
 ### Undiscoverable Facts
 
 - arXiv 2611.12248 could not be read from the sandbox on 14 November 2026. `curl` of the export.arxiv.org abstract and the arxiv.org abstract and PDF failed with `CONNECT tunnel failed, response 403`. The fetch tool got "proxy refused the connection" on the arXiv abstract, HTML and PDF pages and on the alphaxiv and Hugging Face mirrors. Only web-search summaries came through. `docs/local-rules.md` section 2 records the outline they give: per-layer polynomial local losses over Penrose-diagram monomials, regressed against a global loss, with a Hadamard-product sparse prior and locality degree 1–3. It also records how this harness differs from that outline. The coefficient optimisation, the per-degree variable sets and the experimental settings were not found, so the method is not pinned. What is tested is the issue's description.
-- The worker's pre-push gate reads a job's `dtolnay/rust-toolchain@<ref>` ref as the `cargo +<ref>` toolchain (`jobToolchain` in VibeCoder `worker/deno/lib/ci_cargo_checks.ts`). Here the ref is the commit SHA `29eef336…`, and this host has no rustup, so its probe `cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version` exited 101 (`error: no such command: +…`). Three earlier runs of this issue ended there with no PR. That defect is in VibeCoder, which this repository does not depend on, so it cannot be fixed from here. The local action hides the ref from that inference. Running the worker's own `repoCiCargoChecks` on this checkout before the change planned three checks with `cargo +29eef…`; after it, plain `cargo clippy …` (`ci.yml`, `cargo-quality.yml`) and `cargo test --no-run …` (`family-sync.yml`).
+- The worker's pre-push gate reads a job's `dtolnay/rust-toolchain@<ref>` ref as the `cargo +<ref>` toolchain (`jobToolchain` in VibeCoder `worker/deno/lib/ci_cargo_checks.ts`). Here the ref is the commit SHA `29eef336…`, and this host has no rustup, so its probe `cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version` exited 101 (`error: no such command: +…`). Three earlier runs of this issue ended there with no PR. That defect is in VibeCoder, which this repository does not depend on, so it cannot be fixed from here. The local action hides the ref from that inference. Running the worker's own `repoCiCargoChecks` on this checkout before the change planned three checks with `cargo +29eef…`; after it, plain `cargo clippy …` (`ci.yml`, `cargo-quality.yml`) and `cargo test --no-run …` (`family-sync.yml`, whose plain `rustup` step has no `dtolnay` ref).
 - The 13 November research shortlist the issue cites is not in this repository.
 
 ## Evidence
@@ -133,7 +139,7 @@ the new `minPairedTasks` and `missing` (0 everywhere) fields, and the longer
 - **met** — "Do not claim success before representative runs" — evidence: `lamarck/tests/local_rules.rs::synthetic_source_never_supports_a_success_claim`, `lamarck/tests/local_rules.rs::synthetic_report_is_not_claimable_as_a_success`, `lamarck/tests/local_rules.rs::files_report_claim_follows_its_source_and_verdict`, `lamarck/src/local_rules/experiment.rs::success_claim` — reviewer: met
 - **met** — "Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private" — evidence: `lamarck/src/local_rules/experiment.rs::resolve_out_dir`, `lamarck/tests/local_rules.rs::out_dir_defaults_for_synthetic_mode_only`, `lamarck/tests/local_rules.rs::files_run_completes_and_names_its_source` — reviewer: met
 - **met** — "Leave unassigned until an implementer actively starts" — evidence: issue assigned with `work-on` while in progress — reviewer: met
-- **unrequested** — `.github/actions/rust-toolchain` local action used by `ci.yml`, `cargo-quality.yml` and `family-sync.yml` — reviewer: unrequested — reason: needed so the worker's pre-push gate can run plain `cargo` (see Undiscoverable Facts).
+- **unrequested** — `.github/actions/rust-toolchain` local action used by `ci.yml` and `cargo-quality.yml`, and a plain `rustup` install step in `family-sync.yml` — reviewer: unrequested — reason: needed so the worker's pre-push gate can run plain `cargo` (see Undiscoverable Facts).
 - **unrequested** — `CANONICAL_PATHS` fallback in `family-sync.yml`, validator rule 17 and its two tests — reviewer: unrequested — reason: the gate replays that step without the job's `env:` once this branch edits the workflow.
 - **unrequested** — `CHANGELOG.md` Fixed entry for the toolchain action — reviewer: unrequested — reason: records the toolchain change.
 
@@ -159,19 +165,20 @@ the new `minPairedTasks` and `missing` (0 everywhere) fields, and the longer
     - `predeclared_verdict_ignores_other_groups_and_app_only_arms`: a Better group or app-only row cannot change the verdict, and the same rows with `all`-group primary Better do.
     - `a_single_paired_task_cannot_decide_a_comparison`, `a_lost_run_makes_its_comparison_inconclusive` and `manifest_predeclares_the_minimum_paired_sample`.
   - Budget: `baselines_get_the_symbolic_budget_plus_the_meta_share` checks each arm's steps and `record_units` on a reduced run, and that `meta_cost` equals the candidate count times calibration tasks times the per-task units.
-  - Failed runs: `a_failed_validation_run_is_recorded_and_never_decides_the_verdict` runs `run_files` with a creature whose synapse points at a missing neuron. All of its runs land in `failures`, the coverage counts add up, and every primary comparison that lost a pair is `inconclusive` and not `earns-its-place`.
+  - Failed runs: `a_failed_validation_run_is_recorded_and_never_decides_the_verdict` runs `run_files` with three validation creatures, one of them with a synapse pointing at a missing neuron, at `min_paired_tasks` = 2. All of the broken creature's runs land in `failures`, the coverage counts add up, and every primary comparison has n = 2 and `missing` = 1 and is `inconclusive`. The two sound creatures meet the minimum on their own, so only the failed-run rule can make the verdict inconclusive.
   - Report contents: `synthetic_summary_carries_the_search_trace_and_source`.
   - No success before a representative run:
     - `synthetic_source_never_supports_a_success_claim`: every verdict on a synthetic source gives `NotClaimableSynthetic`. Positive controls: files with `EarnsItsPlace` gives `PendingOwnerReview`, and files with any other verdict gives `NoSuccess`.
     - `synthetic_report_is_not_claimable_as_a_success`: a real reduced synthetic report has the claim, and its JSON contains `"successClaim": "not-claimable-synthetic"`.
     - `files_report_claim_follows_its_source_and_verdict`.
   - Red-check: I temporarily made synthetic plus `EarnsItsPlace` return `PendingOwnerReview`. `synthetic_source_never_supports_a_success_claim` failed (18 passed, 1 failed), and passed again once the change was reverted.
+  - Red-check for the failed-run rule: I temporarily passed 0 instead of `missing` to `paired_verdict` in `overall`. `a_failed_validation_run_is_recorded_and_never_decides_the_verdict` failed (27 passed, 1 failed; sparse-backprop at K 5 gave `Worse`), and the suite passed again once the change was reverted.
   - Red-check for the budget: I temporarily multiplied the meta share by 0 in `run_arm`. `baselines_get_the_symbolic_budget_plus_the_meta_share` failed (27 passed, 1 failed), and the suite passed again once the change was reverted.
 - `cargo test --test local_rules < /dev/null`: 28 passed. `cargo clippy` with the CI `-D` flags and `cargo fmt --all -- --check` are clean.
 - `cargo run --release --example local_rules_bench < /dev/null`: regenerated at crate 0.1.47. The changes in `summary.json` are `crateVersion`, `minPairedTasks`, the longer `successCriterion` and `missing` (0) on each comparison, and `manifest.json` gains `minPairedTasks` and the same criterion text. The verdict is still `Negative`, with 360 of 360 runs complete, and every number is unchanged.
 - `./quality.sh < /dev/null` on the working tree for this review round: exit 0, "All quality checks passed!". An earlier run in this session failed at codespell on an Italian word in a new doc line, which was then replaced. An earlier run at `5aa69ba` also passed. An earlier run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree, so the line was added. That pass covers the `CANONICAL_PATHS` changes too.
 - I ran the three CI cargo checks the worker's scanner now plans, with their workflow env (`CARGO_BUILD_JOBS=2 RUSTFLAGS="-D warnings"` for clippy), on the installed cargo 1.99.1. `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::filter_next -D clippy::collapsible_if` and the same without `--workspace` found no issues, and `cargo test --no-run --workspace --all-features` exited 0.
-- Toolchain action: `actionlint` on `ci.yml`, `cargo-quality.yml` and `family-sync.yml` reported nothing. `scripts/check-family-sync-workflow.sh`, `scripts/test-check-family-sync-workflow.sh`, `scripts/check-bot-push-action.sh`, `scripts/check-cargo-quality-overlap.sh` and `scripts/test-check-cargo-quality-overlap.sh` passed. No validator rule was added for the toolchain action, because it does not alter what CI runs.
+- Toolchain action and the `family-sync` rustup step: `actionlint` on `ci.yml`, `cargo-quality.yml` and `family-sync.yml` reported nothing. `scripts/check-family-sync-workflow.sh`, `scripts/test-check-family-sync-workflow.sh`, `scripts/check-bot-push-action.sh`, `scripts/check-cargo-quality-overlap.sh` and `scripts/test-check-cargo-quality-overlap.sh` passed. No validator rule was added for the toolchain action, because it does not alter what CI runs.
 - `CANONICAL_PATHS` fallback: `scripts/test-check-family-sync-workflow.sh` gains two rule-17 cases, "gate step without a CANONICAL_PATHS fallback → fail" and "gate step fallback differs from CANONICAL_PATHS → fail", both exit 1, and the script passes. I replayed the family-sync "Gate the refreshed scripts" step and `ci.yml`'s "Run ShellCheck" step with `env -i PATH="$PATH" HOME="$HOME" bash --noprofile --norc -eo pipefail`: both exited 0, the first with "15 passed, 0 failed".
 - No test was removed or skipped. In this review round I edited tests this PR added earlier: the files-mode tests now pass two validation creatures, because a run below `min_paired_tasks` is refused, and `files_run_refuses_no_validation_creatures_and_mismatched_widths` expects the new minimum-sample message for an empty list in place of "needs at least one validation creature". The base has no `local_rules` code, so no base test is changed.
 - Not done: pinning the paper's full method, which the sandbox cannot fetch. The representative private-corpus run is the owner's step.
