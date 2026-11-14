@@ -1,14 +1,12 @@
 //! Behaviour tests for the offline weight bench (issue #266).
 
 use neat_ai_lamarck::weight_bench::experiment::ALLOWED_BUDGET_MULTIPLES;
-use neat_ai_lamarck::weight_bench::probes::LandscapeProbe;
 use neat_ai_lamarck::weight_bench::suite::{
-    CorpusRole, CorpusSpec, Family, Problem, ProblemSpec, load_corpus, problem_from_corpus,
+    CorpusSpec, Family, Problem, ProblemSpec, load_corpus, problem_from_corpus,
 };
 use neat_ai_lamarck::weight_bench::{
-    Arm, BenchError, BudgetedObjective, CMA_SIGMA0, CalibrationRow, Manifest, ROUTER_PROBE_AXES,
-    RouterRule, WeightObjective, build_problem, calibrate, cma_es, is_extrapolation,
-    lamarck_refine, probe_landscape, route, run_arm, run_manifest, select_influential,
+    Arm, BenchError, BudgetedObjective, CMA_SIGMA0, Manifest, WeightObjective, build_problem,
+    cma_es, is_extrapolation, lamarck_refine, run_arm, run_manifest, select_influential,
 };
 
 fn problem(family: Family, seed: u64) -> (Problem, WeightObjective) {
@@ -23,29 +21,11 @@ fn problem(family: Family, seed: u64) -> (Problem, WeightObjective) {
     (p, o)
 }
 
-fn probe(plateau: f64, kink: f64) -> LandscapeProbe {
-    LandscapeProbe {
-        axes: 8,
-        plateau_share: plateau,
-        kink_share: kink,
-        evaluations: 17,
-    }
-}
-
-fn rule(multiple: Option<f64>, share: f64) -> RouterRule {
-    RouterRule {
-        min_budget_multiple: multiple,
-        max_non_smooth_share: share,
-        probe_axes: 8,
-    }
-}
-
 fn tiny_manifest() -> Manifest {
     Manifest {
         families: vec![Family::Tanh],
         dimensions: vec![20],
         budget_multiples: vec![10],
-        calibration_seeds: vec![1],
         validation_seeds: vec![1001],
         bootstrap_resamples: 200,
         bootstrap_seed: 266,
@@ -111,12 +91,11 @@ fn arms_share_the_start_without_mutating_the_parent() {
     let parent = serde_json::to_value(&p.creature).unwrap();
     let start = objective.start();
     let loss = objective.loss(&start).unwrap();
-    let rule = rule(Some(10.0), 1.01);
-    for arm in [Arm::LamarckRefine, Arm::CmaEs, Arm::Router] {
+    for arm in [Arm::LamarckRefine, Arm::CmaEs] {
         let mut budgeted = BudgetedObjective::new(&objective, 200);
         assert_eq!(budgeted.start(), start);
         assert_eq!(budgeted.eval(&start).unwrap(), loss);
-        run_arm(&mut budgeted, arm, &rule, 2).unwrap();
+        run_arm(&mut budgeted, arm, 2).unwrap();
         assert!(budgeted.best().unwrap().0 <= loss);
         assert_eq!(objective.start(), start);
         assert_eq!(objective.loss(&start).unwrap(), loss);
@@ -133,72 +112,12 @@ fn cma_es_improves_at_large_budget() {
 }
 
 #[test]
-fn probe_counts_evaluations_against_the_budget() {
-    let (_, o) = problem(Family::Relu, 1);
-    let mut b = BudgetedObjective::new(&o, 100);
-    let p = probe_landscape(&mut b, ROUTER_PROBE_AXES).unwrap();
-    assert_eq!(p.axes, 8);
-    assert_eq!(p.evaluations, 17);
-    assert_eq!(b.used(), 17);
-    assert!(p.plateau_share + p.kink_share <= 1.0);
-    // A budget too small for the probe fails loudly.
-    let mut tiny = BudgetedObjective::new(&o, 5);
-    assert!(matches!(
-        probe_landscape(&mut tiny, 8),
-        Err(BenchError::BudgetExhausted { limit: 5 })
-    ));
-}
-
-#[test]
-fn route_follows_the_rule() {
-    let r = rule(Some(30.0), 0.5);
-    assert_eq!(route(&r, 20, 600, &probe(0.0, 0.25)), Arm::CmaEs);
-    assert_eq!(route(&r, 20, 599, &probe(0.0, 0.25)), Arm::LamarckRefine);
-    assert_eq!(route(&r, 20, 6000, &probe(0.5, 0.25)), Arm::LamarckRefine);
-    assert_eq!(
-        route(&rule(None, 1.01), 20, 100_000, &probe(0.0, 0.0)),
-        Arm::LamarckRefine
-    );
-}
-
-fn row(budget: usize, kink: f64, refine: f64, cma: f64) -> CalibrationRow {
-    CalibrationRow {
-        dimension: 20,
-        budget,
-        probe: probe(0.0, kink),
-        refine_normalised: refine,
-        cmaes_normalised: cma,
-    }
-}
-
-#[test]
-fn calibrate_picks_the_favoured_rule() {
-    // CMA-ES wins only at the 100x budget on smooth probes.
-    let rows = vec![
-        row(200, 0.0, 0.5, 0.9),
-        row(600, 0.0, 0.5, 0.9),
-        row(2000, 0.0, 0.9, 0.1),
-        row(2000, 0.0, 0.9, 0.1),
-        row(2000, 1.0, 0.1, 0.9),
-    ];
-    let r = calibrate(&rows);
-    assert_eq!(r.min_budget_multiple, Some(100.0));
-    assert!(r.max_non_smooth_share < 1.0);
-    // Refinement always wins: never route to CMA-ES.
-    let never: Vec<_> = rows.iter().map(|r| row(r.budget, 0.0, 0.1, 0.9)).collect();
-    assert_eq!(calibrate(&never).min_budget_multiple, None);
-}
-
-#[test]
 fn manifest_validation() {
     assert!(tiny_manifest().validate().is_ok());
     let mut m = tiny_manifest();
     m.budget_multiples = vec![50];
     let err = m.validate().unwrap_err().to_string();
     assert!(err.contains("50"), "{err}");
-    let mut m = tiny_manifest();
-    m.validation_seeds = vec![1];
-    assert!(matches!(m.validate(), Err(BenchError::InvalidConfig(_))));
     for d in [19, 101] {
         let mut m = tiny_manifest();
         m.dimensions = vec![d];
@@ -227,7 +146,6 @@ fn manifest_rejects_duplicate_trial_identifiers() {
         "families",
         "dimensions",
         "budgetMultiples",
-        "calibrationSeeds",
         "validationSeeds",
     ] {
         let mut value = serde_json::to_value(&control).unwrap();
@@ -241,6 +159,17 @@ fn manifest_rejects_duplicate_trial_identifiers() {
             )))
         );
     }
+}
+
+#[test]
+fn manifest_rejects_unknown_fields() {
+    let control = tiny_manifest();
+    let value = serde_json::to_value(&control).unwrap();
+    assert!(serde_json::from_value::<Manifest>(value.clone()).is_ok());
+    let mut stale = value;
+    stale["calibrationSeeds"] = serde_json::json!([1, 2]);
+    let err = serde_json::from_value::<Manifest>(stale).unwrap_err();
+    assert!(err.to_string().contains("calibrationSeeds"), "{err}");
 }
 
 #[test]
@@ -290,7 +219,11 @@ fn smoke_manifest_end_to_end() {
     assert!(r.total_evaluations > 0);
     assert_eq!(r.cells.len(), 1);
     for cell in &r.cells {
-        assert_eq!(cell.comparisons.len(), 3);
+        assert_eq!(cell.comparisons.len(), 1);
+        assert_eq!(
+            (cell.comparisons[0].first, cell.comparisons[0].second),
+            (Arm::CmaEs, Arm::LamarckRefine)
+        );
         for c in &cell.comparisons {
             assert_eq!(c.screening.paired_differences.len(), 1);
             assert_eq!(c.held_out.paired_differences.len(), 1);
@@ -299,10 +232,7 @@ fn smoke_manifest_end_to_end() {
     for row in &r.runs {
         assert!(row.evaluations_used <= row.budget, "{row:?}");
         assert!(!row.extrapolation);
-        if row.phase == "validation" && row.arm == Arm::Router {
-            assert_eq!(row.probe_evaluations, 2 * 8 + 1);
-            assert!(row.routed_to.is_some());
-        }
+        assert_eq!(row.phase, "validation");
     }
 }
 
@@ -412,29 +342,22 @@ fn corpus_manifest_runs_within_budget() {
     assert_eq!(results.coverage.failed_runs, 0);
     assert!(results.runs.iter().all(|r| r.family == Family::Corpus));
     assert!(results.runs.iter().all(|r| r.evaluations_used <= r.budget));
-    let routers: Vec<_> = results
-        .runs
-        .iter()
-        .filter(|r| r.phase == "validation" && r.arm == Arm::Router)
-        .collect();
-    assert_eq!(routers.len(), 1);
-    assert_eq!(routers[0].probe_evaluations, 17);
-    // Wiring check: both phases start from the creature's own weights, so the
-    // starting losses differ only if the phases read different records.
-    let multiple = results.runs[0].budget_multiple;
-    let pick = |phase: &str| {
-        results
-            .runs
-            .iter()
-            .find(|r| {
-                r.phase == phase && r.arm == Arm::LamarckRefine && r.budget_multiple == multiple
-            })
-            .unwrap()
-    };
-    let (cal, val) = (pick("calibration"), pick("validation"));
-    assert!(cal.held_out_loss_start.is_some() && val.held_out_loss_start.is_some());
-    assert_ne!(cal.held_out_loss_start, val.held_out_loss_start);
-    assert_ne!(cal.start_screening_loss, val.start_screening_loss);
+    assert_eq!(results.runs.len(), 2);
+    // Wiring check: each row starts from the creature's own weights on the
+    // window's first 128 screening and last 128 held-out records.
+    let spec = corpus_spec(dir.path(), 128, 128);
+    let (creature, packed) = load_corpus(&spec).unwrap();
+    let p = problem_from_corpus(&creature, &packed, &spec, 20, 1001).unwrap();
+    let o =
+        WeightObjective::new(p.creature.clone(), p.synapse_indices.clone(), &p.screening).unwrap();
+    let start = o.start();
+    for row in &results.runs {
+        assert_eq!(row.start_screening_loss, Some(o.loss(&start).unwrap()));
+        assert_eq!(
+            row.held_out_loss_start,
+            Some(o.loss_on(&start, &p.held_out).unwrap())
+        );
+    }
 }
 
 #[test]
@@ -444,18 +367,25 @@ fn corpus_with_too_few_records_is_rejected() {
     assert!(run_manifest(&corpus_manifest(corpus_spec(dir.path(), 128, 128))).is_ok());
     let err = run_manifest(&corpus_manifest(corpus_spec(dir.path(), 400, 400))).unwrap_err();
     match err {
-        BenchError::InvalidConfig(m) => assert!(m.contains("1600"), "{m}"),
+        BenchError::InvalidConfig(m) => assert!(m.contains("800"), "{m}"),
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
-    // Boundary: 150 + 150 needs exactly the 600 records on offer.
-    let (creature, packed) = load_corpus(&corpus_spec(dir.path(), 150, 150)).unwrap();
+    // Boundary: 300 + 300 needs exactly the 600 records on offer.
+    let spec = corpus_spec(dir.path(), 300, 300);
+    let (creature, packed) = load_corpus(&spec).unwrap();
     assert_eq!(packed.len(), 600 * 9);
-    for role in [CorpusRole::Calibration, CorpusRole::Validation] {
-        let spec = corpus_spec(dir.path(), 150, 150);
-        assert!(problem_from_corpus(&creature, &packed, &spec, role, 20, 7).is_ok());
+    assert!(problem_from_corpus(&creature, &packed, &spec, 20, 7).is_ok());
+    match load_corpus(&corpus_spec(dir.path(), 301, 300)).unwrap_err() {
+        BenchError::InvalidConfig(m) => assert!(m.contains("601"), "{m}"),
+        other => panic!("expected InvalidConfig, got {other:?}"),
     }
-    match load_corpus(&corpus_spec(dir.path(), 151, 150)).unwrap_err() {
-        BenchError::InvalidConfig(m) => assert!(m.contains("602"), "{m}"),
+    // problem_from_corpus refuses a window too short for the split on its own.
+    let short = CorpusSpec {
+        screening_records: 301,
+        ..spec
+    };
+    match problem_from_corpus(&creature, &packed, &short, 20, 7).unwrap_err() {
+        BenchError::InvalidConfig(m) => assert!(m.contains("601"), "{m}"),
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
 }
@@ -486,21 +416,13 @@ fn corpus_problem_splits_records() {
     let spec = corpus_spec(dir.path(), 128, 128);
     let (creature, packed) = load_corpus(&spec).unwrap();
     assert_eq!(packed.len(), 600 * 9);
-    let cal =
-        problem_from_corpus(&creature, &packed, &spec, CorpusRole::Calibration, 20, 7).unwrap();
-    let val =
-        problem_from_corpus(&creature, &packed, &spec, CorpusRole::Validation, 20, 7).unwrap();
-    assert_eq!(cal.screening[..], packed[..128 * 9]);
-    assert_eq!(cal.held_out[..], packed[(300 - 128) * 9..300 * 9]);
-    assert_eq!(cal.full.len(), (300 - 128) * 9);
-    assert_eq!(val.screening[..], packed[300 * 9..(300 + 128) * 9]);
-    assert_eq!(val.held_out[..], packed[(600 - 128) * 9..]);
-    assert_eq!(val.full.len(), (300 - 128) * 9);
-    // The halves are disjoint and together cover each role's own records only.
-    let cal_all = [&cal.full[..], &cal.held_out[..]].concat();
-    let val_all = [&val.full[..], &val.held_out[..]].concat();
-    assert_eq!(cal_all[..], packed[..300 * 9]);
-    assert_eq!(val_all[..], packed[300 * 9..]);
+    let p = problem_from_corpus(&creature, &packed, &spec, 20, 7).unwrap();
+    assert_eq!(p.screening[..], packed[..128 * 9]);
+    assert_eq!(p.held_out[..], packed[(600 - 128) * 9..]);
+    assert_eq!(p.full.len(), (600 - 128) * 9);
+    // Full and held-out are disjoint and together cover the window exactly.
+    let all = [&p.full[..], &p.held_out[..]].concat();
+    assert_eq!(all[..], packed[..]);
     assert!(
         build_problem(&ProblemSpec {
             family: Family::Corpus,
@@ -515,7 +437,7 @@ fn corpus_problem_splits_records() {
 fn total_evaluations_count_confirmations_and_preparation_once_per_problem() {
     let m = tiny_manifest();
     let r = run_manifest(&m).unwrap();
-    // One calibration problem and one validation problem, each built once.
+    // One validation problem, built once and shared by both arms.
     let prep = |seed| {
         build_problem(&ProblemSpec {
             family: Family::Tanh,
@@ -525,19 +447,16 @@ fn total_evaluations_count_confirmations_and_preparation_once_per_problem() {
         .unwrap()
         .preparation_evaluations
     };
-    let preparation = prep(1) + prep(1001);
+    let preparation = prep(1001);
     assert!(preparation > 0);
-    // Two calibration rows and three validation rows, five confirmation
-    // evaluations each (screening start; full start and best; held-out start
-    // and best).
-    assert_eq!(r.runs.len(), 5);
+    // Two validation rows, five confirmation evaluations each (screening
+    // start; full start and best; held-out start and best).
+    assert_eq!(r.runs.len(), 2);
     assert!(r.runs.iter().all(|row| row.error.is_none()));
     for row in &r.runs {
         assert_eq!(row.confirmation_evaluations, 5);
         assert_eq!(row.preparation_evaluations, prep(row.seed));
     }
     let used: usize = r.runs.iter().map(|row| row.evaluations_used).sum();
-    let probe = 2 * ROUTER_PROBE_AXES.min(20) + 1;
-    assert_eq!(r.calibration_probe_evaluations, probe);
-    assert_eq!(r.total_evaluations, used + 5 * 5 + preparation + probe);
+    assert_eq!(r.total_evaluations, used + 2 * 5 + preparation);
 }

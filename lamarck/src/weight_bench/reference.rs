@@ -22,13 +22,13 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
+use super::arms::{Arm, arm_seed};
 use super::experiment::{
     CellSummary, Coverage, Manifest, RunRow, build_one, finish_row, load_manifest_corpus,
     summarise_cells,
 };
 use super::objective::BenchError;
-use super::router::{Arm, arm_seed};
-use super::suite::{CorpusRole, Family};
+use super::suite::Family;
 
 /// Half-width of the box handed to AMM, which needs a finite search region:
 /// the start weight plus or minus this, per weight. Predeclared, not tuned.
@@ -94,13 +94,7 @@ pub fn serve_reference(
         ));
     }
     let corpus = load_manifest_corpus(m)?;
-    let (problem, objective) = build_one(
-        &corpus,
-        req.family,
-        CorpusRole::Validation,
-        req.dimension,
-        req.seed,
-    )?;
+    let (problem, objective) = build_one(&corpus, req.family, req.dimension, req.seed)?;
     let budget = req.budget_multiple * req.dimension;
     send(
         &mut output,
@@ -120,7 +114,6 @@ pub fn serve_reference(
         req.budget_multiple,
         "validation",
         Arm::AmmReference,
-        0,
         |budgeted| {
             let mut line = String::new();
             loop {
@@ -146,7 +139,7 @@ pub fn serve_reference(
                     }
                 }
             }
-            Ok(Arm::AmmReference)
+            Ok(())
         },
     );
     send(&mut output, &serde_json::json!({ "row": row }))?;
@@ -169,7 +162,7 @@ pub struct ReferenceResults {
     /// Planned versus finished reference runs; a planned run with no row is
     /// counted as neither completed nor failed.
     pub coverage: Coverage,
-    /// Per-cell comparisons: AMM vs refine, AMM vs CMA-ES, AMM vs router.
+    /// Per-cell comparisons: AMM vs refine, AMM vs CMA-ES.
     pub cells: Vec<CellSummary>,
 }
 
@@ -226,12 +219,11 @@ pub fn summarise_reference(
     let pairs = [
         (Arm::AmmReference, Arm::LamarckRefine),
         (Arm::AmmReference, Arm::CmaEs),
-        (Arm::AmmReference, Arm::Router),
     ];
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
     let cells = summarise_cells(m, &all, &pairs, &mut rng);
     Ok(ReferenceResults {
-        format_version: 1,
+        format_version: 2,
         manifest: m.clone(),
         total_evaluations,
         coverage: Coverage {

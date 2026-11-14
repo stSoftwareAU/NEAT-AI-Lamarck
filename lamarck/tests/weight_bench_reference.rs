@@ -6,8 +6,7 @@ use neat_ai_lamarck::weight_bench::suite::Family;
 use neat_ai_lamarck::weight_bench::suite::ProblemSpec;
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, Manifest, REFERENCE_BOX_HALF_WIDTH, ReferenceRequest,
-    RouterRule, RunRow, WeightObjective, build_problem, run_arm, serve_reference,
-    summarise_reference,
+    RunRow, WeightObjective, build_problem, run_arm, serve_reference, summarise_reference,
 };
 use serde_json::Value;
 
@@ -16,7 +15,6 @@ fn manifest() -> Manifest {
         families: vec![Family::Tanh],
         dimensions: vec![20],
         budget_multiples: vec![10],
-        calibration_seeds: vec![1],
         validation_seeds: vec![1001],
         bootstrap_resamples: 200,
         bootstrap_seed: 266,
@@ -190,18 +188,13 @@ fn run_arm_refuses_the_reference_arm() {
     .unwrap();
     let o =
         WeightObjective::new(p.creature.clone(), p.synapse_indices.clone(), &p.screening).unwrap();
-    let rule = RouterRule {
-        min_budget_multiple: None,
-        max_non_smooth_share: 0.0,
-        probe_axes: 8,
-    };
     let mut b = BudgetedObjective::new(&o, 50);
-    match run_arm(&mut b, Arm::AmmReference, &rule, 1001) {
+    match run_arm(&mut b, Arm::AmmReference, 1001) {
         Err(BenchError::InvalidConfig(msg)) => assert!(msg.contains("offline"), "{msg}"),
         other => panic!("unexpected {other:?}"),
     }
     assert_eq!(b.used(), 0);
-    assert!(run_arm(&mut b, Arm::LamarckRefine, &rule, 1001).is_ok());
+    assert!(run_arm(&mut b, Arm::LamarckRefine, 1001).is_ok());
 }
 
 // ---- summarise_reference -------------------------------------------------
@@ -223,12 +216,10 @@ fn fixture(arm: Arm, seed: u64, normalised: f64) -> RunRow {
         seed,
         phase: "validation".into(),
         arm,
-        routed_to: None,
         start_screening_loss: Some(1.0),
         final_screening_loss: Some(normalised),
         normalised_screening_loss: Some(normalised),
         evaluations_used: 200,
-        probe_evaluations: 0,
         preparation_evaluations: 21,
         full_loss_start: Some(1.0),
         full_loss_final: Some(normalised),
@@ -241,11 +232,11 @@ fn fixture(arm: Arm, seed: u64, normalised: f64) -> RunRow {
     }
 }
 
-/// Refine, CMA-ES and router rows at about 0.8, with seed-to-seed variation.
+/// Refine and CMA-ES rows at about 0.8, with seed-to-seed variation.
 fn in_process_rows() -> Vec<RunRow> {
     let mut rows = Vec::new();
     for (i, &seed) in SEEDS.iter().enumerate() {
-        for arm in [Arm::LamarckRefine, Arm::CmaEs, Arm::Router] {
+        for arm in [Arm::LamarckRefine, Arm::CmaEs] {
             rows.push(fixture(arm, seed, 0.8 + 0.01 * i as f64));
         }
     }
@@ -266,7 +257,7 @@ fn clearly_better_and_worse_references_get_matching_verdicts() {
     let runs = in_process_rows();
 
     let better = summarise_reference(&m, &runs, &reference_rows(-0.3)).unwrap();
-    assert_eq!(better.format_version, 1);
+    assert_eq!(better.format_version, 2);
     assert_eq!(better.cells.len(), 1);
     let comparisons = &better.cells[0].comparisons;
     let pairs: Vec<(Arm, Arm)> = comparisons.iter().map(|c| (c.first, c.second)).collect();
@@ -275,7 +266,6 @@ fn clearly_better_and_worse_references_get_matching_verdicts() {
         vec![
             (Arm::AmmReference, Arm::LamarckRefine),
             (Arm::AmmReference, Arm::CmaEs),
-            (Arm::AmmReference, Arm::Router),
         ]
     );
     for c in comparisons {
@@ -394,7 +384,7 @@ fn hand_built_error_row_with_null_fields_counts_as_failed() {
     // It must survive the JSON round trip the script and the example use.
     let text = serde_json::to_string(&failed).unwrap();
     let failed: RunRow = serde_json::from_str(&text).unwrap();
-    assert!(failed.routed_to.is_none());
+    assert_eq!(failed.error.as_deref(), Some("server gave no row"));
     reference[0] = failed;
 
     let r = summarise_reference(&m, &runs, &reference).unwrap();
@@ -405,4 +395,29 @@ fn hand_built_error_row_with_null_fields_counts_as_failed() {
     assert_eq!(c.screening.failures, 1);
     assert_eq!(c.held_out.failures, 1);
     assert_eq!(c.screening.paired_differences.len(), 5);
+}
+
+/// The committed manifest is current-code output; the committed AMM rows were
+/// written while the router existed and still carry `routedTo` and
+/// `probeEvaluations`. Both must load and summarise, as `--compare-reference`
+/// does with these AMM rows.
+#[test]
+fn committed_evidence_parses_and_summarises() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/evidence/weight-router");
+    let text = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+    assert!(!text.contains("calibrationSeeds"));
+    let m: Manifest = serde_json::from_str(&text).unwrap();
+    assert!(m.validate().is_ok());
+    assert_eq!(m.validation_seeds, (1001..=1012).collect::<Vec<u64>>());
+    let rows = std::fs::read_to_string(dir.join("amm-runs.jsonl")).unwrap();
+    assert!(rows.contains("routedTo") && rows.contains("probeEvaluations"));
+    let parsed: Vec<RunRow> = rows
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(parsed.len(), 324);
+    assert!(parsed.iter().all(|r| r.arm == Arm::AmmReference));
+    let r = summarise_reference(&m, &[], &parsed).unwrap();
+    assert_eq!(r.coverage.completed_runs, 324);
 }

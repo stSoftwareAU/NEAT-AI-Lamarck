@@ -233,9 +233,9 @@ pub struct CorpusSpec {
     pub creature: PathBuf,
     /// Training-data directory.
     pub training_data: PathBuf,
-    /// Records (from the start of each half) used for screening.
+    /// Records (from the start of the window) used for screening.
     pub screening_records: usize,
-    /// Records (from the end of each half) held out.
+    /// Records (from the end of the window) held out.
     pub held_out_records: usize,
     /// Most records read from the corpus, in file order.
     pub max_records: usize,
@@ -279,35 +279,25 @@ pub fn load_corpus(spec: &CorpusSpec) -> Result<(CreatureExport, Vec<f32>), Benc
         count += 1;
     }
     debug_assert_eq!(packed.len(), count * width);
-    let needed = 2 * (spec.screening_records + spec.held_out_records);
+    let needed = spec.screening_records + spec.held_out_records;
     if count < needed {
         return Err(bad(format!(
-            "corpus has {count} usable records but calibration and validation each need screeningRecords + heldOutRecords ({} + {}), {needed} in all",
+            "corpus has {count} usable records but needs screeningRecords + heldOutRecords ({} + {}), {needed} in all",
             spec.screening_records, spec.held_out_records
         )));
     }
     Ok((creature, packed))
 }
 
-/// Which half of the corpus window a problem draws its records from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CorpusRole {
-    /// The first half of the window, `[0, T/2)`.
-    Calibration,
-    /// The second half of the window, `[T/2, T)`.
-    Validation,
-}
-
-/// Build a problem from a loaded corpus. The window of `T` records is split
-/// into a calibration half `[0, T/2)` and a validation half `[T/2, T)`, so the
-/// two roles never share records. Within the half for `role`, screening is the
-/// first `screening_records`, held-out is the last `held_out_records`, and
-/// full is the half minus its held-out tail.
+/// Build a problem from a loaded corpus. Within the window of `T` records,
+/// screening is the first `screening_records`, held-out is the last
+/// `held_out_records`, and full is the window minus its held-out tail. Nothing
+/// is calibrated (the router that needed a calibration half was removed), so
+/// every record is untouched by tuning.
 pub fn problem_from_corpus(
     creature: &CreatureExport,
     packed: &[f32],
     spec: &CorpusSpec,
-    role: CorpusRole,
     dimension: usize,
     seed: u64,
 ) -> Result<Problem, BenchError> {
@@ -324,24 +314,18 @@ pub fn problem_from_corpus(
     }
     let width = creature.input + creature.output;
     let total = packed.len() / width;
-    let needed = 2 * (spec.screening_records + spec.held_out_records);
+    let needed = spec.screening_records + spec.held_out_records;
     if spec.screening_records == 0 || spec.held_out_records == 0 || total < needed {
         return Err(BenchError::InvalidConfig(format!(
-            "corpus has {total} records but calibration and validation each need screeningRecords + heldOutRecords ({} + {}), {needed} in all",
+            "corpus has {total} records but needs screeningRecords + heldOutRecords ({} + {}), {needed} in all",
             spec.screening_records, spec.held_out_records
         )));
     }
-    let mid = total / 2;
-    let (start, end) = match role {
-        CorpusRole::Calibration => (0, mid),
-        CorpusRole::Validation => (mid, total),
-    };
-    let half = &packed[start * width..end * width];
-    let half_records = end - start;
-    let held_start = (half_records - spec.held_out_records) * width;
-    let screening = half[..spec.screening_records * width].to_vec();
-    let full = half[..held_start].to_vec();
-    let held_out = half[held_start..].to_vec();
+    let window = &packed[..total * width];
+    let held_start = (total - spec.held_out_records) * width;
+    let screening = window[..spec.screening_records * width].to_vec();
+    let full = window[..held_start].to_vec();
+    let held_out = window[held_start..].to_vec();
     let (synapse_indices, preparation_evaluations) =
         select_influential(creature, &screening, dimension)?;
     Ok(Problem {

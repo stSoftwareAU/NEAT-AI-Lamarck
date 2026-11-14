@@ -1,5 +1,8 @@
-//! The predeclared experiment: calibrate the router on calibration seeds, then
-//! compare the arms on disjoint validation seeds.
+//! The predeclared experiment: compare the arms on paired validation seeds.
+//!
+//! Neither arm has a tuned parameter, so there is no calibration phase. The
+//! router that needed one was removed after an earlier run (crate 0.1.46),
+//! where it never beat CMA-ES alone.
 
 use std::collections::HashSet;
 
@@ -8,13 +11,12 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
+use super::arms::{Arm, run_arm};
 use super::objective::{BenchError, BudgetedObjective, WeightObjective};
-use super::probes::probe_landscape;
-use super::router::{Arm, CalibrationRow, ROUTER_PROBE_AXES, RouterRule, calibrate, run_arm};
 use super::stats::{bootstrap_ci_mean, mean, median};
 use super::suite::{
-    CorpusRole, CorpusSpec, Family, MAX_DIMENSION, MIN_DIMENSION, Problem, ProblemSpec,
-    build_problem, is_extrapolation, load_corpus, problem_from_corpus,
+    CorpusSpec, Family, MAX_DIMENSION, MIN_DIMENSION, Problem, ProblemSpec, build_problem,
+    is_extrapolation, load_corpus, problem_from_corpus,
 };
 
 /// Budget multiples (of the dimension) the experiment may use.
@@ -26,8 +28,12 @@ pub const ALLOWED_BUDGET_MULTIPLES: [usize; 3] = [10, 30, 100];
 pub const CONFIRMATION_EVALUATIONS: usize = 5;
 
 /// What to run. Declared before any result is seen.
+///
+/// Unknown fields are refused, so a stale router-era manifest (with
+/// `calibrationSeeds`) cannot run while silently ignoring part of what it
+/// declared.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
     /// Squash families.
     pub families: Vec<Family>,
@@ -35,9 +41,7 @@ pub struct Manifest {
     pub dimensions: Vec<usize>,
     /// Budgets as multiples of the dimension (10, 30 or 100).
     pub budget_multiples: Vec<usize>,
-    /// Seeds the router is calibrated on.
-    pub calibration_seeds: Vec<u64>,
-    /// Seeds the comparison is judged on; disjoint from calibration.
+    /// Seeds the comparison is judged on; each runs every arm on one problem.
     pub validation_seeds: Vec<u64>,
     /// Bootstrap resamples for the confidence intervals.
     pub bootstrap_resamples: usize,
@@ -62,7 +66,6 @@ impl Manifest {
         unique("families", &self.families)?;
         unique("dimensions", &self.dimensions)?;
         unique("budgetMultiples", &self.budget_multiples)?;
-        unique("calibrationSeeds", &self.calibration_seeds)?;
         unique("validationSeeds", &self.validation_seeds)?;
         match &self.corpus {
             Some(_) if self.families != [Family::Corpus] => {
@@ -91,19 +94,8 @@ impl Manifest {
                 "budget multiple {b} is not one of {ALLOWED_BUDGET_MULTIPLES:?}"
             ));
         }
-        if self.calibration_seeds.is_empty() {
-            return bad("calibrationSeeds must be non-empty".into());
-        }
         if self.validation_seeds.is_empty() {
             return bad("validationSeeds must be non-empty".into());
-        }
-        let calibration: HashSet<u64> = self.calibration_seeds.iter().copied().collect();
-        if let Some(s) = self
-            .validation_seeds
-            .iter()
-            .find(|s| calibration.contains(s))
-        {
-            return bad(format!("seed {s} is in both calibration and validation"));
         }
         if self.bootstrap_resamples == 0 {
             return bad("bootstrapResamples must be positive".into());
@@ -127,7 +119,6 @@ pub fn predeclared_manifest() -> Manifest {
         families: vec![Family::Tanh, Family::Relu, Family::HardTanh],
         dimensions: vec![20, 40, 100],
         budget_multiples: vec![10, 30, 100],
-        calibration_seeds: (1..=8).collect(),
         validation_seeds: (1001..=1012).collect(),
         bootstrap_resamples: 2000,
         bootstrap_seed: 266,
@@ -136,6 +127,10 @@ pub fn predeclared_manifest() -> Manifest {
 }
 
 /// One optimiser run on one problem.
+///
+/// Unknown fields are tolerated: the committed AMM rows
+/// (`docs/evidence/weight-router/amm-runs.jsonl`) were written while the router
+/// existed and still carry `routedTo` and `probeEvaluations`. They are ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRow {
@@ -149,22 +144,18 @@ pub struct RunRow {
     pub budget: usize,
     /// Problem seed.
     pub seed: u64,
-    /// `"calibration"` or `"validation"`.
+    /// Always `"validation"`; archived rows also carry `"calibration"`.
     pub phase: String,
     /// The arm run.
     pub arm: Arm,
-    /// For the router, the arm it chose.
-    pub routed_to: Option<Arm>,
     /// Screening loss at the start.
     pub start_screening_loss: Option<f64>,
     /// Best screening loss found.
     pub final_screening_loss: Option<f64>,
     /// Final / start screening loss.
     pub normalised_screening_loss: Option<f64>,
-    /// Budgeted evaluations used (router: includes the probe).
+    /// Budgeted evaluations used.
     pub evaluations_used: usize,
-    /// Router only: evaluations the landscape probe spent.
-    pub probe_evaluations: usize,
     /// Evaluations spent choosing the free weights. This is the cost of
     /// building the row's problem, so it is repeated on every row of that
     /// problem; totals count it once per problem built.
@@ -252,8 +243,7 @@ pub struct CellSummary {
     /// Whether the dimension is beyond the calibrated range.
     pub extrapolation: bool,
     /// One paired comparison per arm pair requested of the summary, in the
-    /// order requested (the main experiment: router vs refine, router vs
-    /// CMA-ES, CMA-ES vs refine).
+    /// order requested (the main experiment: CMA-ES vs refine).
     pub comparisons: Vec<Comparison>,
 }
 
@@ -265,13 +255,8 @@ pub struct ExperimentResults {
     pub format_version: u32,
     /// The manifest that was run.
     pub manifest: Manifest,
-    /// The rule chosen on calibration seeds.
-    pub calibrated_rule: RouterRule,
-    /// Evaluations spent by the probe-only calibration passes.
-    pub calibration_probe_evaluations: usize,
-    /// Budgeted + confirmation evaluations of every row, plus the
-    /// calibration-probe evaluations, plus preparation counted once per
-    /// problem built (not once per row).
+    /// Budgeted + confirmation evaluations of every row, plus preparation
+    /// counted once per problem built (not once per row).
     pub total_evaluations: usize,
     /// Planned versus completed runs.
     pub coverage: Coverage,
@@ -291,12 +276,10 @@ fn blank_row(problem: &Problem, multiple: usize, phase: &str, arm: Arm) -> RunRo
         seed: problem.spec.seed,
         phase: phase.to_string(),
         arm,
-        routed_to: None,
         start_screening_loss: None,
         final_screening_loss: None,
         normalised_screening_loss: None,
         evaluations_used: 0,
-        probe_evaluations: 0,
         preparation_evaluations: problem.preparation_evaluations,
         full_loss_start: None,
         full_loss_final: None,
@@ -321,37 +304,28 @@ fn run_row(
     multiple: usize,
     phase: &str,
     arm: Arm,
-    rule: &RouterRule,
 ) -> RunRow {
-    finish_row(
-        problem,
-        objective,
-        multiple,
-        phase,
-        arm,
-        rule.probe_axes,
-        |budgeted| run_arm(budgeted, arm, rule, problem.spec.seed),
-    )
+    finish_row(problem, objective, multiple, phase, arm, |budgeted| {
+        run_arm(budgeted, arm, problem.spec.seed)
+    })
 }
 
 /// Run `optimise` on a fresh budget, then do the confirmation passes and build
-/// the row. A failure is recorded on the row, never propagated. `probe_axes`
-/// only matters for [`Arm::Router`], whose probe cost is reported.
+/// the row. A failure is recorded on the row, never propagated.
 pub(super) fn finish_row(
     problem: &Problem,
     objective: &WeightObjective,
     multiple: usize,
     phase: &str,
     arm: Arm,
-    probe_axes: usize,
-    optimise: impl FnOnce(&mut BudgetedObjective<'_>) -> Result<Arm, BenchError>,
+    optimise: impl FnOnce(&mut BudgetedObjective<'_>) -> Result<(), BenchError>,
 ) -> RunRow {
     let mut row = blank_row(problem, multiple, phase, arm);
     let mut budgeted = BudgetedObjective::new(objective, row.budget);
     let confirmations = std::cell::Cell::new(0usize);
     let outcome = optimise(&mut budgeted);
     row.evaluations_used = budgeted.used();
-    let result = outcome.and_then(|routed| {
+    let result = outcome.and_then(|()| {
         let (best_loss, best_x) = budgeted
             .best()
             .ok_or_else(|| BenchError::Evaluation("no evaluation completed".into()))?;
@@ -371,16 +345,10 @@ pub(super) fn finish_row(
             confirm(&start, &problem.held_out)?,
             confirm(best_x, &problem.held_out)?,
         );
-        Ok((
-            routed, start_loss, best_loss, full_s, full_f, held_s, held_f,
-        ))
+        Ok((start_loss, best_loss, full_s, full_f, held_s, held_f))
     });
     match result {
-        Ok((routed, start, best, full_s, full_f, held_s, held_f)) => {
-            if arm == Arm::Router {
-                row.routed_to = Some(routed);
-                row.probe_evaluations = 2 * problem.spec.dimension.min(probe_axes) + 1;
-            }
+        Ok((start, best, full_s, full_f, held_s, held_f)) => {
             row.start_screening_loss = Some(start);
             row.final_screening_loss = Some(best);
             row.normalised_screening_loss = Some(ratio(best, start));
@@ -412,13 +380,12 @@ pub(super) fn load_manifest_corpus(m: &Manifest) -> Result<LoadedCorpus<'_>, Ben
 pub(super) fn build_one(
     corpus: &LoadedCorpus<'_>,
     family: Family,
-    role: CorpusRole,
     dimension: usize,
     seed: u64,
 ) -> Result<(Problem, WeightObjective), BenchError> {
     let problem = match corpus {
         Some((spec, (creature, packed))) => {
-            problem_from_corpus(creature, packed, spec, role, dimension, seed)?
+            problem_from_corpus(creature, packed, spec, dimension, seed)?
         }
         None => build_problem(&ProblemSpec {
             family,
@@ -434,118 +401,25 @@ pub(super) fn build_one(
     Ok((problem, objective))
 }
 
-/// Visit every (family, dimension, seed) problem once, in manifest order.
-fn problems(
-    m: &Manifest,
-    seeds: &[u64],
-    role: CorpusRole,
-    mut visit: impl FnMut(&Problem, &WeightObjective) -> Result<(), BenchError>,
-) -> Result<(), BenchError> {
+/// Every arm on every validation problem and budget, in manifest order.
+/// Returns the rows and the preparation evaluations, counted once per problem.
+fn validation_phase(m: &Manifest) -> Result<(Vec<RunRow>, usize), BenchError> {
     let corpus = load_manifest_corpus(m)?;
+    let mut rows = Vec::new();
+    let mut preparation = 0;
     for &family in &m.families {
         for &dimension in &m.dimensions {
-            for &seed in seeds {
-                let (problem, objective) = build_one(&corpus, family, role, dimension, seed)?;
-                visit(&problem, &objective)?;
+            for &seed in &m.validation_seeds {
+                let (problem, objective) = build_one(&corpus, family, dimension, seed)?;
+                preparation += problem.preparation_evaluations;
+                for &multiple in &m.budget_multiples {
+                    for arm in [Arm::LamarckRefine, Arm::CmaEs] {
+                        rows.push(run_row(&problem, &objective, multiple, "validation", arm));
+                    }
+                }
             }
         }
     }
-    Ok(())
-}
-
-struct Calibration {
-    rows: Vec<RunRow>,
-    table: Vec<CalibrationRow>,
-    probe_evaluations: usize,
-    preparation_evaluations: usize,
-}
-
-/// Phase 1: both fixed arms plus a probe-only pass on the calibration seeds.
-fn calibration_phase(m: &Manifest) -> Result<Calibration, BenchError> {
-    let default_rule = RouterRule {
-        min_budget_multiple: None,
-        max_non_smooth_share: 0.0,
-        probe_axes: ROUTER_PROBE_AXES,
-    };
-    let mut out = Calibration {
-        rows: Vec::new(),
-        table: Vec::new(),
-        probe_evaluations: 0,
-        preparation_evaluations: 0,
-    };
-    problems(
-        m,
-        &m.calibration_seeds,
-        CorpusRole::Calibration,
-        |problem, objective| {
-            let dimension = problem.spec.dimension;
-            out.preparation_evaluations += problem.preparation_evaluations;
-            let mut probe_obj =
-                BudgetedObjective::new(objective, 2 * ROUTER_PROBE_AXES.min(dimension) + 1);
-            let probe = probe_landscape(&mut probe_obj, ROUTER_PROBE_AXES);
-            out.probe_evaluations += probe_obj.used();
-            for &multiple in &m.budget_multiples {
-                let refine = run_row(
-                    problem,
-                    objective,
-                    multiple,
-                    "calibration",
-                    Arm::LamarckRefine,
-                    &default_rule,
-                );
-                let cma = run_row(
-                    problem,
-                    objective,
-                    multiple,
-                    "calibration",
-                    Arm::CmaEs,
-                    &default_rule,
-                );
-                // A failed arm, or a failed probe, cannot be scored: count a failed
-                // arm as "no improvement" (1.0) and skip a row whose probe failed.
-                if let Ok(probe) = &probe {
-                    out.table.push(CalibrationRow {
-                        dimension,
-                        budget: multiple * dimension,
-                        probe: probe.clone(),
-                        refine_normalised: refine.normalised_screening_loss.unwrap_or(1.0),
-                        cmaes_normalised: cma.normalised_screening_loss.unwrap_or(1.0),
-                    });
-                }
-                out.rows.push(refine);
-                out.rows.push(cma);
-            }
-            Ok(())
-        },
-    )?;
-    Ok(out)
-}
-
-/// Phase 2: all three arms on the validation seeds.
-fn validation_phase(m: &Manifest, rule: &RouterRule) -> Result<(Vec<RunRow>, usize), BenchError> {
-    let mut rows = Vec::new();
-    let mut preparation = 0;
-    problems(
-        m,
-        &m.validation_seeds,
-        CorpusRole::Validation,
-        |problem, objective| {
-            preparation += problem.preparation_evaluations;
-            for &multiple in &m.budget_multiples {
-                for arm in [Arm::LamarckRefine, Arm::CmaEs, Arm::Router] {
-                    rows.push(run_row(
-                        problem,
-                        objective,
-                        multiple,
-                        "validation",
-                        arm,
-                        rule,
-                    ));
-                }
-            }
-            Ok(())
-        },
-    )?;
     Ok((rows, preparation))
 }
 
@@ -581,7 +455,6 @@ fn arm_name(arm: Arm) -> &'static str {
     match arm {
         Arm::LamarckRefine => "lamarck-refine",
         Arm::CmaEs => "cma-es",
-        Arm::Router => "router",
         Arm::AmmReference => "amm-reference",
     }
 }
@@ -671,44 +544,31 @@ pub(super) fn summarise_cells(
     cells
 }
 
-/// Run the whole manifest: calibrate, validate, summarise.
+/// Run the whole manifest: validate, then summarise the paired comparisons.
 ///
 /// A failed run is recorded as a row with `error` set and counted in the
 /// coverage; only a configuration or problem-construction error aborts.
 pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
     m.validate()?;
-    let calibration = calibration_phase(m)?;
-    let calibrated_rule = calibrate(&calibration.table);
-    let (validation, validation_preparation) = validation_phase(m, &calibrated_rule)?;
-
-    let mut runs = calibration.rows;
-    runs.extend(validation);
+    let (runs, preparation) = validation_phase(m)?;
     let planned = m.families.len()
         * m.dimensions.len()
         * m.budget_multiples.len()
-        * (m.calibration_seeds.len() * 2 + m.validation_seeds.len() * 3);
+        * m.validation_seeds.len()
+        * 2;
     let failed = runs.iter().filter(|r| r.error.is_some()).count();
     // Preparation is a per-problem cost repeated on each of the problem's
     // rows, so it is counted once per problem built, not summed over rows.
-    let total_evaluations = calibration.probe_evaluations
-        + calibration.preparation_evaluations
-        + validation_preparation
+    let total_evaluations = preparation
         + runs
             .iter()
             .map(|r| r.evaluations_used + r.confirmation_evaluations)
             .sum::<usize>();
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
-    let pairs = [
-        (Arm::Router, Arm::LamarckRefine),
-        (Arm::Router, Arm::CmaEs),
-        (Arm::CmaEs, Arm::LamarckRefine),
-    ];
-    let cells = summarise_cells(m, &runs, &pairs, &mut rng);
+    let cells = summarise_cells(m, &runs, &[(Arm::CmaEs, Arm::LamarckRefine)], &mut rng);
     Ok(ExperimentResults {
-        format_version: 1,
+        format_version: 2,
         manifest: m.clone(),
-        calibrated_rule,
-        calibration_probe_evaluations: calibration.probe_evaluations,
         total_evaluations,
         coverage: Coverage {
             planned_runs: planned,
@@ -726,8 +586,7 @@ mod tests {
 
     #[test]
     fn failed_confirmations_keep_the_calls_already_spent() {
-        let (problem, objective) =
-            build_one(&None, Family::Tanh, CorpusRole::Validation, 20, 1001).unwrap();
+        let (problem, objective) = build_one(&None, Family::Tanh, 20, 1001).unwrap();
         for (invalid_full, expected_calls) in [(true, 2), (false, 4)] {
             let mut failed = problem.clone();
             if invalid_full {
@@ -741,10 +600,9 @@ mod tests {
                 10,
                 "validation",
                 Arm::AmmReference,
-                0,
                 |obj| {
                     obj.eval(&obj.start())?;
-                    Ok(Arm::AmmReference)
+                    Ok(())
                 },
             );
             assert_eq!(row.evaluations_used, 1);
@@ -760,10 +618,9 @@ mod tests {
             10,
             "validation",
             Arm::AmmReference,
-            0,
             |obj| {
                 obj.eval(&obj.start())?;
-                Ok(Arm::AmmReference)
+                Ok(())
             },
         );
         assert_eq!(control.error, None);

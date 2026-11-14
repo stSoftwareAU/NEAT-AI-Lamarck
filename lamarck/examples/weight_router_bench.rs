@@ -1,5 +1,7 @@
-//! Offline benchmark of local weight optimisers and a budget-aware router
-//! (issue #266). Opt-in experiment; nothing in the optimisation loop uses it.
+//! Offline benchmark of local weight optimisers (issue #266). Opt-in
+//! experiment; nothing in the optimisation loop uses it. The binary keeps its
+//! historical name; the budget-aware router it once measured was removed after
+//! an earlier run (crate 0.1.46) found no advantage over CMA-ES alone.
 //!
 //! Usage:
 //!
@@ -16,11 +18,10 @@
 //!
 //! Corpus mode: `--creature` and `--training-data` (both required together)
 //! run the same protocol on a real creature and its records instead of the
-//! synthetic suite. The first `--max-records` (default 4096) records are split
-//! into a calibration half and a validation half. Within each half the first
-//! `--screening-records` (default 256) screen, the last `--held-out-records`
-//! (default 512) are held out, and the rest of the half is the full set. The
-//! window needs 2 x (screening + held-out) records.
+//! synthetic suite. Of the first `--max-records` (default 4096) records, the
+//! first `--screening-records` (default 256) screen, the last
+//! `--held-out-records` (default 512) are held out, and the rest of the window
+//! is the full set. The window needs screening + held-out records.
 //!
 //! AMM reference arm (offline; the optimiser itself is `scripts/amm-reference.py`):
 //!
@@ -55,7 +56,6 @@ fn smoke_manifest() -> Manifest {
         families: vec![Family::Tanh],
         dimensions: vec![20],
         budget_multiples: vec![10],
-        calibration_seeds: vec![1],
         validation_seeds: vec![1001],
         bootstrap_resamples: 200,
         bootstrap_seed: 266,
@@ -256,7 +256,6 @@ fn run() -> Result<(), String> {
         "formatVersion": results.format_version,
         "crateVersion": env!("CARGO_PKG_VERSION"),
         "manifest": results.manifest,
-        "calibratedRule": results.calibrated_rule,
         "totalEvaluations": results.total_evaluations,
         "coverage": results.coverage,
         "cells": results.cells,
@@ -265,8 +264,7 @@ fn run() -> Result<(), String> {
 
     print_cells(&results.cells);
     println!(
-        "rule {:?}; runs {}/{} completed ({} failed); {} evaluations; wrote {}",
-        results.calibrated_rule,
+        "runs {}/{} completed ({} failed); {} evaluations; wrote {}",
         results.coverage.completed_runs,
         results.coverage.planned_runs,
         results.coverage.failed_runs,
