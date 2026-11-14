@@ -127,6 +127,7 @@ flowchart LR
 - **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private — evidence: `lamarck/tests/local_rules.rs::out_dir_defaults_for_synthetic_mode_only`, `lamarck/tests/local_rules.rs::files_run_completes_and_names_its_source` — reviewer: met
 - **unrequested** — Local `.github/actions/rust-toolchain` action used by `ci.yml` and `cargo-quality.yml`, a plain `rustup` toolchain step in `family-sync.yml`, a `CANONICAL_PATHS` fallback checked by rule 17 in `scripts/check-family-sync-workflow.sh` (two cases in `scripts/test-check-family-sync-workflow.sh`), and the CHANGELOG Fixed entry for them — reviewer: unrequested — reason: the worker's pre-push gate refuses every Rust push on these workflows (Undiscoverable Facts). CI still compiles with the `rust-toolchain.toml` pin.
 - **unrequested** — Crate version 0.1.46 → 0.1.47 in `lamarck/Cargo.toml` and `Cargo.lock` — reviewer: unrequested — reason: the repository bumps on any `lamarck/src` change, and the committed evidence is stamped with 0.1.47.
+- **unrequested** — `.gitleaks.toml`: the empty `[allowlist] commits = []` is replaced by `[extend] useDefault = true` (commit `fdd6170`, made by the worker) — reviewer: unrequested — reason: gitleaks 8.30.1 on the worker host refuses to load the old config (`[[allowlists]] must contain at least one check for: commits, paths, regexes, or stopwords`). The new config loads, keeps the default rule set and scans clean. CI's gitleaks workflow loads the file without `-c`.
 - **unrequested** — The `-app-only` diagnostic arms and files mode — reviewer: unrequested — reason: the app-only arms show what the meta-search cost does to the verdict, and files mode is the private representative run the issue asks for. Neither decides the synthetic verdict.
 
 ## Standards Review
@@ -134,6 +135,7 @@ flowchart LR
 <!-- vibe-standards-review inputs="diff+CODING-STANDARDS.md" -->
 
 - **clean** — No `CODING-STANDARDS.md` in this repository, so the reviewer used `CONTRIBUTING.md` and the README's development rules and safety invariants. It reported no violations. It checked the version bump (ahead of base), CHANGELOG under `[Unreleased]` matching `summary.json`, and the review-checked rules: SHA-pinned `uses:` (kept inside the local action), canonical `runlib.sh` and `family-pins.sh` untouched, TDD, no new dependency, streaming training-data reads, no duplication of core (backprop reuse), and parents never mutated. Optional notes: one over-long CHANGELOG line, and inconsistent blank-line spacing between the CHANGELOG entries.
+- **clean** — `.gitleaks.toml` (commit `fdd6170`), reviewed on its own after the main review: no contradiction with `CONTRIBUTING.md` or `README.md`. `[extend] useDefault = true` keeps the default rules: a planted fake secret was flagged with gitleaks 8.30.1. CI's `gitleaks detect` loads the file automatically and found no leaks. Not confirmed by a run: support in CI's pinned gitleaks 8.24.2, because the binary download returned HTTP 403 here.
 
 ## Test Plan
 
