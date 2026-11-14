@@ -1,0 +1,24 @@
+# Install the Rust toolchain for the jobs that run `cargo clippy` or `cargo test`:
+# the `quality` job in `ci.yml`, `cargo-quality.yml`, and the `family-sync` job
+# in `family-sync.yml` (Issue #268).
+#
+# CI compiles with the toolchain `rust-toolchain.toml` pins (it also lists
+# rustfmt and clippy), because rustup honours that file over this action's
+# `stable` default.
+#
+# It is a local action because the Vibe Coder pre-push gate reads a
+# `dtolnay/rust-toolchain@<ref>` step's ref as the `cargo +<ref>` toolchain of
+# that job's cargo checks, and a commit SHA is no toolchain name. Behind a local
+# action the gate runs plain `cargo`: under rustup that resolves
+# `rust-toolchain.toml` as CI does, and on a host without rustup it is the
+# host's own `cargo`.
+name: Install Rust toolchain
+description: Install the Rust toolchain with rustfmt and clippy, using the pinned dtolnay/rust-toolchain action.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, frozen 2026-05-18
+      with:
+        components: rustfmt, clippy

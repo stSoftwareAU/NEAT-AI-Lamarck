@@ -84,7 +84,7 @@ jobs:
       # pin, and a moved pin is tested here, so this job needs the toolchain
       # the Cargo jobs already install.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, frozen 2026-05-18
+        uses: ./.github/actions/rust-toolchain
 
       # Fail loud on a fetch error: a stale copy that silently passed as "in
       # sync" is worse than a red job, because every sibling then drifts.
