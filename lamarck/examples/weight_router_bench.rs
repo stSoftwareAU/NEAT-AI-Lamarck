@@ -16,9 +16,11 @@
 //!
 //! Corpus mode: `--creature` and `--training-data` (both required together)
 //! run the same protocol on a real creature and its records instead of the
-//! synthetic suite. The first `--screening-records` (default 256) records
-//! screen, the last `--held-out-records` (default 512) of the first
-//! `--max-records` (default 4096) are held out, and the rest are the full set.
+//! synthetic suite. The first `--max-records` (default 4096) records are split
+//! into a calibration half and a validation half. Within each half the first
+//! `--screening-records` (default 256) screen, the last `--held-out-records`
+//! (default 512) are held out, and the rest of the half is the full set. The
+//! window needs 2 x (screening + held-out) records.
 //!
 //! AMM reference arm (offline; the optimiser itself is `scripts/amm-reference.py`):
 //!

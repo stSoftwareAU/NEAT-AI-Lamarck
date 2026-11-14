@@ -13,8 +13,8 @@ use super::probes::probe_landscape;
 use super::router::{Arm, CalibrationRow, ROUTER_PROBE_AXES, RouterRule, calibrate, run_arm};
 use super::stats::{bootstrap_ci_mean, mean, median};
 use super::suite::{
-    CorpusSpec, Family, MAX_DIMENSION, MIN_DIMENSION, Problem, ProblemSpec, build_problem,
-    is_extrapolation, load_corpus, problem_from_corpus,
+    CorpusRole, CorpusSpec, Family, MAX_DIMENSION, MIN_DIMENSION, Problem, ProblemSpec,
+    build_problem, is_extrapolation, load_corpus, problem_from_corpus,
 };
 
 /// Budget multiples (of the dimension) the experiment may use.
@@ -397,12 +397,13 @@ pub(super) fn load_manifest_corpus(m: &Manifest) -> Result<LoadedCorpus<'_>, Ben
 pub(super) fn build_one(
     corpus: &LoadedCorpus<'_>,
     family: Family,
+    role: CorpusRole,
     dimension: usize,
     seed: u64,
 ) -> Result<(Problem, WeightObjective), BenchError> {
     let problem = match corpus {
         Some((spec, (creature, packed))) => {
-            problem_from_corpus(creature, packed, spec, dimension, seed)?
+            problem_from_corpus(creature, packed, spec, role, dimension, seed)?
         }
         None => build_problem(&ProblemSpec {
             family,
@@ -422,13 +423,14 @@ pub(super) fn build_one(
 fn problems(
     m: &Manifest,
     seeds: &[u64],
+    role: CorpusRole,
     mut visit: impl FnMut(&Problem, &WeightObjective) -> Result<(), BenchError>,
 ) -> Result<(), BenchError> {
     let corpus = load_manifest_corpus(m)?;
     for &family in &m.families {
         for &dimension in &m.dimensions {
             for &seed in seeds {
-                let (problem, objective) = build_one(&corpus, family, dimension, seed)?;
+                let (problem, objective) = build_one(&corpus, family, role, dimension, seed)?;
                 visit(&problem, &objective)?;
             }
         }
@@ -456,46 +458,51 @@ fn calibration_phase(m: &Manifest) -> Result<Calibration, BenchError> {
         probe_evaluations: 0,
         preparation_evaluations: 0,
     };
-    problems(m, &m.calibration_seeds, |problem, objective| {
-        let dimension = problem.spec.dimension;
-        out.preparation_evaluations += problem.preparation_evaluations;
-        let mut probe_obj =
-            BudgetedObjective::new(objective, 2 * ROUTER_PROBE_AXES.min(dimension) + 1);
-        let probe = probe_landscape(&mut probe_obj, ROUTER_PROBE_AXES);
-        out.probe_evaluations += probe_obj.used();
-        for &multiple in &m.budget_multiples {
-            let refine = run_row(
-                problem,
-                objective,
-                multiple,
-                "calibration",
-                Arm::LamarckRefine,
-                &default_rule,
-            );
-            let cma = run_row(
-                problem,
-                objective,
-                multiple,
-                "calibration",
-                Arm::CmaEs,
-                &default_rule,
-            );
-            // A failed arm, or a failed probe, cannot be scored: count a failed
-            // arm as "no improvement" (1.0) and skip a row whose probe failed.
-            if let Ok(probe) = &probe {
-                out.table.push(CalibrationRow {
-                    dimension,
-                    budget: multiple * dimension,
-                    probe: probe.clone(),
-                    refine_normalised: refine.normalised_screening_loss.unwrap_or(1.0),
-                    cmaes_normalised: cma.normalised_screening_loss.unwrap_or(1.0),
-                });
+    problems(
+        m,
+        &m.calibration_seeds,
+        CorpusRole::Calibration,
+        |problem, objective| {
+            let dimension = problem.spec.dimension;
+            out.preparation_evaluations += problem.preparation_evaluations;
+            let mut probe_obj =
+                BudgetedObjective::new(objective, 2 * ROUTER_PROBE_AXES.min(dimension) + 1);
+            let probe = probe_landscape(&mut probe_obj, ROUTER_PROBE_AXES);
+            out.probe_evaluations += probe_obj.used();
+            for &multiple in &m.budget_multiples {
+                let refine = run_row(
+                    problem,
+                    objective,
+                    multiple,
+                    "calibration",
+                    Arm::LamarckRefine,
+                    &default_rule,
+                );
+                let cma = run_row(
+                    problem,
+                    objective,
+                    multiple,
+                    "calibration",
+                    Arm::CmaEs,
+                    &default_rule,
+                );
+                // A failed arm, or a failed probe, cannot be scored: count a failed
+                // arm as "no improvement" (1.0) and skip a row whose probe failed.
+                if let Ok(probe) = &probe {
+                    out.table.push(CalibrationRow {
+                        dimension,
+                        budget: multiple * dimension,
+                        probe: probe.clone(),
+                        refine_normalised: refine.normalised_screening_loss.unwrap_or(1.0),
+                        cmaes_normalised: cma.normalised_screening_loss.unwrap_or(1.0),
+                    });
+                }
+                out.rows.push(refine);
+                out.rows.push(cma);
             }
-            out.rows.push(refine);
-            out.rows.push(cma);
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
     Ok(out)
 }
 
@@ -503,22 +510,27 @@ fn calibration_phase(m: &Manifest) -> Result<Calibration, BenchError> {
 fn validation_phase(m: &Manifest, rule: &RouterRule) -> Result<(Vec<RunRow>, usize), BenchError> {
     let mut rows = Vec::new();
     let mut preparation = 0;
-    problems(m, &m.validation_seeds, |problem, objective| {
-        preparation += problem.preparation_evaluations;
-        for &multiple in &m.budget_multiples {
-            for arm in [Arm::LamarckRefine, Arm::CmaEs, Arm::Router] {
-                rows.push(run_row(
-                    problem,
-                    objective,
-                    multiple,
-                    "validation",
-                    arm,
-                    rule,
-                ));
+    problems(
+        m,
+        &m.validation_seeds,
+        CorpusRole::Validation,
+        |problem, objective| {
+            preparation += problem.preparation_evaluations;
+            for &multiple in &m.budget_multiples {
+                for arm in [Arm::LamarckRefine, Arm::CmaEs, Arm::Router] {
+                    rows.push(run_row(
+                        problem,
+                        objective,
+                        multiple,
+                        "validation",
+                        arm,
+                        rule,
+                    ));
+                }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
     Ok((rows, preparation))
 }
 

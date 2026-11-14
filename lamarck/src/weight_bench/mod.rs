@@ -50,4 +50,4 @@ pub use router::{
     Arm, CALIBRATION_GRID_MULTIPLES, CALIBRATION_GRID_NON_SMOOTH, CalibrationRow,
     ROUTER_PROBE_AXES, RouterRule, arm_seed, calibrate, route, run_arm, run_router,
 };
-pub use suite::{Family, Problem, ProblemSpec, build_problem, is_extrapolation};
+pub use suite::{CorpusRole, Family, Problem, ProblemSpec, build_problem, is_extrapolation};

@@ -20,7 +20,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   through its authors' pinned implementation (scratch Python environment, no new
   dependency, never in CI) and lost in all 27 cells against refine, CMA-ES and
   the router; nothing is ported. The representative run on the production corpus
-  has not been made. Write-up and committed evidence:
+  has not been made. Corpus mode splits the loaded window into a calibration
+  half and a validation half, so calibration never touches validation records.
+  Write-up and committed evidence:
   `docs/weight-optimiser-routing.md`, `docs/evidence/weight-router/`.
 
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on

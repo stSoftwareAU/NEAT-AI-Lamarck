@@ -164,10 +164,13 @@ cargo run --release --example weight_router_bench -- OUT_DIR \
   [--screening-records 256] [--held-out-records 512] [--max-records 4096]
 ```
 
-In corpus mode the screening records are the first N in file order, the held-out
-records are the last M of the loaded window, and the full set is the loaded
-window minus the held-out records. Seeds then vary only the arms' random
-streams.
+In corpus mode the loaded window of T records is split into two halves so
+that validation records are untouched by calibration. Calibration seeds use the
+first half, records `[0, T/2)`; validation seeds and the AMM reference use the
+second half, `[T/2, T)`. Within each half the screening records are the first N,
+the held-out records are the last M, and the full set is the half minus its
+held-out records. The window therefore needs at least 2 x (N + M) records. Seeds
+then vary only the arms' random streams.
 
 AMM reference (offline, opt-in; needs network once to fetch the pinned
 artefacts). Run the base bench first, then:

@@ -28,7 +28,7 @@ use super::experiment::{
 };
 use super::objective::BenchError;
 use super::router::{Arm, arm_seed};
-use super::suite::Family;
+use super::suite::{CorpusRole, Family};
 
 /// Half-width of the box handed to AMM, which needs a finite search region:
 /// the start weight plus or minus this, per weight. Predeclared, not tuned.
@@ -94,7 +94,13 @@ pub fn serve_reference(
         ));
     }
     let corpus = load_manifest_corpus(m)?;
-    let (problem, objective) = build_one(&corpus, req.family, req.dimension, req.seed)?;
+    let (problem, objective) = build_one(
+        &corpus,
+        req.family,
+        CorpusRole::Validation,
+        req.dimension,
+        req.seed,
+    )?;
     let budget = req.budget_multiple * req.dimension;
     send(
         &mut output,

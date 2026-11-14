@@ -3,7 +3,7 @@
 use neat_ai_lamarck::weight_bench::experiment::ALLOWED_BUDGET_MULTIPLES;
 use neat_ai_lamarck::weight_bench::probes::LandscapeProbe;
 use neat_ai_lamarck::weight_bench::suite::{
-    CorpusSpec, Family, Problem, ProblemSpec, load_corpus, problem_from_corpus,
+    CorpusRole, CorpusSpec, Family, Problem, ProblemSpec, load_corpus, problem_from_corpus,
 };
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, CMA_SIGMA0, CalibrationRow, Manifest, ROUTER_PROBE_AXES,
@@ -345,6 +345,22 @@ fn corpus_manifest_runs_within_budget() {
         .collect();
     assert_eq!(routers.len(), 1);
     assert_eq!(routers[0].probe_evaluations, 17);
+    // Wiring check: both phases start from the creature's own weights, so the
+    // starting losses differ only if the phases read different records.
+    let multiple = results.runs[0].budget_multiple;
+    let pick = |phase: &str| {
+        results
+            .runs
+            .iter()
+            .find(|r| {
+                r.phase == phase && r.arm == Arm::LamarckRefine && r.budget_multiple == multiple
+            })
+            .unwrap()
+    };
+    let (cal, val) = (pick("calibration"), pick("validation"));
+    assert!(cal.held_out_loss_start.is_some() && val.held_out_loss_start.is_some());
+    assert_ne!(cal.held_out_loss_start, val.held_out_loss_start);
+    assert_ne!(cal.start_screening_loss, val.start_screening_loss);
 }
 
 #[test]
@@ -354,7 +370,18 @@ fn corpus_with_too_few_records_is_rejected() {
     assert!(run_manifest(&corpus_manifest(corpus_spec(dir.path(), 128, 128))).is_ok());
     let err = run_manifest(&corpus_manifest(corpus_spec(dir.path(), 400, 400))).unwrap_err();
     match err {
-        BenchError::InvalidConfig(m) => assert!(m.contains("800"), "{m}"),
+        BenchError::InvalidConfig(m) => assert!(m.contains("1600"), "{m}"),
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+    // Boundary: 150 + 150 needs exactly the 600 records on offer.
+    let (creature, packed) = load_corpus(&corpus_spec(dir.path(), 150, 150)).unwrap();
+    assert_eq!(packed.len(), 600 * 9);
+    for role in [CorpusRole::Calibration, CorpusRole::Validation] {
+        let spec = corpus_spec(dir.path(), 150, 150);
+        assert!(problem_from_corpus(&creature, &packed, &spec, role, 20, 7).is_ok());
+    }
+    match load_corpus(&corpus_spec(dir.path(), 151, 150)).unwrap_err() {
+        BenchError::InvalidConfig(m) => assert!(m.contains("602"), "{m}"),
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
 }
@@ -385,12 +412,21 @@ fn corpus_problem_splits_records() {
     let spec = corpus_spec(dir.path(), 128, 128);
     let (creature, packed) = load_corpus(&spec).unwrap();
     assert_eq!(packed.len(), 600 * 9);
-    let p = problem_from_corpus(&creature, &packed, &spec, 20, 7).unwrap();
-    assert_eq!(p.screening.len(), 128 * 9);
-    assert_eq!(p.held_out.len(), 128 * 9);
-    assert_eq!(p.full.len(), (600 - 128) * 9);
-    assert_eq!(p.held_out[..], packed[(600 - 128) * 9..]);
-    assert_eq!(p.full[..128 * 9], p.screening[..]);
+    let cal =
+        problem_from_corpus(&creature, &packed, &spec, CorpusRole::Calibration, 20, 7).unwrap();
+    let val =
+        problem_from_corpus(&creature, &packed, &spec, CorpusRole::Validation, 20, 7).unwrap();
+    assert_eq!(cal.screening[..], packed[..128 * 9]);
+    assert_eq!(cal.held_out[..], packed[(300 - 128) * 9..300 * 9]);
+    assert_eq!(cal.full.len(), (300 - 128) * 9);
+    assert_eq!(val.screening[..], packed[300 * 9..(300 + 128) * 9]);
+    assert_eq!(val.held_out[..], packed[(600 - 128) * 9..]);
+    assert_eq!(val.full.len(), (300 - 128) * 9);
+    // The halves are disjoint and together cover each role's own records only.
+    let cal_all = [&cal.full[..], &cal.held_out[..]].concat();
+    let val_all = [&val.full[..], &val.held_out[..]].concat();
+    assert_eq!(cal_all[..], packed[..300 * 9]);
+    assert_eq!(val_all[..], packed[300 * 9..]);
     assert!(
         build_problem(&ProblemSpec {
             family: Family::Corpus,
