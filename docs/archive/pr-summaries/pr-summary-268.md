@@ -16,7 +16,13 @@ One change is outside the experiment itself. The Rust jobs in `ci.yml`
 toolchain through a new local action, `.github/actions/rust-toolchain`. It wraps
 the same pinned `dtolnay/rust-toolchain` step with the same components, so CI
 behaviour is unchanged. Without it, the worker's pre-push gate refused every
-push of this branch (see Undiscoverable Facts).
+push of this branch (see Undiscoverable Facts). Because this branch now edits
+`family-sync.yml`, the gate also replays that workflow's ShellCheck step without
+the job's `env:`, and `set -u` stopped it on `CANONICAL_PATHS`. The step now
+falls back to the job's own list, and validator rule 17 in
+`scripts/check-family-sync-workflow.sh` fails if the fallback is missing or
+differs. That is the same change as issue #266's commit `0832c75`, so whichever
+branch lands second merges it without a conflict.
 
 ## Spec
 
@@ -105,9 +111,10 @@ or harm on real creatures. The method write-up is `docs/local-rules.md`. The
     - `files_run_refuses_no_validation_creatures_and_mismatched_widths`.
   - Report contents: `synthetic_summary_carries_the_search_trace_and_source`.
 - `cargo test --test local_rules`: 16 passed.
-- `./quality.sh < /dev/null` on the head: exit 0, "All quality checks passed!". The first run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree. The line was added and the gate re-run.
+- `./quality.sh < /dev/null` at `5aa69ba`, which includes the toolchain action: exit 0, "All quality checks passed!". An earlier run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree, so the line was added. The later `CANONICAL_PATHS` commit changes only `family-sync.yml` and the two family-sync scripts. The checks that cover them, listed above, were run on it individually rather than through the full gate again.
 - I ran the three CI cargo checks the worker's scanner now plans, with their workflow env (`CARGO_BUILD_JOBS=2 RUSTFLAGS="-D warnings"` for clippy), on the installed cargo 1.99.1. `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::filter_next -D clippy::collapsible_if` and the same without `--workspace` found no issues, and `cargo test --no-run --workspace --all-features` exited 0.
-- Toolchain action: `actionlint` on `ci.yml`, `cargo-quality.yml` and `family-sync.yml` reported nothing. `scripts/check-family-sync-workflow.sh`, `scripts/test-check-family-sync-workflow.sh`, `scripts/check-bot-push-action.sh`, `scripts/check-cargo-quality-overlap.sh` and `scripts/test-check-cargo-quality-overlap.sh` passed. No validator rule was added, because the change does not alter what CI runs.
+- Toolchain action: `actionlint` on `ci.yml`, `cargo-quality.yml` and `family-sync.yml` reported nothing. `scripts/check-family-sync-workflow.sh`, `scripts/test-check-family-sync-workflow.sh`, `scripts/check-bot-push-action.sh`, `scripts/check-cargo-quality-overlap.sh` and `scripts/test-check-cargo-quality-overlap.sh` passed. No validator rule was added for the toolchain action, because it does not alter what CI runs.
+- `CANONICAL_PATHS` fallback: `scripts/test-check-family-sync-workflow.sh` gains two rule-17 cases, "gate step without a CANONICAL_PATHS fallback → fail" and "gate step fallback differs from CANONICAL_PATHS → fail", both exit 1, and the script passes. I replayed the family-sync "Gate the refreshed scripts" step and `ci.yml`'s "Run ShellCheck" step with `env -i PATH="$PATH" HOME="$HOME" bash --noprofile --norc -eo pipefail`: both exited 0, the first with "15 passed, 0 failed".
 - No existing test was edited or removed.
 - Not done: the representative private-corpus run, and pinning the paper's method (both above).
 
