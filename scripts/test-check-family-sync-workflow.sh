@@ -251,6 +251,21 @@ awk '
 ' "$WORKFLOW" >"$DECOY_ADD"
 assert_exit "a decoy 'add' line does not shadow the staging rule → pass" 0 "$CHECK" "$DECOY_ADD"
 
+# Rule 17 — the gate step's CANONICAL_PATHS fallback. Missing, it stops on an
+# unbound variable when replayed without the job's env:; stale, it checks a
+# different script set from the one CI checks.
+NO_FALLBACK="$TMP_DIR/no-fallback.yml"
+# shellcheck disable=SC2016  # the workflow's own `$VAR` text, not an expansion
+sed -E 's|gate_paths="\$\{CANONICAL_PATHS:-[^}]*\}"|gate_paths="$CANONICAL_PATHS"|' \
+  "$WORKFLOW" >"$NO_FALLBACK"
+assert_exit "gate step without a CANONICAL_PATHS fallback → fail" 1 "$CHECK" "$NO_FALLBACK"
+
+STALE_FALLBACK="$TMP_DIR/stale-fallback.yml"
+# shellcheck disable=SC2016  # the workflow's own `$VAR` text, not an expansion
+sed -E 's|gate_paths="\$\{CANONICAL_PATHS:-[^}]*\}"|gate_paths="${CANONICAL_PATHS:-scripts/runlib.sh}"|' \
+  "$WORKFLOW" >"$STALE_FALLBACK"
+assert_exit "gate step fallback differs from CANONICAL_PATHS → fail" 1 "$CHECK" "$STALE_FALLBACK"
+
 if [[ "$FAILS" -ne 0 ]]; then
   echo "test-check-family-sync-workflow: $FAILS failure(s)" >&2
   exit 1

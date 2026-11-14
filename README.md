@@ -2048,6 +2048,7 @@ run under [#98](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/98).
 | Creature-scale budgets ([#223](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/223)) | Shipped **opt-in** (`--scale-budgets derived`, `fixed` by default). The analysis-side cost is measured ([`docs/scale-sensitivity.md`](docs/scale-sensitivity.md): a shortlist widened from 0.65 % to 2.3 % of a 7 363-neuron creature's ranked sources costs under 1 % more scan time), but the **run** economics are not: no paired A/B script exists yet, the derived focus count is unbenchmarked, and it multiplies with the derived shortlist because the post-focus scan runs per focus. Journalled creature dimensions and resolved budgets ship on **both** arms. |
 | Transferable operator priors ([#221](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/221)) | Shipped **opt-in** (`--strategy-priors seed`, `off` by default). The paired cold-start-vs-seeded A/B is scripted (`scripts/run-strategy-priors-ab.sh`) but **not yet run**: it needs exclusive box time on the production creature and corpus, so no `scoreImprovementPerWallHour` comparison exists yet. [`docs/strategy-priors.md`](docs/strategy-priors.md). |
 | [#123](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/123) | **Fixed, pending release.** A sampled scorer call used to read and decode the whole corpus to score a twentieth of it; it now fetches only the records it scores, cutting the fixed cost of a screen call from **10 693 ms to 3 423 ms** ([`docs/scorer-fixed-cost.md`](docs/scorer-fixed-cost.md)). The change lives in NEAT-AI-core (`issue-scorer-sampled-read`) and NEAT-AI-scorer (`issue-lamarck-123-sampled-read`); a human must open those two PRs and cut a scorer release before a run picks it up ([#141](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/141)). The whole-run `scorerCallCost` re-measure on an idle box is owed then. |
+| [#267](https://github.com/stSoftwareAU/NEAT-AI-Lamarck/issues/267) | Opt-in, offline easy-record skipping experiment (nothing in the run loop calls it). The synthetic suite has been run: no easy-skip arm beat matched random skipping under the rare-stratum guard, or full data. The representative corpus run has **not** been made. [`docs/easy-record-skipping.md`](docs/easy-record-skipping.md) (see it for how to run). |
 
 ## Repository layout
 
@@ -2093,6 +2094,7 @@ NEAT-AI-Lamarck/
     ├── run.rs
     ├── report.rs
     ├── failed_cache/        # opt-in unsuccessful-candidate cache (issues #88–#94)
+    ├── record_skip/         # opt-in easy-record skipping experiment (issue #267)
     ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── screen_thresholds.rs # per-strategy screen thresholds (issue #220)
