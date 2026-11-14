@@ -3,7 +3,7 @@
     "crateVersion": "0.1.47",
     "neatCoreTag": "v0.23.4",
     "taskGeneratorVersion": "local-rules-synthetic-v1",
-    "sourceCommit": "1aa2a1b40a5030da08e696c14c731c1075c76f55",
+    "sourceCommit": "f22e4f7b27c7a33eb03e4a073a19508913d7f98d",
     "sourceTreeDirty": false
   },
   "dataSource": {
