@@ -53,9 +53,13 @@ def die(message):
 
 def fetch(url, dest, want):
     """Download url to dest, then refuse on checksum mismatch."""
+    if not url.startswith("https://"):
+        die(f"refusing non-https download: {url}")
     digest = hashlib.sha256()
     with open(dest, "wb") as out:
         try:
+            # URLs are the pinned https constants above (checked to be https), never user input.
+            # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             with urllib.request.urlopen(url) as response:
                 for chunk in iter(lambda: response.read(1 << 16), b""):
                     digest.update(chunk)
@@ -92,7 +96,10 @@ def main(argv):
         wheels.append(dest)
 
     with tarfile.open(amm_tar, "r:gz") as tar:
-        tar.extractall(src, filter="data")
+        # Member-by-member with the "data" filter, which rejects absolute paths, ".."
+        # traversal, links escaping the destination, and special files.
+        for member in tar:
+            tar.extract(member, src, filter="data")
     for wheel in wheels:
         with zipfile.ZipFile(wheel) as zf:
             zf.extractall(site)
