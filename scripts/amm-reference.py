@@ -3,7 +3,7 @@
 
 Issue #266. An opt-in offline research tool, never part of CI.
 
-Build the environment with scripts/amm-reference-env.sh, then run (without
+Build the environment with scripts/amm-reference-env.py, then run (without
 -I, which would ignore PYTHONPATH):
 
     env PYTHONPATH=... python3 scripts/amm-reference.py \

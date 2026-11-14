@@ -126,7 +126,7 @@ so D=100 is extrapolation for AMM as well.
 
 No dependency is added to the repository. AMM runs in a scratch Python 3.13
 environment built by
-[`scripts/amm-reference-env.sh`](../scripts/amm-reference-env.sh) from
+[`scripts/amm-reference-env.py`](../scripts/amm-reference-env.py) from
 sha256-pinned numpy 2.5.4 and scipy 1.18.1 wheels and the pinned AMM tarball. It
 is opt-in, offline and never part of CI.
 
@@ -176,7 +176,7 @@ AMM reference (offline, opt-in; needs network once to fetch the pinned
 artefacts). Run the base bench first, then:
 
 ```bash
-scripts/amm-reference-env.sh /tmp/amm-env   # prints PYTHONPATH=...
+scripts/amm-reference-env.py /tmp/amm-env   # prints PYTHONPATH=...
 env PYTHONPATH=... python3 scripts/amm-reference.py \
   --bench target/release/examples/weight_router_bench \
   --manifest /tmp/wrb-full/manifest.json --out-dir /tmp/amm-out --jobs 18
