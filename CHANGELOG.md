@@ -29,6 +29,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fingerprint) and refuses to run without an explicit `OUT_DIR`. Reproduce with
   `cargo run --release --example local_rules_bench`; the method, protocol and
   results are in [`docs/local-rules.md`](docs/local-rules.md).
+- **Opt-in offline easy-record skipping experiment (Issue #267).** Adds
+  `lamarck/src/record_skip/` (difficulty EWMA schedule with rare-stratum
+  protection and revisits, matched random-skip control, paired bootstrap
+  verdicts), the `record_skip_bench` example and `lamarck/tests/record_skip.rs`.
+  Nothing in the optimisation loop calls it and no default changes. The
+  synthetic suite (228 runs) found no easy-skip arm better than matched random
+  skipping under the rare-stratum guard, or better than full data; the
+  representative corpus run is outstanding. Evidence is in
+  `docs/evidence/record-skip/`; see `docs/easy-record-skipping.md`.
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
   `path = "../../NEAT-AI-core/neat-core"` dependency with
@@ -143,16 +152,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The Rust jobs install their toolchain through a local action, so the Vibe
   Coder pre-push gate can replay their cargo checks (Issue #268).** The
-  `ci.yml`'s `quality` job and `cargo-quality.yml` now use
-  `./.github/actions/rust-toolchain`, which wraps the same pinned
+  `ci.yml` `quality` job, `cargo-quality.yml` and the `family-sync` job now
+  use `./.github/actions/rust-toolchain`, which wraps the same pinned
   `dtolnay/rust-toolchain` step with `rustfmt, clippy`. The gate read that
   step's commit-SHA ref as a toolchain and ran `cargo +29eef336… --version`,
   which exits 101 on a host without rustup, so every Rust change was refused
   before it could be pushed. CI still compiles with the toolchain
-  `rust-toolchain.toml` pins; the other workflows keep their inline step. The
-  `family-sync` job checks out the PR branch, so it installs the toolchain with
-  a plain `rustup` step instead: a local action there would be read from a
-  branch cut before the action existed and fail. The family-sync refreshed-script gate step now falls back to the job's
+  `rust-toolchain.toml` pins. The family-sync refreshed-script gate step now
+  falls back to the job's
   `CANONICAL_PATHS` list when replayed without the job's `env:`, and
   `scripts/check-family-sync-workflow.sh` rule 17 checks the fallback equals
   that list.
