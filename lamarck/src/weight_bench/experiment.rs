@@ -144,7 +144,7 @@ pub struct RunRow {
     pub budget: usize,
     /// Problem seed.
     pub seed: u64,
-    /// Always `"validation"`; archived rows also carry `"calibration"`.
+    /// Always `"validation"`; router-era `runs.jsonl` rows (not committed) also carried `"calibration"`.
     pub phase: String,
     /// The arm run.
     pub arm: Arm,

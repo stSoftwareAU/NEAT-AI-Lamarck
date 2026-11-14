@@ -153,7 +153,13 @@ three families, three dimensions and three budgets. It explicitly supplies
 receive the same seed and configuration. This checks completed RunRows, not
 every evaluation trace or every AMM route. The source/dependency pins and
 observed result are recorded in
-[`method-check.json`](evidence/weight-router/method-check.json).
+[`method-check.json`](evidence/weight-router/method-check.json). That file is **router-era output** (crate 0.1.46, code checkpoint
+`8f77004`), like `amm-runs.jsonl`: the manifest it embeds still carries
+`calibrationSeeds`, which the current `Manifest` refuses, and its binary hash
+is of the removed code. It was not re-run after the router was removed, because
+no scratch AMM environment was available. Re-running the check with the current
+manifest records a different `manifest` field, and its `canonicalRowsSha256`
+has not been confirmed to reproduce.
 
 To repeat the compatibility check, extract the two pinned source tarballs
 (after verifying the SHA-256 values above), share the wheels produced by
