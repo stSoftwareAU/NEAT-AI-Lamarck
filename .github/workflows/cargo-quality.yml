@@ -73,9 +73,7 @@ jobs:
       # is a git-tag dependency on a core release, so `cargo fmt --all` and
       # `cargo clippy` resolve the workspace from the pin alone.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, frozen 2026-05-18
-        with:
-          components: rustfmt, clippy
+        uses: ./.github/actions/rust-toolchain
 
       - name: Cache dependencies
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
