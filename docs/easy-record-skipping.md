@@ -13,12 +13,38 @@ is a hypothesis to test, not an established improvement.
 
 ## Source
 
-The idea is attributed to <https://arxiv.org/abs/2611.10386>. From the
-sandbox the paper could not be retrieved (`curl` to `export.arxiv.org`
-failed with "CONNECT tunnel failed, response 403"), so its method is **not**
-pinned or reproduced here. The scheme tested is the one the issue itself
-describes: a per-record error EWMA, omit consistently easy records, protect
-rare strata, and periodically revisit omitted records.
+The idea is attributed to arXiv 2611.10386, "Pruning DNA Sequence" (Satter,
+Islam and Islam, v1 published 7 November 2026). The paper text could not be
+read from the sandbox: `curl` to `arxiv.org`, `export.arxiv.org`, Semantic
+Scholar, alphaXiv and Hugging Face all failed with "CONNECT tunnel failed,
+response 403". Its method is therefore pinned from the authors' released code,
+<https://github.com/FaiasPromit/pruning-dna-sequence> at commit
+`804aedb94fda8c531f1e6406f62de769d045ebad` (`dnabert2/pretraining/run_mlm.py`,
+`run_epoch_end_pruning`, and the `SP_*` / `RP_20%` configs):
+
+- **Signal.** Each sequence's accuracy on its masked tokens, read from the
+  ordinary training forward pass. No extra scoring pass or scoring model.
+- **Rule (Sequence Pruning, SP).** At the end of every epoch, an active
+  sequence whose accuracy, averaged over the last `pruning_window` epochs
+  (default 1), lies in `[pruning_lower_threshold, pruning_upper_threshold]`
+  (for example `[0.2, 1.0]` for `SP_20%`) is removed **for the rest of the
+  run**. A sequence is eligible only when every slot of its window holds a
+  real accuracy. Removed sequences are never revisited.
+- **Controls.** `RP_20%` trains on a random subset fixed before training,
+  sized to match `SP_20%`'s data savings; `LP_0%` removes the hardest
+  (0%-accuracy) sequences instead. Savings are reported as the Data Savings
+  Index, the share of the unpruned run's sequence processing avoided.
+- **Budget.** A pruned run keeps the unpruned run's epoch count, so savings
+  come from processing fewer sequences per epoch.
+
+The scheme tested here is the one the issue describes, and it differs from SP
+on purpose: a per-record error EWMA instead of a windowed accuracy (refinement
+targets are continuous, so there is no token accuracy), a fixed processing
+reduction per arm (25/50/75%) instead of a threshold, **temporary** omission
+with periodic revisits instead of permanent removal, and rare-stratum
+protection, which SP does not have. The matched random arm plays the role of
+`RP`, but it is re-drawn each epoch at the same processed count rather than
+fixed before training. SP itself is not reproduced as an arm.
 
 ## What is refined
 
@@ -192,6 +218,5 @@ stays opt-in only until the representative run decides whether to remove it.
 
 - Run the representative experiment on the private creature and corpus, on a
   quiet machine. This is an owner step, and the results stay private.
-- Pin the paper's method once it can be retrieved.
 - Remove `record_skip/` if the representative run does not earn its
   maintenance cost.
