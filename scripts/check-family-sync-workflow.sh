@@ -35,6 +35,9 @@
 #   16. Compile and test a moved pin in this job: a push made with the default
 #       GITHUB_TOKEN starts no new workflow run, so a breaking core release
 #       would otherwise land on the branch with nothing having built it.
+#   17. Give the refreshed-script gate step a CANONICAL_PATHS fallback equal to
+#       the job's own list, so the step still checks both scripts when it is
+#       replayed outside the job's `env:` (as a local pre-push check does).
 #
 # Exit codes: 0 the workflow satisfies every rule, 1 at least one rule is
 # broken, 2 invalid invocation.
@@ -314,6 +317,18 @@ elif printf '%s\n' "$build_verdicts" | grep -q 'unbuilt'; then
   fail "the step that moves the pin does not build it — a breaking neat-core release would land on the branch with CI already green"
 else
   ok "the step that moves the pin compiles and tests it"
+fi
+
+# 17. The gate step's fallback is a second copy of CANONICAL_PATHS, so the two
+# must agree: a stale fallback would check a different script set off-CI.
+job_paths="$(sed -nE 's/^[[:space:]]*CANONICAL_PATHS:[[:space:]]*"([^"]*)"[[:space:]]*$/\1/p' "$BODY")"
+fallback_paths="$(sed -nE 's/^[[:space:]]*gate_paths="\$\{CANONICAL_PATHS:-([^}]*)\}"[[:space:]]*$/\1/p' "$BODY")"
+if [[ -z "$fallback_paths" ]]; then
+  fail "the refreshed-script gate has no CANONICAL_PATHS fallback — replayed without the job's env:, it stops on an unbound variable"
+elif [[ "$fallback_paths" != "$job_paths" ]]; then
+  fail "the refreshed-script gate's fallback ($fallback_paths) differs from CANONICAL_PATHS ($job_paths)"
+else
+  ok "the refreshed-script gate falls back to the job's CANONICAL_PATHS"
 fi
 
 exit "$EXIT_CODE"

@@ -1,9 +1,10 @@
 //! Files mode: the same predeclared protocol, on a private creature and corpus.
 //!
-//! One calibration creature supplies the rule-discovery records. Each validation
-//! creature is a different creature (transfer, and different from every other
-//! validation creature) measured on the same validation records. Records are read from a training-data directory with the crate's own
-//! reader, split by position, and never written into a report.
+//! One calibration creature supplies the rule-discovery records. Each
+//! validation creature is a different creature (transfer, and different from
+//! every other validation creature) measured on the same validation records.
+//! Records are read from a training-data directory with the crate's own reader,
+//! split by position, and never written into a report.
 
 use std::path::Path;
 

@@ -330,9 +330,9 @@ The first `trainRecords` records train the calibration creature for rule
 discovery. The next `trainRecords` are validation training records, and the
 next `heldOutRecords` are held out. Validation creatures must differ from the
 calibration creature and from each other (a duplicate is refused), and share
-its widths. The report's `dataSource` holds only
-a corpus key and creature fingerprints, never paths or record values. The
-validation group is labelled `files`.
+its widths. The report's `dataSource` holds only a corpus key and creature
+fingerprints, never paths or record values. The validation group is labelled
+`files`.
 
 Keep `OUT_DIR` and its results private. Do not commit them. Files mode refuses
 to run without `OUT_DIR`, naming the missing argument, so a private run cannot
