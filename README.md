@@ -2100,6 +2100,7 @@ NEAT-AI-Lamarck/
     ├── run.rs
     ├── report.rs
     ├── failed_cache/        # opt-in unsuccessful-candidate cache (issues #88–#94)
+    ├── local_rules/         # opt-in local update-rule experiment (issue #268)
     ├── promote_gate.rs      # screen promote gate, incl. noise-aware (issue #111)
     ├── screen_calibration.rs # screen Δ vs full-corpus Δ (issue #110)
     ├── screen_thresholds.rs # per-strategy screen thresholds (issue #220)
