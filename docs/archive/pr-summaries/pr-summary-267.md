@@ -14,8 +14,10 @@ committed. A corpus mode runs the same protocol on a real creature and its
 records. Nothing in the optimisation loop calls this code, no default changed
 and nothing was ported.
 
-The paper (arXiv 2611.10386) could not be retrieved from the sandbox, so its
-method is not pinned. The representative (private) run is also outstanding.
+The source paper's text (arXiv 2611.10386) was still unreachable from the
+sandbox. Its method, Sequence Pruning, is pinned from the authors' released
+code at a fixed commit, and `docs/easy-record-skipping.md` says how the tested
+scheme differs from it. The representative (private) run is outstanding.
 Part of #267.
 
 ## Spec
@@ -55,11 +57,17 @@ Part of #267.
 
 ### Undiscoverable Facts
 
-- `curl https://export.arxiv.org/abs/2611.10386` and `curl
-  https://arxiv.org/pdf/2611.10386` both failed with "CONNECT tunnel failed,
-  response 403", and a WebFetch of `https://arxiv.org/abs/2611.10386` got
-  "proxy refused the connection" when retried on 14 November. The scheme
-  tested is therefore the issue's own description.
+- arXiv 2611.10386 is "Pruning DNA Sequence" (Satter, Islam and Islam). On
+  14 November, `curl` to `arxiv.org`, `export.arxiv.org`, Semantic Scholar,
+  alphaXiv and Hugging Face all failed with "CONNECT tunnel failed, response
+  403", while `pypi.org` returned 200. `gh search code 2611.10386` found the
+  abstract, which names <https://github.com/FaiasPromit/pruning-dna-sequence>.
+  The method is pinned from `dnabert2/pretraining/run_mlm.py` at `804aedb`
+  (`run_epoch_end_pruning`). At each epoch end it **permanently** removes
+  sequences whose windowed accuracy lies in `[lower, 1.0]`. It has no revisits
+  and no strata, and its `RP` control is a random subset fixed before
+  training. The scheme tested here is the issue's own (temporary EWMA skipping
+  at fixed reductions), so SP is documented but not run as an arm.
 - No `stSoftwareAU` repository named Backpropagation exists (`gh repo list
   stSoftwareAU`). Lamarck's refinement lives in this repository.
 - The synthetic run took 15 s wall in release, on a shared, parallel
@@ -115,9 +123,10 @@ results private. That run decides whether `record_skip/` stays or is removed.
 ## Acceptance Criteria
 
 - **missing** — Read and pin the full method before reproducing it — reason:
-  arXiv 2611.10386 could not be fetched from the sandbox (HTTP 403 from the
-  proxy), so the paper's method is not pinned; only the issue's described
-  scheme is tested.
+  the method is pinned from the authors' code at `804aedb` (see
+  `docs/easy-record-skipping.md`, "Source"), but the paper text itself is still
+  unreadable from the sandbox (HTTP 403 from the proxy). Anything stated only
+  in the PDF is unchecked.
 - **missing** — Do not claim success before representative runs — reason: no
   representative run on a real creature and corpus has been made. The corpus
   mode exists, but the private corpus is not in this repository, so that run
@@ -160,8 +169,9 @@ results private. That run decides whether `record_skip/` stays or is removed.
 - No existing test was edited or removed. The only change to existing source
   is `pub mod record_skip;` in `lamarck/src/lib.rs`.
 
-Not done: pinning the paper's method, the representative corpus run, and the
-keep-or-remove decision (see above). Remaining risk: the synthetic outcome may
-not carry over to real creatures and corpora.
+Not done: reading the paper text (the method is pinned from its code), running
+SP itself as an arm, the representative corpus run, and the keep-or-remove
+decision (see above). Remaining risk: the synthetic outcome may not carry over
+to real creatures and corpora.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
