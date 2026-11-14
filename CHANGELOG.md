@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Sparse symbolic local update rules are tested as an opt-in research harness, with a negative synthetic verdict (Issue #268).**
+  `lamarck/src/local_rules/` discovers one sparse rule per activation family on
+  calibration tasks only, then scores it on untouched validation tasks against
+  Lamarck's sparse backprop and a derivative-free (1+1) search at an equal record
+  budget, with the meta-search cost charged in full. Nothing in
+  `run_optimisation` or the CLI calls it, so defaults are unchanged. On the
+  synthetic fixtures (`docs/evidence/local-rules/summary.json`) the overall verdict
+  is `negative`: the rules are worse than both primary baselines at every step
+  count once the meta-search is included. Every report also carries
+  `successClaim`. A synthetic run is always `not-claimable-synthetic`, and a
+  files run that earns its place is only `pending-owner-review`, so no success
+  is claimed before a representative run. A comparison needs at least 8 paired
+  tasks (`minPairedTasks`) and goes `inconclusive` if any run behind it failed,
+  and files mode refuses to run without an explicit `OUT_DIR`. Reproduce with
+  `cargo run --release --example local_rules_bench`; the method, protocol and
+  results are in [`docs/local-rules.md`](docs/local-rules.md).
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
   `path = "../../NEAT-AI-core/neat-core"` dependency with
@@ -119,6 +135,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bump.
 
 ### Fixed
+
+- **The Rust jobs install their toolchain through a local action, so the Vibe
+  Coder pre-push gate can replay their cargo checks (Issue #268).** The
+  `ci.yml`'s `quality` job and `cargo-quality.yml` now use
+  `./.github/actions/rust-toolchain`, which wraps the same pinned
+  `dtolnay/rust-toolchain` step with `rustfmt, clippy`. The gate read that
+  step's commit-SHA ref as a toolchain and ran `cargo +29eef336… --version`,
+  which exits 101 on a host without rustup, so every Rust change was refused
+  before it could be pushed. CI still compiles with the toolchain
+  `rust-toolchain.toml` pins; the other workflows keep their inline step. The
+  `family-sync` job checks out the PR branch, so it installs the toolchain with
+  a plain `rustup` step instead: a local action there would be read from a
+  branch cut before the action existed and fail.
 
 - **The breaking-bump gate is green against neat-core 0.22.5 (PR #239).** Core
   `Develop` moved 0.17.0 -> 0.22.5 while this branch was open, so
