@@ -1,6 +1,7 @@
 //! Baseline update arms: Lamarck's current sparse backprop refinement, and a
-//! derivative-free (1+1) random search. Both clone the parent and charge cost
-//! in the same record units as the symbolic arm.
+//! derivative-free search built on the crate's mirrored signed-perturbation
+//! path (`crate::mirror`, issue #203). Both clone the parent and charge cost in
+//! the same record units as the symbolic arm.
 
 use std::f64::consts::TAU;
 
@@ -11,6 +12,8 @@ use rand::{RngExt, SeedableRng};
 use super::apply::{Cost, compile, mse};
 use super::tasks::TaskRecord;
 use crate::backprop::{BackpropConfig, apply_learnings, calculate_learning_rate};
+use crate::candidates::{Candidate, CandidateProvenance, CandidateStrategy};
+use crate::mirror::{mirror_candidate, signed_perturbation};
 use crate::propagate_layout::LearningPlan;
 
 /// Mixed into the seed so the sparse selection stream differs from other streams.
@@ -64,12 +67,71 @@ fn gaussian(rng: &mut StdRng) -> f64 {
     (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos()
 }
 
-/// Derivative-free (1+1) random search over every weight and hidden/output bias.
+/// One scalar the derivative-free search may step.
+#[derive(Clone, Copy)]
+enum Scalar {
+    Weight(usize),
+    Bias(usize),
+}
+
+/// Every synapse weight, then every hidden/output neuron bias.
+fn eligible_scalars(creature: &CreatureExport) -> Vec<Scalar> {
+    let weights = (0..creature.synapses.len()).map(Scalar::Weight);
+    let biases = creature
+        .neurons
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| matches!(n.neuron_type.as_str(), "hidden" | "output"))
+        .map(|(i, _)| Scalar::Bias(i));
+    weights.chain(biases).collect()
+}
+
+/// The `+δ` candidate: `best` with one scalar stepped by `delta`.
+fn step_one(best: &CreatureExport, scalar: Scalar, delta: f64) -> Candidate {
+    let mut creature = best.clone();
+    let (focus, old, new, what) = match scalar {
+        Scalar::Weight(i) => {
+            let synapse = &mut creature.synapses[i];
+            let old = synapse.weight;
+            synapse.weight += delta;
+            (synapse.to_uuid.clone(), old, synapse.weight, "weight")
+        }
+        Scalar::Bias(i) => {
+            let neuron = &mut creature.neurons[i];
+            let old = neuron.bias;
+            neuron.bias += delta;
+            (neuron.uuid.clone(), old, neuron.bias, "bias")
+        }
+    };
+    Candidate {
+        creature,
+        provenance: CandidateProvenance {
+            strategy: CandidateStrategy::Random,
+            focus_neuron: focus,
+            mutation: format!("local-rules derivative-free {what} delta {delta}"),
+            old_value: Some(old),
+            new_value: Some(new),
+            mirror: None,
+            follow_up: None,
+            neighbourhood: None,
+        },
+    }
+}
+
+/// Derivative-free search on Lamarck's mirrored signed-perturbation path.
 ///
-/// The parent's own evaluation counts as the first of `evaluations`. A candidate
-/// is accepted only if its training MSE strictly decreases, so the returned
-/// creature never has a higher training MSE than the parent. Each evaluation
-/// costs one forward pass per record (1 unit).
+/// Each round steps one scalar of the incumbent (a synapse weight or a
+/// hidden/output bias, drawn uniformly) by `sigma` times a standard normal,
+/// confirms the step with [`crate::mirror::signed_perturbation`], and scores it
+/// beside its `−δ` twin from [`crate::mirror::mirror_candidate`] — the same
+/// antithetic pair the candidate generator emits (issue #203). The lower-MSE
+/// half replaces the incumbent only if its training MSE is strictly lower, so
+/// the returned creature never has a higher training MSE than the parent.
+///
+/// The parent's own evaluation counts as the first of `evaluations`. When one
+/// evaluation is left, or the twin is refused (a clamped or sub-plank `−δ`),
+/// only the `+δ` half is scored. Each evaluation costs one forward pass per
+/// record (1 unit).
 pub fn derivative_free(
     parent: &CreatureExport,
     records: &[TaskRecord],
@@ -77,25 +139,31 @@ pub fn derivative_free(
     sigma: f64,
     seed: u64,
 ) -> Result<(CreatureExport, Cost), String> {
+    let scalars = eligible_scalars(parent);
+    if scalars.is_empty() {
+        return Err("derivative-free search found no weight or bias to step".to_string());
+    }
+    let limits = BackpropConfig::default();
     let mut rng = StdRng::seed_from_u64(seed);
     let mut best = parent.clone();
     let mut best_mse = mse(&best, records)?;
     let mut done = 1u64;
     while done < evaluations {
-        let mut candidate = best.clone();
-        for synapse in &mut candidate.synapses {
-            synapse.weight += sigma * gaussian(&mut rng);
-        }
-        for neuron in &mut candidate.neurons {
-            if matches!(neuron.neuron_type.as_str(), "hidden" | "output") {
-                neuron.bias += sigma * gaussian(&mut rng);
+        let scalar = scalars[rng.random_range(0..scalars.len())];
+        let original = step_one(&best, scalar, sigma * gaussian(&mut rng));
+        let twin = if evaluations - done >= 2 {
+            signed_perturbation(&best, &original.creature)
+                .and_then(|p| mirror_candidate(&original, &p, &limits))
+        } else {
+            None
+        };
+        for half in std::iter::once(original).chain(twin) {
+            let half_mse = mse(&half.creature, records)?;
+            done += 1;
+            if half_mse < best_mse {
+                best = half.creature;
+                best_mse = half_mse;
             }
-        }
-        let candidate_mse = mse(&candidate, records)?;
-        done += 1;
-        if candidate_mse < best_mse {
-            best = candidate;
-            best_mse = candidate_mse;
         }
     }
     Ok((

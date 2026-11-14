@@ -4,7 +4,8 @@
 //! Issue #268. A small rule language (activation family, local features, sparse
 //! linear rules) is discovered on calibration tasks only, then scored on
 //! untouched validation tasks against sparse backprop and a derivative-free
-//! search. Parents are never mutated: every arm clones its parent.
+//! search on the crate's mirrored signed-perturbation path (`crate::mirror`).
+//! Parents are never mutated: every arm clones its parent.
 //!
 //! This module is research only. It is never wired into `run_optimisation`, and
 //! nothing in the crate calls it, so default behaviour is unchanged.
@@ -28,10 +29,7 @@ pub use experiment::{
 };
 pub use files::run_files;
 pub use manifest::{Manifest, NEAT_CORE_TAG, TaskGroup, Versions};
-pub use rule::{
-    ActivationFamily, Feature, LocalObservation, RuleSet, SparseRule, describe, local_residual,
-    rule_delta,
-};
-pub use search::{SearchStep, discover};
-pub use stats::{Verdict, bootstrap_mean_ci, mean, paired_verdict, verdict};
+pub use rule::{ActivationFamily, Feature, LocalObservation, RuleSet, SparseRule, local_residual};
+pub use search::SearchStep;
+pub use stats::{Verdict, paired_verdict, verdict};
 pub use tasks::{TASK_GENERATOR_VERSION, Task, TaskRecord, TaskSpec, build_task};

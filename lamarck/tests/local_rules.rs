@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use neat_ai_lamarck::local_rules::{
     ActivationFamily, Comparison, DEFAULT_OUT_DIR, DataSource, Feature, Manifest, NEAT_CORE_TAG,
     OverallVerdict, RuleSet, SparseRule, SuccessClaim, TASK_GENERATOR_VERSION, Task, TaskGroup,
-    TaskSpec, Verdict, apply_rule_steps, build_task, derivative_free, local_residual,
+    TaskSpec, Verdict, Versions, apply_rule_steps, build_task, derivative_free, local_residual,
     matched_count, mse, paired_verdict, predeclared_verdict, resolve_out_dir, run_files,
     run_manifest, sparse_backprop, success_claim, verdict,
 };
@@ -170,6 +170,119 @@ fn derivative_free_never_raises_training_mse() {
     let now = mse(&after, &t.train).expect("result mse");
     assert!(now <= before, "training MSE rose: {before} -> {now}");
     assert_eq!(cost.record_units, 40 * 64);
+}
+
+#[test]
+fn derivative_free_cost_matches_the_evaluations_for_odd_and_even_budgets() {
+    let t = task(4);
+    for evaluations in [1u64, 2, 7, 8, 41] {
+        let (_, cost) =
+            derivative_free(&t.parent, &t.train, evaluations, 0.05, 11).expect("search runs");
+        assert_eq!(
+            cost.record_units,
+            evaluations * t.train.len() as u64,
+            "budget {evaluations}"
+        );
+    }
+}
+
+#[test]
+fn derivative_free_moves_scalars_only_and_never_the_structure() {
+    let t = task(5);
+    let (after, _) = derivative_free(&t.parent, &t.train, 60, 0.05, 13).expect("search runs");
+    assert_eq!(after.neurons.len(), t.parent.neurons.len());
+    assert_eq!(after.synapses.len(), t.parent.synapses.len());
+    for (before, now) in t.parent.neurons.iter().zip(&after.neurons) {
+        assert_eq!(before.uuid, now.uuid);
+        assert_eq!(before.neuron_type, now.neuron_type);
+        assert_eq!(before.squash, now.squash);
+        if now.neuron_type == "input" {
+            assert_eq!(before.bias, now.bias, "an input bias moved");
+        }
+    }
+    for (before, now) in t.parent.synapses.iter().zip(&after.synapses) {
+        assert_eq!(before.from_uuid, now.from_uuid);
+        assert_eq!(before.to_uuid, now.to_uuid);
+    }
+    let moved = t
+        .parent
+        .neurons
+        .iter()
+        .zip(&after.neurons)
+        .filter(|(b, a)| b.bias != a.bias)
+        .count()
+        + t.parent
+            .synapses
+            .iter()
+            .zip(&after.synapses)
+            .filter(|(b, a)| b.weight != a.weight)
+            .count();
+    assert!(moved > 0, "60 evaluations accepted no step");
+}
+
+#[test]
+fn derivative_free_steps_one_scalar_per_accepted_round() {
+    // Three evaluations: the parent plus one mirrored pair, so at most one
+    // signed perturbation can be accepted.
+    let t = task(6);
+    let (after, _) = derivative_free(&t.parent, &t.train, 3, 0.05, 17).expect("search runs");
+    let moved = t
+        .parent
+        .neurons
+        .iter()
+        .zip(&after.neurons)
+        .filter(|(b, a)| b.bias != a.bias)
+        .count()
+        + t.parent
+            .synapses
+            .iter()
+            .zip(&after.synapses)
+            .filter(|(b, a)| b.weight != a.weight)
+            .count();
+    assert!(moved <= 1, "{moved} scalars moved in one round");
+}
+
+#[test]
+fn versions_current_has_no_source_commit() {
+    let v = Versions::current();
+    assert_eq!(v.source_commit, None);
+    assert_eq!(v.source_tree_dirty, None);
+    let json = serde_json::to_value(&v).expect("versions serialise");
+    assert!(json["sourceCommit"].is_null());
+    assert!(json["sourceTreeDirty"].is_null());
+    assert!(
+        json.as_object()
+            .expect("object")
+            .contains_key("sourceCommit")
+    );
+}
+
+#[test]
+fn versions_with_source_records_a_full_sha_and_the_dirty_flag() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let v = Versions::current()
+        .with_source(&format!("{sha}\n"), true)
+        .expect("valid sha");
+    assert_eq!(v.source_commit.as_deref(), Some(sha));
+    assert_eq!(v.source_tree_dirty, Some(true));
+    let clean = Versions::current()
+        .with_source(sha, false)
+        .expect("valid sha");
+    assert_eq!(clean.source_tree_dirty, Some(false));
+}
+
+#[test]
+fn versions_with_source_refuses_anything_but_a_full_lowercase_sha() {
+    for bad in [
+        "",
+        "0123456",
+        "0123456789ABCDEF0123456789abcdef01234567",
+        "0123456789abcdef0123456789abcdef0123456g",
+        "0123456789abcdef0123456789abcdef012345678",
+    ] {
+        let err = Versions::current().with_source(bad, false).unwrap_err();
+        assert!(err.contains("40 lowercase hex"), "{bad:?}: {err}");
+    }
 }
 
 #[test]

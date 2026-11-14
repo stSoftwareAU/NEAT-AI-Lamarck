@@ -142,7 +142,7 @@ its meta share) is matched by the primary baselines' total, rounded down to whol
 |-----|------------|-----------------|
 | `symbolic` | Discovered sparse rules, `K` steps | `2 * K * 64` update units, plus meta share in the total |
 | `sparse-backprop` | Lamarck's own `LearningPlan` and `apply_learnings`, `sparseRatio` 0.5 | `2 * 64` units per step, `2Kn + meta share` in total |
-| `derivative-free` | (1+1) random search, Gaussian `sigma` 0.05 | `1` unit per evaluation, `2Kn + meta share` in total |
+| `derivative-free` | Lamarck's mirrored signed-perturbation path (`lamarck/src/mirror.rs`, issue #203): each round steps one weight or hidden/output bias by Gaussian `sigma` 0.05 and scores it beside its `−δ` twin; the better half is kept only if training MSE falls | `1` unit per evaluation, `2Kn + meta share` in total |
 
 The sparse-backprop learning rate is Lamarck's `BackpropConfig` default,
 `0.01` (`lamarck/src/backprop.rs:93`), and the manifest records it as
@@ -206,6 +206,12 @@ widths (2 and 8), so the 16 transfer tasks are pooled.
 | Crate version | `0.1.47` (`lamarck/Cargo.toml`) |
 | neat-core tag | `v0.23.4` |
 | Task generator | `local-rules-synthetic-v1` |
+| Source commit | `versions.sourceCommit`: the full git SHA the code was built from, read by the example runner (`git rev-parse HEAD`); `null` when git is unavailable |
+| Source tree dirty | `versions.sourceTreeDirty`: `true` when tracked files differed from that commit at run time, so the numbers may not reproduce from it; `null` when unknown |
+
+The crate version alone cannot tell two builds apart, so the source commit is
+recorded too. The committed evidence is generated from a clean tree, then
+committed on top of that source commit.
 
 **Success criterion** (`manifest.json`, quoted verbatim):
 
@@ -252,7 +258,7 @@ flowchart TD
     B --> C["Discovered rule set: one sparse rule per family"]
     D["24 validation tasks: same-width, and new-width at widths 2 and 8"] --> E["Symbolic arm: K steps of discovered rules"]
     D --> F["Sparse backprop: primary, equal total budget"]
-    D --> G["Derivative-free (1+1): primary, equal total budget"]
+    D --> G["Derivative-free (mirrored signed perturbations): primary, equal total budget"]
     D --> H["App-only arms: diagnostic, no meta share"]
     C --> E
     E --> I["Paired held-out MSE differences, symbolic minus baseline"]
@@ -356,6 +362,7 @@ cargo run --release --example local_rules_bench -- [OUT_DIR]
 In synthetic mode `OUT_DIR` defaults to `docs/evidence/local-rules`. Every seed
 is fixed in the manifest, so the synthetic run is deterministic. The runtime is
 small, a few seconds in release. A re-run reproduces `manifest.json` and
-`summary.json` byte for byte at the same crate version. The reports stamp
-`versions.crateVersion`, so a later version bump changes that one line and the
-evidence is then regenerated.
+`summary.json` byte for byte at the same crate version and source commit. The
+reports stamp `versions.crateVersion` and `versions.sourceCommit`, so a re-run
+from a later commit changes those lines (and a version bump the crate-version
+line), and the evidence is then regenerated.

@@ -25,16 +25,48 @@ pub struct Versions {
     pub neat_core_tag: String,
     /// Synthetic task generator version.
     pub task_generator_version: String,
+    /// Full git SHA of the commit the harness was built from, or `null` when
+    /// the runner could not read it. Two builds at one crate version differ
+    /// here.
+    pub source_commit: Option<String>,
+    /// True when tracked files differed from `source_commit` at run time, so
+    /// the numbers may not reproduce from that commit; `null` when unknown.
+    pub source_tree_dirty: Option<bool>,
 }
 
 impl Versions {
-    /// Versions of the running build.
+    /// Versions of the running build. The library cannot see the checkout, so
+    /// the source commit is left unknown until a runner stamps it with
+    /// [`Self::with_source`].
     pub fn current() -> Self {
         Self {
             crate_version: env!("CARGO_PKG_VERSION").to_string(),
             neat_core_tag: NEAT_CORE_TAG.to_string(),
             task_generator_version: TASK_GENERATOR_VERSION.to_string(),
+            source_commit: None,
+            source_tree_dirty: None,
         }
+    }
+
+    /// Stamp the commit the harness was built from and whether the tree was
+    /// dirty. Refuses anything but a full 40-character lowercase hex SHA, so an
+    /// abbreviated or garbled commit can never stand in for a version.
+    pub fn with_source(self, commit: &str, dirty: bool) -> Result<Self, String> {
+        let commit = commit.trim();
+        let valid = commit.len() == 40
+            && commit
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !valid {
+            return Err(format!(
+                "source commit must be 40 lowercase hex characters, got {commit:?}"
+            ));
+        }
+        Ok(Self {
+            source_commit: Some(commit.to_string()),
+            source_tree_dirty: Some(dirty),
+            ..self
+        })
     }
 }
 

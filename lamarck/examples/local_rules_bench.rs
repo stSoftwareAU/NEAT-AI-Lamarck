@@ -1,9 +1,17 @@
 //! Predeclared sparse symbolic local-rules experiment (issue #268).
 //!
 //! Runs `Manifest::predeclared()`: discovers sparse rules on calibration tasks,
-//! then compares the rules with sparse backprop and a derivative-free search on
-//! untouched validation tasks, at equal record budgets. Writes `manifest.json`
-//! and `summary.json` to OUT_DIR and prints the verdict and coverage.
+//! then compares the rules with sparse backprop and a derivative-free search
+//! (mirrored signed perturbations, `crate::mirror`, issue #203) on untouched
+//! validation tasks, at equal record budgets. Writes `manifest.json` and
+//! `summary.json` to OUT_DIR and prints the verdict and coverage.
+//!
+//! Before running it reads `git rev-parse HEAD` and
+//! `git status --porcelain --untracked-files=no` and stamps them into the
+//! report as `versions.sourceCommit` (the commit the code was built from) and
+//! `versions.sourceTreeDirty` (true when tracked files differed from that
+//! commit, so the numbers may not reproduce from it). Without git both stay
+//! `null` and a warning is printed.
 //!
 //! Research only: nothing in the library calls this harness.
 //!
@@ -29,10 +37,11 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use neat_ai_lamarck::local_rules::{
-    Manifest, Report, resolve_out_dir, run_files, run_manifest, write_outputs,
+    Manifest, Report, Versions, resolve_out_dir, run_files, run_manifest, write_outputs,
 };
 use neat_ai_lamarck::width::load_creature;
 use neat_core::CreatureExport;
@@ -147,13 +156,44 @@ fn run(report_inputs: Option<FilesInputs>, manifest: &Manifest) -> Result<Report
     }
 }
 
+/// Stdout of a successful `git` call, or the reason it failed.
+fn git(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!("git {} exited {}", args.join(" "), output.status));
+    }
+    String::from_utf8(output.stdout).map_err(|e| format!("git {}: {e}", args.join(" ")))
+}
+
+/// Stamp the source commit and dirty flag, read before any output is written.
+fn stamp_source(versions: Versions) -> Versions {
+    let source = git(&["rev-parse", "HEAD"]).and_then(|commit| {
+        let status = git(&["status", "--porcelain", "--untracked-files=no"])?;
+        versions
+            .clone()
+            .with_source(&commit, !status.trim().is_empty())
+    });
+    match source {
+        Ok(stamped) => stamped,
+        Err(reason) => {
+            println!("warning: source commit not recorded ({reason})");
+            versions
+        }
+    }
+}
+
 fn main() -> Result<(), String> {
     let args = parse_args(std::env::args().skip(1))?;
     let inputs = files_inputs(&args)?;
     let out = resolve_out_dir(inputs.is_some(), args.out.as_deref())?;
     let started = Instant::now();
     let manifest = Manifest::predeclared();
-    let report = run(inputs, &manifest)?;
+    let versions = stamp_source(Versions::current());
+    let mut report = run(inputs, &manifest)?;
+    report.versions = versions;
     write_outputs(Path::new(&out), &report)?;
     let coverage = report.coverage;
     println!("overall verdict: {:?}", report.overall_verdict);
