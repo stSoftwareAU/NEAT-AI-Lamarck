@@ -1,0 +1,74 @@
+{
+  "inputs": 3,
+  "trainRecords": 64,
+  "heldOutRecords": 64,
+  "hiddenSquashes": [
+    "TANH",
+    "LOGISTIC"
+  ],
+  "calibrationSeeds": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "calibrationWidth": 4,
+  "validationGroups": [
+    {
+      "group": "same-width",
+      "seeds": [
+        101,
+        102,
+        103,
+        104
+      ],
+      "hiddenWidth": 4
+    },
+    {
+      "group": "new-width",
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "hiddenWidth": 2
+    },
+    {
+      "group": "new-width",
+      "seeds": [
+        301,
+        302,
+        303,
+        304
+      ],
+      "hiddenWidth": 8
+    }
+  ],
+  "steps": [
+    5,
+    10,
+    20
+  ],
+  "calibrationSteps": 10,
+  "eta": 0.05,
+  "maxStep": 1.0,
+  "maxSupport": 3,
+  "metaRounds": 3,
+  "candidatesPerRound": 16,
+  "coefficientGrid": [
+    -2.0,
+    -1.0,
+    -0.5,
+    0.5,
+    1.0,
+    2.0
+  ],
+  "backpropLearningRate": 0.01,
+  "sparseRatio": 0.5,
+  "derivativeFreeSigma": 0.05,
+  "bootstrapResamples": 2000,
+  "bootstrapSeed": 7,
+  "metaSeed": 11,
+  "successCriterion": "earns-its-place iff the symbolic arm is Better than BOTH primary baselines (sparse-backprop, derivative-free) at at least one K and Worse than neither at any K; negative iff Worse than sparse-backprop at every K; otherwise inconclusive."
+}
