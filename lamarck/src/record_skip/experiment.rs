@@ -47,13 +47,46 @@ pub fn neat_core_tag_from(manifest: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Identify the checkout in `dir`: the commit hash, with `-dirty` appended when
+/// tracked files have uncommitted changes, or `unavailable: <cause>` when git
+/// cannot say.
+pub fn git_commit(dir: &Path) -> String {
+    fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map_err(|e| format!("unavailable: git: {e}"))?;
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let line = stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("git exited with an error");
+        Err(format!("unavailable: {line}"))
+    }
+    let sha = match git(dir, &["rev-parse", "HEAD"]) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match git(dir, &["status", "--porcelain", "--untracked-files=no"]) {
+        Ok(status) if status.is_empty() => sha,
+        Ok(_) => format!("{sha}-dirty"),
+        Err(e) => e,
+    }
+}
+
 /// Result of one refinement run.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunOutcome {
     /// Arm label, for example `easy-50`.
     pub arm: String,
-    /// `calibration` or `validation` (set by the runner).
+    /// `preparation`, `calibration` or `validation` (set by the runner).
     pub phase: String,
     /// Seed driving the random and revisit draws.
     pub seed: u64,
@@ -130,7 +163,9 @@ fn squared_error(out: &[f32], expected: &[f32]) -> f64 {
         / n as f64
 }
 
-/// Refine a clone of `parent` over `corpus.train` under `policy`.
+/// Refine a clone of `parent` over `corpus.train` under `policy` at `learning_rate`.
+// The arms differ only in these inputs; a parameter struct would add noise.
+#[allow(clippy::too_many_arguments)]
 pub fn refine(
     parent: &CreatureExport,
     corpus: &Corpus,
@@ -138,6 +173,7 @@ pub fn refine(
     policy: &SkipPolicy,
     schedule: &ScheduleConfig,
     manifest: &Manifest,
+    learning_rate: f64,
     rng_seed: u64,
 ) -> Result<RunOutcome, String> {
     let n = corpus.train.len();
@@ -153,8 +189,8 @@ pub fn refine(
         .map_err(|e| e.to_string())?;
 
     let config = BackpropConfig {
-        learning_rate: manifest.learning_rate,
-        initial_learning_rate: manifest.learning_rate,
+        learning_rate,
+        initial_learning_rate: learning_rate,
         ..BackpropConfig::default()
     };
 
@@ -307,6 +343,9 @@ pub struct Versions {
     pub crate_version: String,
     /// neat-core tag.
     pub neat_core_tag: String,
+    /// Commit of the checkout that built the run; the library leaves it empty
+    /// and the example fills it in.
+    pub git_commit: Option<String>,
 }
 
 /// Chosen schedule parameters.
@@ -331,6 +370,96 @@ pub struct CalibrationEntry {
     pub n_pairs: usize,
     /// Mean of (easy - random) final training MSE; null when no pairs.
     pub mean_train_diff: Option<f64>,
+}
+
+/// Learning-rate sweep result for one rate.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningRateEntry {
+    /// Learning rate tried.
+    pub learning_rate: f64,
+    /// Completed runs at this rate.
+    pub n_runs: usize,
+    /// Mean final training MSE; null when no run completed.
+    pub mean_train_mse: Option<f64>,
+}
+
+/// Predeclared compute limit against planned and actual cost.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeBudget {
+    /// The manifest's `maxRecordPasses`.
+    pub limit_record_passes: u64,
+    /// Upper bound planned before any run: runs * epochs * training records.
+    pub planned_bound_record_passes: u64,
+    /// Record passes charged across every completed run, all phases.
+    pub actual_record_passes: u64,
+}
+
+/// Validation-phase summary of one arm (means over its runs).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArmSummary {
+    /// Arm label.
+    pub arm: String,
+    /// Completed validation runs.
+    pub n_runs: usize,
+    /// Mean record passes.
+    pub record_passes: Option<f64>,
+    /// Mean processed share.
+    pub processed_share: Option<f64>,
+    /// Mean final training MSE.
+    pub final_train_mse: Option<f64>,
+    /// Mean final validation MSE.
+    pub final_validation_mse: Option<f64>,
+    /// Mean rare-stratum validation MSE over runs that have one.
+    pub rare_stratum_validation_mse: Option<f64>,
+    /// Mean forgotten share.
+    pub forgotten_share: Option<f64>,
+    /// Mean revisit passes.
+    pub revisit_passes: Option<f64>,
+    /// Mean scheduling operations.
+    pub schedule_ops: Option<f64>,
+    /// Per-stratum mean validation MSE over runs where the stratum is present.
+    pub strata_validation_mse: Vec<Option<f64>>,
+}
+
+fn arm_summary(arm: String, runs: &[&RunOutcome]) -> ArmSummary {
+    let m = |f: &dyn Fn(&RunOutcome) -> f64| {
+        let v: Vec<f64> = runs.iter().map(|o| f(o)).collect();
+        opt(mean(&v))
+    };
+    let rare: Vec<f64> = runs
+        .iter()
+        .filter_map(|o| o.rare_stratum_validation_mse)
+        .collect();
+    let bins = runs
+        .iter()
+        .map(|o| o.strata_validation_mse.len())
+        .max()
+        .unwrap_or(0);
+    let strata = (0..bins)
+        .map(|b| {
+            let v: Vec<f64> = runs
+                .iter()
+                .filter_map(|o| o.strata_validation_mse.get(b).copied().flatten())
+                .collect();
+            opt(mean(&v))
+        })
+        .collect();
+    ArmSummary {
+        arm,
+        n_runs: runs.len(),
+        record_passes: m(&|o| o.record_passes as f64),
+        processed_share: m(&|o| o.processed_share),
+        final_train_mse: m(&|o| o.final_train_mse),
+        final_validation_mse: m(&|o| o.final_validation_mse),
+        rare_stratum_validation_mse: opt(mean(&rare)),
+        forgotten_share: m(&|o| o.forgotten_share),
+        revisit_passes: m(&|o| o.revisit_passes as f64),
+        schedule_ops: m(&|o| o.schedule_ops as f64),
+        strata_validation_mse: strata,
+    }
 }
 
 /// Run coverage.
@@ -425,12 +554,22 @@ pub struct BenchReport {
     pub versions: Versions,
     /// Corpus source description.
     pub source: String,
+    /// Learning rate chosen by the preparation sweep (training MSE only).
+    pub chosen_learning_rate: f64,
+    /// Preparation sweep table.
+    pub learning_rate_sweep: Vec<LearningRateEntry>,
     /// Schedule chosen by calibration.
     pub chosen_schedule: ChosenSchedule,
     /// Calibration table.
     pub calibration: Vec<CalibrationEntry>,
     /// Coverage.
     pub coverage: Coverage,
+    /// Cost of the preparation phase (learning-rate sweep).
+    pub preparation_cost: PhaseCost,
+    /// Predeclared compute limit, planned bound and actual cost.
+    pub compute: ComputeBudget,
+    /// Per-arm validation summary.
+    pub arms: Vec<ArmSummary>,
     /// Cost of the calibration phase (schedule search).
     pub calibration_cost: PhaseCost,
     /// Cost of the validation phase.
@@ -469,6 +608,7 @@ impl Runner<'_> {
         seed: u64,
         policy: SkipPolicy,
         sched: &ScheduleConfig,
+        learning_rate: f64,
     ) -> Option<RunOutcome> {
         let (corpus, parent) = match self.source {
             CorpusSource::Synthetic => (
@@ -493,6 +633,7 @@ impl Runner<'_> {
             &policy,
             sched,
             self.manifest,
+            learning_rate,
             seed,
         ) {
             Ok(mut o) => {
@@ -522,7 +663,7 @@ fn schedule_for(m: &Manifest, g: &GridPoint) -> ScheduleConfig {
     }
 }
 
-/// Run calibration then validation per the manifest.
+/// Run preparation, calibration then validation per the manifest.
 pub fn run_manifest(manifest: &Manifest, source: &CorpusSource) -> Result<BenchReport, String> {
     manifest.validate()?;
     run_validated(manifest, source)
@@ -537,8 +678,65 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
         rows: Vec::new(),
     };
     let nred = manifest.reductions.len();
-    let planned = manifest.calibration_seeds.len() * nred * manifest.calibration_grid.len() * 2
+    let prep_runs = manifest.calibration_seeds.len() * manifest.learning_rate_grid.len();
+    let planned = prep_runs
+        + manifest.calibration_seeds.len() * nred * manifest.calibration_grid.len() * 2
         + manifest.validation_seeds.len() * (1 + 2 * nred);
+    let train_count = match source {
+        CorpusSource::Synthetic => manifest.train_records,
+        CorpusSource::Files { corpus, .. } => corpus.train.len(),
+    } as u64;
+    let bound = planned as u64 * u64::from(manifest.epochs) * train_count;
+    if bound > manifest.max_record_passes {
+        return Err(format!(
+            "planned compute bound {bound} record passes exceeds maxRecordPasses {}",
+            manifest.max_record_passes
+        ));
+    }
+    let first_failure = |rows: &[Row]| {
+        rows.iter()
+            .find_map(|r| match r {
+                Row::Failed(f) => Some(format!(
+                    "; first failure: {} seed {} {}: {}",
+                    f.arm, f.seed, f.phase, f.error
+                )),
+                Row::Ok(_) => None,
+            })
+            .unwrap_or_default()
+    };
+
+    // Phase 0: learning-rate preparation on training MSE only.
+    let prep_sched = schedule_for(manifest, &manifest.calibration_grid[0]);
+    let mut sweep = Vec::new();
+    for &lr in &manifest.learning_rate_grid {
+        let mut finals = Vec::new();
+        for &seed in &manifest.calibration_seeds {
+            if let Some(o) = runner.run_one("preparation", seed, SkipPolicy::Full, &prep_sched, lr)
+            {
+                finals.push(o.final_train_mse);
+            }
+        }
+        sweep.push(LearningRateEntry {
+            learning_rate: lr,
+            n_runs: finals.len(),
+            mean_train_mse: opt(mean(&finals)),
+        });
+    }
+    let mut best_lr: Option<usize> = None;
+    for (i, e) in sweep.iter().enumerate() {
+        if let Some(d) = e.mean_train_mse
+            && best_lr.is_none_or(|b| d < sweep[b].mean_train_mse.unwrap_or(f64::INFINITY))
+        {
+            best_lr = Some(i);
+        }
+    }
+    let best_lr = best_lr.ok_or_else(|| {
+        format!(
+            "preparation produced no completed run; cannot choose a learning rate{}",
+            first_failure(&runner.rows)
+        )
+    })?;
+    let learning_rate = sweep[best_lr].learning_rate;
 
     // Phase 1: calibration on training MSE only.
     let mut calibration = Vec::new();
@@ -552,12 +750,14 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
                     seed,
                     SkipPolicy::RandomSkip { reduction: r },
                     &sched,
+                    learning_rate,
                 );
                 let easy = runner.run_one(
                     "calibration",
                     seed,
                     SkipPolicy::EasySkip { reduction: r },
                     &sched,
+                    learning_rate,
                 );
                 if let (Some(rnd), Some(easy)) = (rnd, easy) {
                     diffs.push(easy.final_train_mse - rnd.final_train_mse);
@@ -580,16 +780,9 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
         }
     }
     let best = best.ok_or_else(|| {
-        let first = runner.rows.iter().find_map(|r| match r {
-            Row::Failed(f) => Some(format!(
-                "; first failure: {} seed {} {}: {}",
-                f.arm, f.seed, f.phase, f.error
-            )),
-            Row::Ok(_) => None,
-        });
         format!(
             "calibration produced no matched pairs; cannot choose a schedule{}",
-            first.unwrap_or_default()
+            first_failure(&runner.rows)
         )
     })?;
     let chosen = manifest.calibration_grid[best];
@@ -604,11 +797,24 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
             policies.push(SkipPolicy::EasySkip { reduction: r });
         }
         for p in policies {
-            if let Some(o) = runner.run_one("validation", seed, p, &sched) {
+            if let Some(o) = runner.run_one("validation", seed, p, &sched, learning_rate) {
                 done.push(o);
             }
         }
     }
+
+    let mut arm_labels = vec!["full".to_string()];
+    for &r in &manifest.reductions {
+        arm_labels.push(arm_label(&SkipPolicy::RandomSkip { reduction: r }));
+        arm_labels.push(arm_label(&SkipPolicy::EasySkip { reduction: r }));
+    }
+    let arms: Vec<ArmSummary> = arm_labels
+        .into_iter()
+        .map(|label| {
+            let runs: Vec<&RunOutcome> = done.iter().filter(|o| o.arm == label).collect();
+            arm_summary(label, &runs)
+        })
+        .collect();
 
     let mut comparisons = Vec::new();
     for &r in &manifest.reductions {
@@ -638,8 +844,11 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
         versions: Versions {
             crate_version: env!("CARGO_PKG_VERSION").to_string(),
             neat_core_tag: neat_core_tag(),
+            git_commit: None,
         },
         source: source_desc,
+        chosen_learning_rate: learning_rate,
+        learning_rate_sweep: sweep,
         chosen_schedule: ChosenSchedule {
             ewma_alpha: chosen.ewma_alpha,
             revisit_share: chosen.revisit_share,
@@ -651,6 +860,19 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
             failed,
         },
         comparisons,
+        preparation_cost: phase_cost(&rows, "preparation"),
+        compute: ComputeBudget {
+            limit_record_passes: manifest.max_record_passes,
+            planned_bound_record_passes: bound,
+            actual_record_passes: rows
+                .iter()
+                .map(|r| match r {
+                    Row::Ok(o) => o.record_passes,
+                    Row::Failed(_) => 0,
+                })
+                .sum(),
+        },
+        arms,
         calibration_cost: phase_cost(&rows, "calibration"),
         validation_cost: phase_cost(&rows, "validation"),
         rows,
@@ -751,13 +973,14 @@ mod tests {
     #[test]
     fn refused_grid_point_is_reported_beside_a_valid_one() {
         let mut m = tiny();
+        // The valid point comes first: preparation runs the full arm on it.
         m.calibration_grid = vec![
             GridPoint {
-                ewma_alpha: 0.0,
+                ewma_alpha: 0.5,
                 revisit_share: 0.1,
             },
             GridPoint {
-                ewma_alpha: 0.5,
+                ewma_alpha: 0.0,
                 revisit_share: 0.1,
             },
         ];
@@ -765,10 +988,10 @@ mod tests {
         assert!(m.validate().unwrap_err().contains("ewmaAlpha"));
 
         let report = run_validated(&m, &CorpusSource::Synthetic).unwrap();
-        // 1 seed * 1 reduction * 2 grid * 2 arms + 2 seeds * 3 arms.
-        assert_eq!(report.coverage.planned, 10);
+        // 4 rates * 1 seed + 1 seed * 1 reduction * 2 grid * 2 arms + 2 seeds * 3 arms.
+        assert_eq!(report.coverage.planned, 14);
         assert_eq!(report.coverage.failed, 2);
-        assert_eq!(report.coverage.completed, 8);
+        assert_eq!(report.coverage.completed, 12);
 
         let fails = failed(&report.rows);
         assert_eq!(fails.len(), 2);
@@ -779,30 +1002,30 @@ mod tests {
             assert!(f.error.contains("ewma_alpha"), "{}", f.error);
         }
 
-        assert_eq!(report.calibration[0].n_pairs, 0);
-        assert!(report.calibration[0].mean_train_diff.is_none());
-        assert_eq!(report.calibration[1].n_pairs, 1);
-        assert!(report.calibration[1].mean_train_diff.is_some());
+        assert_eq!(report.calibration[1].n_pairs, 0);
+        assert!(report.calibration[1].mean_train_diff.is_none());
+        assert_eq!(report.calibration[0].n_pairs, 1);
+        assert!(report.calibration[0].mean_train_diff.is_some());
         assert_eq!(report.chosen_schedule.ewma_alpha, 0.5);
 
         let dir = tempfile::tempdir().unwrap();
         write_outputs(dir.path(), &report).unwrap();
         let runs = std::fs::read_to_string(dir.path().join("runs.jsonl")).unwrap();
-        assert_eq!(runs.lines().count(), 10);
+        assert_eq!(runs.lines().count(), 14);
         let error_lines = runs.lines().filter(|l| l.contains("\"error\"")).count();
         assert_eq!(error_lines, 2);
     }
 
     #[test]
-    fn all_failed_calibration_names_the_first_failure() {
+    fn all_failed_preparation_names_the_first_failure() {
         let mut m = tiny();
         m.warmup_epochs = 0;
         assert!(m.validate().unwrap_err().contains("warmupEpochs"));
 
         let err = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
-        assert!(err.contains("no matched pairs"), "{err}");
+        assert!(err.contains("no completed run"), "{err}");
         assert!(
-            err.contains("first failure: random-50 seed 1 calibration"),
+            err.contains("first failure: full seed 1 preparation"),
             "{err}"
         );
         assert!(err.contains("warmup_epochs"), "{err}");

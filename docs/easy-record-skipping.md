@@ -98,6 +98,14 @@ fixed before training. SP itself is not reproduced as an arm.
   `DifficultyScope` (parent fingerprint, corpus key and record count).
   `ensure_scope` refuses reuse for a different parent or corpus, and
   `refine` calls it before every epoch's selection.
+- Backpropagation ownership: the update math runs in neat-core's
+  `propagate_topological_loop` (stSoftwareAU/NEAT-AI-core, tag v0.23.4),
+  reached through Lamarck's existing `backprop.rs` and `propagate_layout.rs`
+  port. Record skipping only chooses which records reach that loop, so neither
+  neat-core nor NEAT-AI (the TypeScript trainer the README names as the current
+  backpropagation implementation) needs a change for this experiment. Nothing
+  is wired into NEAT-AI; that would follow only a `better` representative
+  verdict.
 - Fitness and validation records are never pruned. After refinement the full
   training MSE and the untouched validation MSE are measured over every
   record. This audit is not charged to the arm's record-pass count.
@@ -150,14 +158,33 @@ Values come from `docs/evidence/record-skip/manifest.json`.
 | Rare stratum share | 0.10 |
 | Warm-up epochs | 1 |
 | Calibration grid | EWMA alpha in {0.3, 0.7} x revisit share in {0.1, 0.25} |
-| Learning rate | 0.2 |
+| Learning-rate grid | {0.01, 0.05, 0.2, 0.5}, chosen by the counted preparation sweep (training MSE only) |
+| Manifest version | 2 (`validate` refuses any other version) |
+| Compute limit | `maxRecordPasses` 16,000,000 |
 | Bootstrap | 2000 resamples, seed 267 |
 | Forgetting tolerance | 1e-4 |
-| Versions | crate 0.1.46, neat-core v0.23.4 |
+| Versions | crate 0.1.47, neat-core v0.23.4, and the git commit recorded in `versions.gitCommit` |
 
-The learning rate 0.2 was chosen before the run from a full-arm sweep on two
-seeds (final train MSE from 0.3816: 0.01 gave 0.2328, 0.05 gave 0.0958, 0.2
-gave 0.0685, 0.5 gave 0.0771). It is fixed in `manifest.rs`.
+The learning rate is chosen by a counted **preparation** phase. It runs the
+full arm at each rate in `learningRateGrid` on the calibration seeds (1-6) and
+picks the lowest mean final **training** MSE. That rate is used for calibration
+and validation. The sweep (`learningRateSweep` in `summary.json`, 6 runs per
+rate) chose 0.2:
+
+| Learning rate | Mean final train MSE |
+|--------------:|---------------------:|
+| 0.01 | 0.2393 |
+| 0.05 | 0.1055 |
+| 0.2 | 0.0805 |
+| 0.5 | 0.0906 |
+
+This counted phase replaces the earlier hand sweep on two seeds, and it chose
+the same rate. Its cost is reported below.
+
+Before any run the harness computes the bound planned runs x epochs x training
+records and refuses the manifest when the bound exceeds `maxRecordPasses`
+(the error names `maxRecordPasses`). For the synthetic suite the bound is
+252 x 30 x 2000 = 15,120,000, under the limit of 16,000,000.
 
 Calibration uses the calibration seeds only and selects by training MSE,
 never validation. It chose alpha 0.7 and revisit share 0.25.
@@ -192,14 +219,21 @@ In corpus mode `--validation-records` defaults to 2000 and `--max-records` to
 20000. The validation set is the last N records of the loaded window.
 Corpus-mode results stay private.
 
+With those defaults the predeclared manifest's bound is
+252 x 30 x 18,000 = 136,080,000 record passes, over the 16,000,000 limit, so
+the corpus run is refused. It runs only when `--manifest FILE` supplies a
+`maxRecordPasses` predeclared for that corpus.
+
 ## Results (synthetic)
 
-228 of 228 planned runs completed, 0 failed. Wall time was 15 s in release on
+252 of 252 planned runs completed, 0 failed. Wall time was 15 s in release on
 a shared, parallel container, so it is indicative only. The committed
 evidence is `docs/evidence/record-skip/manifest.json` and `summary.json`
 (`runs.jsonl` is not committed).
 
-Per-arm means over the 12 validation seeds (initial train MSE 0.3875):
+Per-arm means over the 12 validation seeds (initial train MSE 0.3875). The
+table comes from `arms` in `summary.json`, no longer hand-aggregated from
+`runs.jsonl`:
 
 | Arm | Record passes | Processed share | Final train MSE | Validation MSE | Rare-stratum validation MSE | Forgotten share | Schedule ops | Revisit passes |
 |-----|--------------:|----------------:|----------------:|---------------:|----------------------------:|----------------:|-------------:|---------------:|
@@ -230,8 +264,13 @@ Costs:
 
 | Phase | Runs | Record passes | Revisit passes | Schedule ops |
 |-------|-----:|--------------:|---------------:|-------------:|
+| Preparation | 24 | 1,440,000 | 0 | 0 |
 | Calibration | 144 | 4,464,000 | 322,944 | 49,790,789 |
 | Validation | 84 | 2,952,000 | 230,811 | 24,876,869 |
+| Total | 252 | 8,856,000 | 553,755 | 74,667,658 |
+
+Compute (`compute` in `summary.json`): limit 16,000,000 record passes, planned
+bound 15,120,000, actual 8,856,000.
 
 ## Findings
 
@@ -248,9 +287,10 @@ These are findings on this synthetic suite only.
    52% of the record passes, and easy-75 is worse.
 4. The forgotten share rises when records are skipped: 0.381 for full against
    0.46 to 0.57 for the skipped arms.
-5. Calibration cost 4,464,000 record passes. That is more than the whole
-   validation phase (2,952,000) and about 100 times the 43,500 passes easy-75
-   saves per run, so at this scale the search does not pay for itself.
+5. Preparation plus calibration cost 5,904,000 record passes. That is twice
+   the validation phase (2,952,000) and about 136 times the 43,500 passes
+   easy-75 saves per run (60,000 - 16,500), so at this scale the search does
+   not pay for itself.
 
 This is a negative and inconclusive result. Nothing is ported, and no success
 is claimed.
@@ -269,13 +309,14 @@ result was removed:
 - the unused first argument of `stats::verdict`;
 - `Serialize` on `DifficultyScope` and `ScheduleConfig`, and `Deserialize` on
   `Verdict`, which were never used;
-- the `LEARNING_RATE` re-export from `experiment`. `arm_label`, `stats::mean`
-  and `stats::bootstrap_mean_ci` became private to the module.
+- the `LEARNING_RATE` re-export from `experiment` (the constant itself has
+  since been replaced by the manifest's `learningRateGrid`). `arm_label`,
+  `stats::mean` and `stats::bootstrap_mean_ci` became private to the module.
 
-None of this changes the experiment. Re-running the synthetic suite after the
-removal reproduces the committed `summary.json` and `manifest.json` byte for
-byte. Only the uncommitted `runs.jsonl` changes shape: each row loses its
-`meanForgettingIncrease` key.
+None of this changes the experiment. Re-running the synthetic suite after that
+earlier removal reproduced the committed `summary.json` and `manifest.json`
+byte for byte (before the version 2 change). Only the uncommitted `runs.jsonl`
+changes shape: each row loses its `meanForgettingIncrease` key.
 
 Kept on purpose:
 
@@ -286,8 +327,9 @@ Kept on purpose:
 - the `StrataLength` refusal (input validation on a public constructor,
   covered by a test);
 - corpus mode (the representative run needs it);
-- every field of `summary.json` (changing them would break the committed
-  evidence).
+- every existing field of `summary.json`; the version 2 change only adds
+  fields (`chosenLearningRate`, `learningRateSweep`, `preparationCost`,
+  `compute`, `arms` and `versions.gitCommit`).
 
 **Removal rule.** Delete `lamarck/src/record_skip/`,
 `lamarck/examples/record_skip_bench.rs`, `lamarck/tests/record_skip.rs`,
@@ -304,5 +346,8 @@ pointer back to it.
 ## Outstanding
 
 - Run the representative experiment on the private creature and corpus, on a
-  quiet machine. This is an owner step, and the results stay private.
+  quiet machine. This is an owner step, and the results stay private. The
+  owner writes the corpus manifest, with a `maxRecordPasses` limit predeclared
+  for that corpus, before running; the default manifest is refused there (see
+  "How to run").
 - Apply the removal rule above.

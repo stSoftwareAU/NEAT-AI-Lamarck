@@ -1,4 +1,160 @@
 {
+  "arms": [
+    {
+      "arm": "full",
+      "finalTrainMse": 0.0841834607782152,
+      "finalValidationMse": 0.08766944030952266,
+      "forgottenShare": 0.3812083333333333,
+      "nRuns": 12,
+      "processedShare": 1.0,
+      "rareStratumValidationMse": 1.2299668175441825,
+      "recordPasses": 60000.0,
+      "revisitPasses": 0.0,
+      "scheduleOps": 0.0,
+      "strataValidationMse": [
+        0.012697212946652721,
+        0.014445341386547995,
+        0.009227253515838271,
+        0.018109197471544144,
+        0.05037395744139911,
+        0.4103060019401335,
+        1.3756235634565865,
+        3.0656508151800863
+      ]
+    },
+    {
+      "arm": "random-25",
+      "finalTrainMse": 0.08351450834297967,
+      "finalValidationMse": 0.08686407577060916,
+      "forgottenShare": 0.44516666666666665,
+      "nRuns": 12,
+      "processedShare": 0.7583333333333332,
+      "rareStratumValidationMse": 1.1230684325900469,
+      "recordPasses": 45500.0,
+      "revisitPasses": 0.0,
+      "scheduleOps": 0.0,
+      "strataValidationMse": [
+        0.019089581576174405,
+        0.02127758842411728,
+        0.014191391113764931,
+        0.023998014659338585,
+        0.044397008067222354,
+        0.3473726227223492,
+        1.2392206079707946,
+        2.8401730536948975
+      ]
+    },
+    {
+      "arm": "easy-25",
+      "finalTrainMse": 0.08491300516318721,
+      "finalValidationMse": 0.08840700907925014,
+      "forgottenShare": 0.4619583333333333,
+      "nRuns": 12,
+      "processedShare": 0.7583333333333332,
+      "rareStratumValidationMse": 1.2166922858523699,
+      "recordPasses": 45500.0,
+      "revisitPasses": 10036.416666666666,
+      "scheduleOps": 690820.5,
+      "strataValidationMse": [
+        0.014876107494194308,
+        0.016581306560432236,
+        0.009665196294110147,
+        0.019780759438550413,
+        0.050511633885858186,
+        0.3968442796612413,
+        1.3586412220050488,
+        3.042127804202116
+      ]
+    },
+    {
+      "arm": "random-50",
+      "finalTrainMse": 0.087642493234225,
+      "finalValidationMse": 0.0907053787764151,
+      "forgottenShare": 0.5619166666666667,
+      "nRuns": 12,
+      "processedShare": 0.5166666666666667,
+      "rareStratumValidationMse": 0.9374222210473652,
+      "recordPasses": 31000.0,
+      "revisitPasses": 0.0,
+      "scheduleOps": 0.0,
+      "strataValidationMse": [
+        0.03760099917301115,
+        0.03916961847486375,
+        0.027699893223452277,
+        0.038270216397662,
+        0.04073265359547449,
+        0.2462199508778886,
+        1.0007056649267865,
+        2.436372590699346
+      ]
+    },
+    {
+      "arm": "easy-50",
+      "finalTrainMse": 0.0846669284225351,
+      "finalValidationMse": 0.08789004247112119,
+      "forgottenShare": 0.4866249999999999,
+      "nRuns": 12,
+      "processedShare": 0.5166666666666667,
+      "rareStratumValidationMse": 1.1351052454702295,
+      "recordPasses": 31000.0,
+      "revisitPasses": 6411.416666666667,
+      "scheduleOps": 691562.0,
+      "strataValidationMse": [
+        0.021165030302062515,
+        0.02410589309154609,
+        0.012624166281163746,
+        0.022198459426109717,
+        0.05346249889888587,
+        0.3606533944592664,
+        1.254670758072254,
+        2.8528656344426864
+      ]
+    },
+    {
+      "arm": "random-75",
+      "finalTrainMse": 0.12910492066091636,
+      "finalValidationMse": 0.13065142544529326,
+      "forgottenShare": 0.5695833333333333,
+      "nRuns": 12,
+      "processedShare": 0.27499999999999997,
+      "rareStratumValidationMse": 0.545467814838039,
+      "recordPasses": 16500.0,
+      "revisitPasses": 0.0,
+      "scheduleOps": 0.0,
+      "strataValidationMse": [
+        0.12680603571206847,
+        0.11700618564244679,
+        0.08346495959530191,
+        0.08747331536911944,
+        0.06492497181456847,
+        0.08897390436216907,
+        0.5131252450776809,
+        1.4811557184204787
+      ]
+    },
+    {
+      "arm": "easy-75",
+      "finalTrainMse": 0.0913936993730818,
+      "finalValidationMse": 0.09383681528566762,
+      "forgottenShare": 0.4878333333333334,
+      "nRuns": 12,
+      "processedShare": 0.27499999999999997,
+      "rareStratumValidationMse": 0.8892959797018883,
+      "recordPasses": 16500.0,
+      "revisitPasses": 2786.4166666666665,
+      "scheduleOps": 690689.9166666666,
+      "strataValidationMse": [
+        0.043055987564328,
+        0.04861590964157134,
+        0.035721191452397806,
+        0.0424120427112307,
+        0.06424925620066076,
+        0.2504089734450597,
+        0.933404623881024,
+        2.2847847034412037
+      ]
+    }
+  ],
   "calibration": [
     {
       "ewmaAlpha": 0.3,
@@ -31,6 +187,7 @@
     "runs": 144,
     "scheduleOps": 49790789
   },
+  "chosenLearningRate": 0.2,
   "chosenSchedule": {
     "ewmaAlpha": 0.7,
     "revisitShare": 0.25
@@ -442,11 +599,38 @@
       "verdict": "worse"
     }
   ],
-  "coverage": {
-    "completed": 228,
-    "failed": 0,
-    "planned": 228
+  "compute": {
+    "actualRecordPasses": 8856000,
+    "limitRecordPasses": 16000000,
+    "plannedBoundRecordPasses": 15120000
   },
+  "coverage": {
+    "completed": 252,
+    "failed": 0,
+    "planned": 252
+  },
+  "learningRateSweep": [
+    {
+      "learningRate": 0.01,
+      "meanTrainMse": 0.23926404293406855,
+      "nRuns": 6
+    },
+    {
+      "learningRate": 0.05,
+      "meanTrainMse": 0.10550499847123761,
+      "nRuns": 6
+    },
+    {
+      "learningRate": 0.2,
+      "meanTrainMse": 0.08054561376754692,
+      "nRuns": 6
+    },
+    {
+      "learningRate": 0.5,
+      "meanTrainMse": 0.09056588803824385,
+      "nRuns": 6
+    }
+  ],
   "manifest": {
     "bootstrapResamples": 2000,
     "bootstrapSeed": 267,
@@ -478,7 +662,13 @@
     ],
     "epochs": 30,
     "forgettingTolerance": 0.0001,
-    "learningRate": 0.2,
+    "learningRateGrid": [
+      0.01,
+      0.05,
+      0.2,
+      0.5
+    ],
+    "maxRecordPasses": 16000000,
     "parentSeed": 267,
     "rareStratumShare": 0.1,
     "reductions": [
@@ -503,8 +693,14 @@
       1011,
       1012
     ],
-    "version": 1,
+    "version": 2,
     "warmupEpochs": 1
+  },
+  "preparationCost": {
+    "recordPasses": 1440000,
+    "revisitPasses": 0,
+    "runs": 24,
+    "scheduleOps": 0
   },
   "source": "synthetic",
   "validationCost": {
@@ -514,7 +710,8 @@
     "scheduleOps": 24876869
   },
   "versions": {
-    "crate": "0.1.46",
+    "crate": "0.1.47",
+    "gitCommit": "ad6812f640577aecfe2c60a154452bb12dc73c79-dirty",
     "neatCoreTag": "v0.23.4"
   }
 }

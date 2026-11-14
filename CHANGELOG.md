@@ -13,10 +13,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   protection and revisits, matched random-skip control, paired bootstrap
   verdicts), the `record_skip_bench` example and `lamarck/tests/record_skip.rs`.
   Nothing in the optimisation loop calls it and no default changes. The
-  synthetic suite (228 runs) found no easy-skip arm better than matched random
+  synthetic suite (252 runs) found no easy-skip arm better than matched random
   skipping under the rare-stratum guard, or better than full data; the
   representative corpus run is outstanding. Evidence is in
-  `docs/evidence/record-skip/`; see `docs/easy-record-skipping.md`.
+  `docs/evidence/record-skip/`; see `docs/easy-record-skipping.md`. The
+  harness chooses the learning rate in a counted preparation phase (training
+  MSE only), refuses any manifest whose planned record passes exceed the
+  predeclared `maxRecordPasses`, uses manifest version 2, and `summary.json`
+  now carries `versions.gitCommit` and per-arm means in `arms`.
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
   `path = "../../NEAT-AI-core/neat-core"` dependency with

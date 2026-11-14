@@ -9,11 +9,11 @@
 //! Writes `manifest.json`, `runs.jsonl` and `summary.json` into `OUT_DIR`. The
 //! creature and training-data paths are only ever read.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use neat_ai_lamarck::record_skip::experiment::{
-    CorpusSource, Manifest, load_corpus, run_manifest, write_outputs,
+    CorpusSource, Manifest, git_commit, load_corpus, run_manifest, write_outputs,
 };
 use neat_core::parse_creature_json;
 
@@ -87,10 +87,16 @@ fn run() -> Result<(), String> {
         }
         _ => CorpusSource::Synthetic,
     };
-    let report = run_manifest(&manifest, &source)?;
+    let mut report = run_manifest(&manifest, &source)?;
+    report.versions.git_commit = Some(git_commit(Path::new(env!("CARGO_MANIFEST_DIR"))));
     write_outputs(&args.out, &report)?;
 
     println!("source: {}", report.source);
+    println!(
+        "chosen learning rate: {} (git {})",
+        report.chosen_learning_rate,
+        report.versions.git_commit.as_deref().unwrap_or("n/a")
+    );
     println!(
         "chosen schedule: ewmaAlpha={} revisitShare={}",
         report.chosen_schedule.ewma_alpha, report.chosen_schedule.revisit_share
@@ -100,6 +106,7 @@ fn run() -> Result<(), String> {
         report.coverage.planned, report.coverage.completed, report.coverage.failed
     );
     for (name, c) in [
+        ("preparation", &report.preparation_cost),
         ("calibration", &report.calibration_cost),
         ("validation", &report.validation_cost),
     ] {
