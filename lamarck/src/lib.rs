@@ -27,6 +27,7 @@ pub mod observations;
 pub mod parity;
 pub mod promote_gate;
 pub mod propagate_layout;
+pub mod record_skip;
 pub mod report;
 pub mod run;
 pub mod scale;

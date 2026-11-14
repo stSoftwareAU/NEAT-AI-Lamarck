@@ -84,7 +84,7 @@ jobs:
       # pin, and a moved pin is tested here, so this job needs the toolchain
       # the Cargo jobs already install.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, frozen 2026-05-18
+        uses: ./.github/actions/rust-toolchain
 
       # Fail loud on a fetch error: a stale copy that silently passed as "in
       # sync" is worse than a red job, because every sibling then drifts.
@@ -137,8 +137,11 @@ jobs:
         if: steps.compare.outputs.changed == 'true'
         run: |
           set -euo pipefail
+          # Local replays of this step run without the job's `env:`; the
+          # fallback must equal CANONICAL_PATHS (check-family-sync-workflow.sh).
+          gate_paths="${CANONICAL_PATHS:-scripts/runlib.sh scripts/family-pins.sh}"
           # shellcheck disable=SC2086  # a space-separated path list, on purpose
-          shellcheck --severity=warning -s bash $CANONICAL_PATHS
+          shellcheck --severity=warning -s bash $gate_paths
           ./scripts/test-runlib.sh </dev/null
           ./scripts/test-family-pins.sh </dev/null
 
