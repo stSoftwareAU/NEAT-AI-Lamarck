@@ -293,17 +293,17 @@ arms that decide the verdict.
 | Arm | Primary | K | n | Mean diff | 95% CI | Verdict |
 |-----|---------|---|---|-----------|--------|---------|
 | `sparse-backprop` | yes | 5 | 24 | 0.2563 | [0.1276, 0.3948] | worse |
-| `derivative-free` | yes | 5 | 24 | 0.2684 | [0.1360, 0.4108] | worse |
+| `derivative-free` | yes | 5 | 24 | 0.2680 | [0.1360, 0.4106] | worse |
 | `sparse-backprop-app-only` | no | 5 | 24 | -0.3726 | [-0.6616, -0.1512] | better |
-| `derivative-free-app-only` | no | 5 | 24 | -0.1987 | [-0.4025, -0.0249] | better |
+| `derivative-free-app-only` | no | 5 | 24 | -0.4570 | [-0.8263, -0.1777] | better |
 | `sparse-backprop` | yes | 10 | 24 | 0.1490 | [0.0661, 0.2453] | worse |
-| `derivative-free` | yes | 10 | 24 | 0.1610 | [0.0759, 0.2599] | worse |
+| `derivative-free` | yes | 10 | 24 | 0.1607 | [0.0758, 0.2594] | worse |
 | `sparse-backprop-app-only` | no | 10 | 24 | -0.3781 | [-0.6579, -0.1701] | better |
-| `derivative-free-app-only` | no | 10 | 24 | -0.1655 | [-0.3425, -0.0217] | better |
+| `derivative-free-app-only` | no | 10 | 24 | -0.5255 | [-0.9566, -0.2089] | better |
 | `sparse-backprop` | yes | 20 | 24 | 0.0876 | [0.0472, 0.1316] | worse |
-| `derivative-free` | yes | 20 | 24 | 0.0996 | [0.0570, 0.1461] | worse |
+| `derivative-free` | yes | 20 | 24 | 0.0992 | [0.0566, 0.1454] | worse |
 | `sparse-backprop-app-only` | no | 20 | 24 | -0.3198 | [-0.5389, -0.1492] | better |
-| `derivative-free-app-only` | no | 20 | 24 | -0.0342 | [-0.1131, 0.0293] | inconclusive |
+| `derivative-free-app-only` | no | 20 | 24 | -0.5410 | [-0.9627, -0.2178] | better |
 
 **Same-width and new-width split.** For the primary arms the symbolic arm is
 worse at every K in both groups, and the gap is larger on new-width tasks (at
@@ -314,10 +314,9 @@ n = 16; mean differences rounded to three decimal places).
 the symbolic arm is worse than sparse backprop at every K.
 
 **Interpretation.** With the meta-search cost included, the rules lose to both
-primary baselines at every K. Excluding the meta-search, the rules beat the
-app-only sparse-backprop arm at every K, and the app-only derivative-free arm at
-K = 5 and 10 (inconclusive at K = 20). That diagnostic does not count under the
-predeclared rule. The backprop learning rate is the default and was not tuned,
+primary baselines at every K. Excluding the meta-search, the rules beat both
+app-only arms at every K. That diagnostic does not count under the predeclared
+rule. The backprop learning rate is the default and was not tuned,
 so the app-only result is **not** evidence of a benefit. The fixtures are
 synthetic, and they alone do not demonstrate an optimisation benefit.
 
