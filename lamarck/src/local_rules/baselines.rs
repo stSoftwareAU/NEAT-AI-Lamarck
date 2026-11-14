@@ -1,6 +1,6 @@
 //! Baseline update arms: Lamarck's current sparse backprop refinement, and a
 //! derivative-free search built on the crate's mirrored signed-perturbation
-//! path (`crate::mirror`, issue #203). Both clone the parent and charge cost in
+//! helpers (`crate::mirror`, issue #203). Both clone the parent and charge cost in
 //! the same record units as the symbolic arm.
 
 use std::f64::consts::TAU;
@@ -13,7 +13,7 @@ use super::apply::{Cost, compile, mse};
 use super::tasks::TaskRecord;
 use crate::backprop::{BackpropConfig, apply_learnings, calculate_learning_rate};
 use crate::candidates::{Candidate, CandidateProvenance, CandidateStrategy};
-use crate::mirror::{mirror_candidate, signed_perturbation};
+use crate::mirror::{PerturbedScalar, mirror_candidate, signed_perturbation};
 use crate::propagate_layout::LearningPlan;
 
 /// Mixed into the seed so the sparse selection stream differs from other streams.
@@ -67,37 +67,30 @@ fn gaussian(rng: &mut StdRng) -> f64 {
     (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos()
 }
 
-/// One scalar the derivative-free search may step.
-#[derive(Clone, Copy)]
-enum Scalar {
-    Weight(usize),
-    Bias(usize),
-}
-
 /// Every synapse weight, then every hidden/output neuron bias.
-fn eligible_scalars(creature: &CreatureExport) -> Vec<Scalar> {
-    let weights = (0..creature.synapses.len()).map(Scalar::Weight);
+fn eligible_scalars(creature: &CreatureExport) -> Vec<PerturbedScalar> {
+    let weights = (0..creature.synapses.len()).map(|synapse| PerturbedScalar::Weight { synapse });
     let biases = creature
         .neurons
         .iter()
         .enumerate()
         .filter(|(_, n)| matches!(n.neuron_type.as_str(), "hidden" | "output"))
-        .map(|(i, _)| Scalar::Bias(i));
+        .map(|(neuron, _)| PerturbedScalar::Bias { neuron });
     weights.chain(biases).collect()
 }
 
 /// The `+δ` candidate: `best` with one scalar stepped by `delta`.
-fn step_one(best: &CreatureExport, scalar: Scalar, delta: f64) -> Candidate {
+fn step_one(best: &CreatureExport, scalar: PerturbedScalar, delta: f64) -> Candidate {
     let mut creature = best.clone();
     let (focus, old, new, what) = match scalar {
-        Scalar::Weight(i) => {
-            let synapse = &mut creature.synapses[i];
+        PerturbedScalar::Weight { synapse } => {
+            let synapse = &mut creature.synapses[synapse];
             let old = synapse.weight;
             synapse.weight += delta;
             (synapse.to_uuid.clone(), old, synapse.weight, "weight")
         }
-        Scalar::Bias(i) => {
-            let neuron = &mut creature.neurons[i];
+        PerturbedScalar::Bias { neuron } => {
+            let neuron = &mut creature.neurons[neuron];
             let old = neuron.bias;
             neuron.bias += delta;
             (neuron.uuid.clone(), old, neuron.bias, "bias")
@@ -118,7 +111,7 @@ fn step_one(best: &CreatureExport, scalar: Scalar, delta: f64) -> Candidate {
     }
 }
 
-/// Derivative-free search on Lamarck's mirrored signed-perturbation path.
+/// Derivative-free search built on Lamarck's mirror helpers (`crate::mirror`).
 ///
 /// Each round steps one scalar of the incumbent (a synapse weight or a
 /// hidden/output bias, drawn uniformly) by `sigma` times a standard normal,

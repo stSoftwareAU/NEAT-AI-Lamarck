@@ -142,7 +142,7 @@ its meta share) is matched by the primary baselines' total, rounded down to whol
 |-----|------------|-----------------|
 | `symbolic` | Discovered sparse rules, `K` steps | `2 * K * 64` update units, plus meta share in the total |
 | `sparse-backprop` | Lamarck's own `LearningPlan` and `apply_learnings`, `sparseRatio` 0.5 | `2 * 64` units per step, `2Kn + meta share` in total |
-| `derivative-free` | Lamarck's mirrored signed-perturbation path (`lamarck/src/mirror.rs`, issue #203): each round steps one weight or hidden/output bias by Gaussian `sigma` 0.05 and scores it beside its `−δ` twin; the better half is kept only if training MSE falls | `1` unit per evaluation, `2Kn + meta share` in total |
+| `derivative-free` | Built on Lamarck's mirrored signed-perturbation helpers (`signed_perturbation` and `mirror_candidate` in `lamarck/src/mirror.rs`, issue #203): each round steps one weight or hidden/output bias by Gaussian `sigma` 0.05 and scores it beside its `−δ` twin; the better half is kept only if training MSE falls | `1` unit per evaluation, `2Kn + meta share` in total |
 
 The sparse-backprop learning rate is Lamarck's `BackpropConfig` default,
 `0.01` (`lamarck/src/backprop.rs:93`), and the manifest records it as
@@ -206,7 +206,7 @@ widths (2 and 8), so the 16 transfer tasks are pooled.
 | Crate version | `0.1.47` (`lamarck/Cargo.toml`) |
 | neat-core tag | `v0.23.4` |
 | Task generator | `local-rules-synthetic-v1` |
-| Source commit | `versions.sourceCommit`: the full git SHA the code was built from, read by the example runner (`git rev-parse HEAD`); `null` when git is unavailable |
+| Source commit | `versions.sourceCommit`: the full git SHA checked out when the example runner ran (`git rev-parse HEAD`; untracked files are not part of the dirty check); `null` when git is unavailable or the library is called without the runner |
 | Source tree dirty | `versions.sourceTreeDirty`: `true` when tracked files differed from that commit at run time, so the numbers may not reproduce from it; `null` when unknown |
 
 The crate version alone cannot tell two builds apart, so the source commit is

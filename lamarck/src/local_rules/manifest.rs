@@ -25,7 +25,7 @@ pub struct Versions {
     pub neat_core_tag: String,
     /// Synthetic task generator version.
     pub task_generator_version: String,
-    /// Full git SHA of the commit the harness was built from, or `null` when
+    /// Full git SHA of the commit checked out when the runner ran, or `null` when
     /// the runner could not read it. Two builds at one crate version differ
     /// here.
     pub source_commit: Option<String>,
@@ -48,7 +48,7 @@ impl Versions {
         }
     }
 
-    /// Stamp the commit the harness was built from and whether the tree was
+    /// Stamp the commit checked out at run time and whether the tree was
     /// dirty. Refuses anything but a full 40-character lowercase hex SHA, so an
     /// abbreviated or garbled commit can never stand in for a version.
     pub fn with_source(self, commit: &str, dirty: bool) -> Result<Self, String> {

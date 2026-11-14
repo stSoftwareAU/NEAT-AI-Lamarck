@@ -11,8 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Sparse symbolic local update rules are tested as an opt-in research harness, with a negative synthetic verdict (Issue #268).**
   `lamarck/src/local_rules/` discovers one sparse rule per activation family on
   calibration tasks only, then scores it on untouched validation tasks against
-  Lamarck's sparse backprop and a derivative-free search on Lamarck's mirrored
-  signed-perturbation path (`lamarck/src/mirror.rs`) at an equal record
+  Lamarck's sparse backprop and a derivative-free search built on Lamarck's
+  mirrored signed-perturbation helpers (`lamarck/src/mirror.rs`) at an equal record
   budget, with the meta-search cost charged in full. Nothing in
   `run_optimisation` or the CLI calls it, so defaults are unchanged. On the
   synthetic fixtures (`docs/evidence/local-rules/summary.json`) the overall verdict
@@ -22,8 +22,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   files run that earns its place is only `pending-owner-review`, so no success
   is claimed before a representative run. A comparison needs at least 8 paired
   tasks (`minPairedTasks`) and goes `inconclusive` if any run behind it failed.
-  Every report records `versions.sourceCommit` and `versions.sourceTreeDirty`
-  as well as the crate version.
+  The example runner stamps every report with `versions.sourceCommit` and
+  `versions.sourceTreeDirty` as well as the crate version (both `null` when the
+  library is called without the runner).
   Files mode refuses validation creatures that duplicate each other (same
   fingerprint) and refuses to run without an explicit `OUT_DIR`. Reproduce with
   `cargo run --release --example local_rules_bench`; the method, protocol and

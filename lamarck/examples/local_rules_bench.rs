@@ -2,13 +2,13 @@
 //!
 //! Runs `Manifest::predeclared()`: discovers sparse rules on calibration tasks,
 //! then compares the rules with sparse backprop and a derivative-free search
-//! (mirrored signed perturbations, `crate::mirror`, issue #203) on untouched
-//! validation tasks, at equal record budgets. Writes `manifest.json` and
+//! (mirrored signed perturbations, `neat_ai_lamarck::mirror`, issue #203) on
+//! untouched validation tasks, at equal record budgets. Writes `manifest.json` and
 //! `summary.json` to OUT_DIR and prints the verdict and coverage.
 //!
 //! Before running it reads `git rev-parse HEAD` and
 //! `git status --porcelain --untracked-files=no` and stamps them into the
-//! report as `versions.sourceCommit` (the commit the code was built from) and
+//! report as `versions.sourceCommit` (the commit checked out at run time) and
 //! `versions.sourceTreeDirty` (true when tracked files differed from that
 //! commit, so the numbers may not reproduce from it). Without git both stay
 //! `null` and a warning is printed.

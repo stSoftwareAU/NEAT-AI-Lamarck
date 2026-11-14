@@ -871,3 +871,23 @@ fn a_failed_validation_run_is_recorded_and_never_decides_the_verdict() {
     }
     assert_ne!(report.overall_verdict, OverallVerdict::EarnsItsPlace);
 }
+
+#[test]
+fn derivative_free_accepts_the_mirrored_twin_when_plus_delta_loses() {
+    // Three evaluations: the parent plus one mirrored pair. A step this small
+    // improves training MSE in exactly one direction, and the sign of the draw
+    // is random, so across these seeds `+δ` loses roughly half the time. Every
+    // seed must still improve: only the scored `−δ` twin can rescue those.
+    let t = task(6);
+    let before = mse(&t.parent, &t.train).expect("parent mse");
+    for seed in 0..16 {
+        let (after, cost) =
+            derivative_free(&t.parent, &t.train, 3, 1e-3, seed).expect("search runs");
+        let now = mse(&after, &t.train).expect("result mse");
+        assert!(
+            now < before,
+            "seed {seed}: no half improved ({before} -> {now})"
+        );
+        assert_eq!(cost.record_units, 3 * t.train.len() as u64);
+    }
+}
