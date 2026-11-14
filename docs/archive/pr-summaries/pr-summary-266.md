@@ -85,9 +85,11 @@ Part of #266.
   same block hit NEAT-AI-Ockham#262. The environment builder was therefore
   ported from `scripts/amm-reference-env.sh` to `scripts/amm-reference-env.py`
   with the same pins, checksums, refusals and output. CI's own ShellCheck step
-  passed on the old script. The gate reads paths from every commit since
-  `origin/Develop`, so the branch was also squashed into one commit with the
-  same final tree.
+  passed on the old script. The gate still reads paths from every commit since
+  `origin/Develop`, so an earlier commit's `.sh` keeps that step firing, and its
+  CI-cargo replay runs `cargo +29eef336d9b2848a0b548edc03f92a220660cdb8
+  --version`, which exits 101 (that hash is the `dtolnay/rust-toolchain` action
+  SHA, not a toolchain). Neither block is fixed by this branch.
 - Wall times on a shared, parallel aarch64 container, indicative only: the
   synthetic suite took about 12.5 min single-threaded, and AMM took 100.2 s with
   18 workers.
