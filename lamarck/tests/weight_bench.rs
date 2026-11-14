@@ -261,7 +261,7 @@ fn objective_requires_nonzero_record_dimensions() {
     let (p, _) = problem(Family::Tanh, 1);
     let selected = p.synapse_indices[0];
     assert!(WeightObjective::new(p.creature.clone(), vec![selected], &p.screening).is_ok());
-    for (input, output) in [(0, 0), (0, 1), (1, 0)] {
+    for (input, output) in [(0, 1), (1, 0), (0, 0)] {
         let mut creature = p.creature.clone();
         creature.input = input;
         creature.output = output;

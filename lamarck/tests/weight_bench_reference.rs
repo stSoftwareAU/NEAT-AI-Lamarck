@@ -235,7 +235,7 @@ fn fixture(arm: Arm, seed: u64, normalised: f64) -> RunRow {
         held_out_loss_start: Some(1.0),
         held_out_loss_final: Some(normalised),
         normalised_held_out_loss: Some(normalised),
-        confirmation_evaluations: 4,
+        confirmation_evaluations: 5,
         extrapolation: false,
         error: None,
     }
@@ -311,7 +311,7 @@ fn coverage_counts_failed_rows_and_missing_runs() {
     assert_eq!(r.coverage.planned_runs, 6);
     assert_eq!(r.coverage.completed_runs, 4);
     assert_eq!(r.coverage.failed_runs, 1);
-    assert_eq!(r.total_evaluations, 5 * (200 + 21 + 4));
+    assert_eq!(r.total_evaluations, 5 * (200 + 21 + 5));
     // The failed seed and the missing seed are dropped from the pairing.
     let c = &r.cells[0].comparisons[0];
     assert_eq!(c.screening.paired_differences.len(), 4);
@@ -400,7 +400,7 @@ fn hand_built_error_row_with_null_fields_counts_as_failed() {
     let r = summarise_reference(&m, &runs, &reference).unwrap();
     assert_eq!(r.coverage.completed_runs, 5);
     assert_eq!(r.coverage.failed_runs, 1);
-    assert_eq!(r.total_evaluations, 5 * (200 + 21 + 4));
+    assert_eq!(r.total_evaluations, 5 * (200 + 21 + 5));
     let c = &r.cells[0].comparisons[0];
     assert_eq!(c.screening.failures, 1);
     assert_eq!(c.held_out.failures, 1);

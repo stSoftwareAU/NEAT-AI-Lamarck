@@ -139,6 +139,20 @@ every evaluation trace or every AMM route. The source/dependency pins and
 observed result are recorded in
 [`method-check.json`](evidence/weight-router/method-check.json).
 
+To repeat the compatibility check, extract the two pinned source tarballs
+(after verifying the SHA-256 values above), share the wheels produced by
+`amm-reference-env.py`, and run with one source tree at a time:
+
+```bash
+env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONPATH=SITE:PAPER_SRC \
+  python3 scripts/check-amm-method.py --bench BIN \
+  --manifest docs/evidence/weight-router/manifest.json --out /tmp/amm-paper.json
+env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONPATH=SITE:PINNED_SRC \
+  python3 scripts/check-amm-method.py --bench BIN \
+  --manifest docs/evidence/weight-router/manifest.json --out /tmp/amm-current.json \
+  --compare /tmp/amm-paper.json
+```
+
 No dependency is added to the repository. AMM runs in a scratch Python 3.13
 environment built by
 [`scripts/amm-reference-env.py`](../scripts/amm-reference-env.py) from

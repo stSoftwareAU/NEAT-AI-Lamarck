@@ -10,6 +10,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -86,6 +87,40 @@ class ReferenceProcessTests(unittest.TestCase):
         self.assertEqual(row["evaluationsUsed"], control["evaluationsUsed"])
         self.assertEqual(row["confirmationEvaluations"], 5)
         self.assertEqual(row["normalisedScreeningLoss"], control["normalisedScreeningLoss"])
+
+    def method_check(self, manifest, output, *extra):
+        return subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("check-amm-method.py")),
+             "--bench", self.bench, "--manifest", str(manifest), "--out", str(output), *extra],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+        )
+
+    def test_method_check_compares_real_rows_and_rejects_a_different_result(self):
+        original = self.root / "method-original.json"
+        current = self.root / "method-current.json"
+        control = self.method_check(self.manifest, original)
+        self.assertEqual(control.returncode, 0, control.stderr)
+        same = self.method_check(self.manifest, current, "--compare", str(original))
+        self.assertEqual(same.returncode, 0, same.stderr)
+        expected = json.loads(original.read_text())
+        expected["rows"][0]["finalScreeningLoss"] += 1.0
+        different = self.root / "method-different.json"
+        different.write_text(json.dumps(expected))
+        refused = self.method_check(self.manifest, current, "--compare", str(different))
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("released engines produced different RunRows", refused.stderr)
+        self.assertEqual(json.loads(current.read_text())["rows"][0]["error"], None)
+
+    def test_method_check_refuses_empty_campaigns(self):
+        control = json.loads(Path(self.manifest).read_text())
+        for field, cause in [("validationSeeds", "requires a validation seed"),
+                             ("dimensions", "planned no runs")]:
+            with self.subTest(field=field):
+                manifest = self.root / f"empty-{field}.json"
+                manifest.write_text(json.dumps({**control, field: []}))
+                result = self.method_check(manifest, self.root / "empty-result.json")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(cause, result.stderr)
 
 
 if __name__ == "__main__":
