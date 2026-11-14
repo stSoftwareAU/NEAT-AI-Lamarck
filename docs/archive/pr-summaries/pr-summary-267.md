@@ -55,8 +55,11 @@ Part of #267.
 
 ### Undiscoverable Facts
 
-- `curl https://export.arxiv.org/abs/2611.10386` failed with "CONNECT tunnel
-  failed, response 403", so the scheme tested is the issue's own description.
+- `curl https://export.arxiv.org/abs/2611.10386` and `curl
+  https://arxiv.org/pdf/2611.10386` both failed with "CONNECT tunnel failed,
+  response 403", and a WebFetch of `https://arxiv.org/abs/2611.10386` got
+  "proxy refused the connection" when retried on 14 November. The scheme
+  tested is therefore the issue's own description.
 - No `stSoftwareAU` repository named Backpropagation exists (`gh repo list
   stSoftwareAU`). Lamarck's refinement lives in this repository.
 - The synthetic run took 15 s wall in release, on a shared, parallel
@@ -150,8 +153,8 @@ results private. That run decides whether `record_skip/` stays or is removed.
     rejected, next to a positive control on the same files.
   - `verdict_rules`.
   - `neat_core_tag_matches_cargo_toml`.
-- `timeout 1500 ./quality.sh < /dev/null` passed on the head before this
-  summary commit ("All quality checks passed!"). That includes clippy
+- `timeout 1500 ./quality.sh < /dev/null` passed on the head (exit 0, "All
+  quality checks passed!"). That includes clippy
   `-D warnings`, the full test suite (`readme_contract`, `docs_link_targets`),
   rustdoc and codespell.
 - No existing test was edited or removed. The only change to existing source
