@@ -1,4 +1,7 @@
-//! The current Lamarck local refinement, replayed on a fixed weight set.
+//! A simplified random-axis control on a fixed weight set.
+//!
+//! This replays perturbation scales, mirrors and follow-up fractions, not the
+//! production candidate pipeline or its statistical/backprop proposals.
 
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};

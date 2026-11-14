@@ -10,11 +10,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Offline benchmark of budget-aware routing between local weight optimisers
   (Issue #266).** New `lamarck/src/weight_bench/` module and
-  `weight_router_bench` example compare the current refinement, an in-repo
+  `weight_router_bench` example compare a simplified random-axis surrogate, an in-repo
   CMA-ES and a probe-then-route rule under explicit evaluation budgets, on a
   predeclared synthetic suite with calibration and validation seeds kept apart.
   Opt-in and offline: nothing in the optimisation loop calls it and no default
-  changed. On the synthetic suite CMA-ES beat the refinement in 20 of 27 cells,
+  changed. The surrogate does not call the production candidate pipeline.
+  Duplicate trials are refused, failed rows cannot enter paired comparisons,
+  and failed confirmation attempts retain their costs. The AMM driver records
+  process startup/non-zero-exit failures and drains verbose stderr safely.
+  On the synthetic suite CMA-ES beat the refinement in 20 of 27 cells,
   but the router always routed to CMA-ES and never beat it, so it is not ported.
   The AMM method (arXiv 2611.06879) was run as an offline reference arm
   through its authors' pinned implementation (scratch Python environment, no new

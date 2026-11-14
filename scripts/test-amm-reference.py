@@ -50,11 +50,25 @@ class ReferenceProcessTests(unittest.TestCase):
         wrapper = self.root / "fail-before-header"
         wrapper.write_text("#!/usr/bin/env python3\nimport sys\n"
                            "print('deliberate header failure', file=sys.stderr)\n"
+                           "print('wrapper: request could not finish', file=sys.stderr)\n"
                            "sys.exit(9)\n")
         wrapper.chmod(0o700)
         row = driver.run_one((str(wrapper), self.manifest, self.request))
         self.assertIn("no header from server: deliberate header failure", row["error"])
         self.assertEqual(row["evaluationsUsed"], 0)
+
+    def test_verbose_server_does_not_block_objective_replies(self):
+        wrapper = self.root / "verbose-server"
+        wrapper.write_text(
+            "#!/usr/bin/env python3\nimport subprocess, sys\n"
+            "sys.stderr.write('diagnostic padding ' * 65536)\nsys.stderr.flush()\n"
+            f"subprocess.run([{json.dumps(self.bench)}, *sys.argv[1:]], check=True)\n"
+        )
+        wrapper.chmod(0o700)
+        row = driver.run_one((str(wrapper), self.manifest, self.request))
+        self.assertIsNone(row["error"])
+        self.assertEqual(row["confirmationEvaluations"], 5)
+        self.assertLessEqual(row["normalisedScreeningLoss"], 1.0)
 
     def test_nonzero_exit_after_real_row_keeps_costs_and_marks_failure(self):
         wrapper = self.root / "fail-after-row"

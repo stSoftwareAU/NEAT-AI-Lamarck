@@ -2,14 +2,15 @@
 
 **Status: opt-in offline experiment.** Nothing in the optimisation loop calls
 this code: it runs only when the `weight_router_bench` example (or a test)
-drives it, so ordinary runs are unchanged. No default was changed and nothing
-was ported. The synthetic suite has been run and is reported below; the
+drives it, so ordinary runs are unchanged. No default was changed; these Rust arms are offline research code, not
+production integrations. The synthetic suite has been run and is reported below; the
 **representative run on the private production creature and corpus has not been
 made**. AMM (arXiv 2611.06879) is **not ported and not reimplemented**. It was
 run as an offline reference arm through its authors' implementation and lost in
-all 27 cells (see [AMM reference results](#amm-reference-results)). The arXiv
-page itself could not be fetched from the build sandbox (see
-[Outstanding](#outstanding)).
+all 27 cells (see [AMM reference results](#amm-reference-results)). The full method has now been read and pinned to
+[arXiv:2611.06879v1](https://arxiv.org/pdf/2611.06879v1). The refinement control
+is a simplified surrogate, **not the production candidate pipeline**; the
+reported margins do not establish superiority over current Lamarck refinement.
 
 The code is [`lamarck/src/weight_bench/`](../lamarck/src/weight_bench/mod.rs),
 the driver is
@@ -19,8 +20,9 @@ and the committed evidence is in
 
 ## Question and hypothesis
 
-Lamarck's local weight refinement spends a small evaluation budget on random
-axis moves. Is a covariance-adapting optimiser (CMA-ES) a better use of the same
+The benchmark's simplified refinement control spends its evaluation budget on
+random axis moves. Production Lamarck also uses statistics, backpropagation,
+focus selection and candidate filtering; this control does not reproduce them. Is a covariance-adapting optimiser (CMA-ES) a better use of the same
 budget, and can a cheap rule that probes the landscape and routes by budget and
 smoothness do at least as well as either fixed choice?
 
@@ -33,8 +35,8 @@ alone.
 
 | Arm | What it is |
 |-----|------------|
-| `lamarck-refine` | The current refinement replayed on a fixed weight set. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), tries the mirrored pair `x ± delta` as `mirror.rs` does, and accepts the better one only if it strictly improves. After an accept it probes the #219 follow-up `STEP_FRACTIONS` (`[0.5, -0.5, 1.0]`, from `followup.rs`) along the winning move and takes the best strict improvement. |
-| `cma-es` | Full-covariance (mu/mu_w, lambda)-CMA-ES, written in-repo with no third-party dependency. Strategy parameters are Hansen's tutorial defaults (arXiv:1604.00772); the eigendecomposition is a cyclic Jacobi method. Initial step size `CMA_SIGMA0 = 0.05`, deliberately equal to the refinement's step scale so neither arm starts with a larger search radius. |
+| `lamarck-refine` | A simplified random-axis surrogate on a fixed weight set, not a call to `generate_candidate_batch`. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), tries the mirrored pair `x ± delta` as `mirror.rs` does, and accepts the better one only if it strictly improves. After an accept it probes the #219 follow-up `STEP_FRACTIONS` (`[0.5, -0.5, 1.0]`, from `followup.rs`) along the winning move and takes the best strict improvement. |
+| `cma-es` | Full-covariance (mu/mu_w, lambda)-CMA-ES, written in-repo with no third-party dependency. Strategy parameters are Hansen's tutorial defaults (arXiv:1604.00772); the eigendecomposition is a cyclic Jacobi method. Initial per-coordinate standard deviation `CMA_SIGMA0 = 0.05`. This equals the surrogate's uniform half-width numerically, but CMA-ES moves all coordinates and the search radii are not matched. |
 | `router` | Spends `2 * probe_axes + 1` evaluations probing the landscape, then runs `lamarck-refine` or `cma-es` on the remaining budget. The probe is charged to the **same** budget. The chosen arm re-evaluates the start, one further counted evaluation. |
 | AMM (reference only) | Adaptive Multi Mode, run offline through its authors' reference implementation, not reimplemented here and not ported. It needs a known budget and a finite box, spends a counted part of the budget on online probes and routes the rest among several engines. See [AMM reference](#amm-reference). |
 
@@ -66,7 +68,7 @@ the manifest it used to `manifest.json` (the committed copy is
 * **Budgets.** 10D, 30D and 100D evaluations (`ALLOWED_BUDGET_MULTIPLES`).
 * **Seeds.** Calibration seeds 1 to 8 choose the router rule; validation seeds
   1001 to 1012 are untouched by calibration (the manifest is rejected if the two
-  overlap). Each validation seed runs all three arms on the same problem, so
+  overlap or any cell/seed identifier is duplicated). Each validation seed runs all three arms on the same problem, so
   differences are paired.
 * **Landscape probe** (`probes.rs`). Up to `ROUTER_PROBE_AXES = 8` evenly spaced
   axes, each evaluated at `x0 ± 0.05 e_i` (`2 x 8 + 1 = 17` evaluations). An
@@ -92,7 +94,8 @@ the manifest it used to `manifest.json` (the committed copy is
   the held-out mean difference is at most zero. It is `-worse` iff the interval's
   lower bound is above zero. Otherwise the cell is `inconclusive`. A run that
   fails is recorded with its error and counted in coverage. In validation it is
-  dropped from that pair (counted under `failures`); in calibration it counts as
+  dropped from that pair even if it retained finite metrics (counted under
+  `failures`); in calibration it counts as
   1.0, no improvement. This run had none.
 * **Compute limits.** Each run's evaluation budget is enforced by
   `BudgetedObjective`, which refuses (fails loud with `BudgetExhausted`) any
@@ -100,7 +103,7 @@ the manifest it used to `manifest.json` (the committed copy is
 * **Cost accounting.** Total evaluations include preparation (145 per problem,
   counted once per problem built), the calibration probe passes, the router's
   17 probe evaluations per run and 5 confirmation evaluations per successful run
-  (`CONFIRMATION_EVALUATIONS`): the start on the screening records, the start
+  (`CONFIRMATION_EVALUATIONS`; failed confirmation attempts count too): the start on the screening records, the start
   and the best point on the full records, and the start and the best point on the
   held-out records. The probe and the start re-evaluation come out of the
   router's budget. Each AMM serve process rebuilds its problem, so the AMM
@@ -108,21 +111,33 @@ the manifest it used to `manifest.json` (the committed copy is
 
 ## AMM reference
 
-The paper is "Adaptive Multi Mode: Budget-Aware Routing of Optimizers By Online
-Landscape Probes", Benjamin Jacob Bodner, arXiv 2611.06879 (submitted 4 Nov
-2026). The arXiv page could not be fetched from the sandbox ("proxy refused the
-connection"); the title and abstract came from web search. The method is
-therefore pinned through its authors' reference implementation rather than the
-PDF: `BjBodner/amm-optimizer` (Apache-2.0), commit
-`74d39b4f7988a1f1aa8b40a2a0c3ee547f251107`, version 0.7.0, default
-configuration preset `c46`, the configuration frozen for the paper (config hash
-`2153948ebed51150`, checked at start-up by the driver). AMM spends a counted part
-of the budget on online probes (curvature, plateau, separability, kink, basin,
-fractal) and routes the rest among quasi-Newton (SLSQP, L-BFGS-B), trust-region
-(COBYQA), coordinate, multistart (MLSL) and population (CMA-ES family, ATM
-sampler) engines. It needs a known budget and a finite box. Its authors
-developed and measured it on COCO/bbob at D 2 to 40 and budgets 10 to 1000 x D,
-so D=100 is extrapolation for AMM as well.
+The full method is pinned to [arXiv:2611.06879v1](https://arxiv.org/pdf/2611.06879v1)
+(submitted 4 November 2026): Section 3, Algorithms 1–2, Tables 2 and 6,
+Appendices A–B and Section 6 were read. It specifies preset `c46`, documents
+probe defaults and validity ranges, and requires the harness to stop evaluations
+at the budget. Its probes depend on the box width; the local router here uses
+different plateau/kink tests and is not AMM. The tested dimension range ends at
+40, so D=100 remains extrapolation. These are constraints on reproduction, not
+evidence of transfer to neural weight search.
+
+The paper identifies release `v0.3.0`, resolved with `gh api` to commit
+`c4f0ab160aae912311328145aa5a426b26a06b26`. Its source tarball SHA-256 is
+`c3435857f04aa9a8c9c18519924469ad00bb67ce836da47aedff2ec990493187`.
+The existing driver keeps `BjBodner/amm-optimizer` (Apache-2.0) at commit
+`74d39b4f7988a1f1aa8b40a2a0c3ee547f251107`, release 0.7.0. Both releases give
+`c46` config hash `2153948ebed51150`. The pinned release's
+[`FREEZE_2026-10-22.md`](https://github.com/BjBodner/amm-optimizer/blob/74d39b4f7988a1f1aa8b40a2a0c3ee547f251107/docs/FREEZE_2026-10-22.md)
+and `DEVIATIONS.md` describe preservation of the frozen configuration; a
+matching config hash alone is not a behavioural proof.
+
+The offline compatibility check is `scripts/check-amm-method.py`: it uses the
+existing driver and real Rust objective server, one validation seed (1001),
+three families, three dimensions and three budgets. It explicitly supplies
+`c46` and converts `SeedSequence` to its first 32-bit word so both public APIs
+receive the same seed and configuration. This checks completed RunRows, not
+every evaluation trace or every AMM route. The source/dependency pins and
+observed result are recorded in
+[`method-check.json`](evidence/weight-router/method-check.json).
 
 No dependency is added to the repository. AMM runs in a scratch Python 3.13
 environment built by
@@ -218,9 +233,9 @@ paired validation seeds each):
 
 | Comparison | First arm better | First arm worse | Inconclusive |
 |------------|-----------------:|----------------:|-------------:|
-| CMA-ES vs current refinement | 20 | 1 | 6 |
+| CMA-ES vs random-axis surrogate | 20 | 1 | 6 |
 | Router vs CMA-ES | 0 | 13 | 14 |
-| Router vs current refinement | 19 | 0 | 8 |
+| Router vs random-axis surrogate | 19 | 0 | 8 |
 
 Per cell, differences in normalised screening loss (final over start); negative
 means the first arm is better. The mean and interval are CMA-ES minus refinement
@@ -259,7 +274,7 @@ and the last two columns are the router verdicts.
 
 ## Findings
 
-1. **CMA-ES beat the current refinement in 20 of 27 synthetic cells**, by the
+1. **CMA-ES beat the random-axis surrogate in 20 of 27 synthetic cells**, by the
    most at 10D (mean normalised-loss reduction of about 0.05 to 0.17, mostly
    0.09 to 0.17), with the held-out confirmation agreeing in sign in most cells.
    This is a hypothesis for the representative run. It is **not** evidence of a
@@ -268,11 +283,12 @@ and the last two columns are the router verdicts.
 2. **Negative finding: the router never beat CMA-ES alone.** It was worse in 13
    cells and inconclusive in 14. With the calibrated rule it routed every
    validation run to CMA-ES, so it reduces to CMA-ES plus a 17-evaluation probe
-   charge, which is why it cannot win. On this suite the landscape probes did
+   charge. These runs did not show an advantage for that charge. On this suite the landscape probes did
    not discriminate between families. Its wins over the refinement (19 cells)
    are CMA-ES's wins. Per the issue, the router and probes are therefore **not
-   ported** to the production loop. If the representative run repeats this, the
-   router and probe code should be removed rather than maintained.
+   integrated** into the production loop. Their offline code is retained for
+   reproducing the archived comparison; a final retention decision is still
+   outstanding alongside the representative comparison.
 3. **The CMA-ES margin shrinks with budget and is not uniform.** At 30D the
    margins are smaller and four cells are inconclusive (tanh D=40, relu D=100,
    hard-tanh D=40 and D=100). The one `cma-es-worse` cell is tanh, D=100, 30D
@@ -325,8 +341,9 @@ validation seeds, and AMM's held-out loss:
 
 Interpretation (a negative finding, stated carefully). On this suite, under the
 predeclared box, AMM as published is a poor fit for local weight refinement from
-a good incumbent. At 10D it barely improves on the start (0.70 to 0.95), and from
-30D to 100D it hardly improves further while the local arms do. A likely reason,
+a good incumbent. At 10D its median final/start loss is 0.70 to 0.95; the 30D and 100D
+results are lower but trail the other arms. This is a result for the declared
+box and surrogate baseline. A likely reason,
 offered as a **hypothesis, not a finding**: AMM is a box-global method whose
 probes and engines scale to the box, here ±0.5 around the start, whereas the
 local arms take steps of 0.05. A box-size sensitivity sweep was **not** run,
@@ -335,17 +352,74 @@ because choosing a box after seeing these results would be post-hoc.
 Consequence: nothing from AMM is ported, its probes do not justify a port and,
 per the issue, the in-repo router stays unported too. No default changed. The
 synthetic suite does not demonstrate any NEAT-AI benefit either way; the
-representative run on the private corpus remains an owner step.
+representative run on the private corpus remains unperformed.
+
+## Controls and remaining experiment
+
+Inspection found that `refine.rs` reuses two production constants, but manually
+recreates mirrors and follow-up steps. It does not call `generate_candidate_batch`,
+`mirror_candidate` or `FollowUpPlan`, nor use the production focus/statistics/
+learning pipeline. Its uniform half-width and CMA-ES's coordinate standard
+deviation also define different search radii. The archived comparison therefore
+has a **surrogate baseline**, not baseline equivalence. Correcting that baseline
+changes the protocol and needs fresh validation data; the archived results must
+not select parameters for the corrected experiment.
+
+The local input search on 14 November 2026 found GRQ test models, but no
+production model/corpus pair at the campaign's documented paths or in the local
+GRQ checkouts. Test fixtures are not representative evidence. Representative
+coverage is **0 runs**; no private model/data versions have been selected and no
+representative manifest is frozen. Private inputs, their provenance manifests
+and results must remain outside this public checkout.
+
+Before a representative run, freeze the model revision/hash, corpus snapshot
+and ordered-file hashes, screening/full/held-out split, and baseline pipeline
+configuration in its private manifest. Keep D=20/40/100, 10D/30D/100D and the
+three activation families in the public synthetic controls. Keep eight
+calibration and twelve paired validation trials per cell; a revised protocol
+uses fresh validation problems/seeds and untouched validation records. Repeated
+seeds on one fixed corpus measure optimiser randomness, not twelve independent
+models or corpora. Report that sampling limitation with the uncertainty.
+
+The remaining comparison must charge preparation, calibration, probes, search
+and confirmation separately, enforce the per-arm evaluation ceilings, and set
+an overall wall-clock ceiling before launch. Use the declared paired bootstrap
+and held-out criterion as descriptive evidence, then confirm candidates through
+the full authoritative scorer. Corpus mode's `full` is only the loaded half
+minus its held-out tail, **not the entire corpus**. This benchmark exports
+metrics; it does not invoke the authoritative acceptance pipeline or install a
+candidate. Ordinary production acceptance in `run.rs` is unchanged.
+
+## Verification and process failures
+
+```bash
+cargo test --test weight_bench --test weight_bench_reference
+cargo test --lib failed_confirmations_keep_the_calls_already_spent
+# Integration checks, using the pinned scratch Python environment and a built bench:
+env PYTHONPATH=... python3 scripts/test-amm-reference.py --bench BIN
+```
+
+`Manifest::validate` refuses duplicate cells/seeds; `WeightObjective::new`
+requires positive input/output counts and distinct synapse indices. The tests
+also check fixed starting weights, immutable parents, disjoint corpus halves
+and budget refusal. Successful confirmation uses five calls; failures retain
+the attempts already spent. Failed rows are excluded from paired distributions
+even when their metrics are populated, while their costs stay in the totals.
+
+The Python driver records startup failures and non-zero exits after a completed
+row as failures. Server stderr goes to a temporary file so verbose diagnostics
+cannot fill a pipe and block objective replies. A missing final row is labelled
+`costs incomplete`; its zero/default cost fields are not a complete measurement.
+Use a bounded foreground command for offline campaigns, for example
+`timeout 900 env PYTHONPATH=... python3 scripts/amm-reference.py ...`.
+These process checks use the real AMM package and Rust server; they are separate
+from routine feature CI and are not representative optimisation measurements.
 
 ## Outstanding
 
-* **AMM reproduction: done via the reference implementation.** The method is
-  pinned through the authors' code (commit above), not the paper. The arXiv
-  page and PDF still cannot be fetched from the sandbox, so the paper has not
-  been read here and the reference implementation's behaviour is taken as the
-  method. The box-size sensitivity of AMM was not run (it would be post-hoc),
-  so the box-scale explanation above remains a hypothesis.
-* **Representative corpus run (owner step).** Run the corpus mode above on the
-  private production creature and corpus, on a quiet machine. No such run has
-  been made. Private results stay private.
-* **Any port decision** waits on that run. Until then no default changes.
+* The comparison against the actual production refinement pipeline and a frozen
+  representative model/corpus campaign, including full authoritative confirmation.
+* A final decision on removing the offline router/probes; the synthetic result
+  provides no reason to integrate them into production.
+* Box-size sensitivity and search-radius controls, predeclared on fresh data.
+  No production optimiser or default change is supported by the current evidence.

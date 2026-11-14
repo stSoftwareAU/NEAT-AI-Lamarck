@@ -49,7 +49,8 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Reject a manifest that could not support a clean comparison.
+    /// Reject a manifest that could not support a clean comparison, including
+    /// repeated cells or seeds that would count a trial more than once.
     pub fn validate(&self) -> Result<(), BenchError> {
         let bad = |m: String| Err(BenchError::InvalidConfig(m));
         if self.families.is_empty()
@@ -113,7 +114,9 @@ impl Manifest {
 
 fn unique<T: Eq + std::hash::Hash>(field: &str, values: &[T]) -> Result<(), BenchError> {
     if values.iter().collect::<HashSet<_>>().len() != values.len() {
-        return Err(BenchError::InvalidConfig(format!("duplicate entry in {field}")));
+        return Err(BenchError::InvalidConfig(format!(
+            "duplicate entry in {field}"
+        )));
     }
     Ok(())
 }
@@ -176,7 +179,7 @@ pub struct RunRow {
     pub held_out_loss_final: Option<f64>,
     /// Final / start held-out loss.
     pub normalised_held_out_loss: Option<f64>,
-    /// Unbudgeted confirmation evaluations (reported separately).
+    /// Unbudgeted confirmation attempts, including any failed call (reported separately).
     pub confirmation_evaluations: usize,
     /// Whether the dimension is beyond the calibrated range.
     pub extrapolation: bool,
@@ -723,9 +726,8 @@ mod tests {
 
     #[test]
     fn failed_confirmations_keep_the_calls_already_spent() {
-        let (problem, objective) = build_one(
-            &None, Family::Tanh, CorpusRole::Validation, 20, 1001,
-        ).unwrap();
+        let (problem, objective) =
+            build_one(&None, Family::Tanh, CorpusRole::Validation, 20, 1001).unwrap();
         for (invalid_full, expected_calls) in [(true, 2), (false, 4)] {
             let mut failed = problem.clone();
             if invalid_full {
@@ -733,18 +735,37 @@ mod tests {
             } else {
                 failed.held_out.clear();
             }
-            let row = finish_row(&failed, &objective, 10, "validation", Arm::AmmReference, 0, |obj| {
-                obj.eval(&obj.start())?;
-                Ok(Arm::AmmReference)
-            });
+            let row = finish_row(
+                &failed,
+                &objective,
+                10,
+                "validation",
+                Arm::AmmReference,
+                0,
+                |obj| {
+                    obj.eval(&obj.start())?;
+                    Ok(Arm::AmmReference)
+                },
+            );
             assert_eq!(row.evaluations_used, 1);
-            assert_eq!(row.error.as_deref(), Some("evaluation failed: records are empty or not a multiple of the record width"));
+            assert_eq!(
+                row.error.as_deref(),
+                Some("evaluation failed: records are empty or not a multiple of the record width")
+            );
             assert_eq!(row.confirmation_evaluations, expected_calls);
         }
-        let control = finish_row(&problem, &objective, 10, "validation", Arm::AmmReference, 0, |obj| {
-            obj.eval(&obj.start())?;
-            Ok(Arm::AmmReference)
-        });
+        let control = finish_row(
+            &problem,
+            &objective,
+            10,
+            "validation",
+            Arm::AmmReference,
+            0,
+            |obj| {
+                obj.eval(&obj.start())?;
+                Ok(Arm::AmmReference)
+            },
+        );
         assert_eq!(control.error, None);
         assert_eq!(control.confirmation_evaluations, 5);
         assert_eq!(control.normalised_screening_loss, Some(1.0));

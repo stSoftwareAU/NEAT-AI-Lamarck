@@ -6,9 +6,9 @@ use rand::{RngExt, SeedableRng};
 
 use super::objective::{BenchError, BudgetedObjective};
 
-/// Initial step size. It matches the scale of the refinement arm's step
-/// ([`crate::candidates::RANDOM_DELTA_HALF_WIDTH`]) so neither arm starts with
-/// a larger search radius by construction.
+/// Initial per-coordinate standard deviation. Its numeric value equals the
+/// random-axis control's uniform half-width, but the distributions and total
+/// search radii differ: CMA-ES moves every coordinate.
 pub const CMA_SIGMA0: f64 = 0.05;
 
 /// One standard-normal draw by Box-Muller.

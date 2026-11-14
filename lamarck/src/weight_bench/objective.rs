@@ -1,8 +1,8 @@
 //! The weight objective, its evaluation budget, and influential-synapse
 //! selection.
 
-use std::fmt;
 use std::collections::HashSet;
+use std::fmt;
 
 use neat_core::{CreatureExport, compile_creature, mse_sum_batch_packed};
 

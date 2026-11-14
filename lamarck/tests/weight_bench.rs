@@ -8,7 +8,7 @@ use neat_ai_lamarck::weight_bench::suite::{
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, CMA_SIGMA0, CalibrationRow, Manifest, ROUTER_PROBE_AXES,
     RouterRule, WeightObjective, build_problem, calibrate, cma_es, is_extrapolation,
-    lamarck_refine, probe_landscape, route, run_manifest, select_influential,
+    lamarck_refine, probe_landscape, route, run_arm, run_manifest, select_influential,
 };
 
 fn problem(family: Family, seed: u64) -> (Problem, WeightObjective) {
@@ -103,6 +103,25 @@ fn arms_are_deterministic_and_seed_sensitive() {
         assert_eq!(best_of(&o, limit, 5, cma), best_of(&o, limit, 5, cma));
     }
     assert_ne!(best_of(&o, limit, 5, true), best_of(&o, limit, 6, true));
+}
+
+#[test]
+fn arms_share_the_start_without_mutating_the_parent() {
+    let (p, objective) = problem(Family::Tanh, 2);
+    let parent = serde_json::to_value(&p.creature).unwrap();
+    let start = objective.start();
+    let loss = objective.loss(&start).unwrap();
+    let rule = rule(Some(10.0), 1.01);
+    for arm in [Arm::LamarckRefine, Arm::CmaEs, Arm::Router] {
+        let mut budgeted = BudgetedObjective::new(&objective, 200);
+        assert_eq!(budgeted.start(), start);
+        assert_eq!(budgeted.eval(&start).unwrap(), loss);
+        run_arm(&mut budgeted, arm, &rule, 2).unwrap();
+        assert!(budgeted.best().unwrap().0 <= loss);
+        assert_eq!(objective.start(), start);
+        assert_eq!(objective.loss(&start).unwrap(), loss);
+        assert_eq!(serde_json::to_value(&p.creature).unwrap(), parent);
+    }
 }
 
 #[test]
@@ -204,14 +223,22 @@ fn manifest_validation() {
 fn manifest_rejects_duplicate_trial_identifiers() {
     let control = tiny_manifest();
     assert!(control.validate().is_ok());
-    for field in ["families", "dimensions", "budgetMultiples", "calibrationSeeds", "validationSeeds"] {
+    for field in [
+        "families",
+        "dimensions",
+        "budgetMultiples",
+        "calibrationSeeds",
+        "validationSeeds",
+    ] {
         let mut value = serde_json::to_value(&control).unwrap();
         let items = value[field].as_array_mut().unwrap();
         items.push(items[0].clone());
         let manifest: Manifest = serde_json::from_value(value).unwrap();
         assert_eq!(
             manifest.validate(),
-            Err(BenchError::InvalidConfig(format!("duplicate entry in {field}")))
+            Err(BenchError::InvalidConfig(format!(
+                "duplicate entry in {field}"
+            )))
         );
     }
 }
@@ -222,9 +249,10 @@ fn objective_requires_distinct_weights() {
     let selected = p.synapse_indices[0];
     assert!(WeightObjective::new(p.creature.clone(), vec![selected], &p.screening).is_ok());
     assert_eq!(
-        WeightObjective::new(p.creature.clone(), vec![selected, selected], &p.screening)
-            .err(),
-        Some(BenchError::InvalidConfig("synapse indices must be distinct".into()))
+        WeightObjective::new(p.creature.clone(), vec![selected, selected], &p.screening).err(),
+        Some(BenchError::InvalidConfig(
+            "synapse indices must be distinct".into()
+        ))
     );
 }
 
@@ -239,7 +267,9 @@ fn objective_requires_nonzero_record_dimensions() {
         creature.output = output;
         assert_eq!(
             WeightObjective::new(creature, vec![selected], &[1.0]).err(),
-            Some(BenchError::InvalidConfig("creature input and output must both be positive".into()))
+            Some(BenchError::InvalidConfig(
+                "creature input and output must both be positive".into()
+            ))
         );
     }
 }

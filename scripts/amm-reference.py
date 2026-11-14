@@ -72,10 +72,10 @@ def failure(run, why):
 
 
 def stderr_cause(text):
-    """The bench prints `weight_router_bench: <error>` on failure; prefer that line."""
+    """Prefer the named Rust error, otherwise the first diagnostic before summaries."""
     lines = [x.strip() for x in text.splitlines() if x.strip()]
     named = [x for x in lines if x.startswith("weight_router_bench:")]
-    return named[-1] if named else (lines[-1] if lines else "no stderr")
+    return named[-1] if named else (lines[0] if lines else "no stderr")
 
 
 def run_one(args):

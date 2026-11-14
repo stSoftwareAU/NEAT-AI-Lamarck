@@ -23,7 +23,7 @@ pub const CALIBRATION_GRID_NON_SMOOTH: [f64; 4] = [0.25, 0.5, 0.75, 1.01];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Arm {
-    /// The current local refinement.
+    /// The simplified random-axis control; not the production candidate pipeline.
     LamarckRefine,
     /// Full-covariance CMA-ES.
     CmaEs,

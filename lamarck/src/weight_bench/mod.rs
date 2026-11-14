@@ -6,8 +6,8 @@
 //!
 //! It compares three arms on fixed, deterministic screening records:
 //!
-//! - **lamarck-refine** — the current local refinement (random axis deltas,
-//!   antithetic pairs, follow-up probes) replayed on a fixed weight set;
+//! - **lamarck-refine** — a simplified random-axis control (antithetic pairs
+//!   and follow-up fractions), not the production candidate pipeline;
 //! - **cma-es** — a full-covariance (mu/mu_w, lambda)-CMA-ES;
 //! - **router** — a budget-aware rule that spends a few evaluations probing
 //!   the landscape, then hands the remaining budget to one of the two arms.
