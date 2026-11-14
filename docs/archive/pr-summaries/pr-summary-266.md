@@ -6,9 +6,21 @@ process handling; verify the pinned AMM release against the paper's release.
 The production-baseline and representative comparisons remain incomplete.
 Part of #266.
 
+The branch also carries two CI fixes from the #268 branch, unchanged
+(`98e7b28`, `5614dd8`). The Vibe Coder pre-push gate refused every earlier push
+of this branch, and both commits are needed for it to pass. The `quality` job
+in `ci.yml`, `cargo-quality.yml` and the `family-sync` job now install Rust
+through `.github/actions/rust-toolchain`, which wraps the same pinned step. The
+family-sync ShellCheck step falls back to the job's `CANONICAL_PATHS` list
+when that variable is unset, and rule 17 in
+`scripts/check-family-sync-workflow.sh` checks that the two lists match. The
+carried-over CHANGELOG bullet still names Issue #268, word for word, so the
+branch that merges second applies it cleanly.
+
 - [x] Preserve the checkpointed harness and synthetic results.
 - [x] Read and pin the full AMM method; check release compatibility.
 - [x] Correct demonstrated comparison/accounting defects and run validation.
+- [x] Carry over the pre-push gate fixes so the branch can be pushed.
 - [ ] Establish production-baseline equivalence and freeze/run representative inputs.
 - [ ] Complete full authoritative confirmation and the router/probe retirement decision.
 
@@ -31,7 +43,7 @@ Part of #266.
 - The full method in [arXiv:2611.06879v1](https://arxiv.org/pdf/2611.06879v1) was read through the PDF reader: Section 3, Algorithms 1–2, Tables 2/6, Appendices A–B, Section 6 and software availability. The paper identifies `v0.3.0`, resolved to `c4f0ab160aae912311328145aa5a426b26a06b26`.
 - Both `v0.3.0` and pinned `v0.7.0` produced 27 identical completed RunRows on one synthetic validation seed. This is a limited compatibility check, not evidence of representative benefit or identical internal evaluation traces.
 - Local searches found test fixtures but no authorised production model/corpus pair. Representative coverage is zero and its provenance/manifest is not frozen.
-- The generated worker pre-push spec requests `cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version`; the direct probe exits 101 with `error: no such command: +29eef336d9b2848a0b548edc03f92a220660cdb8`. This is an action SHA interpreted as a toolchain. The action's own pinned `action.yml` defaults to `stable`. Hooks/specs and workflows were not changed or bypassed.
+- The worker's pre-push gate blocked earlier pushes in two ways. It read the `dtolnay/rust-toolchain` commit SHA as a toolchain, and `cargo +29eef336… --version` exited 101 with `error: no such command`. It also re-ran the family-sync ShellCheck step without the job's `env:`, where `set -u` stopped on `CANONICAL_PATHS: unbound variable`. The carried-over commits fix both, and no guard was bypassed. The SHA-as-toolchain misreading is a worker defect and is not fixed. Workflow steps that still call the pinned action directly (`ci.yml`'s `validation` job, `auto-format`, `cargo-audit`, `sbom`, `security`) can still trigger it.
 
 ## Evidence
 
@@ -63,7 +75,8 @@ flowchart LR
 
 ## Test Plan
 
-- `timeout 1500 ./quality.sh < /dev/null` passed on the code in `6bf4e46`: shell/workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc. CI is not yet verified.
+- `timeout 1600 ./quality.sh < /dev/null` passed (exit 0, "All quality checks passed!") on `1da2506`, the last code commit: shell/workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc. CI is not yet verified.
+- Carried-over gate fixes: `scripts/test-check-family-sync-workflow.sh` passed, including its two rule-17 negative cases (no fallback, stale fallback), each refused with exit 1. `scripts/check-family-sync-workflow.sh`, `scripts/check-bot-push-action.sh` and `scripts/check-cargo-quality-overlap.sh` passed. The gate step re-run under `env -i … bash --noprofile --norc -eo pipefail`, with no `CANONICAL_PATHS`, exited 0.
 - `cargo test --test weight_bench --test weight_bench_reference` passed: 20 and 11 tests, with one existing debug-mode ignore. The ignored `lamarck/tests/weight_bench.rs::extrapolation_flag_on_rows_for_large_dimension` passed separately with `--release -- --ignored`.
 - Added `lamarck/tests/weight_bench.rs::manifest_rejects_duplicate_trial_identifiers`, `objective_requires_distinct_weights` and `objective_requires_nonzero_record_dimensions`; each rejected the checkpoint implementation before its fix and passes now. `arms_share_the_start_without_mutating_the_parent` pins an existing invariant and was not claimed as a previously failing bug.
 - Added `lamarck/tests/weight_bench_reference.rs::failed_reference_with_completed_metrics_is_excluded_from_pairs`: before the fix it counted six wins instead of five; after the fix it drops the failed sample while retaining its costs.
@@ -77,7 +90,7 @@ flowchart LR
 
 ## Merge verification
 
-- Normal push passed the worker gate (`1 changed-file checks, 0 pre-flight commands`) and reached the remote branch. GitHub CI is not yet verified. The direct toolchain probe failure above is recorded separately; no guard was bypassed.
+- The branch is pushed through the normal guarded `git push`, with no hook or gate bypassed. GitHub CI is not yet verified.
 
 Skipped: the full archived synthetic campaign was not repeated in this run;
 only the compatibility subset was rerun. Representative inputs, production
