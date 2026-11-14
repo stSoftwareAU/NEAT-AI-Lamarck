@@ -1,0 +1,87 @@
+{
+  "paper": {
+    "revision": "2611.06879v1",
+    "url": "https://arxiv.org/pdf/2611.06879v1",
+    "methodRead": [
+      "Section 3",
+      "Algorithms 1-2",
+      "Tables 2 and 6",
+      "Appendices A-B",
+      "Section 6",
+      "Software availability"
+    ],
+    "sourceTag": "v0.3.0",
+    "sourceCommit": "c4f0ab160aae912311328145aa5a426b26a06b26",
+    "sourceTarballSha256": "c3435857f04aa9a8c9c18519924469ad00bb67ce836da47aedff2ec990493187"
+  },
+  "reference": {
+    "version": "0.7.0",
+    "sourceCommit": "74d39b4f7988a1f1aa8b40a2a0c3ee547f251107",
+    "sourceTarballSha256": "9d161338ff40be69c656e436073df6af38311acd1f0d0967dff9abc8f036fe0f",
+    "preset": "c46",
+    "configHashBothVersions": "2153948ebed51150"
+  },
+  "environment": {
+    "python": "3.13.5",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "platform": "Linux x86_64",
+    "blasThreads": 1,
+    "numpyWheelSha256": "6ffa07666f8da0eef81d149934a626d0d95fbd6838432a33e66245423a9062c0",
+    "scipyWheelSha256": "fdaf5ea890a6183d0565f51a61799d67081bd5b1cf03c5f4b3fd3732108625c9"
+  },
+  "compatibilityCheck": {
+    "command": "scripts/check-amm-method.py",
+    "manifest": {
+      "bootstrapResamples": 2000,
+      "bootstrapSeed": 266,
+      "budgetMultiples": [
+        10,
+        30,
+        100
+      ],
+      "calibrationSeeds": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "dimensions": [
+        20,
+        40,
+        100
+      ],
+      "families": [
+        "tanh",
+        "relu",
+        "hard-tanh"
+      ],
+      "validationSeeds": [
+        1001
+      ]
+    },
+    "rowsPerVersion": 27,
+    "failuresPerVersion": 0,
+    "completedRunRowsIdentical": true,
+    "canonicalRowsSha256": "970568ee7ff19fefb5a438cc8de1740faaf474530102f1ed0c92777a035a456e",
+    "canonicalisation": "json.dumps(rows, sort_keys=True, separators=(comma, colon), allow_nan=False), UTF-8",
+    "seedMapping": "int(SeedSequence(arm_seed).generate_state(1)[0]) for both versions",
+    "rustHarnessCodeCheckpoint": "8f77004d1c51738a294d7298a41e25161befd946",
+    "rustHarnessCrateVersion": "0.1.46",
+    "rustHarnessBinarySha256": "c15f7d37151572b772dd13077c4440cf4c7e2a4862f9b6959410052e3b735ab3",
+    "rustc": "1.99.1",
+    "coreTag": "v0.23.4",
+    "extrapolationDimensions": [
+      100
+    ],
+    "limitation": "One synthetic seed; compares final rows, not evaluation traces or all AMM routes; no representative evidence."
+  },
+  "representativeCoverage": {
+    "completedRuns": 0,
+    "reason": "No authorised production model/corpus pair located in this environment."
+  }
+}

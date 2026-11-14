@@ -39,6 +39,7 @@ pub mod strategy_priors;
 pub mod structural;
 pub mod tags;
 pub mod validate;
+pub mod weight_bench;
 pub mod width;
 
 pub use analysis::{
