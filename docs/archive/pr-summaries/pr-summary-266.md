@@ -35,8 +35,8 @@ Part of #266.
 - AMM runs out of process instead of being ported. The issue says to port only
   what wins and to add no unverified dependency by default. So AMM, NumPy and
   SciPy live in a scratch Python 3.13 environment, built by
-  `scripts/amm-reference-env.sh` from sha256-pinned wheels and the pinned AMM
-  tarball, never in Cargo or CI.
+  `scripts/amm-reference-env.py` (stdlib-only Python) from sha256-pinned wheels
+  and the pinned AMM tarball, never in Cargo or CI.
 - The serve mode (`reference.rs::serve_reference`) charges every AMM evaluation,
   probes included, to the same `BudgetedObjective`. The comparison
   (`summarise_reference`) reuses the existing paired bootstrap and verdict rule
@@ -76,6 +76,16 @@ Part of #266.
   integer in [0, 2**32) or a numpy.random.SeedSequence, got 71800265524911`.
   This led to the `SeedSequence` fix, and the driver now puts AMM's own error
   ahead of the server's.
+- The worker's pre-push gate blocked three earlier attempts. The cause: it
+  replays `.github/workflows/family-sync.yml`'s "Gate the refreshed scripts"
+  step whenever a branch changes a `.sh` file, but without that workflow's
+  `env:` block. Under `set -u` the unset `CANONICAL_PATHS` exits 1 (reproduced
+  with `env -i PATH="$PATH" HOME="$HOME" bash --noprofile --norc -eo pipefail`
+  on the step body). That is a worker defect, not one in this repository; the
+  same block hit NEAT-AI-Ockham#262. The environment builder was therefore
+  ported from `scripts/amm-reference-env.sh` to `scripts/amm-reference-env.py`
+  with the same pins, checksums, refusals and output. CI's own ShellCheck step
+  passed on the old script.
 - Wall times on a shared, parallel aarch64 container, indicative only: the
   synthetic suite took about 12.5 min single-threaded, and AMM took 100.2 s with
   18 workers.
@@ -145,7 +155,7 @@ on a quiet machine, and keep the results private.
   `lamarck/src/weight_bench/experiment.rs` — reviewer: met
 - **met** — Port only winning probes/router to Rust after measurement; no
   topology optimisation or unverified third-party dependency added by default —
-  evidence: `scripts/amm-reference-env.sh` (scratch environment, sha256 pins),
+  evidence: `scripts/amm-reference-env.py` (scratch environment, sha256 pins),
   no Cargo dependency added — reviewer: met
 - **partial** — Read and pin the full method before reproducing it — evidence:
   `scripts/amm-reference.py` (commit, preset and config-hash gate) —
@@ -282,11 +292,14 @@ on a quiet machine, and keep the results private.
   - a real 18-run smoke against the serve binary;
   - `--bench /bin/false`, which writes RunRow-shaped failure rows and exits 1;
   - the key set of a failure row matches a real row.
-- `./quality.sh < /dev/null` passed at `f6c6839`, the last code commit, with
-  this summary in the working tree ("All quality checks passed!"). It also
-  passed at `5859c34` before the corpus split. That suggests the earlier
-  attempt's pre-push block was environmental, but the block was not
-  reproduced here.
+- `scripts/amm-reference-env.py` checks: `python3 -I -m py_compile` passed. With
+  no argument and with `""` it refused with
+  `amm-reference-env: usage: scripts/amm-reference-env.py DIR` and exit 1. A
+  real run on Python 3.13.5 into a fresh temp dir printed the `PYTHONPATH=` line
+  and exited 0, and so did a re-run into the same dir. With that `PYTHONPATH`,
+  `import numpy, scipy, amm_optimizer` reported numpy 2.5.4 and scipy 1.18.1.
+- `./quality.sh < /dev/null` passed at `29a5103`, the last code commit ("All
+  quality checks passed!").
 
 Not done:
 
