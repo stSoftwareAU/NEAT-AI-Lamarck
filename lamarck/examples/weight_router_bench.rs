@@ -18,13 +18,33 @@
 //! synthetic suite. The first `--screening-records` (default 256) records
 //! screen, the last `--held-out-records` (default 512) of the first
 //! `--max-records` (default 4096) are held out, and the rest are the full set.
+//!
+//! AMM reference arm (offline; the optimiser itself is `scripts/amm-reference.py`):
+//!
+//! ```text
+//! weight_router_bench --serve-reference --family F --dimension D --seed S --budget-multiple K
+//!     [--manifest FILE | --smoke | --creature ... --training-data ...]
+//! weight_router_bench OUT_DIR --compare-reference AMM_ROWS_JSONL
+//! ```
+//!
+//! `--serve-reference` serves one validation run over stdin/stdout (a JSON
+//! header line, then one `{"loss":v}` reply per point sent; see
+//! `weight_bench::reference`), using the manifest the other flags select, and
+//! exits non-zero if the run recorded an error. `--compare-reference` reads
+//! `OUT_DIR/manifest.json` and `OUT_DIR/runs.jsonl` from an earlier run plus
+//! the AMM rows (one `RunRow` JSON per line), writes
+//! `OUT_DIR/reference-summary.json` and prints one verdict line per cell.
 
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use neat_ai_lamarck::weight_bench::suite::{CorpusSpec, Family};
-use neat_ai_lamarck::weight_bench::{Manifest, predeclared_manifest, run_manifest};
+use neat_ai_lamarck::weight_bench::{
+    Manifest, ReferenceRequest, RunRow, predeclared_manifest, run_manifest, serve_reference,
+    summarise_reference,
+};
 use serde_json::json;
 
 fn smoke_manifest() -> Manifest {
@@ -45,6 +65,71 @@ fn count(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<usize, S
     text.parse().map_err(|e| format!("{flag} {text}: {e}"))
 }
 
+fn read_rows(path: &Path) -> Result<Vec<RunRow>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row =
+            serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", path.display(), i + 1))?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn print_cells(cells: &[neat_ai_lamarck::weight_bench::CellSummary]) {
+    for cell in cells {
+        let verdicts: Vec<String> = cell
+            .comparisons
+            .iter()
+            .map(|c| {
+                format!(
+                    "{:?}-{:?}: {} (screening mean {:?})",
+                    c.first, c.second, c.verdict, c.screening.mean
+                )
+            })
+            .collect();
+        println!(
+            "{:?} D={} x{}{}: {}",
+            cell.family,
+            cell.dimension,
+            cell.budget_multiple,
+            if cell.extrapolation {
+                " [extrapolation]"
+            } else {
+                ""
+            },
+            verdicts.join("; ")
+        );
+    }
+}
+
+fn compare_reference(out_dir: &Path, amm_rows: &Path) -> Result<(), String> {
+    let manifest_path = out_dir.join("manifest.json");
+    let text = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    let manifest: Manifest =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    let runs = read_rows(&out_dir.join("runs.jsonl"))?;
+    let reference = read_rows(amm_rows)?;
+    let results = summarise_reference(&manifest, &runs, &reference).map_err(|e| e.to_string())?;
+    let path = out_dir.join("reference-summary.json");
+    let pretty = serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?;
+    fs::write(&path, pretty).map_err(|e| format!("{}: {e}", path.display()))?;
+    print_cells(&results.cells);
+    println!(
+        "reference runs {}/{} completed ({} failed); {} evaluations; wrote {}",
+        results.coverage.completed_runs,
+        results.coverage.planned_runs,
+        results.coverage.failed_runs,
+        results.total_evaluations,
+        path.display()
+    );
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let mut out_dir = PathBuf::from("weight-router-bench");
     let mut manifest: Option<Manifest> = None;
@@ -52,10 +137,35 @@ fn run() -> Result<(), String> {
     let mut creature: Option<PathBuf> = None;
     let mut training_data: Option<PathBuf> = None;
     let (mut screening, mut held_out, mut max_records) = (256usize, 512usize, 4096usize);
+    let mut serve = false;
+    let mut family: Option<Family> = None;
+    let mut dimension: Option<usize> = None;
+    let mut seed: Option<u64> = None;
+    let mut budget_multiple: Option<usize> = None;
+    let mut compare: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--smoke" => smoke = true,
+            "--serve-reference" => serve = true,
+            "--family" => {
+                let text = args.next().ok_or("--family needs a name")?;
+                family = Some(
+                    serde_json::from_value(serde_json::Value::String(text.clone()))
+                        .map_err(|e| format!("--family {text}: {e}"))?,
+                );
+            }
+            "--dimension" => dimension = Some(count(&mut args, "--dimension")?),
+            "--seed" => {
+                let text = args.next().ok_or("--seed needs a number")?;
+                seed = Some(text.parse().map_err(|e| format!("--seed {text}: {e}"))?);
+            }
+            "--budget-multiple" => budget_multiple = Some(count(&mut args, "--budget-multiple")?),
+            "--compare-reference" => {
+                compare = Some(PathBuf::from(
+                    args.next().ok_or("--compare-reference needs a file")?,
+                ));
+            }
             "--manifest" => {
                 let path = args.next().ok_or("--manifest needs a file")?;
                 let text = fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
@@ -97,6 +207,30 @@ fn run() -> Result<(), String> {
         _ => return Err("--creature and --training-data must be given together".into()),
     }
 
+    if serve && compare.is_some() {
+        return Err("--serve-reference and --compare-reference are mutually exclusive".into());
+    }
+    if let Some(amm_rows) = compare {
+        return compare_reference(&out_dir, &amm_rows);
+    }
+    if serve {
+        let request = ReferenceRequest {
+            family: family.ok_or("--serve-reference needs --family")?,
+            dimension: dimension.ok_or("--serve-reference needs --dimension")?,
+            seed: seed.ok_or("--serve-reference needs --seed")?,
+            budget_multiple: budget_multiple.ok_or("--serve-reference needs --budget-multiple")?,
+        };
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let row = serve_reference(&manifest, &request, stdin.lock(), stdout.lock())
+            .map_err(|e| e.to_string())?;
+        std::io::stdout().flush().map_err(|e| e.to_string())?;
+        return match row.error {
+            Some(e) => Err(format!("reference run failed: {e}")),
+            None => Ok(()),
+        };
+    }
+
     let results = run_manifest(&manifest).map_err(|e| e.to_string())?;
 
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
@@ -121,30 +255,7 @@ fn run() -> Result<(), String> {
     });
     write("summary.json", pretty(&summary)?)?;
 
-    for cell in &results.cells {
-        let verdicts: Vec<String> = cell
-            .comparisons
-            .iter()
-            .map(|c| {
-                format!(
-                    "{:?}-{:?}: {} (screening mean {:?})",
-                    c.first, c.second, c.verdict, c.screening.mean
-                )
-            })
-            .collect();
-        println!(
-            "{:?} D={} x{}{}: {}",
-            cell.family,
-            cell.dimension,
-            cell.budget_multiple,
-            if cell.extrapolation {
-                " [extrapolation]"
-            } else {
-                ""
-            },
-            verdicts.join("; ")
-        );
-    }
+    print_cells(&results.cells);
     println!(
         "rule {:?}; runs {}/{} completed ({} failed); {} evaluations; wrote {}",
         results.calibrated_rule,

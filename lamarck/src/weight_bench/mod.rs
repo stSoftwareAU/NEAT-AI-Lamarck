@@ -13,8 +13,13 @@
 //!   the landscape, then hands the remaining budget to one of the two arms.
 //!
 //! AMM, the method of the paper arXiv 2611.06879, is deliberately NOT
-//! implemented: its method could not be retrieved and pinned, so comparing
-//! against a guess would be misleading.
+//! implemented in Rust: its method could not be retrieved and pinned, so
+//! comparing against a guess would be misleading. Instead the published
+//! optimiser runs offline (`scripts/amm-reference.py`) as a fourth,
+//! **amm-reference** arm. [`reference::serve_reference`] hands it the same
+//! budgeted objective over a line protocol, and
+//! [`reference::summarise_reference`] compares its rows with the in-process
+//! arms using the same paired bootstrap. It only ever runs on validation seeds.
 //!
 //! Every evaluation is counted against an explicit [`Budget`]; exceeding it is
 //! an error ([`BenchError::BudgetExhausted`]), never a silent value.
@@ -23,6 +28,7 @@ pub mod cmaes;
 pub mod experiment;
 pub mod objective;
 pub mod probes;
+pub mod reference;
 pub mod refine;
 pub mod router;
 pub mod stats;
@@ -35,6 +41,10 @@ pub use experiment::{
 };
 pub use objective::{BenchError, Budget, BudgetedObjective, WeightObjective, select_influential};
 pub use probes::{LandscapeProbe, probe_landscape};
+pub use reference::{
+    REFERENCE_BOX_HALF_WIDTH, ReferenceRequest, ReferenceResults, serve_reference,
+    summarise_reference,
+};
 pub use refine::lamarck_refine;
 pub use router::{
     Arm, CALIBRATION_GRID_MULTIPLES, CALIBRATION_GRID_NON_SMOOTH, CalibrationRow,

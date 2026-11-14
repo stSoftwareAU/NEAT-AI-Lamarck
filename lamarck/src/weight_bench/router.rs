@@ -29,6 +29,8 @@ pub enum Arm {
     CmaEs,
     /// Probe, then route to one of the other two.
     Router,
+    /// The published AMM optimiser, run offline through `scripts/amm-reference.py`; never run in-process.
+    AmmReference,
 }
 
 /// Thresholds deciding when the router picks CMA-ES.
@@ -64,6 +66,7 @@ pub fn arm_seed(arm: Arm, problem_seed: u64) -> u64 {
             Arm::LamarckRefine => 0x5245_4649_4e45,
             Arm::CmaEs => 0x434d_4145_5300,
             Arm::Router => 0x524f_5554_4552,
+            Arm::AmmReference => 0x414d_4d52_4546,
         }
 }
 
@@ -98,6 +101,10 @@ pub fn run_arm(
             Ok(arm)
         }
         Arm::Router => run_router(obj, rule, problem_seed),
+        Arm::AmmReference => Err(BenchError::InvalidConfig(
+            "the AMM reference arm runs offline via the serve mode (--serve-reference), not in-process"
+                .into(),
+        )),
     }
 }
 

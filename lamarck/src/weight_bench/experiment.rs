@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use neat_core::CreatureExport;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
@@ -231,7 +232,9 @@ pub struct CellSummary {
     pub budget_multiple: usize,
     /// Whether the dimension is beyond the calibrated range.
     pub extrapolation: bool,
-    /// Router vs refine, router vs CMA-ES, CMA-ES vs refine.
+    /// One paired comparison per arm pair requested of the summary, in the
+    /// order requested (the main experiment: router vs refine, router vs
+    /// CMA-ES, CMA-ES vs refine).
     pub comparisons: Vec<Comparison>,
 }
 
@@ -299,9 +302,32 @@ fn run_row(
     arm: Arm,
     rule: &RouterRule,
 ) -> RunRow {
+    finish_row(
+        problem,
+        objective,
+        multiple,
+        phase,
+        arm,
+        rule.probe_axes,
+        |budgeted| run_arm(budgeted, arm, rule, problem.spec.seed),
+    )
+}
+
+/// Run `optimise` on a fresh budget, then do the confirmation passes and build
+/// the row. A failure is recorded on the row, never propagated. `probe_axes`
+/// only matters for [`Arm::Router`], whose probe cost is reported.
+pub(super) fn finish_row(
+    problem: &Problem,
+    objective: &WeightObjective,
+    multiple: usize,
+    phase: &str,
+    arm: Arm,
+    probe_axes: usize,
+    optimise: impl FnOnce(&mut BudgetedObjective<'_>) -> Result<Arm, BenchError>,
+) -> RunRow {
     let mut row = blank_row(problem, multiple, phase, arm);
     let mut budgeted = BudgetedObjective::new(objective, row.budget);
-    let outcome = run_arm(&mut budgeted, arm, rule, problem.spec.seed);
+    let outcome = optimise(&mut budgeted);
     row.evaluations_used = budgeted.used();
     let result = outcome.and_then(|routed| {
         let (best_loss, best_x) = budgeted
@@ -330,7 +356,7 @@ fn run_row(
         Ok((routed, start, best, full_s, full_f, held_s, held_f)) => {
             if arm == Arm::Router {
                 row.routed_to = Some(routed);
-                row.probe_evaluations = 2 * problem.spec.dimension.min(rule.probe_axes) + 1;
+                row.probe_evaluations = 2 * problem.spec.dimension.min(probe_axes) + 1;
             }
             row.start_screening_loss = Some(start);
             row.final_screening_loss = Some(best);
@@ -347,34 +373,53 @@ fn run_row(
     row
 }
 
+/// A manifest's corpus, loaded once (`None` for the synthetic suite).
+pub(super) type LoadedCorpus<'a> = Option<(&'a CorpusSpec, (CreatureExport, Vec<f32>))>;
+
+/// Load the manifest's corpus, if it declares one.
+pub(super) fn load_manifest_corpus(m: &Manifest) -> Result<LoadedCorpus<'_>, BenchError> {
+    match &m.corpus {
+        Some(spec) => Ok(Some((spec, load_corpus(spec)?))),
+        None => Ok(None),
+    }
+}
+
+/// Build one (problem, objective) pair exactly as the experiment does.
+pub(super) fn build_one(
+    corpus: &LoadedCorpus<'_>,
+    family: Family,
+    dimension: usize,
+    seed: u64,
+) -> Result<(Problem, WeightObjective), BenchError> {
+    let problem = match corpus {
+        Some((spec, (creature, packed))) => {
+            problem_from_corpus(creature, packed, spec, dimension, seed)?
+        }
+        None => build_problem(&ProblemSpec {
+            family,
+            dimension,
+            seed,
+        })?,
+    };
+    let objective = WeightObjective::new(
+        problem.creature.clone(),
+        problem.synapse_indices.clone(),
+        &problem.screening,
+    )?;
+    Ok((problem, objective))
+}
+
 /// Visit every (family, dimension, seed) problem once, in manifest order.
 fn problems(
     m: &Manifest,
     seeds: &[u64],
     mut visit: impl FnMut(&Problem, &WeightObjective) -> Result<(), BenchError>,
 ) -> Result<(), BenchError> {
-    let corpus = match &m.corpus {
-        Some(spec) => Some((spec, load_corpus(spec)?)),
-        None => None,
-    };
+    let corpus = load_manifest_corpus(m)?;
     for &family in &m.families {
         for &dimension in &m.dimensions {
             for &seed in seeds {
-                let problem = match &corpus {
-                    Some((spec, (creature, packed))) => {
-                        problem_from_corpus(creature, packed, spec, dimension, seed)?
-                    }
-                    None => build_problem(&ProblemSpec {
-                        family,
-                        dimension,
-                        seed,
-                    })?,
-                };
-                let objective = WeightObjective::new(
-                    problem.creature.clone(),
-                    problem.synapse_indices.clone(),
-                    &problem.screening,
-                )?;
+                let (problem, objective) = build_one(&corpus, family, dimension, seed)?;
                 visit(&problem, &objective)?;
             }
         }
@@ -496,6 +541,7 @@ fn arm_name(arm: Arm) -> &'static str {
         Arm::LamarckRefine => "lamarck-refine",
         Arm::CmaEs => "cma-es",
         Arm::Router => "router",
+        Arm::AmmReference => "amm-reference",
     }
 }
 
@@ -510,12 +556,13 @@ fn verdict(first: Arm, screening: &MetricSummary, held_out: &MetricSummary) -> S
     }
 }
 
-fn summarise_cells(m: &Manifest, runs: &[RunRow], rng: &mut StdRng) -> Vec<CellSummary> {
-    let pairs = [
-        (Arm::Router, Arm::LamarckRefine),
-        (Arm::Router, Arm::CmaEs),
-        (Arm::CmaEs, Arm::LamarckRefine),
-    ];
+/// One paired comparison per `pairs` entry, for every validation cell.
+pub(super) fn summarise_cells(
+    m: &Manifest,
+    runs: &[RunRow],
+    pairs: &[(Arm, Arm)],
+    rng: &mut StdRng,
+) -> Vec<CellSummary> {
     let mut cells = Vec::new();
     for &family in &m.families {
         for &dimension in &m.dimensions {
@@ -605,7 +652,12 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
             .map(|r| r.evaluations_used + r.preparation_evaluations + r.confirmation_evaluations)
             .sum::<usize>();
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
-    let cells = summarise_cells(m, &runs, &mut rng);
+    let pairs = [
+        (Arm::Router, Arm::LamarckRefine),
+        (Arm::Router, Arm::CmaEs),
+        (Arm::CmaEs, Arm::LamarckRefine),
+    ];
+    let cells = summarise_cells(m, &runs, &pairs, &mut rng);
     Ok(ExperimentResults {
         format_version: 1,
         manifest: m.clone(),
