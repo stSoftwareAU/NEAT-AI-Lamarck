@@ -1,6 +1,5 @@
 # Install the Rust toolchain for the jobs that run `cargo clippy` or `cargo test`:
-# the `quality` job in `ci.yml`, `cargo-quality.yml`, and the `family-sync` job
-# in `family-sync.yml` (Issue #268).
+# the `quality` job in `ci.yml` and `cargo-quality.yml` (Issue #268).
 #
 # CI compiles with the toolchain `rust-toolchain.toml` pins (it also lists
 # rustfmt and clippy), because rustup honours that file over this action's

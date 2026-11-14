@@ -51,6 +51,16 @@ pub fn run_files(
             ));
         }
     }
+    // Identical creatures share records and seed, so their runs repeat one paired
+    // difference; refuse them before the sample floor counts them as evidence.
+    let mut first_seen = std::collections::HashMap::new();
+    for (index, creature) in validation_creatures.iter().enumerate() {
+        if let Some(earlier) = first_seen.insert(creature_fingerprint(creature), index) {
+            return Err(format!(
+                "validation creatures {earlier} and {index} are the same creature (same fingerprint); validation creatures must differ from each other"
+            ));
+        }
+    }
 
     if validation_creatures.len() < manifest.min_paired_tasks {
         return Err(format!(

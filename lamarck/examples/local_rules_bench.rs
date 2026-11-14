@@ -16,8 +16,9 @@
 //! OUT_DIR defaults to `docs/evidence/local-rules` in synthetic mode only.
 //!
 //! Usage, a real creature and corpus (files mode). The three flags go together:
-//! one calibration creature, one or more validation creatures (each a different
-//! creature), and the training-data directory. Records are never written into
+//! one calibration creature, at least `min_paired_tasks` (8) validation creatures
+//! (each different from the calibration creature and from each other), and the
+//! training-data directory. Records are never written into
 //! the report, only a corpus key and creature fingerprints. Files mode refuses to
 //! run without OUT_DIR, so a private run cannot overwrite the public evidence:
 //!

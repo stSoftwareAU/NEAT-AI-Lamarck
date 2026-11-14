@@ -514,6 +514,33 @@ fn files_run_refuses_fewer_creatures_than_the_minimum_paired_sample() {
     );
 }
 
+#[test]
+fn files_run_refuses_duplicate_validation_creatures() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manifest = reduced_files_manifest();
+    support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
+    let calibration = task(1).parent;
+    let err = run_files(
+        &manifest,
+        &calibration,
+        &[task(2).parent, task(2).parent],
+        dir.path(),
+    )
+    .expect_err("two copies of one creature are one sample, not two");
+    assert_eq!(
+        err,
+        "validation creatures 0 and 1 are the same creature (same fingerprint); validation creatures must differ from each other"
+    );
+    // Control: the same count with two different creatures is accepted.
+    run_files(
+        &manifest,
+        &calibration,
+        &[task(2).parent, task(3).parent],
+        dir.path(),
+    )
+    .expect("two different creatures complete");
+}
+
 fn comparison(arm: &str, k: u32, group: &str, verdict: Verdict) -> Comparison {
     Comparison {
         arm: arm.to_string(),

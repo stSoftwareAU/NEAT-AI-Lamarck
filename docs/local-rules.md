@@ -225,7 +225,9 @@ to every protocol:
 - A comparison with fewer than `minPairedTasks` paired tasks is
   `inconclusive` (`paired_verdict` in `lamarck/src/local_rules/stats.rs`).
 - A files run with fewer than `minPairedTasks` validation creatures is refused
-  with a named error. `Manifest::validate` refuses a synthetic protocol with
+  with a named error, and so is a run in which two validation creatures share a
+  fingerprint, because identical creatures repeat one paired difference.
+  `Manifest::validate` refuses a synthetic protocol with
   fewer validation tasks, or a `minPairedTasks` below 2.
 - A run that errors or gives a non-finite MSE is listed under `failures` and
   counted in `coverage.failed`. Each comparison records how many validation
@@ -326,7 +328,8 @@ cargo run --release --example local_rules_bench -- OUT_DIR \
 The first `trainRecords` records train the calibration creature for rule
 discovery. The next `trainRecords` are validation training records, and the
 next `heldOutRecords` are held out. Validation creatures must differ from the
-calibration creature and share its widths. The report's `dataSource` holds only
+calibration creature and from each other (byte-identical copies are refused), and
+share its widths. The report's `dataSource` holds only
 a corpus key and creature fingerprints, never paths or record values. The
 validation group is labelled `files`.
 
@@ -334,7 +337,7 @@ Keep `OUT_DIR` and its results private. Do not commit them. Files mode refuses
 to run without `OUT_DIR`, naming the missing argument, so a private run cannot
 overwrite the tracked public evidence (`resolve_out_dir` in
 `lamarck/src/local_rules/experiment.rs`). Give at least `minPairedTasks` (8)
-`--creature` flags: a smaller run is refused.
+different `--creature` files: a smaller run, or one with duplicates, is refused.
 
 The runner prints `success claim:` after the verdict. A files run that
 `earns-its-place` reports `pending-owner-review`, never a success on its own.
