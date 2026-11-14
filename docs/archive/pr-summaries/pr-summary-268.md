@@ -11,6 +11,13 @@ predeclared synthetic verdict is **`negative`**. Nothing in the optimiser, the
 CLI or any default changes. Two parts are still open: the representative run on
 a private creature and corpus, and pinning the paper's method. Part of #268.
 
+One change is outside the experiment itself. The Rust jobs in `ci.yml`
+(`quality`), `cargo-quality.yml` and `family-sync.yml` now install their
+toolchain through a new local action, `.github/actions/rust-toolchain`. It wraps
+the same pinned `dtolnay/rust-toolchain` step with the same components, so CI
+behaviour is unchanged. Without it, the worker's pre-push gate refused every
+push of this branch (see Undiscoverable Facts).
+
 ## Spec
 
 ### Intent and Rationale
@@ -28,6 +35,7 @@ a private creature and corpus, and pinning the paper's method. Part of #268.
 ### Undiscoverable Facts
 
 - arXiv 2611.12248 could not be read from the sandbox on 14 November 2026. Both `curl https://export.arxiv.org/abs/2611.12248` and `curl https://arxiv.org/pdf/2611.12248` failed with `CONNECT tunnel failed, response 403`. What is tested is the issue's description of the method.
+- The worker's pre-push gate reads a job's `dtolnay/rust-toolchain@<ref>` ref as the `cargo +<ref>` toolchain (`jobToolchain` in VibeCoder `worker/deno/lib/ci_cargo_checks.ts`). Here the ref is the commit SHA `29eef336…`, and this host has no rustup, so its probe `cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version` exited 101 (`error: no such command: +…`). Three earlier runs of this issue ended there with no PR. That defect is in VibeCoder, which this repository does not depend on, so it cannot be fixed from here. The local action hides the ref from that inference. Running the worker's own `repoCiCargoChecks` on this checkout before the change planned three checks with `cargo +29eef…`; after it, plain `cargo clippy …` (`ci.yml`, `cargo-quality.yml`) and `cargo test --no-run …` (`family-sync.yml`).
 - The 13 November research shortlist the issue cites is not in this repository.
 
 ## Evidence
@@ -98,7 +106,8 @@ or harm on real creatures. The method write-up is `docs/local-rules.md`. The
   - Report contents: `synthetic_summary_carries_the_search_trace_and_source`.
 - `cargo test --test local_rules`: 16 passed.
 - `./quality.sh < /dev/null` on the head: exit 0, "All quality checks passed!". The first run failed `readme_contract::repository_layout_lists_every_lamarck_src_rs` because `local_rules` was missing from the README layout tree. The line was added and the gate re-run.
-- I ran the CI cargo checks the pre-push gate lists, using the installed 1.99.1 toolchain. `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::filter_next -D clippy::collapsible_if` found no issues, and `cargo test --no-run --workspace --all-features` exited 0. The worker's pre-push gate itself refused the push: it ran `cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version`, which exited 101. That hash is the `dtolnay/rust-toolchain` action SHA from `.github/workflows/ci.yml:64`, not a toolchain name, so this is a fault in the worker's gate, not in this repository.
+- I ran the three CI cargo checks the worker's scanner now plans, with their workflow env (`CARGO_BUILD_JOBS=2 RUSTFLAGS="-D warnings"` for clippy), on the installed cargo 1.99.1. `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::filter_next -D clippy::collapsible_if` and the same without `--workspace` found no issues, and `cargo test --no-run --workspace --all-features` exited 0.
+- Toolchain action: `actionlint` on `ci.yml`, `cargo-quality.yml` and `family-sync.yml` reported nothing. `scripts/check-family-sync-workflow.sh`, `scripts/test-check-family-sync-workflow.sh`, `scripts/check-bot-push-action.sh`, `scripts/check-cargo-quality-overlap.sh` and `scripts/test-check-cargo-quality-overlap.sh` passed. No validator rule was added, because the change does not alter what CI runs.
 - No existing test was edited or removed.
 - Not done: the representative private-corpus run, and pinning the paper's method (both above).
 
