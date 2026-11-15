@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "epochs": 30,
+  "trainRecords": 2000,
+  "validationRecords": 1000,
+  "parentSeed": 267,
+  "calibrationSeeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "validationSeeds": [
+    1001,
+    1002,
+    1003,
+    1004,
+    1005,
+    1006,
+    1007,
+    1008,
+    1009,
+    1010,
+    1011,
+    1012
+  ],
+  "reductions": [
+    0.25,
+    0.5,
+    0.75
+  ],
+  "strataBins": 8,
+  "rareStratumShare": 0.1,
+  "warmupEpochs": 1,
+  "calibrationGrid": [
+    {
+      "ewmaAlpha": 0.3,
+      "revisitShare": 0.1
+    },
+    {
+      "ewmaAlpha": 0.3,
+      "revisitShare": 0.25
+    },
+    {
+      "ewmaAlpha": 0.7,
+      "revisitShare": 0.1
+    },
+    {
+      "ewmaAlpha": 0.7,
+      "revisitShare": 0.25
+    }
+  ],
+  "learningRate": 0.2,
+  "bootstrapResamples": 2000,
+  "bootstrapSeed": 267,
+  "forgettingTolerance": 0.0001
+}

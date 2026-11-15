@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Opt-in offline easy-record skipping experiment (Issue #267).** Adds
+  `lamarck/src/record_skip/` (difficulty EWMA schedule with rare-stratum
+  protection and revisits, matched random-skip control, paired bootstrap
+  verdicts), the `record_skip_bench` example and `lamarck/tests/record_skip.rs`.
+  Nothing in the optimisation loop calls it and no default changes. The
+  synthetic suite (228 runs) found no easy-skip arm better than matched random
+  skipping under the rare-stratum guard, or better than full data; the
+  representative corpus run is outstanding. Evidence is in
+  `docs/evidence/record-skip/`; see `docs/easy-record-skipping.md`.
 - **Offline benchmark of budget-aware routing between local weight optimisers
   (Issue #266).** New `lamarck/src/weight_bench/` module and
   `weight_router_bench` example compare a simplified random-axis surrogate and
