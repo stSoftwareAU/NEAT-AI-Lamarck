@@ -72,17 +72,10 @@ Part of #268
   connection`, and PR #269's attempt got `CONNECT tunnel failed, response 403`.
   `docs/local-rules.md` section 2 records only a secondary outline and marks the
   method **not pinned**.
-- The worker's pre-push gate replays the CI cargo steps. It reads
-  `dtolnay/rust-toolchain@<sha>` as `cargo +<sha>`, which exits 101 on a host
-  without rustup. This run's push was refused with
-  `[PRE_PUSH_BLOCKED] Rust toolchain unavailable here: cargo +29eef336… --version exited 101`.
-  The gate's per-run spec (`pre-push-spec.json`) was built from the workflows
-  at run start, so the push went through only after the workaround commit was
-  on the branch. The open sibling PRs #270 and #271 carry the same workaround.
-- Merging Develop brought in its own use of the local action in `family-sync.yml`,
-  so this PR no longer carries a plain `rustup` step there: the workflow, the
-  action header and the CHANGELOG follow Develop. README and CHANGELOG keep both
-  the `local_rules` and `record_skip` entries.
+- This PR touches no file under `.github/` or `scripts/`: the local
+  `rust-toolchain` action, its workflow use and the family-sync rule-17 fallback
+  are already on Develop. README and CHANGELOG keep both the `local_rules` and
+  `record_skip` entries.
 
 ## Evidence
 
@@ -92,8 +85,11 @@ Backend/CLI research harness. No UI files are touched.
   predeclared synthetic run. They were regenerated with
   `cargo run --release --example local_rules_bench` from a clean tree at
   commit `f22e4f7` (`versions.sourceCommit`, `sourceTreeDirty: false`, crate
-  0.1.47), then committed on top in `5f28cec`. `git diff f22e4f7 HEAD -- lamarck`
-  is empty. `manifest.json` is unchanged. In `summary.json` only the
+  0.1.47, neat-core `v0.23.4`), then committed on top in `5f28cec`. Since then the
+  harness changed only by the `NEAT_CORE_TAG` constant (`v0.23.7`), the
+  `max_step` refusal in `Manifest::validate` and `apply_rule_steps`, and the
+  tests. None of these changes a number the predeclared run records.
+  `manifest.json` is unchanged. In `summary.json` only the
   derivative-free rows moved, because that arm's algorithm changed; the
   sparse-backprop rows, discovered rules, meta cost and coverage are as before.
 - The result is `overallVerdict: negative`, with `successClaim:
@@ -139,9 +135,9 @@ flowchart LR
 - **met** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms — evidence: `lamarck/src/local_rules/baselines.rs` (sparse backprop through `LearningPlan`/`apply_learnings`; the derivative-free arm through `mirror::signed_perturbation`, `mirror::mirror_candidate` and `PerturbedScalar`), `lamarck/tests/local_rules.rs::derivative_free_accepts_the_mirrored_twin_when_plus_delta_loses` — reviewer: met
 - **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change — evidence: `lamarck/tests/local_rules.rs::parent_is_unchanged_by_every_arm` — reviewer: met
 - **met** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria — evidence: `docs/evidence/local-rules/manifest.json`, `lamarck/tests/local_rules.rs::manifest_predeclares_the_minimum_paired_sample`, `lamarck/tests/local_rules.rs::files_run_refuses_duplicate_validation_creatures` — reviewer: met
-- **met** — Identify code/model/data versions — evidence: `versions` in `docs/evidence/local-rules/summary.json` (crate 0.1.47, neat-core `v0.23.4`, task generator `local-rules-synthetic-v1`, `sourceCommit` `f22e4f7…`, `sourceTreeDirty: false`; the evidence was generated under neat-core `v0.23.4`, and the only later change to the harness (`lamarck/src/local_rules/`, `lamarck/examples/local_rules_bench.rs`, `lamarck/tests/local_rules.rs`) is the `NEAT_CORE_TAG` constant moving to `v0.23.7` with the `Cargo.toml` pin, which does not change any recorded number, so the evidence is not regenerated), the files-mode corpus key and fingerprints, `lamarck/tests/local_rules.rs::versions_with_source_refuses_anything_but_a_full_lowercase_sha` — reviewer: met
+- **met** — Identify code/model/data versions — evidence: `versions` in `docs/evidence/local-rules/summary.json` (crate 0.1.47 in the evidence and 0.1.48 at the head, neat-core `v0.23.4`, task generator `local-rules-synthetic-v1`, `sourceCommit` `f22e4f7…`, `sourceTreeDirty: false`; the evidence was generated under neat-core `v0.23.4`, and the only later change to the harness (`lamarck/src/local_rules/`, `lamarck/examples/local_rules_bench.rs`, `lamarck/tests/local_rules.rs`) is the `NEAT_CORE_TAG` constant moving to `v0.23.7` to follow the `Cargo.toml` pin already on Develop, plus the `max_step` refusal, which does not change any recorded number, so the evidence is not regenerated), the files-mode corpus key and fingerprints, `lamarck/tests/local_rules.rs::versions_with_source_refuses_anything_but_a_full_lowercase_sha` — reviewer: met
 - **met** — separate calibration from untouched validation and count all preparation/search costs — evidence: `lamarck/tests/local_rules.rs::baselines_get_the_symbolic_budget_plus_the_meta_share` — reviewer: met
-- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `lamarck/tests/local_rules.rs` (36 tests), and `./quality.sh` passed on the final head — reviewer: met
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `lamarck/tests/local_rules.rs` (37 tests), and `./quality.sh` passed on the final head — reviewer: met
 - **met** — Research runs are separate from routine feature CI — evidence: `lamarck/examples/local_rules_bench.rs`; the tests run only a reduced manifest — reviewer: met
 - **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage — evidence: `docs/evidence/local-rules/summary.json` (`pairedDifferences`, CIs, `failures`, `coverage`), `lamarck/tests/local_rules.rs::reduced_manifest_is_reproducible_and_fully_covered` — reviewer: met
 - **met** — Fixtures alone do not demonstrate an optimisation benefit — evidence: `lamarck/tests/local_rules.rs::synthetic_source_never_supports_a_success_claim` — reviewer: met
@@ -149,24 +145,21 @@ flowchart LR
 - **partial** — remove optional code that does not earn its maintenance cost — evidence: `lamarck/src/local_rules/mod.rs` (five re-exports that only the module used are removed: `discover`, `rule_delta`, `describe`, `bootstrap_mean_ci`, `mean`), the old (1+1) search replaced by the crate's mirror helpers, `docs/local-rules.md` section 8 decision rule — reviewer: partial (first pass), met (re-review, which found every remaining item used or required by a public signature) — reason: the harness itself has a `negative` synthetic verdict. Whether it stays depends on the owner's representative files-mode run, which needs a private corpus and has no tracking issue, so I keep this partial.
 - **met** — Do not claim success before representative runs — evidence: `lamarck/tests/local_rules.rs::files_report_claim_follows_its_source_and_verdict` — reviewer: met
 - **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private — evidence: `lamarck/tests/local_rules.rs::out_dir_defaults_for_synthetic_mode_only`, `lamarck/tests/local_rules.rs::files_run_completes_and_names_its_source` — reviewer: met
-- **unrequested** — Local `.github/actions/rust-toolchain` action used by `ci.yml`, `cargo-quality.yml` and `family-sync.yml` (Develop already routes `family-sync.yml` through it, so this PR follows that), a `CANONICAL_PATHS` fallback checked by rule 17 in `scripts/check-family-sync-workflow.sh` (two cases in `scripts/test-check-family-sync-workflow.sh`), and the CHANGELOG Fixed entry for them — reviewer: unrequested — reason: the worker's pre-push gate refuses every Rust push on these workflows (Undiscoverable Facts). CI still compiles with the `rust-toolchain.toml` pin.
-- **unrequested** — Crate version 0.1.47 in `lamarck/Cargo.toml` and `Cargo.lock` (0.1.46 → 0.1.47 when written; Develop's #267 later reached 0.1.47 too, so the merged result equals the base) — reviewer: unrequested — reason: the repository bumps on any `lamarck/src` change, and the committed evidence is stamped with 0.1.47. The `neat-core` pin in `lamarck/Cargo.toml` and `Cargo.lock` also moved `v0.23.4` → `v0.23.7` (the Family Sync job's move to core's latest release, which `neat_core_tag_matches_cargo_manifest` requires `NEAT_CORE_TAG` to follow).
-- **unrequested** — `.gitleaks.toml`: the empty `[allowlist] commits = []` is replaced by `[extend] useDefault = true` (commit `fdd6170`, made by the worker) — reviewer: unrequested — reason: gitleaks 8.30.1 on the worker host refuses to load the old config (`[[allowlists]] must contain at least one check for: commits, paths, regexes, or stopwords`). The new config loads, keeps the default rule set and scans clean. CI's gitleaks workflow loads the file without `-c`.
+- **unrequested** — Crate version: the head's `lamarck/Cargo.toml` and `Cargo.lock` are 0.1.48, the same as Develop (the auto-increment commit and #274 reached it), so this PR changes neither file against Develop — reviewer: unrequested — reason: the committed evidence is stamped with the crate version it was generated under (0.1.47), and `docs/local-rules.md` says so beside the current 0.1.48. The evidence is not regenerated because the version change does not alter any recorded number.
 - **unrequested** — The `-app-only` diagnostic arms and files mode — reviewer: unrequested — reason: the app-only arms show what the meta-search cost does to the verdict, and files mode is the private representative run the issue asks for. Neither decides the synthetic verdict.
 
 ## Standards Review
 
 <!-- vibe-standards-review inputs="diff+CODING-STANDARDS.md" -->
 
-- **clean** — No `CODING-STANDARDS.md` in this repository, so the reviewer used `CONTRIBUTING.md` and the README's development rules and safety invariants. It reported no violations. It checked the version bump (ahead of base), CHANGELOG under `[Unreleased]` matching `summary.json`, and the review-checked rules: SHA-pinned `uses:` (kept inside the local action), canonical `runlib.sh` and `family-pins.sh` untouched, TDD, no new dependency, streaming training-data reads, no duplication of core (backprop reuse), and parents never mutated. Optional notes: one over-long CHANGELOG line, and inconsistent blank-line spacing between the CHANGELOG entries.
+- **clean** — No `CODING-STANDARDS.md` in this repository, so the reviewer used `CONTRIBUTING.md` and the README's development rules and safety invariants. It reported no violations. It checked the crate version (equal to Develop's 0.1.48), CHANGELOG under `[Unreleased]` matching `summary.json`, and the review-checked rules: canonical `runlib.sh` and `family-pins.sh` untouched, TDD, no new dependency, streaming training-data reads, no duplication of core (backprop reuse), and parents never mutated. Optional notes: one over-long CHANGELOG line, and inconsistent blank-line spacing between the CHANGELOG entries.
 - **violation** — README development rule "Use TDD for behaviour changes": no test showed that the derivative-free arm's `−δ` twin is scored (every test still passed with the twin removed) — evidence: `lamarck/src/local_rules/baselines.rs` (`derivative_free`) — reason: fixed in this diff by `lamarck/tests/local_rules.rs::derivative_free_accepts_the_mirrored_twin_when_plus_delta_loses`, red-checked (fails at seed 6 with the twin disabled).
 - **violation** — doc accuracy: the CHANGELOG said every report records `versions.sourceCommit`, and the example header wrote `crate::mirror` where an example must name `neat_ai_lamarck::mirror` — evidence: `CHANGELOG.md`, `lamarck/examples/local_rules_bench.rs:5` — reason: fixed in this diff (CHANGELOG now says the runner stamps it and that it is `null` without the runner or without git).
-- **clean** — Post-completion-check commits (`1aa2a1b`, `f22e4f7`, plus the evidence commits `2d45bd5` and `5f28cec`), reviewed separately: no new dependencies (only `std::process::Command`), parent immutability (`derivative_free` clones the parent), reuse rather than duplication (`mirror` helpers; the local `Scalar` enum was replaced by `mirror::PerturbedScalar`), CHANGELOG under `[Unreleased]`, `docs/local-rules.md` tables checked against `summary.json`, and the version bump (at that review 0.1.47 was ahead of Develop's 0.1.46; Develop has since reached 0.1.47 through #267, so the version now equals the base, which CONTRIBUTING allows and the version-increment workflow auto-bumps). Left open, minor: the runner's git stamping in the example and the empty-scalars error path of `derivative_free` have no test, and the `+δ` step is not checked against the weight/bias limit that `mirror_candidate` applies to its twin (the crate's own `Random` strategy does not clamp either).
-- **clean** — `.gitleaks.toml` (commit `fdd6170`), reviewed on its own after the main review: no contradiction with `CONTRIBUTING.md` or `README.md`. `[extend] useDefault = true` keeps the default rules: a planted fake secret was flagged with gitleaks 8.30.1. CI's `gitleaks detect` loads the file automatically and found no leaks. Not confirmed by a run: support in CI's pinned gitleaks 8.24.2, because the binary download returned HTTP 403 here.
+- **clean** — Post-completion-check commits (`1aa2a1b`, `f22e4f7`, plus the evidence commits `2d45bd5` and `5f28cec`), reviewed separately: no new dependencies (only `std::process::Command`), parent immutability (`derivative_free` clones the parent), reuse rather than duplication (`mirror` helpers; the local `Scalar` enum was replaced by `mirror::PerturbedScalar`), CHANGELOG under `[Unreleased]`, `docs/local-rules.md` tables checked against `summary.json`, and the version bump (at that review 0.1.47 was ahead of Develop's 0.1.46; Develop has since reached 0.1.48, the head's version, so this PR no longer changes it). Left open, minor: the runner's git stamping in the example and the empty-scalars error path of `derivative_free` have no test, and the `+δ` step is not checked against the weight/bias limit that `mirror_candidate` applies to its twin (the crate's own `Random` strategy does not clamp either).
 
 ## Test Plan
 
-- Added `lamarck/tests/local_rules.rs` (36 tests, public API only, deterministic).
+- Added `lamarck/tests/local_rules.rs` (37 tests, public API only, deterministic).
   It covers rule refusals, manifest refusals, the residual being output-only,
   parent immutability, derivative-free never raising training MSE, the verdict
   rule (`predeclared_verdict_follows_the_success_criterion`,
@@ -179,9 +172,20 @@ flowchart LR
   and `[c2, c3, c2]` ("0 and 2"), each with the minimum lowered to 2, and accepts
   `[c2, c3]` with n = 2. Before the fix it failed: `run_files` returned
   `Ok(Report …)` with identical fingerprints and `ci_low == ci_high`.
-- `scripts/test-check-family-sync-workflow.sh` gains two rule-17 cases (missing
-  fallback, stale fallback), and both expect exit 1. No existing assertion was
-  removed or changed.
+- Review round 3:
+  - `reduced_manifest()` now has three calibration seeds (6 calibration tasks
+    against 4 validation tasks) and 32 held-out records against 64 training
+    records. `reduced_files_manifest()` uses 16 training and 8 held-out records,
+    so the short-corpus message reads "39 records but the protocol needs 40: 16
+    calibration, 16 validation training and 8 held-out".
+    `baselines_get_the_symbolic_budget_plus_the_meta_share` asserts the counts
+    differ. Red-checked: dividing the meta cost by the calibration count instead
+    of `validation.len()` fails it.
+  - `Manifest::validate` refuses a non-finite or negative `max_step`
+    ("max_step must be finite and non-negative"), and `apply_rule_steps` returns
+    the same refusal as an `Err` instead of panicking in `f64::clamp`. Covered by
+    `manifest_refusals_name_their_cause` and
+    `apply_rule_steps_refuses_an_unusable_max_step_instead_of_panicking`.
 - New after the completion checks:
   - `derivative_free_accepts_the_mirrored_twin_when_plus_delta_loses`: three
     evaluations (the parent and one mirrored pair), sigma 1e-3, seeds 0–15, and
@@ -195,7 +199,7 @@ flowchart LR
   - `versions_current_has_no_source_commit`,
     `versions_with_source_records_a_full_sha_and_the_dirty_flag` and
     `versions_with_source_refuses_anything_but_a_full_lowercase_sha`.
-- `cargo test -p neat_ai_lamarck --test local_rules`: 36 passed.
+- `cargo test -p neat_ai_lamarck --test local_rules`: 37 passed.
 - `./quality.sh < /dev/null` on the final head: passed ("All quality checks
   passed!").
 

@@ -160,6 +160,27 @@ fn manifest_refusals_name_their_cause() {
         refusal(|m| m.sparse_ratio = 0.0),
         "sparse_ratio must be in (0, 1]"
     );
+    for bad in [-1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            refusal(|m| m.max_step = bad),
+            "max_step must be finite and non-negative"
+        );
+    }
+}
+
+#[test]
+fn apply_rule_steps_refuses_an_unusable_max_step_instead_of_panicking() {
+    let t = task(1);
+    let rules = only(ActivationFamily::Identity, rule(vec![(Feature::XR, 1.0)]));
+    for bad in [-1.0, f64::NAN, f64::INFINITY] {
+        let err = apply_rule_steps(&t.parent, &t.train, &rules, 5, 0.05, bad)
+            .expect_err("an unusable max_step is refused");
+        assert!(
+            err.starts_with("max_step must be finite and non-negative"),
+            "{err}"
+        );
+    }
+    apply_rule_steps(&t.parent, &t.train, &rules, 5, 0.05, 0.0).expect("zero clamps every step");
 }
 
 #[test]
@@ -306,7 +327,11 @@ fn local_residual_is_output_only() {
 
 fn reduced_manifest() -> Manifest {
     let mut m = Manifest::predeclared();
-    m.calibration_seeds = vec![1, 2];
+    // Three calibration seeds give 6 calibration tasks against 4 validation
+    // tasks, and held-out differs from training, so each figure a test pins can
+    // only come from the intended count.
+    m.calibration_seeds = vec![1, 2, 3];
+    m.held_out_records = 32;
     m.validation_groups = vec![
         TaskGroup {
             group: "same-width".to_string(),
@@ -363,7 +388,7 @@ fn neat_core_tag_matches_cargo_manifest() {
 fn reduced_files_manifest() -> Manifest {
     let mut m = reduced_manifest();
     m.train_records = 16;
-    m.held_out_records = 16;
+    m.held_out_records = 8;
     m
 }
 
@@ -416,7 +441,7 @@ fn files_run_refuses_a_short_corpus_and_accepts_a_full_one() {
         .expect_err("a short corpus is refused");
     assert_eq!(
         err,
-        "training data holds 47 records but the protocol needs 48: 16 calibration, 16 validation training and 16 held-out"
+        "training data holds 39 records but the protocol needs 40: 16 calibration, 16 validation training and 8 held-out"
     );
     support::write_sample(dir.path(), files_records(&manifest), manifest.inputs);
     run_files(&manifest, &calibration, &validation, dir.path())
@@ -772,6 +797,7 @@ fn baselines_get_the_symbolic_budget_plus_the_meta_share() {
     let symbolic_units = 2 * k * unit;
     // 2 squashes x 2 validation seeds.
     let validation_tasks = 4u64;
+    assert_ne!(manifest.train_records, manifest.held_out_records);
 
     // Meta cost: every candidate scores each calibration task with
     // `calibration_steps` rule steps at 2 units plus two MSE passes at 1 unit.
@@ -783,6 +809,7 @@ fn baselines_get_the_symbolic_budget_plus_the_meta_share() {
     assert_eq!(report.search_trace.len() as u64, candidates);
     let calibration_tasks =
         (manifest.calibration_seeds.len() * manifest.hidden_squashes.len()) as u64;
+    assert_ne!(calibration_tasks, validation_tasks);
     let per_task = 2 * u64::from(manifest.calibration_steps) * unit + 2 * unit;
     assert_eq!(
         report.meta_cost.record_units,

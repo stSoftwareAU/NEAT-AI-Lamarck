@@ -155,6 +155,11 @@ pub fn apply_rule_steps(
     if records.is_empty() {
         return Err("apply_rule_steps needs at least one record".to_string());
     }
+    if !max_step.is_finite() || max_step < 0.0 {
+        return Err(format!(
+            "max_step must be finite and non-negative, got {max_step}"
+        ));
+    }
     let mut creature = parent.clone();
     let mut cost = Cost::default();
     let n = records.len() as f64;

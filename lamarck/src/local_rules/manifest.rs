@@ -220,6 +220,9 @@ impl Manifest {
                 return Err(format!("{name} must be finite and positive"));
             }
         }
+        if !self.max_step.is_finite() || self.max_step < 0.0 {
+            return Err("max_step must be finite and non-negative".to_string());
+        }
         if !(self.sparse_ratio > 0.0 && self.sparse_ratio <= 1.0) {
             return Err("sparse_ratio must be in (0, 1]".to_string());
         }
