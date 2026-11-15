@@ -2679,9 +2679,9 @@
     "failedRuns": 0,
     "plannedRuns": 648
   },
-  "crateVersion": "0.1.48",
+  "crateVersion": "0.1.49",
   "formatVersion": 3,
-  "gitCommit": "757ac15dc3b190b84dd9f0459d0dddff54eb9777",
+  "gitCommit": "f0a7b4caa52163435bca556d38ab2da000eadc42",
   "gitDirty": false,
   "manifest": {
     "bootstrapResamples": 2000,
@@ -2718,5 +2718,5 @@
   },
   "neatCoreSource": "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.7#3759355634b1cabc8034cd76df5dbd44a867d18c",
   "totalEvaluations": 1631615,
-  "wallClockSeconds": 211.693
+  "wallClockSeconds": 224.355
 }

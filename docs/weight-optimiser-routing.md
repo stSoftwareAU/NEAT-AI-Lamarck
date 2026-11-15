@@ -19,7 +19,7 @@ current code runs two in-process arms, refinement and CMA-ES, on paired
 validation seeds with no calibration phase. The committed `manifest.json`,
 `summary.json` and `reference-summary.json` in
 [`docs/evidence/weight-router/`](evidence/weight-router/summary.json) are
-output of the current code (crate 0.1.48, `formatVersion` 3) and are reproduced
+output of the current code (crate 0.1.49, `formatVersion` 3) and are reproduced
 by the commands in [How to run](#how-to-run). The router, probe and calibration
 sections below describe an **earlier router-era run** (crate 0.1.46). Its
 numbers are kept as a recorded negative finding; they cannot be reproduced from
@@ -69,7 +69,9 @@ the manifest it used to `manifest.json` (the committed copy is
   loss-sensitive synapses, which steers away from flat ones. Format 3 measures
   the flat-axis count directly (Finding 4): no chosen free weight was flat in
   any problem, so the synthetic suite does not exercise plateaus. The families
-  vary the activation, not plateau structure.
+  vary the activation, not plateau structure. The flat-axis test is one-sided
+  (see Finding 4), and no kink measurement exists in the current code: kinks come
+  only from the relu and hard-tanh families.
 * **Problem construction** (`suite.rs`). A random teacher network with 16
   inputs, 16 hidden neurons of one family, fan-in 8 and one identity output
   generates the records (target noise `0.01`). That is 16 x 8 + 16 = 144
@@ -119,7 +121,10 @@ the manifest it used to `manifest.json` (the committed copy is
   first arm is `-better` iff the interval's upper bound on screening loss is
   below zero **and** the held-out mean difference is at most zero **and** the
   full-window mean difference is at most zero (the full-window term is format 3;
-  format 2 had only the first two conditions). It is `-worse` iff the interval's
+  format 2 had only the first two conditions). The full-window veto was added
+  after the format 2 results had been seen; it can only turn a `-better` verdict
+  into `inconclusive`, never create one, and it changed exactly one verdict
+  (hard-tanh, D=40, 100D). It is `-worse` iff the interval's
   lower bound is above zero. Otherwise the cell is `inconclusive`. A run that
   fails is recorded with its error and counted in coverage. In validation it is
   dropped from that pair even if it retained finite metrics (counted under
@@ -165,13 +170,16 @@ three families, three dimensions and three budgets. It explicitly supplies
 receive the same seed and configuration. This checks completed RunRows, not
 every evaluation trace or every AMM route. The source/dependency pins and
 observed result are recorded in
-[`method-check.json`](evidence/weight-router/method-check.json). It was re-run from head after the router was removed (crate 0.1.48, code
-checkpoint `757ac15`): the v0.7.0 package completed 27 rows, identical to the
-v0.3.0 tree's, with no failures. The check takes the committed manifest and
+[`method-check.json`](evidence/weight-router/method-check.json). It was
+regenerated at commit `f0a7b4c` (crate 0.1.49) after the router was removed;
+later commits change only documentation and evidence. The v0.7.0 package
+completed 27 rows, identical to the v0.3.0 tree's, with no failures. The check takes the committed manifest and
 keeps only its first validation seed, so the `manifest` it records has
-`validationSeeds` [1001] and no `calibrationSeeds`. The canonical-rows hash and
-the bench binary hash come from that single run; no second run has reproduced
-them.
+`validationSeeds` [1001] and no `calibrationSeeds`. A second run, at `f0a7b4c`,
+reproduced the earlier run at `757ac15` (crate 0.1.48) exactly: the
+canonical-rows hash (`33203af0…`) and every row file (`runs.jsonl`,
+`amm-runs.jsonl`, and the cell values of both summaries). The bench binary hash
+(`8ccd83c8…`) is that build's (crate 0.1.49), not the 0.1.48 build's.
 
 To repeat the compatibility check, extract the two pinned source tarballs
 (after verifying the SHA-256 values above), share the wheels produced by
@@ -254,7 +262,7 @@ The run writes `manifest.json`, `runs.jsonl` and `summary.json` to `OUT_DIR`
 |------|----------|
 | `manifest.json` | The manifest that was run. |
 | [`runs.jsonl`](evidence/weight-router/runs.jsonl) | One line per run (648 for the synthetic suite), failures included: arm, start and final screening, full and held-out losses, normalised screening and held-out losses, evaluations used, preparation and confirmation evaluations, flat-axis count (`plateauFreeAxes`), error. |
-| `summary.json` | Format version (`formatVersion`, 3), crate version (`crateVersion`, 0.1.48), `gitCommit`, `gitDirty`, `neatCoreSource` (the neat-core source pinned in `Cargo.lock`), `wallClockSeconds`, total evaluations, coverage (planned, completed, failed runs), `plateauFreeAxes` per validation seed, and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening, held-out and full-window loss, plus the verdict. A corpus run also carries `corpusFingerprint`: FNV-1a 64-bit hashes of the creature file (`creatureFnv1a64`) and of the records actually loaded (`recordsFnv1a64`), and the record count. The synthetic suite omits it, since the crate version and manifest seeds fix its problems. |
+| `summary.json` | Format version (`formatVersion`, 3), crate version (`crateVersion`, 0.1.49), `gitCommit`, `gitDirty`, `neatCoreSource` (the neat-core source pinned in `Cargo.lock`), `wallClockSeconds`, total evaluations, coverage (planned, completed, failed runs), `plateauFreeAxes` per validation seed, and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening, held-out and full-window loss, plus the verdict. A corpus run also carries `corpusFingerprint`: FNV-1a 64-bit hashes of the creature file (`creatureFnv1a64`) and of the records actually loaded (`recordsFnv1a64`), and the record count. The synthetic suite omits it, since the crate version and manifest seeds fix its problems. |
 
 Output format version 2 dropped the router-era fields: `calibratedRule` from
 `summary.json`, and `routedTo` and `probeEvaluations` from run rows. Format 3
@@ -263,7 +271,8 @@ provenance fields listed above. The committed
 [`runs.jsonl`](evidence/weight-router/runs.jsonl) (about 364 KB) holds the
 synthetic run's per-run rows, and the committed
 [`summary.json`](evidence/weight-router/summary.json) carries the per-cell paired
-distributions. The AMM campaign was re-run from head, so the committed
+distributions. The AMM campaign was regenerated at commit `f0a7b4c` (crate
+0.1.49); later commits change only documentation and evidence. The committed
 `amm-runs.jsonl` (324 rows) no longer carries `routedTo` or `probeEvaluations`;
 its rows carry `plateauFreeAxes`. The AMM reference adds three committed files:
 
@@ -271,14 +280,14 @@ its rows carry `plateauFreeAxes`. The AMM reference adds three committed files:
 |------|----------|
 | [`amm-runs.jsonl`](evidence/weight-router/amm-runs.jsonl) | One `RunRow` per AMM validation run (324). |
 | [`amm-meta.json`](evidence/weight-router/amm-meta.json) | AMM version, commit, preset and config hash, numpy, scipy and Python versions, coverage and wall time. |
-| [`reference-summary.json`](evidence/weight-router/reference-summary.json) | Format version (`formatVersion` 3), crate version (`crateVersion` 0.1.48) and provenance, coverage, total evaluations and per-cell paired comparisons of AMM against refine and CMA-ES, with verdicts. Regenerated from the committed `amm-runs.jsonl` with `--compare-reference`. |
+| [`reference-summary.json`](evidence/weight-router/reference-summary.json) | Format version (`formatVersion` 3), crate version (`crateVersion` 0.1.49) and provenance, coverage, total evaluations and per-cell paired comparisons of AMM against refine and CMA-ES, with verdicts. Regenerated from the committed `amm-runs.jsonl` with `--compare-reference`. |
 
 ## Results (synthetic suite only)
 
-**Current committed results** (`summary.json`, crate 0.1.48, `formatVersion`
-3, git commit `757ac15`, clean tree): `cargo run --release --example
+**Current committed results** (`summary.json`, crate 0.1.49, `formatVersion`
+3, git commit `f0a7b4c`, clean tree): `cargo run --release --example
 weight_router_bench -- OUT_DIR`, 648 of 648 runs completed, 0 failed, 1,631,615
-evaluations, 211.7 s wall on a shared host (indicative only). CMA-ES beat the
+evaluations, 224.355 s wall on a shared host (indicative only). CMA-ES beat the
 random-axis surrogate in **18 of 27** cells, was worse in **0** and inconclusive
 in **9**. The per-cell table below gives the current CMA-ES-minus-refine values
 and verdicts.
@@ -419,16 +428,21 @@ columns are the router-era run's router verdicts.
    the weights, so it costs no extra evaluations. Every row and every cell has 0
    flat axes (`plateauFreeAxes` is 0 in all 648 runs and in all 324 cell-seed
    entries). This is a measured negative: the suite does not exercise plateaus,
-   so it says nothing about how the method behaves on flat axes. The
-   representative run has to measure that rather than assume it.
+   so it says nothing about how the method behaves on flat axes. The test is
+   one-sided (a +0.05 step only), so an axis flat on one side of a kink (relu at
+   zero, hard-tanh at its clip) can count as flat, and a flat axis with a kink
+   just past +0.05 can count as not flat; no kink measurement exists in the
+   current code, where kinks are represented only by the relu and hard-tanh
+   families. The representative run has to measure that rather than assume it.
 
 ## AMM reference results
 
 Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 855,000
 evaluations (budgeted, preparation per AMM run and 5 confirmation evaluations
-per run). The campaign was re-run from head with `--jobs 8`: 156.5 s wall on a
-shared host, so the time is indicative only. Its normalised screening losses are
-identical to the previously committed router-era rows.
+per run). The campaign was regenerated at commit `f0a7b4c` (crate 0.1.49); later
+commits change only documentation and evidence. It ran with `--jobs 8`: 133.038 s
+wall on a shared host, so the time is indicative only. Its normalised screening
+losses are identical to the previously committed router-era rows.
 
 **Verdict: `amm-reference-worse` in all 27 cells against both refine and
 CMA-ES** in the committed `reference-summary.json` (54 of 54 comparisons; 0

@@ -4758,9 +4758,9 @@
     "failedRuns": 0,
     "plannedRuns": 324
   },
-  "crateVersion": "0.1.48",
+  "crateVersion": "0.1.49",
   "formatVersion": 3,
-  "gitCommit": "757ac15dc3b190b84dd9f0459d0dddff54eb9777",
+  "gitCommit": "f0a7b4caa52163435bca556d38ab2da000eadc42",
   "gitDirty": false,
   "manifest": {
     "bootstrapResamples": 2000,

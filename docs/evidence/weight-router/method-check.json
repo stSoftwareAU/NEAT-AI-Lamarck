@@ -61,9 +61,9 @@
     "canonicalRowsSha256": "33203af0f8395ec26943932907fa60e54198109f89a9cbf4814a76581a39e96a",
     "canonicalisation": "json.dumps(rows, sort_keys=True, separators=(comma, colon), allow_nan=False), UTF-8",
     "seedMapping": "int(SeedSequence(arm_seed).generate_state(1)[0]) for both versions",
-    "rustHarnessCodeCheckpoint": "757ac15dc3b190b84dd9f0459d0dddff54eb9777",
-    "rustHarnessCrateVersion": "0.1.48",
-    "rustHarnessBinarySha256": "bad73e713ebdc24679b6600131a5985a02e2981e37ed83c1d4e3afe929b25fa7",
+    "rustHarnessCodeCheckpoint": "f0a7b4caa52163435bca556d38ab2da000eadc42",
+    "rustHarnessCrateVersion": "0.1.49",
+    "rustHarnessBinarySha256": "8ccd83c8177f8a7ed8a749f76a9abbb56f9ca1a299cc6bccb22df4e8bf16204a",
     "rustc": "1.99.1",
     "coreTag": "v0.23.7",
     "extrapolationDimensions": [

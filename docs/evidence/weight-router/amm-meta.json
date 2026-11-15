@@ -7,9 +7,9 @@
   "scipy": "1.18.1",
   "python": "3.13.5",
   "bench": "/var/tmp/vibe-cargo-target/NEAT-AI-Lamarck-f8d6afdf/release/examples/weight_router_bench",
-  "manifest": "/tmp/amm266/out/manifest.json",
+  "manifest": "/tmp/amm266/out2/manifest.json",
   "planned": 324,
   "completed": 324,
   "failed": 0,
-  "wallSeconds": 156.457
+  "wallSeconds": 133.038
 }
