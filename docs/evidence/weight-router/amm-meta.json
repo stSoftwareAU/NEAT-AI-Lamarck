@@ -6,10 +6,10 @@
   "numpy": "2.5.4",
   "scipy": "1.18.1",
   "python": "3.13.5",
-  "bench": "/tmp/exec-a-target/release/examples/weight_router_bench",
-  "manifest": "/tmp/wrb-full2/manifest.json",
+  "bench": "/var/tmp/vibe-cargo-target/NEAT-AI-Lamarck-f8d6afdf/release/examples/weight_router_bench",
+  "manifest": "/tmp/amm266/out/manifest.json",
   "planned": 324,
   "completed": 324,
   "failed": 0,
-  "wallSeconds": 100.2
+  "wallSeconds": 156.457
 }
