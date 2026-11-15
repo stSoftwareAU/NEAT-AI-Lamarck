@@ -35,7 +35,10 @@ Part of #268
   `CONNECT tunnel failed, response 403`; WebFetch of the abstract, HTML,
   alphaxiv and Hugging Face pages: "proxy refused the connection"). Scholar
   Archive, ResearchGate, OpenReview, Papers with Code and the Wayback Machine
-  also gave no HTTP response through the proxy (`000`). GitHub and PyPI were
+  also gave no HTTP response through the proxy (`000`). A later retry the same
+  day also failed: `curl` of the arXiv abstract and PDF, `export.arxiv.org`, the
+  Semantic Scholar page and API, and an `r.jina.ai` reader proxy gave `000`, and
+  WebFetch of the PDF gave "proxy refused the connection". GitHub and PyPI were
   reachable. `gh search repos "symbolic local learning rules"` found no code
   released by the authors.
 - New snippet facts: v1 (also listed among NeurIPS 2026 papers), monomial order
@@ -51,9 +54,16 @@ Documentation-only change. No UI, code, test or evidence file is touched.
 - `docs/local-rules.md` section 2 now has: the 15 November retry and its
   errors, the new snippet-derived outline bullets, a narrowed "Not pinned"
   list, and a comparison-table row for the training horizon. It also notes that
-  short horizons are an unfavourable regime for the paper's rules. The row's
+  snippets suggest, without establishing, that short horizons are an
+  unfavourable regime for the paper's rules. The row's
   `steps` [5, 10, 20] and `calibration_steps` 10 were checked against
   `docs/evidence/local-rules/manifest.json`.
+- `docs/local-rules.md` section 2 also records the later 15 November retry
+  (`export.arxiv.org`, Semantic Scholar, `r.jina.ai`, WebFetch of the PDF).
+- Unused-code audit of the harness: every public item in
+  `lamarck/src/local_rules/` is used by the module, the example or the tests,
+  or appears in a public type or signature. `cargo clippy --all-targets` reports
+  no dead code, so nothing smaller than the whole harness can be removed.
 - Sources: web search results pointing at
   [arXiv abs](https://arxiv.org/abs/2611.12248),
   [HTML](https://arxiv.org/html/2611.12248) and
@@ -62,13 +72,16 @@ Documentation-only change. No UI, code, test or evidence file is touched.
 
 ## Acceptance Criteria
 
-- **missing** — Read and pin the full method before reproducing it — reason: arXiv 2611.12248 and its mirrors are still refused by the sandbox proxy, so the paper was not read. `docs/local-rules.md` section 2 now holds a fuller secondary outline (K = 4, unrolled horizon up to 100, transfer setup) and lists what is still unpinned.
-- **missing** — remove optional code that does not earn its maintenance cost — reason: the synthetic verdict is negative, but whether `lamarck/src/local_rules/` stays depends on the owner's representative files-mode run (`docs/local-rules.md` section 8), which needs a private corpus not available here.
+<!-- vibe-spec-review inputs="diff+issue-body" -->
+
+- **missing** — Read and pin the full method before reproducing it — reviewer: missing — reason: the sandbox proxy still refuses arXiv 2611.12248 and every mirror tried, so the paper was not read. `docs/local-rules.md` section 2 holds only a secondary outline and an explicit "Not pinned" list.
+- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/local-rules.md` sections 7–8, `docs/evidence/local-rules/summary.json` — reviewer: partial — reason: the negative synthetic finding is recorded and the audit found no dead code inside the harness. Removing `lamarck/src/local_rules/` waits on the owner's representative files-mode run (section 8 decision rule), which needs a private corpus not available here.
 
 ## Test Plan
 
 - No test is added or changed: the diff touches documentation only.
 - `markdownlint-cli2 docs/local-rules.md` and `codespell docs/local-rules.md`
-  reported no issues after the edit.
+  reported no issues after the edits.
+- `cargo clippy --all-targets` reported no dead code in the harness.
 - `./quality.sh < /dev/null` passed on the final edit ("All quality checks
   passed!").

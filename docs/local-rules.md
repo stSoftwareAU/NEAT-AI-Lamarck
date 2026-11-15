@@ -53,6 +53,10 @@ On 15 November 2026 the same fetches were retried and failed the same way:
 HTML, alphaxiv and Hugging Face pages gave "proxy refused the connection". The
 sandbox proxy does reach GitHub, but no code release by the authors was found
 (`gh search repos "symbolic local learning rules"` returned nothing).
+A later retry the same day also failed: `curl` of the arXiv abstract and PDF,
+`export.arxiv.org`, the Semantic Scholar page and API, and an `r.jina.ai`
+reader proxy got no HTTP response (`000`), and WebFetch of the PDF gave "proxy
+refused the connection".
 
 **Outline from web-search summaries (secondary, not read from the paper, so not a pin of the full method). The bullets from monomial order onwards come from search snippets of the paper's HTML version taken on 15 November 2026:**
 
@@ -112,8 +116,9 @@ therefore still open.
 | Rules trained and evaluated over an unrolled horizon of up to 100 steps | Rules applied for K = 5, 10 or 20 steps, as the issue asks (section 5), and scored during discovery with `calibration_steps` = 10 steps |
 
 So this experiment tests the issue's description, which the summaries match
-only in outline. The paper reports that loss falls more slowly than under
-backprop, so short horizons are an unfavourable regime for its rules. The 5–20
+only in outline. Search snippets say the paper's loss falls more slowly than
+under backprop, which suggests (but does not establish) that short horizons
+are an unfavourable regime for its rules. The 5–20
 step window the issue asks for is shorter than the horizon the summaries
 report, so a negative result here says nothing about the paper's longer-horizon
 regime. A negative result here does not refute the paper's method.
