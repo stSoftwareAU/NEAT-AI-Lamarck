@@ -1,3 +1,5 @@
-[allowlist]
-  description = "Allowlist for known false positives"
-  commits = []
+# Gitleaks configuration: extend the built-in default ruleset.
+# Add [[allowlists]] entries here only with at least one of
+# commits, paths, regexes, or stopwords set (gitleaks rejects empty allowlists).
+[extend]
+  useDefault = true
