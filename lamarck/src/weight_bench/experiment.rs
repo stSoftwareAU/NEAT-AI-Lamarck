@@ -174,6 +174,10 @@ pub struct RunRow {
     pub confirmation_evaluations: usize,
     /// Whether the dimension is beyond the calibrated range.
     pub extrapolation: bool,
+    /// Flat chosen axes of the row's problem (see `PLATEAU_REL_TOL`). Absent
+    /// (`None`) on rows written before the field existed.
+    #[serde(default)]
+    pub plateau_free_axes: Option<usize>,
     /// Why the run failed, if it did.
     pub error: Option<String>,
 }
@@ -224,6 +228,9 @@ pub struct Comparison {
     pub second: Arm,
     /// On normalised screening loss.
     pub screening: MetricSummary,
+    /// On normalised full-window loss: the full-record loss at the best point
+    /// over the full-record loss at the start.
+    pub full: MetricSummary,
     /// On normalised held-out loss.
     pub held_out: MetricSummary,
     /// `"<first>-better"`, `"<first>-worse"` or `"inconclusive"`.
@@ -242,6 +249,10 @@ pub struct CellSummary {
     pub budget_multiple: usize,
     /// Whether the dimension is beyond the calibrated range.
     pub extrapolation: bool,
+    /// Flat chosen axes of each validation seed's problem, in manifest seed
+    /// order: the value on that seed's first matching row (any arm), or `None`
+    /// when that row does not carry one.
+    pub plateau_free_axes: Vec<Option<usize>>,
     /// One paired comparison per arm pair requested of the summary, in the
     /// order requested (the main experiment: CMA-ES vs refine).
     pub comparisons: Vec<Comparison>,
@@ -332,6 +343,7 @@ fn blank_row(problem: &Problem, multiple: usize, phase: &str, arm: Arm) -> RunRo
         normalised_held_out_loss: None,
         confirmation_evaluations: 0,
         extrapolation: is_extrapolation(dimension),
+        plateau_free_axes: Some(problem.plateau_free_axes),
         error: None,
     }
 }
@@ -507,15 +519,38 @@ fn arm_name(arm: Arm) -> &'static str {
     }
 }
 
-/// "better" iff the screening interval is wholly below zero and the held-out
-/// mean is not above zero; "worse" iff the screening interval is wholly above.
-fn verdict(first: Arm, screening: &MetricSummary, held_out: &MetricSummary) -> String {
+/// `"<first>-better"` iff the screening interval is wholly below zero, the
+/// held-out mean is not above zero and the full-window mean is not above zero;
+/// `"<first>-worse"` iff the screening interval is wholly above zero; otherwise
+/// `"inconclusive"`.
+fn verdict(
+    first: Arm,
+    screening: &MetricSummary,
+    held_out: &MetricSummary,
+    full: &MetricSummary,
+) -> String {
     let name = arm_name(first);
-    match (screening.ci_low, screening.ci_high, held_out.mean) {
-        (_, Some(hi), Some(held)) if hi < 0.0 && held <= 0.0 => format!("{name}-better"),
-        (Some(lo), _, _) if lo > 0.0 => format!("{name}-worse"),
+    match (
+        screening.ci_low,
+        screening.ci_high,
+        held_out.mean,
+        full.mean,
+    ) {
+        (_, Some(hi), Some(held), Some(whole)) if hi < 0.0 && held <= 0.0 && whole <= 0.0 => {
+            format!("{name}-better")
+        }
+        (Some(lo), _, _, _) if lo > 0.0 => format!("{name}-worse"),
         _ => "inconclusive".to_string(),
     }
+}
+
+/// One arm's normalised losses on one validation seed; `None` when the row is
+/// missing, failed, or lacks the value.
+#[derive(Clone, Copy)]
+struct SeedLosses {
+    screening: Option<f64>,
+    held_out: Option<f64>,
+    full: Option<f64>,
 }
 
 /// One paired comparison per `pairs` entry, for every validation cell.
@@ -529,8 +564,8 @@ pub(super) fn summarise_cells(
     for &family in &m.families {
         for &dimension in &m.dimensions {
             for &multiple in &m.budget_multiples {
-                // Per validation seed, in manifest order: (screening, held-out).
-                let pick = |arm: Arm| -> Vec<(Option<f64>, Option<f64>)> {
+                // Per validation seed, in manifest order.
+                let pick = |arm: Arm| -> Vec<SeedLosses> {
                     m.validation_seeds
                         .iter()
                         .map(|&seed| {
@@ -544,9 +579,23 @@ pub(super) fn summarise_cells(
                                         && r.seed == seed
                                 })
                                 .filter(|r| r.error.is_none())
-                                .map_or((None, None), |r| {
-                                    (r.normalised_screening_loss, r.normalised_held_out_loss)
-                                })
+                                .map_or(
+                                    SeedLosses {
+                                        screening: None,
+                                        held_out: None,
+                                        full: None,
+                                    },
+                                    |r| SeedLosses {
+                                        screening: r.normalised_screening_loss,
+                                        held_out: r.normalised_held_out_loss,
+                                        // Taken from the raw full losses, so older
+                                        // rows that carry only those still count.
+                                        full: r
+                                            .full_loss_final
+                                            .zip(r.full_loss_start)
+                                            .map(|(last, start)| ratio(last, start)),
+                                    },
+                                )
                         })
                         .collect()
                 };
@@ -554,29 +603,54 @@ pub(super) fn summarise_cells(
                     .iter()
                     .map(|&(first, second)| {
                         let (a, b) = (pick(first), pick(second));
-                        let col =
-                            |v: &[(Option<f64>, Option<f64>)], held: bool| -> Vec<Option<f64>> {
-                                v.iter().map(|p| if held { p.1 } else { p.0 }).collect()
-                            };
+                        let col = |v: &[SeedLosses], metric: fn(&SeedLosses) -> Option<f64>| {
+                            v.iter().map(metric).collect::<Vec<_>>()
+                        };
+                        // The full column is summarised last, so the screening and
+                        // held-out intervals draw the same bootstrap samples as before.
                         let screening = summarise_metric(
-                            &col(&a, false),
-                            &col(&b, false),
+                            &col(&a, |p| p.screening),
+                            &col(&b, |p| p.screening),
                             m.bootstrap_resamples,
                             rng,
                         );
                         let held_out = summarise_metric(
-                            &col(&a, true),
-                            &col(&b, true),
+                            &col(&a, |p| p.held_out),
+                            &col(&b, |p| p.held_out),
+                            m.bootstrap_resamples,
+                            rng,
+                        );
+                        let full = summarise_metric(
+                            &col(&a, |p| p.full),
+                            &col(&b, |p| p.full),
                             m.bootstrap_resamples,
                             rng,
                         );
                         Comparison {
                             first,
                             second,
-                            verdict: verdict(first, &screening, &held_out),
+                            verdict: verdict(first, &screening, &held_out, &full),
                             screening,
+                            full,
                             held_out,
                         }
+                    })
+                    .collect();
+                // The problem is the same for every arm of a seed, so the
+                // first row of the cell and seed stands for all of them.
+                let plateau_free_axes = m
+                    .validation_seeds
+                    .iter()
+                    .map(|&seed| {
+                        runs.iter()
+                            .find(|r| {
+                                r.phase == "validation"
+                                    && r.family == family
+                                    && r.dimension == dimension
+                                    && r.budget_multiple == multiple
+                                    && r.seed == seed
+                            })
+                            .and_then(|r| r.plateau_free_axes)
                     })
                     .collect();
                 cells.push(CellSummary {
@@ -584,6 +658,7 @@ pub(super) fn summarise_cells(
                     dimension,
                     budget_multiple: multiple,
                     extrapolation: is_extrapolation(dimension),
+                    plateau_free_axes,
                     comparisons,
                 });
             }
@@ -615,7 +690,7 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
     let cells = summarise_cells(m, &runs, &[(Arm::CmaEs, Arm::LamarckRefine)], &mut rng);
     Ok(ExperimentResults {
-        format_version: 2,
+        format_version: 3,
         manifest: m.clone(),
         total_evaluations,
         coverage: Coverage {

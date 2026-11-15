@@ -30,6 +30,7 @@ pub mod arms;
 pub mod cmaes;
 pub mod experiment;
 pub mod objective;
+pub mod provenance;
 pub mod reference;
 pub mod refine;
 pub mod stats;

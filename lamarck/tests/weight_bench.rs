@@ -1,12 +1,16 @@
 //! Behaviour tests for the offline weight bench (issue #266).
 
 use neat_ai_lamarck::weight_bench::experiment::ALLOWED_BUDGET_MULTIPLES;
+use neat_ai_lamarck::weight_bench::objective::{
+    PLATEAU_REL_TOL, count_plateau_axes, scan_sensitivities,
+};
 use neat_ai_lamarck::weight_bench::suite::{
     CorpusSpec, Family, Problem, ProblemSpec, load_corpus, problem_from_corpus,
 };
 use neat_ai_lamarck::weight_bench::{
-    Arm, BenchError, BudgetedObjective, CMA_SIGMA0, Manifest, WeightObjective, build_problem,
-    cma_es, is_extrapolation, lamarck_refine, run_arm, run_manifest, select_influential,
+    Arm, BenchError, BudgetedObjective, CMA_SIGMA0, Manifest, RunRow, WeightObjective,
+    build_problem, cma_es, is_extrapolation, lamarck_refine, run_arm, run_manifest,
+    select_influential,
 };
 
 fn problem(family: Family, seed: u64) -> (Problem, WeightObjective) {
@@ -675,4 +679,90 @@ fn total_evaluations_count_confirmations_and_preparation_once_per_problem() {
     }
     let used: usize = r.runs.iter().map(|row| row.evaluations_used).sum();
     assert_eq!(r.total_evaluations, used + 2 * 5 + preparation);
+}
+
+/// The plateau count is the number of chosen axes whose one-sided step moves
+/// the loss by at most `PLATEAU_REL_TOL` times the base loss. In the fixture,
+/// synapses 2 and 3 (the dead `h2` inputs) are flat and the rest are not.
+#[test]
+fn plateau_free_axes_count_only_the_flat_synapses_chosen() {
+    let (creature, records) = sensitivity_fixture();
+    let (base, changes, evaluations) = scan_sensitivities(&creature, &records).unwrap();
+    assert_eq!(evaluations, 10);
+    assert_eq!(changes, sensitivities(&creature, &records));
+    assert_eq!(changes[2], 0.0);
+    assert_eq!(changes[3], 0.0);
+    assert!(changes[0] > PLATEAU_REL_TOL * base, "premise: live axis");
+
+    // All nine synapses chosen: the two flat ones are counted.
+    let all: Vec<usize> = (0..9).collect();
+    assert_eq!(count_plateau_axes(&all, &changes, base), 2);
+    // Only the live synapses chosen: none is flat.
+    assert_eq!(
+        count_plateau_axes(&[0, 1, 4, 5, 6, 7, 8], &changes, base),
+        0
+    );
+    // A flat synapse and a live one: one flat axis.
+    assert_eq!(count_plateau_axes(&[2, 0], &changes, base), 1);
+}
+
+/// A corpus creature whose hidden neuron `h0` reaches the output through a
+/// zero weight, so its eight input synapses are flat (36 synapses in all).
+/// Choosing all 36 records eight plateau axes on every row of the problem;
+/// choosing 20 (all of them live) records none.
+#[test]
+fn corpus_rows_record_the_plateau_count_of_their_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = corpus_spec(dir.path(), 128, 96);
+    let json = std::fs::read_to_string(&spec.creature).unwrap();
+    let dead = json.replacen(
+        r#""fromUUID":"h0","toUUID":"o1","weight":0.3}"#,
+        r#""fromUUID":"h0","toUUID":"o1","weight":0}"#,
+        1,
+    );
+    assert_ne!(dead, json);
+    std::fs::write(&spec.creature, dead).unwrap();
+
+    for (dimension, expected) in [(20, 0), (36, 8)] {
+        let m = Manifest {
+            dimensions: vec![dimension],
+            ..corpus_manifest(spec.clone())
+        };
+        let results = run_manifest(&m).unwrap();
+        assert_eq!(results.runs.len(), 2);
+        for row in &results.runs {
+            assert_eq!(row.plateau_free_axes, Some(expected), "D={dimension}");
+        }
+        let (creature, packed) = load_corpus(&spec).unwrap();
+        let p = problem_from_corpus(&creature, &packed, &spec, dimension, 1001).unwrap();
+        assert_eq!(p.plateau_free_axes, expected, "D={dimension}");
+    }
+}
+
+/// A synthetic problem's rows carry its plateau count (`Some`, not absent),
+/// and the cell reports that count for its one validation seed.
+#[test]
+fn synthetic_rows_carry_their_problem_plateau_count() {
+    let (p, _) = problem(Family::Tanh, 1001);
+    let r = run_manifest(&tiny_manifest()).unwrap();
+    assert_eq!(r.runs.len(), 2);
+    for row in &r.runs {
+        assert_eq!(row.plateau_free_axes, Some(p.plateau_free_axes));
+    }
+    assert_eq!(
+        r.cells[0].plateau_free_axes,
+        vec![Some(p.plateau_free_axes)]
+    );
+}
+
+/// Rows written before the field existed have no `plateauFreeAxes` key and
+/// load as `None`.
+#[test]
+fn rows_without_the_plateau_field_load_as_none() {
+    let r = run_manifest(&tiny_manifest()).unwrap();
+    let mut value = serde_json::to_value(&r.runs[0]).unwrap();
+    assert!(value.get("plateauFreeAxes").is_some());
+    value.as_object_mut().unwrap().remove("plateauFreeAxes");
+    let older: RunRow = serde_json::from_value(value).unwrap();
+    assert_eq!(older.plateau_free_axes, None);
 }

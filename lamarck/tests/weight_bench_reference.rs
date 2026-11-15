@@ -236,6 +236,7 @@ fn fixture(arm: Arm, seed: u64, screening: f64, held_out: f64) -> RunRow {
         normalised_held_out_loss: Some(held_out),
         confirmation_evaluations: 5,
         extrapolation: false,
+        plateau_free_axes: None,
         error: None,
     }
 }
@@ -309,13 +310,41 @@ fn reference_rows(offset: f64) -> Vec<RunRow> {
     reference_rows_split(offset, offset / 2.0)
 }
 
+/// Reference rows like `reference_rows_split`, with the full-window column
+/// offset by `full_offset` from the screening base. `fixture` sets the full
+/// column to the screening value, so this offset is the only change to it.
+fn reference_rows_with_full(
+    screening_offset: f64,
+    held_out_offset: f64,
+    full_offset: f64,
+) -> Vec<RunRow> {
+    reference_rows_split(screening_offset, held_out_offset)
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut row)| {
+            // The normalised full loss is final over start (2.0 / 2.0 here, so
+            // exact) and so equals the value written.
+            row.full_loss_final = Some(START_LOSS * (0.8 + 0.01 * i as f64 + full_offset));
+            row
+        })
+        .collect()
+}
+
+/// Expected paired full-window mean of AMM minus `second` for
+/// `reference_rows_with_full(_, _, full_offset)`.
+fn expected_full_mean(second: Arm, full_offset: f64) -> f64 {
+    let (refine_full, _) = base(Arm::LamarckRefine);
+    let (second_full, _) = base(second);
+    refine_full + full_offset - second_full
+}
+
 #[test]
 fn clearly_better_and_worse_references_get_matching_verdicts() {
     let m = many_seeds();
     let runs = in_process_rows();
 
     let better = summarise_reference(&m, &runs, &reference_rows(-0.3)).unwrap();
-    assert_eq!(better.format_version, 2);
+    assert_eq!(better.format_version, 3);
     assert_eq!(better.cells.len(), 1);
     let comparisons = &better.cells[0].comparisons;
     let pairs: Vec<(Arm, Arm)> = comparisons.iter().map(|c| (c.first, c.second)).collect();
@@ -406,6 +435,59 @@ fn held_out_veto_turns_a_screening_win_inconclusive() {
     }
 }
 
+/// The rule also reads the full-window column: a screening win whose held-out
+/// mean is not above zero is still vetoed when the full-window mean is above
+/// zero. The held-out and full offsets differ, so the test fails if either
+/// column is read in place of the other.
+#[test]
+fn full_window_veto_turns_a_screening_win_inconclusive() {
+    let m = many_seeds();
+    let runs = in_process_rows();
+
+    // Screening clearly better; held out not above zero (-0.05 against refine,
+    // -0.01 against CMA-ES); full window worse (+0.05 against refine, +0.15
+    // against CMA-ES). Vetoed against both.
+    let vetoed =
+        summarise_reference(&m, &runs, &reference_rows_with_full(-0.3, -0.05, 0.05)).unwrap();
+    for c in &vetoed.cells[0].comparisons {
+        assert_eq!(c.verdict, "inconclusive", "{:?}", c.second);
+        assert_means(c, -0.3, -0.05);
+        assert!(c.screening.ci_high.unwrap() < 0.0);
+        assert!(c.held_out.mean.unwrap() <= 0.0);
+        assert_eq!(c.full.losses, 6);
+        let expected = expected_full_mean(c.second, 0.05);
+        assert!(
+            (c.full.mean.unwrap() - expected).abs() < 1e-9,
+            "{:?} full {:?} != {expected}",
+            c.second,
+            c.full.mean
+        );
+    }
+
+    // Control at exactly zero: the boundary is inclusive, so refine stays
+    // "better". The full column sits 0.1 above CMA-ES at the same offset (the
+    // in-process gap), so that comparison is still inconclusive.
+    let at_zero =
+        summarise_reference(&m, &runs, &reference_rows_with_full(-0.3, -0.05, 0.0)).unwrap();
+    let [vs_refine, vs_cma] = &at_zero.cells[0].comparisons[..] else {
+        panic!("expected two comparisons");
+    };
+    assert_eq!(vs_refine.full.ties, 6);
+    assert!(vs_refine.full.mean.unwrap().abs() < 1e-9);
+    assert_eq!(vs_refine.verdict, "amm-reference-better");
+    assert_eq!(vs_cma.verdict, "inconclusive");
+
+    // Control below zero: a full-window mean of -0.2 keeps "better" against both.
+    let below =
+        summarise_reference(&m, &runs, &reference_rows_with_full(-0.3, -0.05, -0.2)).unwrap();
+    for c in &below.cells[0].comparisons {
+        assert_eq!(c.verdict, "amm-reference-better", "{:?}", c.second);
+        assert_eq!(c.full.wins, 6);
+        let expected = expected_full_mean(c.second, -0.2);
+        assert!((c.full.mean.unwrap() - expected).abs() < 1e-9);
+    }
+}
+
 #[test]
 fn coverage_counts_failed_rows_and_missing_runs() {
     let m = many_seeds();
@@ -425,6 +507,9 @@ fn coverage_counts_failed_rows_and_missing_runs() {
     let c = &r.cells[0].comparisons[0];
     assert_eq!(c.screening.paired_differences.len(), 4);
     assert_eq!(c.screening.failures, 2);
+    // A failed row and a missing row both count as full-window failures.
+    assert_eq!(c.full.paired_differences.len(), 4);
+    assert_eq!(c.full.failures, 2);
 }
 
 #[test]
@@ -444,6 +529,7 @@ fn failed_reference_with_completed_metrics_is_excluded_from_pairs() {
         assert_eq!(comparison.screening.failures, 1);
         assert_eq!(comparison.held_out.wins, 5);
         assert_eq!(comparison.held_out.failures, 1);
+        assert_eq!(comparison.full.failures, 1);
     }
 }
 
@@ -513,6 +599,8 @@ fn hand_built_error_row_with_null_fields_counts_as_failed() {
     let c = &r.cells[0].comparisons[0];
     assert_eq!(c.screening.failures, 1);
     assert_eq!(c.held_out.failures, 1);
+    // Its full-window losses are absent too, so it fails the full column.
+    assert_eq!(c.full.failures, 1);
     assert_eq!(c.screening.paired_differences.len(), 5);
 }
 

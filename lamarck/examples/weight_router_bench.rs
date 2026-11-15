@@ -11,8 +11,17 @@
 //! ```
 //!
 //! Writes `OUT_DIR/manifest.json`, `OUT_DIR/runs.jsonl` (one run per line) and
-//! `OUT_DIR/summary.json` (which carries the `crateVersion` that produced it;
-//! `--compare-reference` writes `OUT_DIR/reference-summary.json` with it too).
+//! `OUT_DIR/summary.json`; `--compare-reference` writes
+//! `OUT_DIR/reference-summary.json` as well.
+//!
+//! Both summaries carry the provenance of the run: `crateVersion` (the crate
+//! that produced it), `gitCommit` (the checkout's `HEAD`, or null), `gitDirty`
+//! (whether that checkout had uncommitted changes, or null) and
+//! `neatCoreSource` (the `neat-core` source pinned in `Cargo.lock`). When git
+//! cannot be run, a one-line warning goes to stderr and the two git fields are
+//! null. `summary.json` also carries `wallClockSeconds`, the time
+//! `run_manifest` took, to three decimals.
+//!
 //! A corpus run's `summary.json` also carries `corpusFingerprint`: FNV-1a
 //! hashes of the creature file and of the records loaded, and the record count.
 //! `OUT_DIR` defaults to `weight-router-bench`. The default manifest is the predeclared one; `--manifest` reads a JSON manifest;
@@ -45,13 +54,53 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
+use neat_ai_lamarck::weight_bench::provenance;
 use neat_ai_lamarck::weight_bench::suite::{CorpusSpec, Family};
 use neat_ai_lamarck::weight_bench::{
     Manifest, ReferenceRequest, RunRow, predeclared_manifest, run_manifest, serve_reference,
     summarise_reference,
 };
 use serde_json::json;
+
+/// The workspace lock file, which pins the `neat-core` source.
+const NEAT_CORE_LOCK: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"));
+
+/// Where a run's outputs came from, probed before any work or output is written.
+struct Provenance {
+    git_commit: serde_json::Value,
+    git_dirty: serde_json::Value,
+    neat_core_source: String,
+}
+
+impl Provenance {
+    /// Probe git and the lock. A git failure is warned about on stderr and
+    /// recorded as null; a missing `neat-core` pin is an error, so no summary is
+    /// written without it.
+    fn probe() -> Result<Self, String> {
+        let (git_commit, git_dirty) =
+            match provenance::git_state(Path::new(env!("CARGO_MANIFEST_DIR"))) {
+                Ok(state) => (json!(state.commit), json!(state.dirty)),
+                Err(cause) => {
+                    eprintln!("weight_router_bench: warning: git fields are null: {cause}");
+                    (json!(null), json!(null))
+                }
+            };
+        Ok(Self {
+            git_commit,
+            git_dirty,
+            neat_core_source: provenance::neat_core_source(NEAT_CORE_LOCK)?,
+        })
+    }
+
+    /// Add the provenance fields to a summary object.
+    fn insert_into(&self, object: &mut serde_json::Map<String, serde_json::Value>) {
+        object.insert("gitCommit".into(), self.git_commit.clone());
+        object.insert("gitDirty".into(), self.git_dirty.clone());
+        object.insert("neatCoreSource".into(), json!(self.neat_core_source));
+    }
+}
 
 fn smoke_manifest() -> Manifest {
     Manifest {
@@ -112,6 +161,7 @@ fn print_cells(cells: &[neat_ai_lamarck::weight_bench::CellSummary]) {
 }
 
 fn compare_reference(out_dir: &Path, amm_rows: &Path) -> Result<(), String> {
+    let provenance = Provenance::probe()?;
     let manifest_path = out_dir.join("manifest.json");
     let text = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
@@ -124,6 +174,7 @@ fn compare_reference(out_dir: &Path, amm_rows: &Path) -> Result<(), String> {
     let mut value = serde_json::to_value(&results).map_err(|e| e.to_string())?;
     if let Some(object) = value.as_object_mut() {
         object.insert("crateVersion".into(), json!(env!("CARGO_PKG_VERSION")));
+        provenance.insert_into(object);
     }
     let pretty = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     fs::write(&path, pretty).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -240,7 +291,10 @@ fn run() -> Result<(), String> {
         };
     }
 
+    let provenance = Provenance::probe()?;
+    let started = Instant::now();
     let results = run_manifest(&manifest).map_err(|e| e.to_string())?;
+    let wall_clock_seconds = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
 
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let pretty = |v: &serde_json::Value| serde_json::to_string_pretty(v).map_err(|e| e.to_string());
@@ -257,11 +311,15 @@ fn run() -> Result<(), String> {
     let mut summary = json!({
         "formatVersion": results.format_version,
         "crateVersion": env!("CARGO_PKG_VERSION"),
+        "wallClockSeconds": wall_clock_seconds,
         "manifest": results.manifest,
         "totalEvaluations": results.total_evaluations,
         "coverage": results.coverage,
         "cells": results.cells,
     });
+    if let Some(object) = summary.as_object_mut() {
+        provenance.insert_into(object);
+    }
     // Corpus runs name the exact model and records; the synthetic suite is
     // fixed by the crate version and the manifest seeds.
     if let (Some(fp), Some(object)) = (&results.corpus_fingerprint, summary.as_object_mut()) {
