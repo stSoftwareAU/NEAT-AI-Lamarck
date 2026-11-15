@@ -11,15 +11,26 @@ outstanding. Part of #266.
 
 This branch is the earlier PR #271 work, squashed onto the current `Develop`
 after #271 was closed for a `CHANGELOG.md` conflict. The conflict was two
-adjacent `### Added` bullets (#267 and #266); both are kept. The CI gate
-fixes that PR #271 carried are already on `Develop` through #270, so they are
-not in this diff.
+adjacent `### Added` bullets (#267 and #266); both are kept. Most CI gate
+fixes that PR #271 carried are already on `Develop` through #270. One gate fix
+is in this diff, outside the benchmark: `.gitleaks.toml` (commit `659f2d7`).
+
+- **`.gitleaks.toml`.** `Develop`'s config held an empty `[allowlist]`
+  (`commits = []`). gitleaks 8.30.1 refuses to load it ("`[[allowlists]]`
+  must contain at least one check for: commits, paths, regexes, or
+  stopwords"), so the secret scan stopped before scanning anything. The new
+  config is `[extend] useDefault = true`: the gitleaks default rule set with
+  no allowlist, so nothing is exempted. `gitleaks detect --config
+  .gitleaks.toml --log-opts="origin/Develop..HEAD"` scans this PR's commits
+  and reports "no leaks found".
 
 - [x] Read and pin the full AMM method; check release compatibility.
 - [x] Run AMM, CMA-ES and the refinement surrogate on fixed synthetic screening records.
 - [x] Correct comparison and accounting defects; validate failure handling.
 - [x] Remove the router and probes after the negative finding; regenerate evidence from head.
 - [x] Re-land the work on the current `Develop` and pass `./quality.sh`.
+- [x] Fix the gitleaks config so the secret scan loads.
+- [x] Pin influential-synapse choice, best-point confirmation, per-arm reference comparisons and the committed manifest with tests.
 - [ ] Establish production-baseline equivalence and run representative inputs.
 - [ ] Complete full authoritative confirmation on representative inputs.
 
@@ -50,6 +61,7 @@ CLI/backend only; no UI file is touched.
 - `docs/evidence/weight-router/manifest.json`, `summary.json` and `reference-summary.json` come from the current benchmark code (`formatVersion` 2): 648/648 runs, 0 failed, 1,631,615 evaluations. CMA-ES beat the surrogate in 19 of 27 cells, lost 1, and 7 were inconclusive. Over the committed 324 AMM rows, AMM is worse in all 54 comparisons. These are synthetic results, not representative ones.
 - `docs/evidence/weight-router/method-check.json` and `amm-runs.jsonl` are router-era output (crate 0.1.46); `docs/weight-optimiser-routing.md` labels them so.
 - `Cargo.lock` moves `rustix` 1.1.4 → 1.1.6 for RUSTSEC-2026-0486, which the dependency audit flagged on #271.
+- `.gitleaks.toml`: the old config fails to load (`FTL Failed to load config`); the new one scans `origin/Develop..HEAD` with "no leaks found".
 - #266: Experiment: Benchmark budget-aware routing of local weight optimisers.
 
 ```mermaid
@@ -72,8 +84,13 @@ flowchart LR
 ## Test Plan
 
 - `timeout 1500 ./quality.sh < /dev/null` passed on `d044281` (exit 0, "All quality checks passed!"): shell and workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc.
-- `cargo test --test weight_bench --test weight_bench_reference < /dev/null` (from `lamarck/`) passed 19 and 13, with one debug-mode ignore; `cargo test --lib weight_bench` passed 2.
+- `cargo test --test weight_bench --test weight_bench_reference < /dev/null` (from `lamarck/`) passed 21 and 13, with one debug-mode ignore; `cargo test --lib weight_bench` passed 2.
 - Tests added by this PR include `lamarck/tests/weight_bench.rs::manifest_rejects_unknown_fields`, `manifest_rejects_duplicate_trial_identifiers` and `extrapolation_flag_marks_rows_and_cells_just_past_the_boundary`; `lamarck/tests/weight_bench_reference.rs::held_out_veto_turns_a_screening_win_inconclusive`, `failed_reference_with_completed_metrics_is_excluded_from_pairs` and `committed_evidence_parses_and_summarises`; `lamarck/src/weight_bench/experiment.rs::tests::failed_confirmations_keep_the_calls_already_spent`; and `lamarck/src/weight_bench/arms.rs::tests::arm_seeds_are_pinned`.
+- Behaviour pins added after the pre-PR verifier, each shown red by breaking the code and green when it is restored:
+  - `weight_bench.rs::select_influential_picks_the_most_sensitive_synapses` uses a creature whose third hidden neuron reaches the output through a zero weight. It asserts the exact indices returned for every `d`, that the two dead synapses are left out while live ones remain, and that the tied dead pair keeps the lower index. It goes red when the sensitivity comparator in `objective.rs` is reversed, and when the tie-break is reversed.
+  - `weight_bench.rs::confirmation_losses_are_measured_at_the_arms_best_point` replays each `run_manifest` row's arm on the same budget and seed. It asserts the final screening, full and held-out losses and both normalised losses equal that best point's losses, on a fixture where the best point's full and held-out losses differ from the start's. It goes red when `finish_row` confirms the start instead of `best_x` on the held-out window, and again on the full window.
+  - `weight_bench_reference.rs` fixtures now give CMA-ES (0.7 / 0.86) different values from refine (0.8 / 0.9). The verdict tests assert each comparison's mean, wins and verdict against its own second arm. They go red when `summarise_cells` reads refine rows for every pair.
+  - `committed_evidence_parses_and_summarises` asserts the committed manifest equals `predeclared_manifest()`. It derives the AMM row count from the manifest's planned runs and requires every planned run complete. It goes red when the predeclared seeds or dimensions are changed.
 - `scripts/test-amm-reference.py` (offline integration checks against the real pinned AMM and Rust server) was not re-run here: no scratch AMM environment exists, and building one needs network access.
 - No existing test assertion is removed relative to `Develop`; the benchmark module and its test files are new.
 

@@ -5,8 +5,9 @@ use std::io::Cursor;
 use neat_ai_lamarck::weight_bench::suite::Family;
 use neat_ai_lamarck::weight_bench::suite::ProblemSpec;
 use neat_ai_lamarck::weight_bench::{
-    Arm, BenchError, BudgetedObjective, Manifest, REFERENCE_BOX_HALF_WIDTH, ReferenceRequest,
-    RunRow, WeightObjective, build_problem, run_arm, serve_reference, summarise_reference,
+    Arm, BenchError, BudgetedObjective, Comparison, Manifest, REFERENCE_BOX_HALF_WIDTH,
+    ReferenceRequest, RunRow, WeightObjective, build_problem, predeclared_manifest, run_arm,
+    serve_reference, summarise_reference,
 };
 use serde_json::Value;
 
@@ -239,21 +240,51 @@ fn fixture(arm: Arm, seed: u64, screening: f64, held_out: f64) -> RunRow {
     }
 }
 
-/// Refine and CMA-ES rows at about 0.8 on screening and 0.9 held out, with
-/// seed-to-seed variation.
+/// Per-arm base normalised losses `(screening, held out)` of the in-process
+/// fixture rows. The two arms differ, so a comparison that reads the wrong
+/// second arm's rows gets a different mean.
+fn base(arm: Arm) -> (f64, f64) {
+    match arm {
+        Arm::LamarckRefine => (0.8, 0.9),
+        Arm::CmaEs => (0.7, 0.86),
+        other => panic!("no in-process base for {other:?}"),
+    }
+}
+
+/// Refine rows at about 0.8 on screening and 0.9 held out, CMA-ES rows at
+/// about 0.7 and 0.86, with the same seed-to-seed variation.
 fn in_process_rows() -> Vec<RunRow> {
     let mut rows = Vec::new();
     for (i, &seed) in SEEDS.iter().enumerate() {
         for arm in [Arm::LamarckRefine, Arm::CmaEs] {
-            rows.push(fixture(
-                arm,
-                seed,
-                0.8 + 0.01 * i as f64,
-                0.9 + 0.01 * i as f64,
-            ));
+            let (s, h) = base(arm);
+            rows.push(fixture(arm, seed, s + 0.01 * i as f64, h + 0.01 * i as f64));
         }
     }
     rows
+}
+
+/// Expected paired means `(screening, held out)` of AMM minus `second` for
+/// reference rows built by `reference_rows_split(s, h)`.
+fn expected_means(second: Arm, s: f64, h: f64) -> (f64, f64) {
+    let (rs, rh) = base(Arm::LamarckRefine);
+    let (bs, bh) = base(second);
+    (rs + s - bs, rh + h - bh)
+}
+
+fn assert_means(c: &Comparison, s: f64, h: f64) {
+    let (es, eh) = expected_means(c.second, s, h);
+    let (ms, mh) = (c.screening.mean.unwrap(), c.held_out.mean.unwrap());
+    assert!(
+        (ms - es).abs() < 1e-9,
+        "{:?} screening {ms} != {es}",
+        c.second
+    );
+    assert!(
+        (mh - eh).abs() < 1e-9,
+        "{:?} held out {mh} != {eh}",
+        c.second
+    );
 }
 
 /// Reference rows offset from the in-process rows by `screening_offset` on
@@ -295,25 +326,38 @@ fn clearly_better_and_worse_references_get_matching_verdicts() {
             (Arm::AmmReference, Arm::CmaEs),
         ]
     );
+    // AMM is 0.3 below refine and 0.2 below CMA-ES on screening; 0.15 and
+    // 0.11 below on held out. Each comparison reads its own second arm.
     for c in comparisons {
         assert_eq!(c.verdict, "amm-reference-better");
         assert_eq!(c.screening.wins, 6);
-        assert!((c.screening.mean.unwrap() + 0.3).abs() < 1e-9);
-        assert!((c.held_out.mean.unwrap() + 0.15).abs() < 1e-9);
         assert_eq!(c.held_out.wins, 6);
+        assert_means(c, -0.3, -0.15);
     }
+    assert!((comparisons[1].screening.mean.unwrap() + 0.2).abs() < 1e-9);
+    assert!((comparisons[1].held_out.mean.unwrap() + 0.11).abs() < 1e-9);
 
     let worse = summarise_reference(&m, &runs, &reference_rows(0.3)).unwrap();
     for c in &worse.cells[0].comparisons {
         assert_eq!(c.verdict, "amm-reference-worse");
         assert_eq!(c.screening.losses, 6);
+        assert_means(c, 0.3, 0.15);
     }
 
+    // AMM equal to refine is a tie against refine but 0.1 worse than CMA-ES.
     let same = summarise_reference(&m, &runs, &reference_rows(0.0)).unwrap();
-    for c in &same.cells[0].comparisons {
-        assert_eq!(c.verdict, "inconclusive");
-        assert_eq!(c.screening.ties, 6);
-    }
+    let [vs_refine, vs_cma] = &same.cells[0].comparisons[..] else {
+        panic!("expected two comparisons");
+    };
+    assert_eq!(vs_refine.second, Arm::LamarckRefine);
+    assert_eq!(vs_refine.verdict, "inconclusive");
+    assert_eq!(vs_refine.screening.ties, 6);
+    assert_means(vs_refine, 0.0, 0.0);
+    assert_eq!(vs_cma.second, Arm::CmaEs);
+    assert_eq!(vs_cma.verdict, "amm-reference-worse");
+    assert_eq!(vs_cma.screening.losses, 6);
+    assert_eq!(vs_cma.held_out.losses, 6);
+    assert_means(vs_cma, 0.0, 0.0);
 }
 
 /// The predeclared rule: a screening interval wholly below zero is only
@@ -323,25 +367,33 @@ fn held_out_veto_turns_a_screening_win_inconclusive() {
     let m = many_seeds();
     let runs = in_process_rows();
 
-    // Screening clearly better, held-out slightly worse: vetoed.
+    // Screening clearly better, held-out slightly worse against both arms
+    // (by 0.05 and 0.09): vetoed.
     let vetoed = summarise_reference(&m, &runs, &reference_rows_split(-0.3, 0.05)).unwrap();
     for c in &vetoed.cells[0].comparisons {
         assert_eq!(c.verdict, "inconclusive");
-        assert!((c.screening.mean.unwrap() + 0.3).abs() < 1e-9);
-        assert!((c.held_out.mean.unwrap() - 0.05).abs() < 1e-9);
+        assert_means(c, -0.3, 0.05);
         assert!(c.screening.ci_high.unwrap() < 0.0);
         assert_eq!(c.screening.wins, 6);
         assert_eq!(c.held_out.losses, 6);
     }
 
-    // Controls: a held-out mean exactly at zero and one below zero both keep
-    // the verdict "better".
-    for held_out_offset in [0.0, -0.05] {
+    // Controls against refine: a held-out mean exactly at zero and one below
+    // zero both keep the verdict "better". The same offsets leave AMM 0.04
+    // above and 0.01 below CMA-ES on held out, so only the second is better.
+    for (held_out_offset, cma_verdict) in [(0.0, "inconclusive"), (-0.05, "amm-reference-better")] {
         let kept =
             summarise_reference(&m, &runs, &reference_rows_split(-0.3, held_out_offset)).unwrap();
-        for c in &kept.cells[0].comparisons {
-            assert_eq!(c.verdict, "amm-reference-better", "{held_out_offset}");
-            assert!((c.held_out.mean.unwrap() - held_out_offset).abs() < 1e-9);
+        let [vs_refine, vs_cma] = &kept.cells[0].comparisons[..] else {
+            panic!("expected two comparisons");
+        };
+        assert_eq!(
+            vs_refine.verdict, "amm-reference-better",
+            "{held_out_offset}"
+        );
+        assert_eq!(vs_cma.verdict, cma_verdict, "{held_out_offset}");
+        for c in [vs_refine, vs_cma] {
+            assert_means(c, -0.3, held_out_offset);
         }
     }
 
@@ -350,6 +402,7 @@ fn held_out_veto_turns_a_screening_win_inconclusive() {
     let worse = summarise_reference(&m, &runs, &reference_rows_split(0.3, -0.3)).unwrap();
     for c in &worse.cells[0].comparisons {
         assert_eq!(c.verdict, "amm-reference-worse");
+        assert_means(c, 0.3, -0.3);
     }
 }
 
@@ -475,15 +528,23 @@ fn committed_evidence_parses_and_summarises() {
     assert!(!text.contains("calibrationSeeds"));
     let m: Manifest = serde_json::from_str(&text).unwrap();
     assert!(m.validate().is_ok());
-    assert_eq!(m.validation_seeds, (1001..=1012).collect::<Vec<u64>>());
+    // The committed manifest is exactly the one the code declares.
+    assert_eq!(m, predeclared_manifest());
     let rows = std::fs::read_to_string(dir.join("amm-runs.jsonl")).unwrap();
     assert!(rows.contains("routedTo") && rows.contains("probeEvaluations"));
     let parsed: Vec<RunRow> = rows
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(parsed.len(), 324);
     assert!(parsed.iter().all(|r| r.arm == Arm::AmmReference));
     let r = summarise_reference(&m, &[], &parsed).unwrap();
-    assert_eq!(r.coverage.completed_runs, 324);
+    // One AMM row per planned (family, dimension, budget, seed) of the
+    // manifest, none failed.
+    assert_eq!(
+        r.coverage.planned_runs,
+        m.families.len() * m.dimensions.len() * m.budget_multiples.len() * m.validation_seeds.len()
+    );
+    assert_eq!(r.coverage.completed_runs, r.coverage.planned_runs);
+    assert_eq!(r.coverage.failed_runs, 0);
+    assert_eq!(parsed.len(), r.coverage.planned_runs);
 }

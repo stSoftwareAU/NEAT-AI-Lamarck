@@ -284,6 +284,90 @@ fn select_influential_contract() {
     assert_eq!(evals, n + 1);
 }
 
+/// Two inputs, three TANH hiddens and one IDENTITY output. `h2` reaches the
+/// output through a zero weight, so its two input synapses (indices 2 and 3)
+/// cannot move the loss at all: both have sensitivity exactly zero, a tie.
+fn sensitivity_fixture() -> (neat_core::CreatureExport, Vec<f32>) {
+    let json = r#"{"semanticVersion":"4.0.0","forwardOnly":true,"input":2,"output":1,
+      "neurons":[
+        {"type":"hidden","uuid":"h0","bias":0.0,"squash":"TANH"},
+        {"type":"hidden","uuid":"h1","bias":0.0,"squash":"TANH"},
+        {"type":"hidden","uuid":"h2","bias":0.0,"squash":"TANH"},
+        {"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}],
+      "synapses":[
+        {"fromUUID":"input-0","toUUID":"h0","weight":0.5},
+        {"fromUUID":"input-1","toUUID":"h0","weight":-0.3},
+        {"fromUUID":"input-0","toUUID":"h2","weight":0.4},
+        {"fromUUID":"input-1","toUUID":"h2","weight":0.2},
+        {"fromUUID":"input-0","toUUID":"h1","weight":0.5},
+        {"fromUUID":"input-1","toUUID":"h1","weight":-0.3},
+        {"fromUUID":"h0","toUUID":"o1","weight":0.7},
+        {"fromUUID":"h1","toUUID":"o1","weight":0.7},
+        {"fromUUID":"h2","toUUID":"o1","weight":0.0}]}"#;
+    let creature: neat_core::CreatureExport = serde_json::from_str(json).unwrap();
+    // Per record: two inputs, then the target.
+    let records = vec![
+        0.9, -0.4, 1.5, //
+        -0.7, 0.8, -1.2, //
+        0.3, 0.6, 0.9, //
+        -0.5, -0.9, 0.4, //
+    ];
+    (creature, records)
+}
+
+/// Sensitivity of each synapse, measured the way `select_influential`
+/// documents it, so the expected choice is derived independently.
+fn sensitivities(creature: &neat_core::CreatureExport, records: &[f32]) -> Vec<f64> {
+    let all: Vec<usize> = (0..creature.synapses.len()).collect();
+    let o = WeightObjective::new(creature.clone(), all, records).unwrap();
+    let x0 = o.start();
+    let base = o.loss(&x0).unwrap();
+    (0..x0.len())
+        .map(|i| {
+            let mut x = x0.clone();
+            x[i] += neat_ai_lamarck::candidates::RANDOM_DELTA_HALF_WIDTH;
+            (o.loss(&x).unwrap() - base).abs()
+        })
+        .collect()
+}
+
+#[test]
+fn select_influential_picks_the_most_sensitive_synapses() {
+    let (creature, records) = sensitivity_fixture();
+    let s = sensitivities(&creature, &records);
+    // The fixture's premises: h2's input synapses are dead and every other
+    // synapse moves the loss.
+    assert_eq!(s[2], 0.0);
+    assert_eq!(s[3], 0.0);
+    for i in [0, 1, 4, 5, 6, 7, 8] {
+        assert!(s[i] > 0.0, "synapse {i} has sensitivity {}", s[i]);
+    }
+
+    // Every live synapse, and no dead one, when d is the live count.
+    let (idx, evals) = select_influential(&creature, &records, 7).unwrap();
+    assert_eq!(idx, vec![0, 1, 4, 5, 6, 7, 8]);
+    assert_eq!(evals, 10);
+
+    // For each d, the choice is exactly the d largest sensitivities with
+    // ties broken towards the lower index.
+    let mut order: Vec<usize> = (0..s.len()).collect();
+    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]).then(a.cmp(&b)));
+    for d in 1..=s.len() {
+        let mut expected = order[..d].to_vec();
+        expected.sort_unstable();
+        let (idx, _) = select_influential(&creature, &records, d).unwrap();
+        assert_eq!(idx, expected, "d = {d}");
+        if d < 7 {
+            assert!(!idx.contains(&2) && !idx.contains(&3), "d = {d}: {idx:?}");
+        }
+    }
+
+    // Tie-break: with room for one dead synapse, the tied pair (2, 3)
+    // keeps the lower index.
+    let (idx, _) = select_influential(&creature, &records, 8).unwrap();
+    assert_eq!(idx, vec![0, 1, 2, 4, 5, 6, 7, 8]);
+}
+
 /// Writes a creature (8 inputs, 4 TANH hiddens reading every input, one
 /// IDENTITY output: 36 synapses) and 600 deterministic records.
 fn corpus_fixture(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -376,6 +460,47 @@ fn corpus_manifest_runs_within_budget() {
             row.held_out_loss_start,
             Some(o.loss_on(&start, &p.held_out).unwrap())
         );
+    }
+}
+
+/// Each row's confirmation losses are taken at the best point its arm found:
+/// replaying the arm deterministically gives that point, and the row's final
+/// screening, full and held-out losses are that point's losses.
+#[test]
+fn confirmation_losses_are_measured_at_the_arms_best_point() {
+    let mut m = tiny_manifest();
+    m.budget_multiples = vec![30];
+    let results = run_manifest(&m).unwrap();
+    assert_eq!(results.runs.len(), 2);
+    for row in &results.runs {
+        assert!(row.error.is_none(), "{:?}", row.error);
+        let (p, o) = problem(row.family, row.seed);
+        assert_eq!(p.synapse_indices.len(), row.dimension);
+        let start = o.start();
+        let mut replay = BudgetedObjective::new(&o, row.budget);
+        run_arm(&mut replay, row.arm, row.seed).unwrap();
+        assert_eq!(replay.used(), row.evaluations_used);
+        let (best_loss, best_x) = replay.best().unwrap();
+        // The fixture moves: the best point is not the start on either
+        // window, so confirming the start instead would change these columns.
+        let held_start = o.loss_on(&start, &p.held_out).unwrap();
+        let held_best = o.loss_on(best_x, &p.held_out).unwrap();
+        let full_start = o.loss_on(&start, &p.full).unwrap();
+        let full_best = o.loss_on(best_x, &p.full).unwrap();
+        assert_ne!(held_best, held_start, "{:?}", row.arm);
+        assert_ne!(full_best, full_start, "{:?}", row.arm);
+
+        assert_eq!(row.final_screening_loss, Some(best_loss));
+        assert_eq!(best_loss, o.loss(best_x).unwrap());
+        assert_eq!(row.full_loss_start, Some(full_start));
+        assert_eq!(row.full_loss_final, Some(full_best));
+        assert_eq!(row.held_out_loss_start, Some(held_start));
+        assert_eq!(row.held_out_loss_final, Some(held_best));
+        assert_eq!(
+            row.normalised_screening_loss,
+            Some(best_loss / o.loss(&start).unwrap())
+        );
+        assert_eq!(row.normalised_held_out_loss, Some(held_best / held_start));
     }
 }
 
