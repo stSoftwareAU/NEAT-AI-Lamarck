@@ -147,6 +147,9 @@ pub struct Candidate {
     pub provenance: CandidateProvenance,
 }
 
+/// Half-width of the uniform bias/weight delta the Random strategy draws; the
+/// weight bench's refinement arm draws from it too.
+pub const RANDOM_DELTA_HALF_WIDTH: f64 = 0.05;
 /// Fraction of mean adjusted error applied as a bias step (full mean overshoots).
 const MEAN_ERROR_STEP_FRACTION: f64 = 0.1;
 /// Cap on |Δw| from a single backprop weight propose (fine-tuned nets).
@@ -1475,7 +1478,7 @@ fn build_candidate(
         }
         CandidateStrategy::Random => {
             if rng.random_bool(0.5) {
-                let delta = rng.random_range(-0.05..0.05);
+                let delta = rng.random_range(-RANDOM_DELTA_HALF_WIDTH..RANDOM_DELTA_HALF_WIDTH);
                 let new_bias = old_bias + delta;
                 creature.neurons[neuron_pos].bias = new_bias;
                 (
@@ -1487,7 +1490,7 @@ fn build_candidate(
                 let src = pick_best_incoming(ctx.incoming, rng)?;
                 let syn_idx = src.synapse_index;
                 let old_w = creature.synapses[syn_idx].weight;
-                let delta = rng.random_range(-0.05..0.05);
+                let delta = rng.random_range(-RANDOM_DELTA_HALF_WIDTH..RANDOM_DELTA_HALF_WIDTH);
                 let new_w = old_w + delta;
                 creature.synapses[syn_idx].weight = new_w;
                 (
