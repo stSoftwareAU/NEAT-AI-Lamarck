@@ -107,7 +107,7 @@ The repository has no `CODING-STANDARDS.md`. The reviewer used `CONTRIBUTING.md`
 
 ## Test Plan
 
-- `timeout 1700 ./quality.sh < /dev/null` passed on `e360bf9` with exit 0 and "All quality checks passed!". That run covered shell and workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc. The later commits change only the version, the evidence files and the docs.
+- `timeout 1700 ./quality.sh < /dev/null` passed on `e360bf9` with exit 0 and "All quality checks passed!". That run covered shell and workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc. It was re-run on `e69261d` (after the version bump and the final evidence regeneration, with this summary in the working tree) and passed again with exit 0.
 - `cargo test --test weight_bench --test weight_bench_reference < /dev/null` (from `lamarck/`): 26 passed with 1 ignored, and 15 passed. `cargo test --lib weight_bench`: 7 passed. After the final evidence regeneration, `cargo test --test weight_bench_reference --test contributing_contract`: 21 passed.
 - Added tests:
   - `lamarck/tests/weight_bench_reference.rs`: `full_window_veto_turns_a_screening_win_inconclusive` and `committed_evidence_is_reproduced_by_the_summariser`.
