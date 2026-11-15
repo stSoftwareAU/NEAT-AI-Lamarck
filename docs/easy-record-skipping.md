@@ -165,6 +165,14 @@ Values come from `docs/evidence/record-skip/manifest.json`.
 | Forgetting tolerance | 1e-4 |
 | Versions | crate 0.1.47, neat-core v0.23.4, and the git commit recorded in `versions.gitCommit` |
 
+The data and the parent are identified by `source` in `summary.json`. For the
+synthetic suite it is `synthetic`, with the seeds in the manifest. In corpus
+mode it is `files: corpus corpus:<training_data_key>:<maxRecords>:<validationRecords>
+parent <creature fingerprint>`. The training-data key is a hash of the
+directory path and each `*.bin` file's name, length and modification time, so
+any change to the corpus changes it. Both the key and the fingerprint are
+16-digit hex.
+
 The learning rate is chosen by a counted **preparation** phase. It runs the
 full arm at each rate in `learningRateGrid` on the calibration seeds (1-6) and
 picks the lowest mean final **training** MSE. That rate is used for calibration
@@ -226,8 +234,9 @@ the corpus run is refused. It runs only when `--manifest FILE` supplies a
 
 ## Results (synthetic)
 
-252 of 252 planned runs completed, 0 failed. Wall time was 15 s in release on
-a shared, parallel container, so it is indicative only. The committed
+252 of 252 planned runs completed, 0 failed. Wall time was 14 s in release on
+a shared, parallel container, so it is indicative only. Re-running the suite
+reproduces `summary.json` exactly apart from `versions.gitCommit`. The committed
 evidence is `docs/evidence/record-skip/manifest.json` and `summary.json`
 (`runs.jsonl` is not committed).
 
