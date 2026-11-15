@@ -204,7 +204,7 @@ widths (2 and 8), so the 16 transfer tasks are pooled.
 | Field | Value |
 |-------|-------|
 | Crate version | `0.1.47` (`lamarck/Cargo.toml`) |
-| neat-core tag | `v0.23.4` |
+| neat-core tag | `v0.23.5` (the committed evidence was generated under `v0.23.4`) |
 | Task generator | `local-rules-synthetic-v1` |
 | Source commit | `versions.sourceCommit`: the full git SHA checked out when the example runner ran (`git rev-parse HEAD`; untracked files are not part of the dirty check); `null` when git is unavailable or the library is called without the runner |
 | Source tree dirty | `versions.sourceTreeDirty`: `true` when tracked files differed from that commit at run time, so the numbers may not reproduce from it; `null` when unknown |

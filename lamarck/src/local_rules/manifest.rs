@@ -10,7 +10,7 @@ use super::tasks::TASK_GENERATOR_VERSION;
 
 /// neat-core tag this crate is built against. Must match `lamarck/Cargo.toml`
 /// (asserted by a test).
-pub const NEAT_CORE_TAG: &str = "v0.23.4";
+pub const NEAT_CORE_TAG: &str = "v0.23.5";
 
 /// Inclusive bounds on the step count of any arm.
 const STEP_RANGE: std::ops::RangeInclusive<u32> = 5..=20;
