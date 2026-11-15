@@ -657,6 +657,33 @@ fn compute_limit_refuses_a_manifest_over_budget() {
 }
 
 #[test]
+fn files_mode_compute_bound_uses_the_loaded_training_count() {
+    let dir = tempfile::tempdir().unwrap();
+    // 170 records less 50 validation: 120 training, not tiny()'s 100.
+    let creature = write_files(dir.path(), 170);
+    let corpus = load_corpus(dir.path(), &creature, 50, 1000).unwrap();
+    assert_eq!(corpus.train.len(), 120);
+    let source = CorpusSource::Files {
+        corpus,
+        parent: creature,
+    };
+
+    let mut m = tiny();
+    assert_eq!(m.train_records, 100);
+    // 4 rates + 4 calibration + 6 validation runs.
+    let bound = 14 * u64::from(m.epochs) * 120;
+    m.max_record_passes = bound - 1;
+    let err = run_manifest(&m, &source).unwrap_err();
+    assert!(err.contains("maxRecordPasses"), "{err}");
+    assert!(err.contains(&bound.to_string()), "{err}");
+
+    m.max_record_passes = bound;
+    let report = run_manifest(&m, &source).unwrap();
+    assert_eq!(report.compute.planned_bound_record_passes, bound);
+    assert!(report.compute.actual_record_passes <= bound);
+}
+
+#[test]
 fn learning_rate_sweep_is_counted_and_chooses_by_training_mse() {
     let mut m = tiny();
     m.learning_rate_grid = vec![1e-6, 0.2];
@@ -677,6 +704,21 @@ fn learning_rate_sweep_is_counted_and_chooses_by_training_mse() {
     assert!(normal < tiny_rate, "{normal} !< {tiny_rate}");
     for e in &report.learning_rate_sweep {
         assert_eq!(e.n_runs, m.calibration_seeds.len());
+    }
+    // The sweep reads training MSE: with one calibration seed each entry is
+    // that seed's preparation row, and validation MSE would differ from it.
+    let prep: Vec<_> = report
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Ok(o) if o.phase == "preparation" => Some(o),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prep.len(), report.learning_rate_sweep.len());
+    for (e, o) in report.learning_rate_sweep.iter().zip(&prep) {
+        assert_eq!(e.mean_train_mse, Some(o.final_train_mse));
+        assert_ne!(e.mean_train_mse, Some(o.final_validation_mse));
     }
     // 2 prep + 4 calibration + 6 validation.
     assert_eq!(report.coverage.planned, 2 + 4 + 6);

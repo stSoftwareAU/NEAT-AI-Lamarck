@@ -230,8 +230,11 @@ any change to the corpus changes it. Both the key and the fingerprint are
 
 The learning rate is chosen by a counted **preparation** phase. It runs the
 full arm at each rate in `learningRateGrid` on the calibration seeds (1-6) and
-picks the lowest mean final **training** MSE. That rate is used for calibration
-and validation. The sweep (`learningRateSweep` in `summary.json`, 6 runs per
+picks the lowest mean final **training** MSE among the rates that completed
+every calibration seed; a rate that failed on any seed is not eligible, because
+its mean would cover different corpora. If no rate completed them all, the run
+stops and names the first failure. That rate is used for calibration and
+validation. The sweep (`learningRateSweep` in `summary.json`, 6 runs per
 rate) chose 0.2:
 
 | Learning rate | Mean final train MSE |
@@ -284,7 +287,8 @@ Corpus-mode results stay private.
 
 With those defaults the predeclared manifest's bound is
 252 x 30 x 18,000 = 136,080,000 record passes, over the 16,000,000 limit, so
-the corpus run is refused. It runs only when `--manifest FILE` supplies a
+the corpus run is refused. The bound uses the loaded training record count, not
+the manifest's `trainRecords`. It runs only when `--manifest FILE` supplies a
 `maxRecordPasses` predeclared for that corpus.
 
 ## Results (synthetic)
@@ -334,7 +338,10 @@ Costs:
 | Total | 252 | 8,856,000 | 553,755 | 74,667,658 |
 
 Compute (`compute` in `summary.json`): limit 16,000,000 record passes, planned
-bound 15,120,000, actual 8,856,000.
+bound 15,120,000, actual 8,856,000. A run that fails still charges the passes
+it spent before failing (a diverged run spends all of them), in its
+`runs.jsonl` row and in its phase's cost and `actualRecordPasses`; `Runs`
+counts completed runs only. This suite had no failures.
 
 ## Findings
 
