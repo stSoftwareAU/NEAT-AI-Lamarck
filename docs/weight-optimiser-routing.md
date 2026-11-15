@@ -242,7 +242,7 @@ The run writes `manifest.json`, `runs.jsonl` and `summary.json` to `OUT_DIR`
 |------|----------|
 | `manifest.json` | The manifest that was run. |
 | `runs.jsonl` | One line per run, failures included: arm, start and final screening, full and held-out losses, evaluations used, preparation and confirmation evaluations, error. |
-| `summary.json` | Format version (`formatVersion`, 2), crate version (`crateVersion`, 0.1.47), total evaluations, coverage (planned, completed, failed runs) and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening and held-out loss, plus the verdict. |
+| `summary.json` | Format version (`formatVersion`, 2), crate version (`crateVersion`, 0.1.47), total evaluations, coverage (planned, completed, failed runs) and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening and held-out loss, plus the verdict. A corpus run also carries `corpusFingerprint`: FNV-1a 64-bit hashes of the creature file (`creatureFnv1a64`) and of the records actually loaded (`recordsFnv1a64`), and the record count. The synthetic suite omits it, since the crate version and manifest seeds fix its problems. |
 
 Output format version 2 drops the router-era fields: `calibratedRule` from
 `summary.json`, and `routedTo` and `probeEvaluations` from run rows. The
@@ -432,8 +432,10 @@ coverage is **0 runs**; no private model/data versions have been selected and no
 representative manifest is frozen. Private inputs, their provenance manifests
 and results must remain outside this public checkout.
 
-Before a representative run, freeze the model revision/hash, corpus snapshot
-and ordered-file hashes, screening/full/held-out split, and baseline pipeline
+A corpus run records `corpusFingerprint` (creature-file and loaded-record
+hashes) in its results, so the model and records it used can be checked
+against a frozen provenance manifest. Before a representative run, freeze the
+model revision/hash, corpus snapshot and ordered-file hashes, screening/full/held-out split, and baseline pipeline
 configuration in its private manifest. Keep D=20/40/100, 10D/30D/100D and the
 three activation families in the public synthetic controls. Keep twelve paired
 validation trials per cell. The current arms have no tuned parameter, so there

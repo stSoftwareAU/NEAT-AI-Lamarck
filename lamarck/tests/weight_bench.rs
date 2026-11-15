@@ -504,6 +504,77 @@ fn confirmation_losses_are_measured_at_the_arms_best_point() {
     }
 }
 
+/// A corpus run names the exact model and records it used; the synthetic
+/// suite carries no fingerprint and serialises without the field.
+#[test]
+fn corpus_runs_fingerprint_the_model_and_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = corpus_spec(dir.path(), 128, 96);
+    let first = run_manifest(&corpus_manifest(spec.clone())).unwrap();
+    let fp = first.corpus_fingerprint.clone().unwrap();
+    assert_eq!(fp.records, 600);
+    assert_eq!(fp.creature_fnv1a64.len(), 16);
+    assert_ne!(fp.creature_fnv1a64, fp.records_fnv1a64);
+    // Independent FNV-1a 64 of the creature file's bytes.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in std::fs::read(&spec.creature).unwrap() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
+    }
+    assert_eq!(fp.creature_fnv1a64, format!("{h:016x}"));
+    let text = serde_json::to_string(&first).unwrap();
+    assert!(text.contains("corpusFingerprint"), "{text:.200}");
+    // Same files, same fingerprint.
+    let again = run_manifest(&corpus_manifest(spec.clone())).unwrap();
+    assert_eq!(again.corpus_fingerprint, Some(fp.clone()));
+
+    // One changed record value moves only the records hash.
+    let data = spec.training_data.join("0.bin");
+    let mut bytes = std::fs::read(&data).unwrap();
+    bytes[0] ^= 0x01;
+    std::fs::write(&data, &bytes).unwrap();
+    let records_changed = run_manifest(&corpus_manifest(spec.clone()))
+        .unwrap()
+        .corpus_fingerprint
+        .unwrap();
+    assert_eq!(records_changed.creature_fnv1a64, fp.creature_fnv1a64);
+    assert_ne!(records_changed.records_fnv1a64, fp.records_fnv1a64);
+    assert_eq!(records_changed.records, 600);
+
+    // A changed creature weight moves only the creature hash.
+    let json = std::fs::read_to_string(&spec.creature).unwrap();
+    let edited = json.replacen(r#""weight":0.3}"#, r#""weight":0.31}"#, 1);
+    assert_ne!(edited, json);
+    std::fs::write(&spec.creature, edited).unwrap();
+    let creature_changed = run_manifest(&corpus_manifest(spec))
+        .unwrap()
+        .corpus_fingerprint
+        .unwrap();
+    assert_ne!(creature_changed.creature_fnv1a64, fp.creature_fnv1a64);
+    assert_eq!(
+        creature_changed.records_fnv1a64,
+        records_changed.records_fnv1a64
+    );
+
+    // Fewer records loaded (a smaller window) changes the count and hash.
+    let dir2 = tempfile::tempdir().unwrap();
+    let small = CorpusSpec {
+        max_records: 300,
+        ..corpus_spec(dir2.path(), 128, 96)
+    };
+    let fp_small = run_manifest(&corpus_manifest(small))
+        .unwrap()
+        .corpus_fingerprint
+        .unwrap();
+    assert_eq!(fp_small.records, 300);
+    assert_ne!(fp_small.records_fnv1a64, fp.records_fnv1a64);
+    assert_eq!(fp_small.creature_fnv1a64, fp.creature_fnv1a64);
+
+    let synthetic = run_manifest(&tiny_manifest()).unwrap();
+    assert_eq!(synthetic.corpus_fingerprint, None);
+    let text = serde_json::to_string(&synthetic).unwrap();
+    assert!(!text.contains("corpusFingerprint"));
+}
+
 #[test]
 fn corpus_with_too_few_records_is_rejected() {
     let dir = tempfile::tempdir().unwrap();

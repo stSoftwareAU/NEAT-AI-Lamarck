@@ -83,7 +83,7 @@ flowchart LR
 
 ## Test Plan
 
-- `timeout 1500 ./quality.sh < /dev/null` passed on `d044281` (exit 0, "All quality checks passed!"): shell and workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc.
+- `timeout 1700 ./quality.sh < /dev/null` passed on `cc4adbd`, which carries every code and test change here (exit 0, "All quality checks passed!"): shell and workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc.
 - `cargo test --test weight_bench --test weight_bench_reference < /dev/null` (from `lamarck/`) passed 21 and 13, with one debug-mode ignore; `cargo test --lib weight_bench` passed 2.
 - Tests added by this PR include `lamarck/tests/weight_bench.rs::manifest_rejects_unknown_fields`, `manifest_rejects_duplicate_trial_identifiers` and `extrapolation_flag_marks_rows_and_cells_just_past_the_boundary`; `lamarck/tests/weight_bench_reference.rs::held_out_veto_turns_a_screening_win_inconclusive`, `failed_reference_with_completed_metrics_is_excluded_from_pairs` and `committed_evidence_parses_and_summarises`; `lamarck/src/weight_bench/experiment.rs::tests::failed_confirmations_keep_the_calls_already_spent`; and `lamarck/src/weight_bench/arms.rs::tests::arm_seeds_are_pinned`.
 - Behaviour pins added after the pre-PR verifier, each shown red by breaking the code and green when it is restored:

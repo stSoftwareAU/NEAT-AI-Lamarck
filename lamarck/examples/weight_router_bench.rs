@@ -13,6 +13,8 @@
 //! Writes `OUT_DIR/manifest.json`, `OUT_DIR/runs.jsonl` (one run per line) and
 //! `OUT_DIR/summary.json` (which carries the `crateVersion` that produced it;
 //! `--compare-reference` writes `OUT_DIR/reference-summary.json` with it too).
+//! A corpus run's `summary.json` also carries `corpusFingerprint`: FNV-1a
+//! hashes of the creature file and of the records loaded, and the record count.
 //! `OUT_DIR` defaults to `weight-router-bench`. The default manifest is the predeclared one; `--manifest` reads a JSON manifest;
 //! `--smoke` runs one tiny cell.
 //!
@@ -252,7 +254,7 @@ fn run() -> Result<(), String> {
         lines.push('\n');
     }
     write("runs.jsonl", lines)?;
-    let summary = json!({
+    let mut summary = json!({
         "formatVersion": results.format_version,
         "crateVersion": env!("CARGO_PKG_VERSION"),
         "manifest": results.manifest,
@@ -260,6 +262,11 @@ fn run() -> Result<(), String> {
         "coverage": results.coverage,
         "cells": results.cells,
     });
+    // Corpus runs name the exact model and records; the synthetic suite is
+    // fixed by the crate version and the manifest seeds.
+    if let (Some(fp), Some(object)) = (&results.corpus_fingerprint, summary.as_object_mut()) {
+        object.insert("corpusFingerprint".into(), json!(fp));
+    }
     write("summary.json", pretty(&summary)?)?;
 
     print_cells(&results.cells);

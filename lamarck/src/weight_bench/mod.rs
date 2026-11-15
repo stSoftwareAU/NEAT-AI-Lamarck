@@ -38,8 +38,8 @@ pub mod suite;
 pub use arms::{Arm, arm_seed, run_arm};
 pub use cmaes::{CMA_SIGMA0, cma_es};
 pub use experiment::{
-    CellSummary, Comparison, Coverage, ExperimentResults, Manifest, MetricSummary, RunRow,
-    predeclared_manifest, run_manifest,
+    CellSummary, Comparison, CorpusFingerprint, Coverage, ExperimentResults, Manifest,
+    MetricSummary, RunRow, predeclared_manifest, run_manifest,
 };
 pub use objective::{BenchError, Budget, BudgetedObjective, WeightObjective, select_influential};
 pub use reference::{

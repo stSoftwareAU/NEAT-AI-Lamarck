@@ -264,6 +264,50 @@ pub struct ExperimentResults {
     pub runs: Vec<RunRow>,
     /// Validation summaries.
     pub cells: Vec<CellSummary>,
+    /// Which model and records a corpus run used; absent for the synthetic
+    /// suite, whose problems are fixed by the code version and the seeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_fingerprint: Option<CorpusFingerprint>,
+}
+
+/// Identifies the exact creature file and records a corpus run used, so two
+/// results can be checked to come from the same model and data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorpusFingerprint {
+    /// FNV-1a 64-bit hash of the creature file's bytes, as 16 hex digits.
+    pub creature_fnv1a64: String,
+    /// FNV-1a 64-bit hash of the loaded records (each value as little-endian
+    /// `f32`, inputs then outputs per record, in file order), as 16 hex digits.
+    pub records_fnv1a64: String,
+    /// Records loaded from the corpus window.
+    pub records: usize,
+}
+
+/// 64-bit FNV-1a over `bytes`, as 16 lower-case hex digits.
+fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Fingerprint the creature file and the records actually loaded from it.
+fn fingerprint(corpus: &LoadedCorpus<'_>) -> Result<Option<CorpusFingerprint>, BenchError> {
+    let Some((spec, (creature, packed))) = corpus else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(&spec.creature).map_err(|e| {
+        BenchError::InvalidConfig(format!("corpus creature {}: {e}", spec.creature.display()))
+    })?;
+    let width = creature.input + creature.output;
+    Ok(Some(CorpusFingerprint {
+        creature_fnv1a64: fnv1a64(bytes),
+        records_fnv1a64: fnv1a64(packed.iter().flat_map(|v| v.to_le_bytes())),
+        records: packed.len() / width,
+    }))
 }
 
 fn blank_row(problem: &Problem, multiple: usize, phase: &str, arm: Arm) -> RunRow {
@@ -403,8 +447,12 @@ pub(super) fn build_one(
 
 /// Every arm on every validation problem and budget, in manifest order.
 /// Returns the rows and the preparation evaluations, counted once per problem.
-fn validation_phase(m: &Manifest) -> Result<(Vec<RunRow>, usize), BenchError> {
+/// Also returns the corpus fingerprint, if the manifest declares a corpus.
+fn validation_phase(
+    m: &Manifest,
+) -> Result<(Vec<RunRow>, usize, Option<CorpusFingerprint>), BenchError> {
     let corpus = load_manifest_corpus(m)?;
+    let fingerprint = fingerprint(&corpus)?;
     let mut rows = Vec::new();
     let mut preparation = 0;
     for &family in &m.families {
@@ -420,7 +468,7 @@ fn validation_phase(m: &Manifest) -> Result<(Vec<RunRow>, usize), BenchError> {
             }
         }
     }
-    Ok((rows, preparation))
+    Ok((rows, preparation, fingerprint))
 }
 
 fn summarise_metric(
@@ -550,7 +598,7 @@ pub(super) fn summarise_cells(
 /// coverage; only a configuration or problem-construction error aborts.
 pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
     m.validate()?;
-    let (runs, preparation) = validation_phase(m)?;
+    let (runs, preparation, corpus_fingerprint) = validation_phase(m)?;
     let planned = m.families.len()
         * m.dimensions.len()
         * m.budget_multiples.len()
@@ -577,6 +625,7 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
         },
         runs,
         cells,
+        corpus_fingerprint,
     })
 }
 
