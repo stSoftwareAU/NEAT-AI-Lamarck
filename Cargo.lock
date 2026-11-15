@@ -202,8 +202,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "neat-core"
-version = "0.23.4"
-source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.4#e86c342e72e85172b2f9e557329aca3b15bf5229"
+version = "0.23.7"
+source = "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.7#3759355634b1cabc8034cd76df5dbd44a867d18c"
 dependencies = [
  "serde",
  "serde_json",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "neat_ai_lamarck"
-version = "0.1.47"
+version = "0.1.48"
 dependencies = [
  "clap",
  "neat-core",
@@ -278,9 +278,9 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",

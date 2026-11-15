@@ -16,6 +16,7 @@
 
 /target/
 **/*.rs.bk
+__pycache__/
 .DS_Store
 
 # NEAT-AI-core lives as a sibling clone. If a script ever checks it out
