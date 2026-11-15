@@ -119,11 +119,22 @@ def run_one(args):
                 except Exception as exc:  # recorded on the row, never swallowed
                     raised = f"{type(exc).__name__}: {exc}"
 
+                # A server that already answered a point with an error has
+                # written its row and exited, so "done" may meet a closed pipe.
+                # Close stdin here and drop it: if the buffered "done" stayed
+                # unflushed, Popen.__exit__ would flush it again and raise
+                # BrokenPipeError past the row already read, replacing the real
+                # costs with a zero-cost failure.
                 try:
                     proc.stdin.write("done\n")
                     proc.stdin.flush()
                 except BrokenPipeError as exc:
                     raised = raised or f"BrokenPipeError: {exc}"
+                try:
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass  # the flush on close hit the same closed pipe
+                proc.stdin = None
                 row = None
                 for line in proc.stdout:
                     if line.startswith('{"row"'):

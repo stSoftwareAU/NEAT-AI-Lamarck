@@ -12,7 +12,10 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
+import types
 import unittest
+from unittest import mock
 
 
 spec = importlib.util.spec_from_file_location(
@@ -87,6 +90,44 @@ class ReferenceProcessTests(unittest.TestCase):
         self.assertEqual(row["evaluationsUsed"], control["evaluationsUsed"])
         self.assertEqual(row["confirmationEvaluations"], 5)
         self.assertEqual(row["normalisedScreeningLoss"], control["normalisedScreeningLoss"])
+
+    def test_server_error_before_done_keeps_the_real_row(self):
+        # The server answers the first point with an error, writes its row and
+        # exits without reading "done". The stub optimiser outlasts the server,
+        # so the driver's "done" meets a closed pipe on every run (not by
+        # timing luck); the real row must still come back with its costs.
+        wrapper = self.root / "error-then-exit"
+        row = {**driver.failure(self.request, "unused"), "evaluationsUsed": 7,
+               "preparationEvaluations": 145, "confirmationEvaluations": 3,
+               "error": "deliberate budget overrun"}
+        row_file = self.root / "error-then-exit-row.json"
+        row_file.write_text(json.dumps(row))
+        wrapper.write_text(
+            "#!/usr/bin/env python3\nimport json, sys\n"
+            "print(json.dumps({'dimension': 2, 'budget': 10, 'seed': 1,"
+            " 'start': [0.0, 0.0], 'boxHalfWidth': 1.0}), flush=True)\n"
+            "sys.stdin.readline()\n"
+            "print(json.dumps({'error': 'deliberate budget overrun'}), flush=True)\n"
+            f"print(json.dumps({{'row': json.load(open({json.dumps(str(row_file))}))}}), flush=True)\n"
+            "sys.exit(1)\n"
+        )
+        wrapper.chmod(0o700)
+
+        def minimize(f, **_kwargs):
+            try:
+                f([0.0, 0.0])
+            finally:
+                time.sleep(1.0)  # the server has exited by now
+
+        stub = types.ModuleType("amm_optimizer")
+        stub.minimize = minimize
+        with mock.patch.dict(sys.modules, {"amm_optimizer": stub}):
+            result = driver.run_one((str(wrapper), self.manifest, self.request))
+        self.assertEqual(result["evaluationsUsed"], 7)
+        self.assertEqual(result["preparationEvaluations"], 145)
+        self.assertEqual(result["confirmationEvaluations"], 3)
+        self.assertIn("deliberate budget overrun", result["error"])
+        self.assertNotIn("costs incomplete", result["error"])
 
     def method_check(self, manifest, output, *extra):
         return subprocess.run(

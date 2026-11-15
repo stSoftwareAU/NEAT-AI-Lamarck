@@ -28,7 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   changed. The surrogate does not call the production candidate pipeline.
   Duplicate trials are refused, failed rows cannot enter paired comparisons,
   and failed confirmation attempts retain their costs. The AMM driver records
-  process startup/non-zero-exit failures and drains verbose stderr safely.
+  process startup/non-zero-exit failures, drains verbose stderr safely and keeps
+  a failed run's real row and costs when the server exits before `done`.
   On the synthetic suite CMA-ES beat the refinement in 19 of 27 cells with the
   current code (20 of 27 in the earlier run, one cell on the interval boundary),
   but the router always routed to CMA-ES and never beat it, so it was removed.
@@ -203,6 +204,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `neat-core.expected-version` acknowledges 0.13.0.
 
 ### Security
+
+- **The secret scan's `.gitleaks.toml` now loads and runs the default rule set
+  (Issue #266).** `gitleaks.yml` runs `gitleaks detect --source .` with no
+  `--config`, so it reads this file. The old file held only an empty
+  `[allowlist]` (`commits = []`), which gitleaks 8.30.1 refuses to load, and it
+  had no `[extend]`, so no default rules were enabled. The file is now
+  `[extend] useDefault = true` with no allowlist, so nothing is exempted;
+  `gitleaks detect --config .gitleaks.toml` over this PR's commits reports no
+  leaks.
+
+- **`rustix` 1.1.4 → 1.1.6 for RUSTSEC-2026-0486 (Issue #266).** The dependency
+  audit flagged 1.1.4; only `Cargo.lock` moves.
 
 - **A push-based advisory channel now covers the cargo dependencies
   (Issue #215).** Every supply-chain gate here was pull-based — `cargo audit` on

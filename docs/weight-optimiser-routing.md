@@ -64,8 +64,12 @@ The manifest is fixed in code (`predeclared_manifest` in
 the manifest it used to `manifest.json` (the committed copy is
 [`manifest.json`](evidence/weight-router/manifest.json)).
 
-* **Families.** Hidden squash `tanh` (smooth), `relu` (kinks) and `hard-tanh`
-  (kinks and plateaus).
+* **Families.** Hidden squash `tanh` (smooth), `relu` (kinks at zero) and
+  `hard-tanh` (kinks where it clips). No test or committed evidence shows that
+  any tested problem has a flat (plateau) axis among its free weights: the free
+  weights are the most loss-sensitive synapses, which steers away from flat
+  ones, and the plateau probes were removed. The families vary the activation,
+  not a demonstrated plateau.
 * **Problem construction** (`suite.rs`). A random teacher network with 16
   inputs, 16 hidden neurons of one family, fan-in 8 and one identity output
   generates the records (target noise `0.01`). That is 16 x 8 + 16 = 144
@@ -484,5 +488,10 @@ from routine feature CI and are not representative optimisation measurements.
 
 * The comparison against the actual production refinement pipeline and a frozen
   representative model/corpus campaign, including full authoritative confirmation.
+* Full-window confirmation is computed for every run but the verdicts, `summary.json`
+  and `reference-summary.json` read only the screening and held-out losses, and
+  `runs.jsonl` is not committed, so full-window results are neither compared
+  nor reported.
+* A problem proven by a test to contain plateau axes among its free weights.
 * Box-size sensitivity and search-radius controls, predeclared on fresh data.
   No production optimiser or default change is supported by the current evidence.
