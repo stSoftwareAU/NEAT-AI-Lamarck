@@ -128,9 +128,8 @@ pub fn predeclared_manifest() -> Manifest {
 
 /// One optimiser run on one problem.
 ///
-/// Unknown fields are tolerated: the committed AMM rows
-/// (`docs/evidence/weight-router/amm-runs.jsonl`) were written while the router
-/// existed and still carry `routedTo` and `probeEvaluations`. They are ignored.
+/// Unknown fields are tolerated, so router-era rows (which carried `routedTo`
+/// and `probeEvaluations`) still load. Those fields are ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRow {
@@ -606,8 +605,10 @@ pub(super) fn summarise_cells(
                         let col = |v: &[SeedLosses], metric: fn(&SeedLosses) -> Option<f64>| {
                             v.iter().map(metric).collect::<Vec<_>>()
                         };
-                        // The full column is summarised last, so the screening and
-                        // held-out intervals draw the same bootstrap samples as before.
+                        // The full column is drawn after screening and held-out. The
+                        // bootstrap RNG is shared across cells and comparisons, so its
+                        // draws shift the resamples of every later comparison relative
+                        // to format 2.
                         let screening = summarise_metric(
                             &col(&a, |p| p.screening),
                             &col(&b, |p| p.screening),
@@ -667,6 +668,13 @@ pub(super) fn summarise_cells(
     cells
 }
 
+/// Summarise the validation `runs` of `m` as CMA-ES vs lamarck-refine, with the
+/// bootstrap RNG seeded from the manifest.
+pub fn summarise_runs(m: &Manifest, runs: &[RunRow]) -> Vec<CellSummary> {
+    let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
+    summarise_cells(m, runs, &[(Arm::CmaEs, Arm::LamarckRefine)], &mut rng)
+}
+
 /// Run the whole manifest: validate, then summarise the paired comparisons.
 ///
 /// A failed run is recorded as a row with `error` set and counted in the
@@ -687,8 +695,7 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
             .iter()
             .map(|r| r.evaluations_used + r.confirmation_evaluations)
             .sum::<usize>();
-    let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
-    let cells = summarise_cells(m, &runs, &[(Arm::CmaEs, Arm::LamarckRefine)], &mut rng);
+    let cells = summarise_runs(m, &runs);
     Ok(ExperimentResults {
         format_version: 3,
         manifest: m.clone(),

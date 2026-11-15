@@ -7,7 +7,7 @@ use neat_ai_lamarck::weight_bench::suite::ProblemSpec;
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, Comparison, Manifest, REFERENCE_BOX_HALF_WIDTH,
     ReferenceRequest, RunRow, WeightObjective, build_problem, predeclared_manifest, run_arm,
-    serve_reference, summarise_reference,
+    serve_reference, summarise_reference, summarise_runs,
 };
 use serde_json::Value;
 
@@ -604,10 +604,9 @@ fn hand_built_error_row_with_null_fields_counts_as_failed() {
     assert_eq!(c.screening.paired_differences.len(), 5);
 }
 
-/// The committed manifest is current-code output; the committed AMM rows were
-/// written while the router existed and still carry `routedTo` and
-/// `probeEvaluations`. Both must load and summarise, as `--compare-reference`
-/// does with these AMM rows.
+/// The committed manifest and AMM rows are current-code output. The rows carry
+/// `plateauFreeAxes` and no router fields. They must load and summarise, as
+/// `--compare-reference` does with these AMM rows.
 #[test]
 fn committed_evidence_parses_and_summarises() {
     let dir =
@@ -619,12 +618,12 @@ fn committed_evidence_parses_and_summarises() {
     // The committed manifest is exactly the one the code declares.
     assert_eq!(m, predeclared_manifest());
     let rows = std::fs::read_to_string(dir.join("amm-runs.jsonl")).unwrap();
-    assert!(rows.contains("routedTo") && rows.contains("probeEvaluations"));
     let parsed: Vec<RunRow> = rows
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert!(parsed.iter().all(|r| r.arm == Arm::AmmReference));
+    assert!(parsed.iter().all(|r| r.plateau_free_axes.is_some()));
     let r = summarise_reference(&m, &[], &parsed).unwrap();
     // One AMM row per planned (family, dimension, budget, seed) of the
     // manifest, none failed.
@@ -635,4 +634,77 @@ fn committed_evidence_parses_and_summarises() {
     assert_eq!(r.coverage.completed_runs, r.coverage.planned_runs);
     assert_eq!(r.coverage.failed_runs, 0);
     assert_eq!(parsed.len(), r.coverage.planned_runs);
+}
+
+/// The committed in-process runs and AMM rows are reproduced by the current
+/// summariser: both committed summary files are what re-summarising the
+/// committed rows gives.
+#[test]
+fn committed_evidence_is_reproduced_by_the_summariser() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/evidence/weight-router");
+    let m: Manifest =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    let runs: Vec<RunRow> = std::fs::read_to_string(dir.join("runs.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let amm_rows: Vec<RunRow> = std::fs::read_to_string(dir.join("amm-runs.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    // (a) The in-process rows: every planned run finished, each with its
+    // plateau-free axis count.
+    assert_eq!(runs.len(), 648);
+    assert!(runs.iter().all(|r| r.error.is_none()));
+    assert!(runs.iter().all(|r| r.plateau_free_axes.is_some()));
+
+    // (b) The AMM reference summary is reproduced from the committed rows.
+    let reference_summary: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("reference-summary.json")).unwrap())
+            .unwrap();
+    let r = summarise_reference(&m, &runs, &amm_rows).unwrap();
+    assert_eq!(
+        serde_json::to_value(&r.cells).unwrap(),
+        reference_summary["cells"]
+    );
+    assert_eq!(
+        serde_json::to_value(r.coverage).unwrap(),
+        reference_summary["coverage"]
+    );
+    assert_eq!(
+        serde_json::json!(r.total_evaluations),
+        reference_summary["totalEvaluations"]
+    );
+    assert_eq!(
+        serde_json::json!(r.format_version),
+        reference_summary["formatVersion"]
+    );
+
+    // (c) The main summary is well-formed and its cells are reproduced from the
+    // committed in-process runs.
+    let summary: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["formatVersion"], serde_json::json!(3));
+    assert_eq!(summary["gitDirty"], serde_json::json!(false));
+    let commit = summary["gitCommit"].as_str().unwrap();
+    assert!(
+        commit.len() == 40 && commit.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+        "gitCommit {commit:?} is not 40 lower-hex characters"
+    );
+    assert!(
+        summary["neatCoreSource"]
+            .as_str()
+            .unwrap()
+            .starts_with("git+https://github.com/stSoftwareAU/NEAT-AI-core")
+    );
+    assert_eq!(summary["coverage"]["plannedRuns"], serde_json::json!(648));
+    assert_eq!(summary["coverage"]["completedRuns"], serde_json::json!(648));
+    assert_eq!(
+        serde_json::to_value(summarise_runs(&m, &runs)).unwrap(),
+        summary["cells"]
+    );
 }

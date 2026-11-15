@@ -30,9 +30,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and failed confirmation attempts retain their costs. The AMM driver records
   process startup/non-zero-exit failures, drains verbose stderr safely and keeps
   a failed run's real row and costs when the server exits before `done`.
-  On the synthetic suite CMA-ES beat the refinement in 19 of 27 cells with the
-  current code (20 of 27 in the earlier run, one cell on the interval boundary),
-  but the router always routed to CMA-ES and never beat it, so it was removed.
+  On the synthetic suite CMA-ES beat the refinement in 18 of 27 cells in format 3
+  (19 of 27 in format 2; 20 of 27 in the earlier run, one cell on the interval
+  boundary), but the router always routed to CMA-ES and never beat it, so it was
+  removed.
   The AMM method (arXiv 2611.06879) was run as an offline reference arm
   through its authors' pinned implementation (scratch Python environment, no new
   dependency, never in CI) and lost in all 27 cells against refine, CMA-ES and
@@ -48,6 +49,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Write-up and
   committed evidence:
   `docs/weight-optimiser-routing.md`, `docs/evidence/weight-router/`.
+- **Issue #266 benchmark, output `formatVersion` 3 (crate 0.1.48).** Each
+  comparison adds a full-window column, and a `-better` verdict now also needs
+  its full-window mean to be non-positive; two verdicts changed, and the
+  intervals of later cells moved because the bootstrap stream changed. Each
+  problem counts its flat chosen axes against `PLATEAU_REL_TOL`; none were found
+  in the synthetic suite (0 in every run and cell). Summaries record the git
+  commit, dirty flag, neat-core source and wall-clock seconds, and `runs.jsonl`
+  is now committed. The format 3 synthetic run (648 of 648 runs, 0 failed) gives
+  CMA-ES better in 18 of 27 cells, worse in none and inconclusive in 9. The AMM
+  campaign (324 of 324 runs, 0 failed) and the AMM method check were re-run from
+  head: AMM remains worse in all 54 comparisons, and the method check's v0.3.0
+  and v0.7.0 runs (27 rows each) are identical.
 
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
