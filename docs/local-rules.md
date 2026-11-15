@@ -48,13 +48,19 @@ and `https://arxiv.org/pdf/2611.12248` failed with
 `CONNECT tunnel failed, response 403`. Fetching the abstract, HTML and PDF pages
 and the alphaxiv and Hugging Face mirrors failed with "proxy refused the
 connection". Only web-search summaries of those pages could be retrieved.
+On 15 November 2026 the same fetches were retried and failed the same way:
+`curl` gave `CONNECT tunnel failed, response 403`, and WebFetch of the abstract,
+HTML, alphaxiv and Hugging Face pages gave "proxy refused the connection". The
+sandbox proxy does reach GitHub, but no code release by the authors was found
+(`gh search repos "symbolic local learning rules"` returned nothing).
 
-**Outline from web-search summaries (secondary, not read from the paper, so not a pin of the full method):**
+**Outline from web-search summaries (secondary, not read from the paper, so not a pin of the full method). The bullets from monomial order onwards come from search snippets of the paper's HTML version taken on 15 November 2026:**
 
 - **Paper:** "A method to automatically discover symbolic local learning rules".
   Andrea Perin (Aalto University), Fabio Anselmi (University of
   Trieste), Stéphane Deny (Aalto University). Submitted 9 November 2026, in
-  cs.LG, cs.NE and stat.ML. The arXiv version number was not visible.
+  cs.LG, cs.NE and stat.ML. The summaries name v1, and list it among
+  NeurIPS 2026 papers.
 - **Object learned:** a separate *local loss* per layer, not an update rule.
   The update is that loss's gradient.
 - **Dictionary:** monomials of local tensor variables, enumerated using
@@ -71,11 +77,28 @@ connection". Only web-search summaries of those pages could be retrieved.
   small multilayer networks and minimal datasets.
 - **Reported limitation:** loss falls more slowly under the discovered rules
   than under backprop.
+- **Monomial order:** fixed to K = 4 in all experiments.
+- **Meta-optimisation:** the outer loop unrolls the inner learning dynamics.
+  The authors call it numerically delicate. It is sensitive to monomial scale,
+  unroll length and the stability of the induced weight updates (their
+  section 2.1).
+- **Training horizon:** the number of inner steps T grows progressively to 100
+  over 6,000 training episodes, with a random jitter J on the step count per
+  episode. Each episode samples a data subset B and draws minibatches of size b
+  from it. Rules are evaluated for about the number of steps they were trained
+  for.
+- **Transfer test:** rules learned on classes 0–4 of Sliced MNIST are tested on
+  a held-out part, on a network with different layer sizes.
+- **Example learned terms (classification):** terms such as `Y1·(Y1 + W1·X)`,
+  `‖W1ᵀ·Y1‖²` and `‖W1‖²`, and forward-looking terms that use layer 2's
+  quantities, such as `Y2·(Y2 + W2·Y1)`.
 
-**Not pinned.** How the coefficient regression is optimised was not found, for
-example whether the inner training loop is unrolled. Also missing: the exact
-variable set per degree, step counts, network sizes, datasets and
-hyperparameters. A faithful reproduction of the paper is therefore still open.
+**Not pinned.** The paper has still not been read, so none of this is a pin.
+Known only from snippets: unrolling, K = 4 and T up to 100. Still missing: the
+starting T, the values of B, b and J, the exact variable set per degree, the
+outer optimiser and its hyperparameters, network widths and depths, and the
+reconstruction and self-supervised datasets. A faithful reproduction is
+therefore still open.
 
 **How this harness differs from that outline** (the left column is only as reliable as the search summaries):
 
@@ -86,9 +109,14 @@ hyperparameters. A faithful reproduction of the paper is therefore still open.
 | Penrose-diagram monomials of local tensors, degree 1–3 | Fixed library of 9 scalar per-synapse features (section 3), polynomial order up to 3 (`XYY`, `WYY`), each using only the synapse's own neurons, so purely local in the paper's degree-1 sense. The residual exists only on output neurons (section 4) |
 | Coefficients regressed against a global loss, with a Hadamard-product sparse prior | Seeded random sampling of sparse rules (at most 3 terms, coefficients from a fixed grid), keeping a candidate only when it lowers calibration training MSE (sections 3 and 6) |
 | No equal-budget accounting reported in the summaries | The meta-search cost is charged to the symbolic arm (section 5) |
+| Rules trained and evaluated over an unrolled horizon of up to 100 steps | Rules applied for K = 5, 10 or 20 steps, as the issue asks (section 5), and scored during discovery with `calibration_steps` = 10 steps |
 
 So this experiment tests the issue's description, which the summaries match
-only in outline. A negative result here does not refute the paper's method.
+only in outline. The paper reports that loss falls more slowly than under
+backprop, so short horizons are an unfavourable regime for its rules. The 5–20
+step window the issue asks for is shorter than the horizon the summaries
+report, so a negative result here says nothing about the paper's longer-horizon
+regime. A negative result here does not refute the paper's method.
 
 ## 3. Rule language
 
