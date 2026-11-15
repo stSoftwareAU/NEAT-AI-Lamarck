@@ -7,7 +7,7 @@ use neat_ai_lamarck::record_skip::experiment::{
     neat_core_tag_from, refine, run_manifest, synthetic_corpus, synthetic_parent, write_outputs,
 };
 use neat_ai_lamarck::record_skip::schedule::{
-    DifficultyScope, DifficultyTracker, ScheduleConfig, ScheduleError, SkipPolicy, output_strata,
+    DifficultyScope, DifficultyTracker, ScheduleConfig, ScheduleError, SkipPolicy, StratumEdges,
 };
 use neat_ai_lamarck::record_skip::stats::{Verdict, verdict};
 use neat_core::parse_creature_json;
@@ -230,12 +230,16 @@ fn config_and_reduction_refusals() {
 }
 
 #[test]
-fn output_strata_bins() {
-    assert_eq!(
-        output_strata(&[0.0, 1.0, 2.0, 3.0, 4.0], 4),
-        vec![0, 1, 2, 3, 3]
-    );
-    assert_eq!(output_strata(&[2.5, 2.5, 2.5], 4), vec![0, 0, 0]);
+fn stratum_edges_bin_first_targets() {
+    let bin = |values: &[f32]| {
+        let edges = StratumEdges::from_values(values, 4);
+        values
+            .iter()
+            .map(|&v| edges.assign(v))
+            .collect::<Vec<u16>>()
+    };
+    assert_eq!(bin(&[0.0, 1.0, 2.0, 3.0, 4.0]), vec![0, 1, 2, 3, 3]);
+    assert_eq!(bin(&[2.5, 2.5, 2.5]), vec![0, 0, 0]);
 }
 
 fn smoke_setup(

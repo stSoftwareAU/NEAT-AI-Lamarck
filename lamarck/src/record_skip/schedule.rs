@@ -195,13 +195,6 @@ impl StratumEdges {
     }
 }
 
-/// Application-agnostic strata: the equal-width bin of each record's first
-/// target value. All-equal values land in bin 0.
-pub fn output_strata(first_outputs: &[f32], bins: usize) -> Vec<u16> {
-    let edges = StratumEdges::from_values(first_outputs, bins);
-    first_outputs.iter().map(|&v| edges.assign(v)).collect()
-}
-
 /// Per-stratum flag (indexed by stratum id) that is true when the stratum's
 /// share of all records is below `rare_share`.
 pub fn rare_flags(strata: &[u16], rare_share: f64) -> Vec<bool> {

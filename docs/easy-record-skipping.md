@@ -24,8 +24,31 @@ behind every result in the paper", but it does not cite the arXiv ID ("Paper:
 coming soon on arXiv"). The link comes the other way: `gh search code
 2611.10386` found third-party copies of the arXiv abstract, and that text names this
 repository as the paper's code. The arXiv listing (seen through a web search)
-gives the title, the authors and the v1 date. The method is therefore pinned from the
-authors' released code,
+gives the title, the authors and the v1 date.
+
+A third retry on 15 November (00:03Z) failed the same way. `curl` to the
+abstract, the PDF, the HTML view, `export.arxiv.org`, Semantic Scholar,
+alphaXiv, Hugging Face, `scholar.archive.org` and `r.jina.ai` all returned
+"CONNECT tunnel failed, response 403". The web-fetch tool gave "proxy refused
+the connection". Only `github.com`, `api.github.com` and
+`raw.githubusercontent.com` were reachable. A web search could quote short
+fragments of the PDF, and these agree with the code below:
+
+- sequences are scored by accuracy from the training forward pass, with no
+  separate scoring model and no extra pass over the corpus;
+- `A_i` is the active set entering epoch i. At each epoch boundary, every
+  sequence in `A_i` with a valid accuracy is compared against the pruning
+  criterion;
+- a sequence with no scored tokens in an epoch is left out of that epoch's
+  decision and reconsidered later;
+- one variant averages each sequence's accuracy over a window of consecutive
+  epochs, which makes the decision more stable but prunes less;
+- a perplexity-scored variant fixes the lower bound at 1 and varies the upper
+  one;
+- `RP` has no threshold parameters.
+
+These are fragments, not the full text. The paper is **not read**, so the
+method is pinned from the authors' released code,
 <https://github.com/FaiasPromit/pruning-dna-sequence> at commit
 `804aedb94fda8c531f1e6406f62de769d045ebad` (`dnabert2/pretraining/run_mlm.py`,
 `run_epoch_end_pruning`, and the `SP_*` / `RP_20%` configs):
@@ -71,6 +94,35 @@ authors' released code,
     by at most `delta_s * exp(alpha * i)` between epochs.
   - **EL2N** (`run_mlm_el2n.py`). This is SP with EL2N in place of accuracy,
     removing sequences whose EL2N lies in `[lower, upper]`.
+- **The other model families**, at the same commit. The rule above is from
+  DNABERT-2, but the paper's five settings also cover HyenaDNA (CLM) and the
+  Nucleotide Transformer (MLM).
+  - **Nucleotide Transformer**
+    (`nucleotide_transformer/pretraining/train_nt.py`,
+    `run_epoch_end_pruning`, `NT-HRG_SP_*` configs). The rule is the same as
+    DNABERT-2's: masked-token accuracy averaged over `pruning_window` epochs,
+    in `[lower, upper]`, removed for good. `SP_20%` is `[0.2, 1.0]`, window 1.
+  - **HyenaDNA, accuracy** (`hyenadna/pretraining/run_clm.py`,
+    `run_epoch_end_pruning`, `HY-HRG_SP_*` and `HY16k-HRG_SP_*` configs). The
+    signal is next-token accuracy: the share of positions where the most
+    likely next token is the true one. At the end of each epoch, an active
+    sequence whose accuracy for that epoch is in `[lower, upper]` is removed
+    for the rest of the run. There is no window. `SP_20%` is `[0.2, 1.0]`.
+    The cosine learning-rate schedule stays tied to `max_steps`, and the run
+    stops at `max_steps` or at `graceful_exit_epoch`, whichever comes first.
+    These are 50,000 and 28 in the `HY-HRG` configs, and 3,866 and 2 in
+    `HY16k-HRG_SP_20%`.
+  - **HyenaDNA, perplexity** (`hyenadna/pretraining/run_clm_perplexity.py`,
+    `HY-HRG_Perp_1` to `Perp_4`). This is the paper's perplexity ablation. The
+    score is exp(mean negative log-likelihood) over a sequence's predicted
+    positions, from the training forward pass. An active, scored sequence
+    with perplexity at or below `pruning_perplexity_threshold` is removed for
+    good. The thresholds are 1.13, 2.19, 3.0 and 12.0, so the lower bound is
+    always 1. The number removed each epoch is not fixed. Unscored sequences
+    (not drawn, or no predicted tokens) are never pruned.
+  - **HyenaDNA random control** (`HY-HRG_RP_20%`). Pruning is off, and
+    `random_subset_fraction` 0.0358 keeps a random 3.58% of the corpus,
+    chosen before training.
 
 Of these, InfoBatch is the closest to the issue's scheme, which skips records
 temporarily and on a per-epoch basis. Unlike InfoBatch, the tested scheme does
@@ -85,7 +137,10 @@ reduction per arm (25/50/75%) instead of a threshold, **temporary** omission
 with periodic revisits instead of permanent removal, and rare-stratum
 protection, which SP does not have. The matched random arm plays the role of
 `RP`, but it is re-drawn each epoch at the same processed count rather than
-fixed before training. SP itself is not reproduced as an arm.
+fixed before training. SP itself is not reproduced as an arm. The closest
+of the authors' signals to the per-record error used here is the HyenaDNA
+perplexity score, which is also a continuous loss. It too is a single-epoch
+value checked against a fixed bound, and its removal is permanent.
 
 ## What is refined
 
@@ -316,6 +371,10 @@ result was removed:
 - `DifficultyTracker::is_protected`, `DifficultyTracker::strata` and
   `StratumEdges::bins`, which had no callers;
 - the unused first argument of `stats::verdict`;
+- `schedule::output_strata`, a wrapper over `StratumEdges::from_values` and
+  `StratumEdges::assign` that only a test called (the experiment builds its
+  strata from `StratumEdges` directly, because it reuses the edges for the
+  validation records). The test now checks `StratumEdges` itself;
 - `Serialize` on `DifficultyScope` and `ScheduleConfig`, and `Deserialize` on
   `Verdict`, which were never used;
 - the `LEARNING_RATE` re-export from `experiment` (the constant itself has

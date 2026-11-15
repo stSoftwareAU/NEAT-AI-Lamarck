@@ -16,7 +16,10 @@ from a clean commit. Every comparison verdict is unchanged, and the counted
 sweep picks 0.2 again. Nothing in the optimisation loop calls this code, and
 no default changes.
 
-The paper text is still unreachable from the sandbox, and the representative
+The method pin now also covers the authors' HyenaDNA (accuracy and perplexity)
+and Nucleotide Transformer scripts. A web search could quote fragments of the
+PDF, but the paper text itself is still unreachable from the sandbox. The
+test-only `schedule::output_strata` wrapper is removed. The representative
 (private) run is still the owner's. Part of #267.
 
 ## Spec
@@ -55,7 +58,11 @@ The paper text is still unreachable from the sandbox, and the representative
 - At 2026-11-14T23:55Z, `curl https://arxiv.org/abs/2611.10386` (and the PDF,
   Semantic Scholar and r.jina.ai URLs) failed with
   `curl: (56) CONNECT tunnel failed, response 403`, and the web-fetch tool
-  returned "proxy refused the connection".
+  returned "proxy refused the connection". A retry at 2026-11-15T00:03Z also
+  failed with 403, this time on the abstract, PDF and HTML views,
+  `export.arxiv.org`, Semantic Scholar, alphaXiv, Hugging Face,
+  `scholar.archive.org` and `r.jina.ai`. Only GitHub was reachable, and a web
+  search returned short PDF fragments.
 - Backpropagation ownership: the update math is neat-core's
   `propagate_topological_loop` (NEAT-AI-core v0.23.4), reached through
   Lamarck's existing port. Skipping only chooses which records reach it, so
@@ -113,7 +120,7 @@ results private. That run decides whether `record_skip/` stays.
 
 - **met** — Maintain per-record error EWMA during refinement — evidence: `lamarck/src/record_skip/experiment.rs` (`refine`, `tracker.observe`) — reviewer: met
 - **met** — temporarily omit consistently easy examples while preserving rare strata and periodically sampling omitted records — evidence: `lamarck/src/record_skip/schedule.rs` (`DifficultyTracker::select`), `lamarck/tests/record_skip.rs::rare_stratum_is_protected` — reviewer: met
-- **partial** — Compare full data, matched random skipping and 25/50/75% processing reductions — evidence: `docs/evidence/record-skip/summary.json` (`comparisons`, `arms`) — reviewer: partial — reason: synthetic only; the representative run on the private creature and corpus is the owner step above.
+- **partial** — Compare full data, matched random skipping and 25/50/75% processing reductions — evidence: `docs/evidence/record-skip/summary.json` (`comparisons`, `arms`) — reviewer: partial — reason: synthetic only ("fixtures alone"). The representative run on the private creature and corpus, with a `maxRecordPasses` predeclared for that corpus, is the owner step above; neither is in the sandbox.
 - **met** — Record scheduling/refresh cost, forgetting, stratum error, full fitness and untouched validation outcomes — evidence: `arms` in `summary.json`; `lamarck/tests/record_skip.rs::arms_summarise_validation_runs` — reviewer: met
 - **met** — Do not prune fitness/validation records or share stale difficulty scores across incompatible parents/corpora — evidence: `lamarck/tests/record_skip.rs::ensure_scope_refuses_other_parent_or_corpus` — reviewer: met
 - **met** — Integrate the update path with Backpropagation if it owns the actual refinement implementation — evidence: `lamarck/src/record_skip/experiment.rs` (`LearningPlan`, `apply_learnings`); `docs/easy-record-skipping.md` ("What is refined", Backpropagation ownership) — reviewer: met
@@ -122,11 +129,11 @@ results private. That run decides whether `record_skip/` stays.
 - **met** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria — evidence: `lamarck/tests/record_skip.rs::compute_limit_refuses_a_manifest_over_budget`, `manifest_refusals`; `stats.rs::verdict` — reviewer: met
 - **met** — Identify code/model/data versions — evidence: `lamarck/tests/record_skip.rs::git_commit_names_the_commit_or_the_cause`; `source` in `summary.json` — reviewer: partial — reason: the reviewer said corpus mode records no creature or data identity. But `source` reads `files: corpus corpus:<training_data_key>:… parent <fingerprint>` (`corpus.rs::load_corpus`, `experiment.rs::run_validated`), and `training_data_key` hashes every corpus file's name, length and modification time. The doc now says so.
 - **met** — separate calibration from untouched validation and count all preparation/search costs — evidence: `lamarck/tests/record_skip.rs::learning_rate_sweep_is_counted_and_chooses_by_training_mse`; `preparationCost` in `summary.json` — reviewer: met
-- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `lamarck/tests/record_skip.rs` (22 tests); `./quality.sh` passed on the head — reviewer: partial — reason: the reviewer could not see a gate run in the diff; `timeout 1500 ./quality.sh < /dev/null` was run on `3015a1d` and exited 0.
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `lamarck/tests/record_skip.rs` (22 tests); `./quality.sh` passed on the head — reviewer: partial — reason: the reviewer could not see a gate run in the diff; `timeout 1500 ./quality.sh < /dev/null` was run on the tree committed with this summary and exited 0.
 - **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage — evidence: `docs/evidence/record-skip/summary.json` (252/252, `validationDiffs`, CIs) — reviewer: met
-- **missing** — Read and pin the full method before reproducing it — reviewer: missing — reason: the method is pinned from the authors' code (merged in #270), but the paper text is still unreadable from the sandbox (proxy 403, see Undiscoverable Facts). The reviewer assessed only the criteria of the "Controlled experiment" and "Execution and acceptance" sections; this entry is the "Research starting point" line.
+- **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source": the pin at `804aedb` now covers DNABERT-2, Nucleotide Transformer, HyenaDNA accuracy and perplexity, the RP controls, DSI and the baselines, plus the PDF fragments from a web search) — reviewer: partial — reason: the pin is thorough, but the paper text is still unread (proxy 403 on three retries, see Undiscoverable Facts), so "read the full method" is not met.
 - **met** — Record negative findings — evidence: `docs/easy-record-skipping.md` ("Findings": preparation plus calibration cost about 136 times the passes easy-75 saves per run) — reviewer: met
-- **partial** — remove optional code that does not earn its maintenance cost — evidence: the `LEARNING_RATE` constant was removed; `docs/easy-record-skipping.md` ("Maintenance cost", removal rule) — reviewer: met — reason: the harness itself stays until the representative run decides, under the documented removal rule.
+- **partial** — remove optional code that does not earn its maintenance cost — evidence: the `LEARNING_RATE` constant and the test-only `schedule::output_strata` wrapper were removed (`lamarck/tests/record_skip.rs::stratum_edges_bin_first_targets`); `docs/easy-record-skipping.md` ("Maintenance cost", removal rule) — reviewer: partial — reason: the harness as a whole has not earned its cost on the synthetic result. It is kept only under the conditional removal rule, so the final removal waits for the representative run.
 - **met** — Do not claim success before representative runs — evidence: `docs/easy-record-skipping.md` ("negative and inconclusive … no success is claimed") — reviewer: met
 - **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private — evidence: synthetic fixtures only — reviewer: met
 - **unrequested** — refusing manifest versions other than 2 — reviewer: unrequested — reason: the manifest's shape changed, so an old file must fail loudly rather than load with made-up defaults.
@@ -151,9 +158,10 @@ results private. That run decides whether `record_skip/` stays.
   - `arms_summarise_validation_runs`.
   - `git_commit_names_the_commit_or_the_cause`: a hash, `-dirty`, and `unavailable: … not a git repository` for a plain directory.
   - `manifest_refusals` gained four refusals beside the predeclared control: version 1, an empty `learningRateGrid`, a rate of 0.0 and `maxRecordPasses` 0.
+- `stratum_edges_bin_first_targets` replaces `output_strata_bins`. It checks the same bins through `StratumEdges::from_values` and `StratumEdges::assign`.
 - `cargo test -p neat_ai_lamarck --test record_skip`: 22 passed.
   `cargo test -p neat_ai_lamarck --lib record_skip`: 2 passed.
-- `timeout 1500 ./quality.sh < /dev/null` passed on `3015a1d` (exit 0, "All quality checks passed!", 55 s). That includes clippy `-D warnings`, the full test suite, rustdoc, codespell and markdownlint.
+- `timeout 1500 ./quality.sh < /dev/null` passed on the tree committed with this summary, after the `output_strata` removal (exit 0, "All quality checks passed!"). That includes clippy `-D warnings`, the full test suite, rustdoc, codespell and markdownlint.
 - Removed from `lamarck/src/record_skip/experiment.rs`: `assert_eq!(report.coverage.planned, 10);`
   - Obsolete: the plan had no preparation phase. Still covered by: `lamarck/src/record_skip/experiment.rs::refused_grid_point_is_reported_beside_a_valid_one`. Replaced by: `assert_eq!(report.coverage.planned, 14);`
 - Removed from `lamarck/src/record_skip/experiment.rs`: `assert_eq!(report.coverage.completed, 8);`
@@ -168,12 +176,15 @@ results private. That run decides whether `record_skip/` stays.
   - Obsolete: the smoke manifest gained four preparation runs. Still covered by: `lamarck/tests/record_skip.rs::smoke_run_is_complete_and_deterministic`. Replaced by: `assert_eq!(a.coverage.planned, 4 + 6 + 4);`, `assert_eq!(a.coverage.completed, 14);` and `assert_eq!(runs.lines().count(), 14);`
 - Removed from `lamarck/tests/record_skip.rs`: `let full = refine(&parent, &corpus, &scope, &SkipPolicy::Full, &cfg, &m, 1).unwrap();` and `let err = refine(&parent, &corpus, &wrong, &SkipPolicy::Full, &cfg, &m, 1).unwrap_err();`
   - Obsolete: `refine` takes the learning rate as an argument. 0.2 is passed, which equals the removed constant. Still covered by: `lamarck/tests/record_skip.rs::refine_full_lowers_train_mse_and_keeps_parent` and `lamarck/tests/record_skip.rs::ensure_scope_refuses_other_parent_or_corpus`, with their assertions unchanged.
+- Removed from `lamarck/tests/record_skip.rs`: `output_strata(&[0.0, 1.0, 2.0, 3.0, 4.0], 4)` and `assert_eq!(output_strata(&[2.5, 2.5, 2.5], 4), vec![0, 0, 0]);`
+  - Obsolete: `schedule::output_strata` was removed as optional code (only this test called it). Still covered by: `lamarck/tests/record_skip.rs::stratum_edges_bin_first_targets`, with the same inputs and expected bins. Replaced by: the same two assertions, made through `StratumEdges::from_values` and `StratumEdges::assign`.
+- Callers of `output_strata` checked: none outside the test. `experiment.rs` builds strata from `StratumEdges` directly.
 - Callers of `refine` checked: `Runner::run_one` (every phase passes the chosen or swept rate) and the two tests above.
 - Docs swept: `docs/easy-record-skipping.md` (protocol table, sweep, compute limit, results, costs, Findings 5, Maintenance cost, How to run, Outstanding) and `CHANGELOG.md`. A grep for `LEARNING_RATE`, `learningRate`, `228` and `15 s` on the head finds no stale sentence.
 
 Not done:
 
-- reading the paper text (blocked by the proxy);
+- reading the paper text (blocked by the proxy; only PDF fragments seen through a web search);
 - the representative corpus run and the keep-or-remove decision (owner step).
 
 No test reaches the calibration "no matched pairs" branch. Remaining risk: the

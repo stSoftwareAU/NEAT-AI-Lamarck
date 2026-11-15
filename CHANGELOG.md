@@ -20,7 +20,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   harness chooses the learning rate in a counted preparation phase (training
   MSE only), refuses any manifest whose planned record passes exceed the
   predeclared `maxRecordPasses`, uses manifest version 2, and `summary.json`
-  now carries `versions.gitCommit` and per-arm means in `arms`.
+  now carries `versions.gitCommit` and per-arm means in `arms`. The
+  test-only `record_skip::schedule::output_strata` wrapper is removed; use
+  `StratumEdges::from_values` and `StratumEdges::assign`. The method pin in
+  the doc now also covers the authors' HyenaDNA (accuracy and perplexity)
+  and Nucleotide Transformer scripts.
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
   `path = "../../NEAT-AI-core/neat-core"` dependency with
