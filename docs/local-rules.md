@@ -118,7 +118,8 @@ monomial order 4, and per-task horizons of 500 (classification), 300
 (reconstruction) and 100 (self-supervised), with T starting at 1. Still
 missing: the values of B, b and J, the exact variable set per degree, the
 outer optimiser and its hyperparameters, network widths and depths, and the
-reconstruction and self-supervised datasets. A faithful reproduction is therefore still open.
+reconstruction and self-supervised datasets. A faithful reproduction is
+therefore still open.
 
 **How this harness differs from that outline** (the left column is only as reliable as the search summaries):
 
@@ -129,16 +130,16 @@ reconstruction and self-supervised datasets. A faithful reproduction is therefor
 | Penrose-diagram monomials of local tensors, degree 1–3 | Fixed library of 9 scalar per-synapse features (section 3), polynomial order up to 3 (`XYY`, `WYY`), each using only the synapse's own neurons, so purely local in the paper's degree-1 sense. The residual exists only on output neurons (section 4) |
 | Coefficients regressed against a global loss, with a Hadamard-product sparse prior | Seeded random sampling of sparse rules (at most 3 terms, coefficients from a fixed grid), keeping a candidate only when it lowers calibration training MSE (sections 3 and 6) |
 | No equal-budget accounting reported in the summaries | The meta-search cost is charged to the symbolic arm (section 5) |
-| Rules trained and evaluated over unrolled horizons of up to 500 steps (classification), 300 (reconstruction) or 100 (self-supervised), as the PR #276 review reports | Rules applied for K = 5, 10 or 20 steps, as the issue asks (section 5), and scored during discovery with `calibration_steps` = 10 steps |
+| Rules trained and evaluated over unrolled horizons of up to 500 steps (classification), 300 (reconstruction) or 100 (self-supervised), as the PR #276 review reports | Rules applied for K = 5, 10 or 20 steps, as the issue asks (sections 5 and 6), and scored during discovery with `calibration_steps` = 10 steps |
 
 So this experiment tests the issue's description, which the summaries match
 only in outline. Search snippets say the paper's loss falls more slowly than
 under backprop, which suggests (but does not establish) that short horizons
 are an unfavourable regime for its rules. The 5–20 step window the issue asks
-for is shorter than every horizon reported for the paper (100–500 steps), so a
-negative result here says nothing about the paper's longer-horizon regimes. A
-negative result here does not refute the paper's method. This harness is not a
-faithful reproduction of the paper.
+for is shorter than the final horizon reported for each of the paper's tasks
+(100–500 steps; T ramps up from 1 to reach it), so a negative result here
+neither speaks to the paper's longer-horizon regimes nor refutes its method.
+This harness is not a faithful reproduction of the paper.
 
 ## 3. Rule language
 
