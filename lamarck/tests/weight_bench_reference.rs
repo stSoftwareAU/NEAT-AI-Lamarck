@@ -607,6 +607,8 @@ fn hand_built_error_row_with_null_fields_counts_as_failed() {
 /// The committed manifest and AMM rows are current-code output. The rows carry
 /// `plateauFreeAxes` and no router fields. They must load and summarise, as
 /// `--compare-reference` does with these AMM rows.
+/// Router-era compatibility is covered by
+/// `router_era_reference_rows_still_load_and_summarise`.
 #[test]
 fn committed_evidence_parses_and_summarises() {
     let dir =
@@ -634,6 +636,52 @@ fn committed_evidence_parses_and_summarises() {
     assert_eq!(r.coverage.completed_runs, r.coverage.planned_runs);
     assert_eq!(r.coverage.failed_runs, 0);
     assert_eq!(parsed.len(), r.coverage.planned_runs);
+}
+
+/// A router-era AMM row: it has `routedTo` and `probeEvaluations`, and no
+/// `plateauFreeAxes`.
+const ROUTER_ERA_AMM_ROW: &str = r#"{"arm": "amm-reference", "budget": 200, "budgetMultiple": 10, "confirmationEvaluations": 5, "dimension": 20, "error": null, "evaluationsUsed": 200, "extrapolation": false, "family": "tanh", "finalScreeningLoss": 0.23903799143076257, "fullLossFinal": 0.23498690183149004, "fullLossStart": 0.33862076535884356, "heldOutLossFinal": 0.24526140860580345, "heldOutLossStart": 0.3203737483400896, "normalisedHeldOutLoss": 0.7655477699922174, "normalisedScreeningLoss": 0.6652639937232112, "phase": "validation", "preparationEvaluations": 145, "probeEvaluations": 0, "routedTo": null, "seed": 1001, "startScreeningLoss": 0.35931298504968595}"#;
+
+/// Router-era rows must still load and summarise, as the unknown router fields
+/// are ignored and the missing `plateauFreeAxes` reads as absent.
+#[test]
+fn router_era_reference_rows_still_load_and_summarise() {
+    assert!(ROUTER_ERA_AMM_ROW.contains("routedTo"));
+    assert!(ROUTER_ERA_AMM_ROW.contains("probeEvaluations"));
+    assert!(!ROUTER_ERA_AMM_ROW.contains("plateauFreeAxes"));
+    let row: RunRow = serde_json::from_str(ROUTER_ERA_AMM_ROW).unwrap();
+    assert_eq!(row.plateau_free_axes, None);
+    assert_eq!(row.arm, Arm::AmmReference);
+    assert_eq!(row.evaluations_used, 200);
+    assert_eq!(row.preparation_evaluations, 145);
+    assert_eq!(row.confirmation_evaluations, 5);
+    assert_eq!(row.normalised_screening_loss, Some(0.6652639937232112));
+    assert_eq!(row.normalised_held_out_loss, Some(0.7655477699922174));
+
+    let runs = [
+        fixture(Arm::LamarckRefine, 1001, 0.8, 0.9),
+        fixture(Arm::CmaEs, 1001, 0.7, 0.86),
+    ];
+    let r = summarise_reference(&manifest(), &runs, &[row]).unwrap();
+    assert_eq!(r.coverage.planned_runs, 1);
+    assert_eq!(r.coverage.completed_runs, 1);
+    assert_eq!(r.coverage.failed_runs, 0);
+    assert_eq!(r.total_evaluations, 200 + 145 + 5);
+    let cell = &r.cells[0];
+    assert_eq!(cell.plateau_free_axes, vec![None]);
+    // The difference is the AMM arm (first) minus the second arm.
+    let amm = 0.6652639937232112;
+    let [vs_refine, vs_cma] = &cell.comparisons[..] else {
+        panic!("expected two comparisons");
+    };
+    assert_eq!(vs_refine.second, Arm::LamarckRefine);
+    assert_eq!(vs_cma.second, Arm::CmaEs);
+    for (c, other) in [(vs_refine, 0.8), (vs_cma, 0.7)] {
+        let [d] = c.screening.paired_differences[..] else {
+            panic!("expected one paired difference");
+        };
+        assert!((d - (amm - other)).abs() < 1e-12);
+    }
 }
 
 /// The committed in-process runs and AMM rows are reproduced by the current
