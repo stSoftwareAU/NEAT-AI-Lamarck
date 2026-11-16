@@ -68,7 +68,12 @@ the connection". A final retry on 16 November 2026 also failed: `curl` of
 `https://arxiv.org/pdf/2611.12248v1` gave `CONNECT tunnel failed, response 403`,
 and WebFetch of the same URL gave "proxy refused the connection". Two more web
 searches for the outer optimiser, its learning rate, b and the network widths
-found none of them in the indexed snippets.
+found none of them in the indexed snippets. A further retry later on 16
+November 2026 also failed: `curl` of `https://arxiv.org/abs/2611.12248` gave
+`CONNECT tunnel failed, response 403`, `curl` of the PDF, `export.arxiv.org`,
+`r.jina.ai`, Semantic Scholar and Hugging Face pages got no HTTP response
+(`000`), and WebFetch of `https://arxiv.org/html/2611.12248v1` gave "proxy
+refused the connection".
 
 **Outline from web-search summaries and the PR #276 review's report (secondary,
 not read from the paper in this run, so not a pin of the full method). The
@@ -116,6 +121,10 @@ source inline:**
   episode ends with an update of every layer's rule coefficients, and that the
   outer loop runs until the global loss L falls below a chosen threshold. The
   threshold value is not given.
+- **Episode safety stop:** a 16 November 2026 search snippet says a training
+  episode stops as soon as the max-norm of any greedily updated weight goes
+  above a chosen maximum or below a chosen minimum safety value. The bound
+  values are not given.
 - **Training horizon (per task, not read in this run):** the PR #276 review,
   which read the versioned paper at <https://arxiv.org/html/2611.12248v1>,
   reports that the number of inner steps T grows per task. Classification
@@ -130,6 +139,10 @@ source inline:**
   were trained for.
 - **Transfer test:** rules learned on classes 0–4 of Sliced MNIST are tested on
   a held-out part, on a network with different layer sizes.
+- **Evaluation sample:** a 16 November 2026 search snippet says each learned
+  rule is tested by training N_eval = 128 different copies of the same network.
+  This harness instead pairs one difference per validation task (section 6),
+  with `minPairedTasks` = 8.
 - **Example learned terms (classification):** terms such as `Y1·(Y1 + W1·X)`,
   `‖W1ᵀ·Y1‖²` and `‖W1‖²`, and forward-looking terms that use layer 2's
   quantities, such as `Y2·(Y2 + W2·Y1)`. The 16 November snippets add that
@@ -143,11 +156,13 @@ is a pin. Known only from snippets or the PR #276 review's report: unrolling,
 monomial order 4, and per-task horizons of 500 (classification), 300
 (reconstruction) and 100 (self-supervised), with T starting at 1, a
 three-layer classification network, the degree-2 neighbourhood for that
-network, and an outer loop that stops at a loss threshold. Still missing: the
-threshold value, the values of B, b and J, the exact variable set per
-degree, the outer optimiser and its hyperparameters, network widths, the
-reconstruction and self-supervised depths, and the reconstruction and
-self-supervised datasets. A faithful reproduction is therefore still open.
+network, an episode stop on weight max-norm safety bounds, 128 evaluation
+copies per rule, and an outer loop that stops at a loss threshold. Still
+missing: the threshold value, the safety-bound values, the values of B, b and
+J, the exact variable set per degree, the outer optimiser and its
+hyperparameters, network widths, the reconstruction and self-supervised depths,
+and the reconstruction and self-supervised datasets. A faithful reproduction is
+therefore still open.
 
 **How this harness differs from that outline** (the left column is only as reliable as the search summaries):
 
