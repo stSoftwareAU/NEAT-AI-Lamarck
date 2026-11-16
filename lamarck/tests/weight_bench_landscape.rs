@@ -178,9 +178,10 @@ fn diagnosis_finds_the_saturated_plateau() {
     assert_eq!(row.shapes.total(), 100);
     assert_eq!(row.evaluations, 1 + 4 * 100);
     assert!(row.shapes.flat > 0);
-    // Every axis the one-sided scan calls flat is flat on both sides too.
-    assert!(row.shapes.flat >= row.plateau_free_axes);
-    assert!(row.shapes.flat <= 100 - 32 + row.shapes.edge);
+    // Only 32 synapses feed live units, so at most 100 - 32 chosen axes can be
+    // flat, and here the one-sided and two-sided counts agree exactly.
+    assert!(row.shapes.flat <= 100 - 32);
+    assert_eq!(row.shapes.flat, row.plateau_free_axes);
 }
 
 #[test]

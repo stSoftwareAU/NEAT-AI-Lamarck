@@ -68,10 +68,11 @@ the manifest it used to `manifest.json` (the committed copy is
   `hard-tanh` (kinks where it clips). The free weights are the most
   loss-sensitive synapses, which steers away from flat ones. Format 3 measures
   the flat-axis count directly (Finding 4): no chosen free weight was flat in
-  any problem, so the synthetic suite does not exercise plateaus. The families
-  vary the activation, not plateau structure. The flat-axis test is one-sided
-  (see Finding 4), and no kink measurement exists in the current code: kinks come
-  only from the relu and hard-tanh families.
+  any problem, so the predeclared suite does not exercise plateaus. Its families
+  vary the activation, not plateau structure. The format 3 flat-axis test is
+  one-sided (see Finding 4). The two-sided landscape diagnosis and the
+  `saturated-hard-tanh` family that does have flat axes were added after the
+  predeclared run, outside this protocol (Finding 5).
 * **Problem construction** (`suite.rs`). A random teacher network with 16
   inputs, 16 hidden neurons of one family, fan-in 8 and one identity output
   generates the records (target noise `0.01`). That is 16 x 8 + 16 = 144
@@ -434,9 +435,9 @@ columns are the router-era run's router verdicts.
    so it says nothing about how the method behaves on flat axes. The test is
    one-sided (a +0.05 step only), so an axis flat on one side of a kink (relu at
    zero, hard-tanh at its clip) can count as flat, and a flat axis with a kink
-   just past +0.05 can count as not flat; no kink measurement exists in the
-   current code, where kinks are represented only by the relu and hard-tanh
-   families. The representative run has to measure that rather than assume it.
+   just past +0.05 can count as not flat. Finding 5 measures kinks and plateaus
+   with a two-sided test; the representative run still has to measure them on
+   real inputs rather than assume them.
 
 5. **Plateaus and kinks, measured with a two-sided diagnosis (added after the
    predeclared run).** `weight_bench::landscape` takes `f(x±h)` and
