@@ -29,7 +29,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   worse than the refine surrogate in every 30D and 100D cell, with full-window
   and held-out agreement. This reverses the plain hard-tanh result, and it holds
   at D=20, which has no flat axis. See Finding 5 in
-  `docs/weight-optimiser-routing.md`.
+  `docs/weight-optimiser-routing.md`. The pinned AMM reference (0.7.0, preset
+  `c46`) was also run on `saturated-hard-tanh`: 108 of 108 runs, 0 failed,
+  285,000 evaluations, and AMM is worse than both refine and CMA-ES in all 18
+  comparisons (`docs/evidence/weight-router-landscape/saturated/reference-summary.json`).
 
 - **Sparse symbolic local update rules are tested as an opt-in research harness, with a negative synthetic verdict (Issue #268).**
   `lamarck/src/local_rules/` discovers one sparse rule per activation family on

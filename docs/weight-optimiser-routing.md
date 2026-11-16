@@ -582,6 +582,52 @@ and are unchanged; the router column is from the router-era run:
 | tanh | 100 (extrapolation) | 30D | 0.0366 | 0.0368 | 0.0370 | 0.1622 | 0.1963 |
 | tanh | 100 (extrapolation) | 100D | 0.0157 | 0.0139 | 0.0139 | 0.1728 | 0.2134 |
 
+### AMM on `saturated-hard-tanh` (added after the predeclared run)
+
+AMM was also run on the family with real flat axes (Finding 5), with the same
+pinned package (0.7.0, preset `c46`, config hash `2153948ebed51150`), the same
+box (start ± 0.5), the same 12 validation seeds and the same paired bootstrap.
+It was paired with the committed refine and CMA-ES rows in
+`docs/evidence/weight-router-landscape/saturated/`. Coverage: 108 of 108 AMM
+runs completed, 0 failed, each spending exactly its budget, 285,000
+evaluations in all (budgeted, preparation per AMM run and confirmation). The
+summary was written at commit `84096bb` on a clean tree, `--jobs 8`, 3.2 s
+wall. The files are
+[`amm-runs.jsonl`](evidence/weight-router-landscape/saturated/amm-runs.jsonl),
+[`amm-meta.json`](evidence/weight-router-landscape/saturated/amm-meta.json) and
+[`reference-summary.json`](evidence/weight-router-landscape/saturated/reference-summary.json).
+
+**Verdict: `amm-reference-worse` in all 9 cells against both refine and
+CMA-ES** (18 of 18 comparisons). Each value is the mean paired difference of
+normalised loss, AMM minus the other arm (positive means AMM is worse), as
+screening `[95% interval]` / full window / held out:
+
+| D | Budget | AMM − refine | AMM − CMA-ES |
+| ---: | --- | --- | --- |
+| 20 | 10D | +0.1813 `[+0.0833, +0.2994]` / +0.1826 / +0.1864 | +0.1978 `[+0.1056, +0.3177]` / +0.2012 / +0.2086 |
+| 20 | 30D | +0.0679 `[+0.0382, +0.1110]` / +0.0697 / +0.0742 | +0.0586 `[+0.0295, +0.1000]` / +0.0597 / +0.0645 |
+| 20 | 100D | +0.0652 `[+0.0325, +0.1038]` / +0.0665 / +0.0686 | +0.0649 `[+0.0320, +0.1012]` / +0.0663 / +0.0683 |
+| 40 | 10D | +0.2614 `[+0.1270, +0.4230]` / +0.2675 / +0.2716 | +0.2757 `[+0.1394, +0.4212]` / +0.2788 / +0.2840 |
+| 40 | 30D | +0.1032 `[+0.0545, +0.1600]` / +0.1057 / +0.1071 | +0.0887 `[+0.0438, +0.1386]` / +0.0913 / +0.0927 |
+| 40 | 100D | +0.1210 `[+0.0588, +0.1936]` / +0.1293 / +0.1286 | +0.1182 `[+0.0542, +0.1909]` / +0.1264 / +0.1256 |
+| 100 (extrapolation) | 10D | +0.2548 `[+0.1186, +0.3867]` / +0.2566 / +0.2582 | +0.2711 `[+0.1430, +0.4298]` / +0.2734 / +0.2763 |
+| 100 (extrapolation) | 30D | +0.0957 `[+0.0474, +0.1545]` / +0.1030 / +0.1052 | +0.0880 `[+0.0433, +0.1431]` / +0.0957 / +0.0979 |
+| 100 (extrapolation) | 100D | +0.1113 `[+0.0497, +0.1802]` / +0.1168 / +0.1140 | +0.1079 `[+0.0477, +0.1767]` / +0.1133 / +0.1101 |
+
+The plateau family does not change the AMM result: its online probes are
+charged to its own budget, and it still trails both local arms in every cell.
+`committed_saturated_amm_evidence_is_reproduced_and_amm_loses_every_cell` in
+`lamarck/tests/weight_bench_reference.rs` re-summarises the committed rows and
+pins the 18 verdicts. To reproduce (release build; the bench reads the arm run
+from a scratch copy so the committed directory is not written to):
+
+```bash
+cp -r docs/evidence/weight-router-landscape/saturated /tmp/sat
+env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONPATH=... python3 scripts/amm-reference.py \
+  --bench BIN --manifest /tmp/sat/manifest.json --out-dir /tmp/sat-amm --jobs 8
+BIN /tmp/sat --compare-reference /tmp/sat-amm/amm-runs.jsonl
+```
+
 Interpretation (a negative finding, stated carefully). On this suite, under the
 predeclared box, AMM as published is a poor fit for local weight refinement from
 a good incumbent. At 10D its median final/start loss is 0.70 to 0.95; the 30D and 100D
