@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Plateau and kink diagnosis for the #266 weight bench, plus a saturated
+  hard-tanh family (Issue #266).** `lamarck/src/weight_bench/landscape.rs`
+  classifies each chosen free axis from `f(x±h)` and `f(x±h/2)` (`h` = 0.05) as
+  flat, edge, kinked, smooth or indeterminate (`classify_axis`,
+  `CURVATURE_REL_TOL` 1e-9, `KINK_RATIO_REL_TOL` 0.25), and
+  `weight_router_bench --landscape` writes `landscape.jsonl` and
+  `landscape-summary.json`. The new `saturated-hard-tanh` family clamps 14 of 16
+  hidden units with a ±12 bias, so only 32 axes are live and D=40/D=100 must
+  choose flat ones. The predeclared manifest, the other families' problems and
+  `docs/evidence/weight-router/` are unchanged. In
+  `docs/evidence/weight-router-landscape/`, the predeclared families have no
+  flat or edge axis, relu and hard-tanh have many kinked axes (349 and 428 of
+  1200 at D=100), and tanh has one rounding-level false-positive kink in 2160
+  axes. On `saturated-hard-tanh` (96 flat axes at D=40, 816 at D=100) CMA-ES is
+  worse than the refine surrogate in every 30D and 100D cell, with full-window
+  and held-out agreement. This reverses the plain hard-tanh result, and it holds
+  at D=20, which has no flat axis. See Finding 5 in
+  `docs/weight-optimiser-routing.md`.
+
 - **Sparse symbolic local update rules are tested as an opt-in research harness, with a negative synthetic verdict (Issue #268).**
   `lamarck/src/local_rules/` discovers one sparse rule per activation family on
   calibration tasks only, then scores it on untouched validation tasks against

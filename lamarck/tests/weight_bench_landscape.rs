@@ -10,6 +10,7 @@ use neat_ai_lamarck::weight_bench::suite::{
     CorpusSpec, Family, LIVE_HIDDEN_UNITS, Problem, ProblemSpec, SATURATION_BIAS,
 };
 use neat_ai_lamarck::weight_bench::{BenchError, Manifest, RunRow, build_problem, run_manifest};
+use serde_json::Value;
 
 const H: f64 = 0.05;
 
@@ -307,4 +308,62 @@ fn existing_families_rebuild_the_committed_rows_exactly() {
             .unwrap();
         assert_eq!(row, old);
     }
+}
+
+#[test]
+fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../docs/evidence/weight-router-landscape");
+    let summary: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("landscape-summary.json")).unwrap())
+            .unwrap();
+    let m: Manifest = serde_json::from_value(summary["manifest"].clone()).unwrap();
+    let declared: Manifest =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(m, declared);
+    let cells: Vec<LandscapeCell> = serde_json::from_value(summary["cells"].clone()).unwrap();
+    let rows: Vec<LandscapeRow> = std::fs::read_to_string(dir.join("landscape.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        rows.len(),
+        m.families.len() * m.dimensions.len() * m.validation_seeds.len()
+    );
+    assert_eq!(summarise_landscape(&m, &rows), cells);
+    assert_eq!(
+        summary["totalEvaluations"],
+        serde_json::json!(rows.iter().map(|r| r.evaluations).sum::<usize>())
+    );
+    for cell in &cells {
+        let axes = cell.dimension * cell.problems;
+        assert_eq!(cell.shapes.total(), axes);
+        match (cell.family, cell.dimension) {
+            (Family::SaturatedHardTanh, 100) => {
+                assert!(cell.shapes.flat > 0);
+                assert_eq!(cell.shapes.flat, cell.plateau_free_axes);
+            }
+            (Family::SaturatedHardTanh, _) => {}
+            _ => assert_eq!(cell.shapes.flat + cell.shapes.edge, 0, "{cell:?}"),
+        }
+        match cell.family {
+            // Smooth activation: at most a rounding-level stray kink.
+            Family::Tanh => assert!(100 * cell.shapes.kinked <= axes, "{cell:?}"),
+            Family::Relu | Family::HardTanh if cell.dimension == 100 => {
+                assert!(10 * cell.shapes.kinked > axes, "{cell:?}")
+            }
+            _ => {}
+        }
+    }
+    // The rows are what the current code computes (first seed only, to keep
+    // the test cheap; the full run is reproduced by the example).
+    let mut first_seed = m.clone();
+    first_seed.validation_seeds.truncate(1);
+    let expected: Vec<LandscapeRow> = rows
+        .iter()
+        .filter(|r| r.seed == m.validation_seeds[0])
+        .cloned()
+        .collect();
+    assert_eq!(diagnose_manifest(&first_seed).unwrap(), expected);
 }

@@ -21,10 +21,14 @@ use crate::candidates::RANDOM_DELTA_HALF_WIDTH;
 
 /// Second differences no larger than this fraction of the base loss (floored
 /// at `1e-12`) are too small to classify: the axis is
-/// [`AxisShape::Indeterminate`]. `1e-9` sits far below every curvature the
-/// committed suite shows and well above `f64` rounding of the loss sum, so it
-/// only catches axes with essentially no curvature (for example exactly
-/// linear ones).
+/// [`AxisShape::Indeterminate`]. `1e-9` (declared before the evidence run)
+/// only catches axes with essentially no curvature, for example exactly
+/// linear ones. It is *below* the rounding floor of the forward pass: an axis
+/// whose second difference is only about `1e-7` of the loss can have its ratio
+/// set by rounding rather than by shape. In the committed evidence
+/// (`docs/evidence/weight-router-landscape/`) that misclassifies exactly one
+/// of the 2160 smooth `TANH` axes as kinked (D=100, seed 1006:
+/// `D2(h) / base ≈ 1.5e-7`, ratio ≈ 13).
 pub const CURVATURE_REL_TOL: f64 = 1e-9;
 
 /// The ratio `D2(h) / D2(h/2)` of a `C²` function's second differences

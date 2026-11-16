@@ -438,6 +438,92 @@ columns are the router-era run's router verdicts.
    current code, where kinks are represented only by the relu and hard-tanh
    families. The representative run has to measure that rather than assume it.
 
+5. **Plateaus and kinks, measured with a two-sided diagnosis (added after the
+   predeclared run).** `weight_bench::landscape` takes `f(x±h)` and
+   `f(x±h/2)` (`h` = 0.05) on every chosen axis from the start weights over the
+   screening records, 4 evaluations per axis plus 1 base, outside every arm's
+   budget. An axis is `flat` when both one-sided changes are within
+   `PLATEAU_REL_TOL` (1e-6) of the base loss and `edge` when exactly one is.
+   Otherwise, with `D2(s) = f(x+s) + f(x-s) - 2f(x)`, it is `indeterminate`
+   when `|D2(h)|` is at most `CURVATURE_REL_TOL` (1e-9) of the base loss,
+   `kinked` when `D2(h)/D2(h/2)` is more than `KINK_RATIO_REL_TOL` (0.25)
+   away from 4 (the smooth value; a slope jump pulls it towards 2) or
+   `D2(h/2)` has the other sign or is zero, and `smooth` otherwise. A new
+   family, `saturated-hard-tanh`, gives 14 of the 16 hidden units a teacher and
+   start bias of ±12. That is more than any `|sum(w x)|` can reach, so
+   `HARD_TANH` clamps those units and their 112 input weights are exactly flat.
+   Only 2 × 8 input and 16 output synapses (32 axes) are live, so D=40 and D=100
+   have to choose flat axes. The other families, the predeclared manifest
+   and `docs/evidence/weight-router/` are unchanged. Totals over the 12
+   validation seeds (1001..1012) in
+   `docs/evidence/weight-router-landscape/landscape-summary.json` (crate
+   0.1.49, commit `8badaf5`, clean tree, 1.9 s, 30 864 evaluations):
+
+   | Family | D | flat | edge | kinked | smooth | indeterminate | one-sided `plateauFreeAxes` |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+   | tanh | 20 | 0 | 0 | 0 | 240 | 0 | 0 |
+   | tanh | 40 | 0 | 0 | 0 | 480 | 0 | 0 |
+   | tanh | 100 | 0 | 0 | 1 | 1199 | 0 | 0 |
+   | relu | 20 | 0 | 0 | 19 | 221 | 0 | 0 |
+   | relu | 40 | 0 | 0 | 67 | 413 | 0 | 0 |
+   | relu | 100 | 0 | 0 | 349 | 851 | 0 | 0 |
+   | hard-tanh | 20 | 0 | 0 | 39 | 201 | 0 | 0 |
+   | hard-tanh | 40 | 0 | 0 | 108 | 372 | 0 | 0 |
+   | hard-tanh | 100 | 0 | 0 | 428 | 772 | 0 | 0 |
+   | saturated-hard-tanh | 20 | 0 | 0 | 12 | 228 | 0 | 0 |
+   | saturated-hard-tanh | 40 | 96 | 1 | 78 | 305 | 0 | 96 |
+   | saturated-hard-tanh | 100 | 816 | 1 | 78 | 305 | 0 | 816 |
+
+   The three predeclared families have **no flat or edge axis**, which confirms
+   Finding 4 with a two-sided test. Kinks, however, are common: 8 to 29% of the
+   relu axes and 16 to 36% of the hard-tanh axes, rising with D. The
+   extra axes chosen at larger D are less sensitive ones; the data do not
+   establish why those kink more often. The smooth tanh family has **one** kinked axis in 2160
+   (D=100, seed 1006). That is a false positive at rounding level:
+   `D2(h)` is only about 1.5e-7 of the loss and the ratio is about 13. It is
+   reported as measured; the declared tolerances were not changed after the
+   run. On `saturated-hard-tanh`, every flat axis is the one-sided scan's
+   plateau axis (96 = 8 × 12 at D=40, 816 = 68 × 12 at D=100). The one `edge`
+   axis in each of those cells is a live-unit weight that is flat on one side.
+
+   Refine against CMA-ES on `saturated-hard-tanh`, with the same protocol
+   (12 seeds, budgets 10D/30D/100D, bootstrap 2000, seed 266) in
+   `docs/evidence/weight-router-landscape/saturated/summary.json` (216/216 runs,
+   0 failed, 543 852 evaluations, 108.6 s, commit `8badaf5`, clean tree). The
+   values are mean paired differences CMA-ES − refine of normalised loss
+   (negative favours CMA-ES), as screening `[95% interval]` / full window /
+   held out:
+
+   | D | 10D | 30D | 100D |
+   | ---: | --- | --- | --- |
+   | 20 | inconclusive: −0.01648 `[−0.04012, +0.00890]` / −0.01865 / −0.02217 | cma-es-worse: +0.00925 `[+0.00385, +0.01610]` / +0.01000 / +0.00964 | cma-es-worse: +0.00036 `[+0.00012, +0.00067]` / +0.00027 / +0.00021 |
+   | 40 | inconclusive: −0.01433 `[−0.05913, +0.01988]` / −0.01134 / −0.01241 | cma-es-worse: +0.01442 `[+0.00662, +0.02450]` / +0.01439 / +0.01440 | cma-es-worse: +0.00272 `[+0.00095, +0.00517]` / +0.00290 / +0.00301 |
+   | 100 | cma-es-better: −0.01628 `[−0.03180, −0.00312]` / −0.01679 / −0.01810 | cma-es-worse: +0.00772 `[+0.00219, +0.01680]` / +0.00737 / +0.00727 | cma-es-worse: +0.00339 `[+0.00107, +0.00686]` / +0.00354 / +0.00395 |
+
+   The full-window and held-out means agree in sign with the screening mean
+   in all 9 cells. This **reverses Finding 1 on this family**: CMA-ES is worse
+   in 6 of 9 cells (every 30D and 100D cell), better only at D=100, 10D, and
+   inconclusive at 10D for D=20 and D=40. On plain hard-tanh it was better in
+   6 of 9 cells and worse in none. The reversal is **not explained by flat
+   axes alone**: D=20 has no flat axis yet shows the same 30D/100D losses.
+   That points to the family's very different live landscape (2 live hidden
+   units) as the cause, not just the plateaus. D=100 is extrapolation. These
+   are synthetic fixtures, so they are a hypothesis for the representative
+   run, not evidence about NEAT-AI creatures.
+
+   Reproduce (from `lamarck/`, release build). The arm run reads its manifest
+   from outside its `OUT_DIR`, because it writes `OUT_DIR/manifest.json`
+   itself. The committed files were written to a scratch directory, so the
+   provenance probe saw a clean tree, and then copied in:
+
+   ```bash
+   cargo run --release --example weight_router_bench -- ../docs/evidence/weight-router-landscape \
+       --manifest ../docs/evidence/weight-router-landscape/manifest.json --landscape
+   cargo run --release --example weight_router_bench -- ../docs/evidence/weight-router-landscape/saturated \
+       --manifest ../docs/evidence/weight-router-landscape/saturated-manifest.json
+   cargo test --test weight_bench_landscape
+   ```
+
 ## AMM reference results
 
 Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 855,000
@@ -549,7 +635,7 @@ candidate. Ordinary production acceptance in `run.rs` is unchanged.
 ## Verification and process failures
 
 ```bash
-cargo test --test weight_bench --test weight_bench_reference
+cargo test --test weight_bench --test weight_bench_reference --test weight_bench_landscape
 cargo test --lib failed_confirmations_keep_the_calls_already_spent
 # Integration checks, using the pinned scratch Python environment and a built bench:
 env PYTHONPATH=... python3 scripts/test-amm-reference.py --bench BIN
@@ -575,7 +661,8 @@ from routine feature CI and are not representative optimisation measurements.
 
 * The comparison against the actual production refinement pipeline and a frozen
   representative model/corpus campaign, including full authoritative confirmation.
-* A problem that contains plateau axes among its free weights. None was found in
-  the synthetic suite (Finding 4).
+* Plateau axes among the free weights on a representative problem. The
+  predeclared synthetic suite has none (Findings 4 and 5); only the added
+  `saturated-hard-tanh` family has them by construction (Finding 5).
 * Box-size sensitivity and search-radius controls, predeclared on fresh data.
   No production optimiser or default change is supported by the current evidence.
