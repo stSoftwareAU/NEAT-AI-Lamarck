@@ -50,8 +50,13 @@
 //! fields as `summary.json`, including `wallClockSeconds`). The summary's
 //! `diagnosisEvaluations` counts the diagnosis itself, `preparationEvaluations`
 //! the selection scan that built each problem (counted once per problem), and
-//! `totalEvaluations` is their sum, every loss evaluation the command runs. It
-//! runs no arm and does not write `OUT_DIR/manifest.json`.
+//! `totalEvaluations` is their sum, every loss evaluation the command runs.
+//! A problem that cannot be built or diagnosed is recorded, not fatal: its row
+//! carries `error` (null on success) and zero shapes, its cell counts it in
+//! `failures`, and the summary's `coverage` gives planned, completed and failed
+//! problems. As for the arm run, failures still exit 0; only an invalid or
+//! corpus manifest is an error. It runs no arm and does not write
+//! `OUT_DIR/manifest.json`.
 //!
 //! AMM reference arm (offline; the optimiser itself is `scripts/amm-reference.py`):
 //!
@@ -80,7 +85,7 @@ use neat_ai_lamarck::weight_bench::objective::PLATEAU_REL_TOL;
 use neat_ai_lamarck::weight_bench::provenance;
 use neat_ai_lamarck::weight_bench::suite::{CorpusSpec, Family};
 use neat_ai_lamarck::weight_bench::{
-    KINK_RATIO_REL_TOL, Manifest, ReferenceRequest, RunRow, diagnose_manifest,
+    KINK_RATIO_REL_TOL, Manifest, ReferenceRequest, RunRow, diagnose_manifest, landscape_coverage,
     landscape_total_evaluations, predeclared_manifest, run_manifest, serve_reference,
     summarise_landscape, summarise_reference,
 };
@@ -218,6 +223,7 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
     let rows = diagnose_manifest(manifest).map_err(|e| e.to_string())?;
     let wall_clock_seconds = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
     let cells = summarise_landscape(manifest, &rows);
+    let coverage = landscape_coverage(manifest, &rows);
     fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
     let mut lines = String::new();
     for row in &rows {
@@ -227,7 +233,7 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
     let rows_path = out_dir.join("landscape.jsonl");
     fs::write(&rows_path, lines).map_err(|e| format!("{}: {e}", rows_path.display()))?;
     let mut summary = json!({
-        "formatVersion": 2,
+        "formatVersion": 3,
         "crateVersion": env!("CARGO_PKG_VERSION"),
         "wallClockSeconds": wall_clock_seconds,
         "manifest": manifest,
@@ -239,6 +245,7 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
         "diagnosisEvaluations": rows.iter().map(|r| r.evaluations).sum::<usize>(),
         "preparationEvaluations": rows.iter().map(|r| r.preparation_evaluations).sum::<usize>(),
         "totalEvaluations": landscape_total_evaluations(&rows),
+        "coverage": coverage,
         "cells": cells,
     });
     if let Some(object) = summary.as_object_mut() {
@@ -249,10 +256,11 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
     fs::write(&summary_path, pretty).map_err(|e| format!("{}: {e}", summary_path.display()))?;
     for cell in &cells {
         println!(
-            "{:?} D={} ({} problems): flat {} edge {} kinked {} smooth {} indeterminate {}; one-sided plateau {}; {} diagnosis + {} preparation evaluations",
+            "{:?} D={} ({} problems, {} failed): flat {} edge {} kinked {} smooth {} indeterminate {}; one-sided plateau {}; {} diagnosis + {} preparation evaluations",
             cell.family,
             cell.dimension,
             cell.problems,
+            cell.failures,
             cell.shapes.flat,
             cell.shapes.edge,
             cell.shapes.kinked,
@@ -264,7 +272,10 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
         );
     }
     println!(
-        "{} evaluations in total (diagnosis and preparation); wrote {} and {}",
+        "problems {}/{} completed ({} failed); {} evaluations in total (diagnosis and preparation); wrote {} and {}",
+        coverage.completed_problems,
+        coverage.planned_problems,
+        coverage.failed_problems,
         landscape_total_evaluations(&rows),
         rows_path.display(),
         summary_path.display()

@@ -13,6 +13,10 @@
 //! budget. The diagnosis's own evaluations are `evaluations`; the selection scan
 //! that built each problem is `preparation_evaluations`, counted once per
 //! problem. [`landscape_total_evaluations`] sums both.
+//!
+//! A problem that cannot be built or diagnosed does not stop the run: it is
+//! recorded as a row with `error` set (see [`diagnose_specs`]) and counted in
+//! [`landscape_coverage`].
 
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +153,11 @@ impl ShapeCounts {
 }
 
 /// The diagnosis of one problem.
+///
+/// A failed problem has `error` set, zero shapes and a zero
+/// `plateau_free_axes`, and keeps the evaluations it actually spent. One whose
+/// [`build_problem`] failed reports `preparation_evaluations` 0, because a
+/// failed build does not expose how much of its selection scan ran.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LandscapeRow {
@@ -162,7 +171,8 @@ pub struct LandscapeRow {
     #[serde(flatten)]
     pub shapes: ShapeCounts,
     /// Diagnosis evaluations: one base plus four per axis. The selection scan
-    /// is in `preparation_evaluations`.
+    /// is in `preparation_evaluations`. On failure, the evaluations made
+    /// before the error.
     pub evaluations: usize,
     /// Loss evaluations of the selection scan that built the problem
     /// ([`Problem::preparation_evaluations`]), counted once per problem.
@@ -170,28 +180,35 @@ pub struct LandscapeRow {
     /// The one-sided plateau count of the same axes from the selection scan
     /// ([`Problem::plateau_free_axes`]), for comparison.
     pub plateau_free_axes: usize,
+    /// Why building or diagnosing the problem failed, if it did.
+    pub error: Option<String>,
 }
 
-/// Shape of every free axis of `problem`, in `synapse_indices` order, and the
-/// evaluations spent (`1 + 4 * dimension`).
-pub fn axis_shapes(problem: &Problem) -> Result<(Vec<AxisShape>, usize), BenchError> {
-    let objective = WeightObjective::new(
-        problem.creature.clone(),
-        problem.synapse_indices.clone(),
-        &problem.screening,
-    )?;
-    let x0 = objective.start();
+/// Classify every axis of `x0` under `loss`, stopping at the first failed
+/// evaluation. Returns the shapes (or that error) with the evaluations made
+/// either way, so a failure partway through still reports its cost.
+fn classify_axes(
+    x0: &[f64],
+    mut loss: impl FnMut(&[f64]) -> Result<f64, BenchError>,
+) -> (Result<Vec<AxisShape>, BenchError>, usize) {
     let mut evaluations = 0usize;
-    let mut eval = |x: &[f64]| {
+    let shapes = classify_each_axis(x0, &mut |x: &[f64]| {
         evaluations += 1;
-        objective.loss(x).map_err(BenchError::Evaluation)
-    };
-    let base = eval(&x0)?;
+        loss(x)
+    });
+    (shapes, evaluations)
+}
+
+fn classify_each_axis(
+    x0: &[f64],
+    eval: &mut impl FnMut(&[f64]) -> Result<f64, BenchError>,
+) -> Result<Vec<AxisShape>, BenchError> {
+    let base = eval(x0)?;
     let h = RANDOM_DELTA_HALF_WIDTH;
     let mut shapes = Vec::with_capacity(x0.len());
     for i in 0..x0.len() {
         let mut at = |step: f64| {
-            let mut x = x0.clone();
+            let mut x = x0.to_vec();
             x[i] += step;
             eval(&x)
         };
@@ -199,21 +216,87 @@ pub fn axis_shapes(problem: &Problem) -> Result<(Vec<AxisShape>, usize), BenchEr
             (at(h)?, at(-h)?, at(h / 2.0)?, at(-h / 2.0)?);
         shapes.push(classify_axis(base, plus_h, minus_h, plus_half, minus_half));
     }
-    Ok((shapes, evaluations))
+    Ok(shapes)
+}
+
+/// [`axis_shapes`] with the evaluations reported on failure too (0 when the
+/// objective cannot be built).
+fn measure_axes(problem: &Problem) -> (Result<Vec<AxisShape>, BenchError>, usize) {
+    match WeightObjective::new(
+        problem.creature.clone(),
+        problem.synapse_indices.clone(),
+        &problem.screening,
+    ) {
+        Ok(objective) => classify_axes(&objective.start(), |x| {
+            objective.loss(x).map_err(BenchError::Evaluation)
+        }),
+        Err(e) => (Err(e), 0),
+    }
+}
+
+/// Shape of every free axis of `problem`, in `synapse_indices` order, and the
+/// evaluations spent (`1 + 4 * dimension`).
+pub fn axis_shapes(problem: &Problem) -> Result<(Vec<AxisShape>, usize), BenchError> {
+    let (shapes, evaluations) = measure_axes(problem);
+    Ok((shapes?, evaluations))
+}
+
+fn completed_row(problem: &Problem, shapes: &[AxisShape], evaluations: usize) -> LandscapeRow {
+    LandscapeRow {
+        family: problem.spec.family,
+        dimension: problem.spec.dimension,
+        seed: problem.spec.seed,
+        shapes: ShapeCounts::of(shapes),
+        evaluations,
+        preparation_evaluations: problem.preparation_evaluations,
+        plateau_free_axes: problem.plateau_free_axes,
+        error: None,
+    }
+}
+
+fn failed_row(
+    spec: &ProblemSpec,
+    evaluations: usize,
+    preparation_evaluations: usize,
+    error: &BenchError,
+) -> LandscapeRow {
+    LandscapeRow {
+        family: spec.family,
+        dimension: spec.dimension,
+        seed: spec.seed,
+        shapes: ShapeCounts::default(),
+        evaluations,
+        preparation_evaluations,
+        plateau_free_axes: 0,
+        error: Some(error.to_string()),
+    }
 }
 
 /// Diagnose one built problem.
 pub fn diagnose(problem: &Problem) -> Result<LandscapeRow, BenchError> {
     let (shapes, evaluations) = axis_shapes(problem)?;
-    Ok(LandscapeRow {
-        family: problem.spec.family,
-        dimension: problem.spec.dimension,
-        seed: problem.spec.seed,
-        shapes: ShapeCounts::of(&shapes),
-        evaluations,
-        preparation_evaluations: problem.preparation_evaluations,
-        plateau_free_axes: problem.plateau_free_axes,
-    })
+    Ok(completed_row(problem, &shapes, evaluations))
+}
+
+/// Build each of `specs` with `build` and diagnose it, in order. A failure to
+/// build or diagnose is recorded on that problem's row (see [`LandscapeRow`]),
+/// never propagated, so every spec yields exactly one row.
+pub fn diagnose_specs(
+    specs: &[ProblemSpec],
+    mut build: impl FnMut(&ProblemSpec) -> Result<Problem, BenchError>,
+) -> Vec<LandscapeRow> {
+    specs
+        .iter()
+        .map(|spec| match build(spec) {
+            Ok(problem) => match measure_axes(&problem) {
+                (Ok(shapes), evaluations) => completed_row(&problem, &shapes, evaluations),
+                (Err(e), evaluations) => {
+                    failed_row(spec, evaluations, problem.preparation_evaluations, &e)
+                }
+            },
+            Err(e) => failed_row(spec, 0, 0, &e),
+        })
+        .collect()
 }
 
 /// Every loss evaluation the diagnosis of `rows` executes: each row's
@@ -224,8 +307,28 @@ pub fn landscape_total_evaluations(rows: &[LandscapeRow]) -> usize {
         .sum()
 }
 
+/// Every (family, dimension, validation seed) problem of `m`, in manifest
+/// order.
+fn manifest_specs(m: &Manifest) -> Vec<ProblemSpec> {
+    let mut specs = Vec::new();
+    for &family in &m.families {
+        for &dimension in &m.dimensions {
+            for &seed in &m.validation_seeds {
+                specs.push(ProblemSpec {
+                    family,
+                    dimension,
+                    seed,
+                });
+            }
+        }
+    }
+    specs
+}
+
 /// Diagnose every (family, dimension, validation seed) problem of a synthetic
-/// manifest, in manifest order. A corpus manifest is refused.
+/// manifest, in manifest order, with [`build_problem`] (see
+/// [`diagnose_specs`]). Only an invalid or corpus manifest is an error; a
+/// problem that fails is recorded on its row.
 pub fn diagnose_manifest(m: &Manifest) -> Result<Vec<LandscapeRow>, BenchError> {
     m.validate()?;
     if m.corpus.is_some() {
@@ -233,20 +336,30 @@ pub fn diagnose_manifest(m: &Manifest) -> Result<Vec<LandscapeRow>, BenchError> 
             "the landscape diagnosis needs a synthetic manifest, not a corpus".into(),
         ));
     }
-    let mut rows = Vec::new();
-    for &family in &m.families {
-        for &dimension in &m.dimensions {
-            for &seed in &m.validation_seeds {
-                let problem = build_problem(&ProblemSpec {
-                    family,
-                    dimension,
-                    seed,
-                })?;
-                rows.push(diagnose(&problem)?);
-            }
-        }
+    Ok(diagnose_specs(&manifest_specs(m), build_problem))
+}
+
+/// Planned versus diagnosed problems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LandscapeCoverage {
+    /// Problems the manifest asked for: families x dimensions x validation
+    /// seeds.
+    pub planned_problems: usize,
+    /// Rows diagnosed without error.
+    pub completed_problems: usize,
+    /// Rows that recorded an error.
+    pub failed_problems: usize,
+}
+
+/// Coverage of `rows` against what `m` plans.
+pub fn landscape_coverage(m: &Manifest, rows: &[LandscapeRow]) -> LandscapeCoverage {
+    let failed = rows.iter().filter(|r| r.error.is_some()).count();
+    LandscapeCoverage {
+        planned_problems: m.families.len() * m.dimensions.len() * m.validation_seeds.len(),
+        completed_problems: rows.len() - failed,
+        failed_problems: failed,
     }
-    Ok(rows)
 }
 
 /// Totals of one (family, dimension) cell.
@@ -257,9 +370,13 @@ pub struct LandscapeCell {
     pub family: Family,
     /// Free weights.
     pub dimension: usize,
-    /// Problems diagnosed.
+    /// Rows in the cell, failed ones included.
     pub problems: usize,
-    /// Shape totals over every axis of every problem.
+    /// Rows in the cell that recorded an error. Absent (0) in format-2
+    /// summaries, whose runs stopped at the first error.
+    #[serde(default)]
+    pub failures: usize,
+    /// Shape totals over every axis of every completed problem.
     #[serde(flatten)]
     pub shapes: ShapeCounts,
     /// Total diagnosis evaluations (see [`LandscapeRow::evaluations`]).
@@ -280,6 +397,7 @@ pub fn summarise_landscape(m: &Manifest, rows: &[LandscapeRow]) -> Vec<Landscape
                 family,
                 dimension,
                 problems: 0,
+                failures: 0,
                 shapes: ShapeCounts::default(),
                 evaluations: 0,
                 preparation_evaluations: 0,
@@ -290,6 +408,7 @@ pub fn summarise_landscape(m: &Manifest, rows: &[LandscapeRow]) -> Vec<Landscape
                 .filter(|r| r.family == family && r.dimension == dimension)
             {
                 cell.problems += 1;
+                cell.failures += usize::from(row.error.is_some());
                 cell.shapes.add(&row.shapes);
                 cell.evaluations += row.evaluations;
                 cell.preparation_evaluations += row.preparation_evaluations;
@@ -299,4 +418,32 @@ pub fn summarise_landscape(m: &Manifest, rows: &[LandscapeRow]) -> Vec<Landscape
         }
     }
     cells
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_partway_through_the_axes_keeps_the_evaluations_spent() {
+        let x0 = [0.0, 0.5, 1.0];
+        // The base and the first axis succeed; the 7th call (axis 1, second
+        // step) fails.
+        let mut calls = 0usize;
+        let (result, evaluations) = classify_axes(&x0, |x| {
+            calls += 1;
+            if calls == 7 {
+                Err(BenchError::Evaluation("boom".into()))
+            } else {
+                Ok(1.0 + x.iter().map(|v| v * v).sum::<f64>())
+            }
+        });
+        assert_eq!(result, Err(BenchError::Evaluation("boom".into())));
+        assert_eq!(evaluations, 7);
+        // Without the failure every axis is classified for 1 + 4 * 3 calls.
+        let (result, evaluations) =
+            classify_axes(&x0, |x| Ok(1.0 + x.iter().map(|v| v * v).sum::<f64>()));
+        assert_eq!(result, Ok(vec![AxisShape::Smooth; 3]));
+        assert_eq!(evaluations, 13);
+    }
 }

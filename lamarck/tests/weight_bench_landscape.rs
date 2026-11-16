@@ -3,9 +3,9 @@
 //! diagnosis.
 
 use neat_ai_lamarck::weight_bench::landscape::{
-    AxisShape, CURVATURE_REL_TOL, KINK_RATIO_REL_TOL, LandscapeCell, LandscapeRow, ShapeCounts,
-    axis_shapes, classify_axis, diagnose, diagnose_manifest, landscape_total_evaluations,
-    summarise_landscape,
+    AxisShape, CURVATURE_REL_TOL, KINK_RATIO_REL_TOL, LandscapeCell, LandscapeCoverage,
+    LandscapeRow, ShapeCounts, axis_shapes, classify_axis, diagnose, diagnose_manifest,
+    diagnose_specs, landscape_coverage, landscape_total_evaluations, summarise_landscape,
 };
 use neat_ai_lamarck::weight_bench::suite::{
     CorpusSpec, Family, LIVE_HIDDEN_UNITS, Problem, ProblemSpec, SATURATION_BIAS,
@@ -222,6 +222,181 @@ fn landscape_command_total_counts_preparation_once_per_problem() {
     );
 }
 
+/// The (family, dimension, seed) problems of `m`, in manifest order.
+fn specs_of(m: &Manifest) -> Vec<ProblemSpec> {
+    let mut specs = Vec::new();
+    for &family in &m.families {
+        for &dimension in &m.dimensions {
+            for &seed in &m.validation_seeds {
+                specs.push(ProblemSpec {
+                    family,
+                    dimension,
+                    seed,
+                });
+            }
+        }
+    }
+    specs
+}
+
+#[test]
+fn failed_problems_are_recorded_and_counted_not_fatal() {
+    let m = manifest(
+        vec![Family::Tanh, Family::Relu],
+        vec![20],
+        vec![1001, 1002, 1003],
+    );
+    let specs = specs_of(&m);
+    let build_fails = ProblemSpec {
+        family: Family::Relu,
+        dimension: 20,
+        seed: 1001,
+    };
+    let objective_fails = ProblemSpec {
+        family: Family::Tanh,
+        dimension: 20,
+        seed: 1002,
+    };
+    let loss_fails = ProblemSpec {
+        family: Family::Relu,
+        dimension: 20,
+        seed: 1003,
+    };
+    let rows = diagnose_specs(&specs, |spec| {
+        if *spec == build_fails {
+            return Err(BenchError::InvalidConfig("injected build failure".into()));
+        }
+        let mut problem = build_problem(spec)?;
+        if *spec == objective_fails {
+            // An out-of-range free axis: the objective cannot be built.
+            problem.synapse_indices[0] = problem.creature.synapses.len();
+        } else if *spec == loss_fails {
+            // A NaN target makes the very first (base) loss non-finite.
+            let last = problem.screening.len() - 1;
+            problem.screening[last] = f32::NAN;
+        }
+        Ok(problem)
+    });
+    assert_eq!(rows.len(), specs.len());
+
+    let by_spec = |spec: &ProblemSpec| {
+        rows.iter()
+            .find(|r| (r.family, r.dimension, r.seed) == (spec.family, spec.dimension, spec.seed))
+            .unwrap()
+    };
+    let failed = by_spec(&build_fails);
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("invalid configuration: injected build failure")
+    );
+    assert_eq!(failed.shapes, ShapeCounts::default());
+    assert_eq!(
+        (
+            failed.evaluations,
+            failed.preparation_evaluations,
+            failed.plateau_free_axes
+        ),
+        (0, 0, 0)
+    );
+    let failed = by_spec(&objective_fails);
+    let synapses = build_problem(&objective_fails)
+        .unwrap()
+        .creature
+        .synapses
+        .len();
+    assert_eq!(
+        failed.error,
+        Some(format!(
+            "invalid configuration: synapse index {synapses} out of range (creature has {synapses})"
+        ))
+    );
+    assert_eq!(failed.shapes, ShapeCounts::default());
+    // The problem was built, so its selection scan was spent; no loss was.
+    assert_eq!(
+        (failed.evaluations, failed.preparation_evaluations),
+        (0, 145)
+    );
+    let failed = by_spec(&loss_fails);
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("evaluation failed: non-finite loss")),
+        "{failed:?}"
+    );
+    assert_eq!(failed.shapes, ShapeCounts::default());
+    // The base evaluation ran and failed: it is counted.
+    assert_eq!(
+        (failed.evaluations, failed.preparation_evaluations),
+        (1, 145)
+    );
+
+    // Every other row is exactly what the unfaulted run produces.
+    let clean = diagnose_manifest(&m).unwrap();
+    assert!(clean.iter().all(|r| r.error.is_none()));
+    let mut others = 0;
+    for (row, expected) in rows.iter().zip(&clean) {
+        if row.error.is_none() {
+            assert_eq!(row, expected);
+            others += 1;
+        }
+    }
+    assert_eq!(others, 3);
+
+    let coverage = landscape_coverage(&m, &rows);
+    assert_eq!(
+        coverage,
+        LandscapeCoverage {
+            planned_problems: 6,
+            completed_problems: 3,
+            failed_problems: 3,
+        }
+    );
+    let cells = summarise_landscape(&m, &rows);
+    assert_eq!(
+        cells
+            .iter()
+            .map(|c| (c.family, c.problems, c.failures))
+            .collect::<Vec<_>>(),
+        vec![(Family::Tanh, 3, 1), (Family::Relu, 3, 2)]
+    );
+    // Failed rows add their spent evaluations but no axes.
+    assert_eq!(cells[0].shapes.total(), 2 * 20);
+    assert_eq!(cells[1].shapes.total(), 20);
+    assert_eq!(cells[0].evaluations, 2 * (1 + 4 * 20));
+    assert_eq!(cells[1].evaluations, (1 + 4 * 20) + 1);
+    assert_eq!(cells[0].preparation_evaluations, 3 * 145);
+    assert_eq!(cells[1].preparation_evaluations, 2 * 145);
+    assert_eq!(
+        landscape_total_evaluations(&rows),
+        3 * (1 + 4 * 20) + 1 + 5 * 145
+    );
+}
+
+#[test]
+fn a_clean_run_covers_every_planned_problem() {
+    let m = manifest(
+        vec![Family::Tanh, Family::HardTanh],
+        vec![20],
+        vec![1001, 1002],
+    );
+    let rows = diagnose_manifest(&m).unwrap();
+    assert_eq!(rows, diagnose_specs(&specs_of(&m), build_problem));
+    assert_eq!(
+        landscape_coverage(&m, &rows),
+        LandscapeCoverage {
+            planned_problems: 4,
+            completed_problems: 4,
+            failed_problems: 0,
+        }
+    );
+    assert!(
+        summarise_landscape(&m, &rows)
+            .iter()
+            .all(|c| c.failures == 0 && c.problems == 2)
+    );
+}
+
 #[test]
 fn tanh_axes_are_smooth_and_relu_and_hard_tanh_axes_kink() {
     for seed in [1001, 1002] {
@@ -261,15 +436,26 @@ fn landscape_rows_and_cells_serialise_in_camel_case() {
         "evaluations",
         "preparationEvaluations",
         "plateauFreeAxes",
+        "error",
     ] {
         assert!(value.get(key).is_some(), "row lacks {key}: {value}");
     }
     assert_eq!(value["family"], "saturated-hard-tanh");
+    // Present and null on a completed row, as on `RunRow`.
+    assert!(value["error"].is_null());
     let back: LandscapeRow = serde_json::from_value(value).unwrap();
     assert_eq!(back, rows[1]);
     let cells: Vec<LandscapeCell> = summarise_landscape(&m, &rows);
     assert_eq!(cells.len(), 2);
     assert_eq!(cells[1].problems, 1);
+    assert_eq!(cells[1].failures, 0);
+    let cell = serde_json::to_value(&cells[1]).unwrap();
+    assert_eq!(cell["failures"], 0, "{cell}");
+    let coverage = serde_json::to_value(landscape_coverage(&m, &rows)).unwrap();
+    assert_eq!(
+        coverage,
+        serde_json::json!({"plannedProblems": 2, "completedProblems": 2, "failedProblems": 0})
+    );
     assert_eq!(cells[1].shapes, rows[1].shapes);
     assert_eq!(cells[1].evaluations, 1 + 4 * 40);
     assert!(cells[1].shapes.flat > 0);
@@ -372,7 +558,28 @@ fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() 
         m.families.len() * m.dimensions.len() * m.validation_seeds.len()
     );
     assert_eq!(summarise_landscape(&m, &rows), cells);
-    assert_eq!(summary["formatVersion"], serde_json::json!(2));
+    assert_eq!(summary["formatVersion"], serde_json::json!(3));
+    let coverage: LandscapeCoverage = serde_json::from_value(summary["coverage"].clone()).unwrap();
+    assert_eq!(coverage, landscape_coverage(&m, &rows));
+    assert_eq!(
+        coverage,
+        LandscapeCoverage {
+            planned_problems: 144,
+            completed_problems: 144,
+            failed_problems: 0,
+        }
+    );
+    // Every committed row carries `error`, and it is null.
+    for line in std::fs::read_to_string(dir.join("landscape.jsonl"))
+        .unwrap()
+        .lines()
+    {
+        let row: Value = serde_json::from_str(line).unwrap();
+        assert!(
+            row.get("error").is_some_and(Value::is_null),
+            "row error not null: {row}"
+        );
+    }
     assert_eq!(
         summary["diagnosisEvaluations"],
         serde_json::json!(rows.iter().map(|r| r.evaluations).sum::<usize>())
@@ -392,6 +599,7 @@ fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() 
     // 30,864 diagnosis + 20,880 preparation (144 problems x 145).
     assert_eq!(summary["totalEvaluations"], serde_json::json!(51744));
     for cell in &cells {
+        assert_eq!(cell.failures, 0, "{cell:?}");
         let axes = cell.dimension * cell.problems;
         assert_eq!(cell.shapes.total(), axes);
         match (cell.family, cell.dimension) {

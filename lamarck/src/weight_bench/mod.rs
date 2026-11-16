@@ -47,8 +47,9 @@ pub use experiment::{
     MetricSummary, RunRow, predeclared_manifest, run_manifest, summarise_runs,
 };
 pub use landscape::{
-    AxisShape, CURVATURE_REL_TOL, KINK_RATIO_REL_TOL, LandscapeCell, LandscapeRow, ShapeCounts,
-    classify_axis, diagnose, diagnose_manifest, landscape_total_evaluations, summarise_landscape,
+    AxisShape, CURVATURE_REL_TOL, KINK_RATIO_REL_TOL, LandscapeCell, LandscapeCoverage,
+    LandscapeRow, ShapeCounts, classify_axis, diagnose, diagnose_manifest, diagnose_specs,
+    landscape_coverage, landscape_total_evaluations, summarise_landscape,
 };
 pub use objective::{BenchError, Budget, BudgetedObjective, WeightObjective, select_influential};
 pub use reference::{
