@@ -1,125 +1,130 @@
 ## Summary
 
-Add an opt-in, offline benchmark of local weight optimisers under explicit
-evaluation budgets (`lamarck/src/weight_bench/`, the `weight_router_bench`
-example), an offline AMM reference driver pinned to the authors' release, and
-synthetic evidence. A budget-aware router and its landscape probes were
-measured, never beat CMA-ES alone, and were removed; AMM lost in every cell, so
-nothing is ported. Nothing in the optimisation loop calls the benchmark and no
-default changes. A corpus run records a fingerprint of the model and records
-it used. The representative comparison on production inputs is still
-outstanding. Part of #266.
+Follow-up to the merged #274 benchmark. It closes three of the gaps that PR
+left open:
 
-This branch is the earlier PR #271 work, squashed onto the current `Develop`
-after #271 was closed for a `CHANGELOG.md` conflict. The conflict was two
-adjacent `### Added` bullets (#267 and #266); both are kept. Most CI gate
-fixes that PR #271 carried are already on `Develop` through #270. One gate fix
-is in this diff, outside the benchmark: `.gitleaks.toml` (commit `659f2d7`).
+- **Full-window confirmation.** It is now a paired column, and it can veto a
+  `-better` verdict.
+- **Flat axes.** Each problem now counts its flat chosen axes. None were found
+  in the synthetic suite.
+- **Versions and evidence.** Runs record the code and dependency versions and
+  the wall-clock time. All evidence was regenerated from the current code, and
+  the AMM campaign and the AMM method check were re-run too. `runs.jsonl` is now
+  committed.
 
-- **`.gitleaks.toml`.** `Develop`'s config held an empty `[allowlist]`
-  (`commits = []`). gitleaks 8.30.1 refuses to load it ("`[[allowlists]]`
-  must contain at least one check for: commits, paths, regexes, or
-  stopwords"), so the secret scan stopped before scanning anything. The new
-  config is `[extend] useDefault = true`: the gitleaks default rule set with
-  no allowlist, so nothing is exempted. `gitleaks detect --config
-  .gitleaks.toml --log-opts="origin/Develop..HEAD"` scans this PR's commits
-  and reports "no leaks found".
+The output format is now version 3. A second, independent run reproduced every
+row file and every summary cell exactly.
 
-- [x] Read and pin the full AMM method; check release compatibility.
-- [x] Run AMM, CMA-ES and the refinement surrogate on fixed synthetic screening records.
-- [x] Correct comparison and accounting defects; validate failure handling.
-- [x] Remove the router and probes after the negative finding; regenerate evidence from head.
-- [x] Re-land the work on the current `Develop` and pass `./quality.sh`.
-- [x] Fix the gitleaks config so the secret scan loads.
-- [x] Pin influential-synapse choice, best-point confirmation, per-arm reference comparisons and the committed manifest with tests.
-- [x] Record a model/data fingerprint (`corpusFingerprint`) on corpus runs.
-- [ ] Establish production-baseline equivalence and run representative inputs.
-- [ ] Complete full authoritative confirmation on representative inputs.
+The representative run on a production creature and corpus is still not done,
+the refinement arm is still a surrogate, and kinks are not measured.
+Part of #266.
+
+- [x] Full-window column and veto (`Comparison.full`, format 3).
+- [x] Flat-axis count per problem, from the existing sensitivity scan (no extra evaluations).
+- [x] `gitCommit`, `gitDirty`, `neatCoreSource` and `wallClockSeconds` in the bench summaries.
+- [x] Regenerate the synthetic suite, AMM campaign and method check, and commit `runs.jsonl`.
+- [x] Test that re-summarising the committed rows reproduces the committed summaries.
+- [x] Bump the crate to 0.1.49 and regenerate the evidence at that commit.
+- [ ] Representative runs on production inputs (no authorised creature or corpus on this host).
+- [ ] A refinement arm that is the production candidate pipeline, not the surrogate.
+- [ ] A kink measurement, and a problem family that actually has flat axes.
 
 ## Spec
 
 ### Intent and Rationale
 
-- Compare local weight search under explicit budgets without touching production acceptance, so a negative or positive finding costs nothing in the run loop.
-- The squash re-lands reviewed work instead of rewriting it; only the changelog conflict needed resolving.
+- #274's own review left three criteria `partial`, and this PR fixes what can be fixed offline:
+  - full-window results were computed but never compared;
+  - plateaus were not measured at all;
+  - the evidence was router-era or not committed, and was named by crate version only.
+- The flat-axis count reuses the sensitivity scan the problem already runs (`scan_sensitivities`), so preparation costs stay the same. Nothing else that is committed moved apart from the new fields: the AMM rows' screening losses are identical to the committed router-era rows.
 
 ### Essential Design Decisions
 
-- `lamarck-refine` is a random-axis surrogate that reuses `RANDOM_DELTA_HALF_WIDTH` (`candidates.rs`) and `STEP_FRACTIONS` (`followup.rs`); it is not `generate_candidate_batch`, and the docs claim no equivalence.
-- The router and probes are removed, not kept: the issue ports only winning probes or routers. With no tuned parameter there is no calibration phase; `Manifest` refuses unknown fields, so a stale `calibrationSeeds` is rejected.
-- AMM runs only in a separate, checksum-pinned scratch Python environment (preset `c46`); no dependency is added and it never runs in CI.
-- Errored rows never enter paired distributions, while their spent evaluations stay counted.
+- **The verdict rule changed after the format 2 results were seen.** A `-better` verdict now also needs a full-window mean ≤ 0. This can only turn `-better` into `inconclusive`, never create a verdict. It changed exactly one cell (hard-tanh D=40 100D, full-window mean +0.0004). The docs say so.
+- **All three columns share one bootstrap RNG.** The full-window column is drawn after the screening and held-out columns, so every later cell's interval moved, while the paired differences did not change. One verdict moved because of this (tanh D=100 30D, `cma-es-worse` → `inconclusive`). The docs record both changes.
+- **Flat means one side only.** An axis is flat when a one-sided +0.05 step changes the screening loss by at most `PLATEAU_REL_TOL` (1e-6) × base loss. Older rows without `plateauFreeAxes` load as `None`.
+- **`summarise_runs` is now public.** `run_manifest` calls it. It exists so the committed `runs.jsonl` can be re-summarised and compared with the committed `summary.json`.
+- **Version format change.** Persisted outputs move from format 2 to format 3. Old AMM rows still load, because `plateau_free_axes` has `#[serde(default)]` and the full-window column is computed from the raw `fullLossStart` and `fullLossFinal`, which old rows carry.
 
 ### Undiscoverable Facts
 
-- The full method in [arXiv:2611.06879v1](https://arxiv.org/pdf/2611.06879v1) was read (Section 3, Algorithms 1–2, Tables 2/6, Appendices A–B). The paper's `v0.3.0` resolves to `c4f0ab160aae912311328145aa5a426b26a06b26`; `v0.3.0` and the pinned `v0.7.0` gave 27 identical rows on one validation seed.
-- No authorised production model and corpus pair was found on the host, so representative coverage is zero.
-- The worker's pre-push gate reads a SHA-pinned `dtolnay/rust-toolchain` ref as a toolchain (`cargo +29eef336… --version` exits 101). `Develop` routes three jobs through `.github/actions/rust-toolchain`, but `ci.yml`'s `validation` job, `auto-format`, `cargo-audit`, `sbom` and `security` still call the pinned action directly.
+- No production creature or corpus was found on this host (`find / -xdev` for `*.creature.json`, `best.json` and `training-data`), so representative coverage stays at 0.
+- The AMM environment was built with `scripts/amm-reference-env.py`. The v0.3.0 tarball (`c4f0ab16…`) matched its pinned sha256 `c3435857…`.
+- Two independent runs, at `757ac15` (0.1.48) and `f0a7b4c` (0.1.49), gave byte-identical `runs.jsonl` and `amm-runs.jsonl`, identical summary cells, and the same canonical method-check hash `33203af0…`.
 
 ## Evidence
 
 CLI/backend only; no UI file is touched.
 
-- `docs/evidence/weight-router/manifest.json`, `summary.json` and `reference-summary.json` come from the current benchmark code (`formatVersion` 2): 648/648 runs, 0 failed, 1,631,615 evaluations. CMA-ES beat the surrogate in 19 of 27 cells, lost 1, and 7 were inconclusive. Over the committed 324 AMM rows, AMM is worse in all 54 comparisons. These are synthetic results, not representative ones.
-- `docs/evidence/weight-router/method-check.json` and `amm-runs.jsonl` are router-era output (crate 0.1.46); `docs/weight-optimiser-routing.md` labels them so.
-- `Cargo.lock` moves `rustix` 1.1.4 → 1.1.6 for RUSTSEC-2026-0486, which the dependency audit flagged on #271.
-- `corpusFingerprint` (FNV-1a hashes of the creature file and of the loaded records, plus the record count) is written to a corpus run's results and `summary.json`. The synthetic suite omits it, so the committed evidence is unchanged.
-- `.gitleaks.toml`: the old config fails to load (`FTL Failed to load config`); the new one scans `origin/Develop..HEAD` with "no leaks found".
+- Synthetic suite, `weight_router_bench` at `f0a7b4c` with a clean tree: 648 of 648 runs, 0 failed, 1,631,615 evaluations, 224.4 s wall time on a shared host (indicative only). CMA-ES beat the surrogate in 18 cells, was worse in 0 and inconclusive in 9 (format 2 gave 19 / 1 / 7). Every row and every cell has 0 flat free axes.
+- AMM campaign, `scripts/amm-reference.py --jobs 8`: 324 of 324 runs, 0 failed, 855,000 evaluations. AMM was worse in all 54 comparisons.
+- Method check: v0.3.0 and v0.7.0 each gave 27 rows, identical to each other ("AMM 0.7.0: 27 completed rows, identical to comparison").
+- `neatCoreSource` = `git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.7#3759355634b1cabc8034cd76df5dbd44a867d18c`, read from `Cargo.lock`.
 - #266: Experiment: Benchmark budget-aware routing of local weight optimisers.
 
 ```mermaid
 flowchart LR
-    M[Manifest validation] --> V[Paired validation seeds]
-    V --> B[Budgeted refine / CMA-ES arms and AMM server]
-    B --> F{Run failed?}
-    F -->|yes| E[Record error and spent costs; exclude pair]
-    F -->|no| H[Full-window and held-out confirmation]
-    H --> S[Paired summaries with bootstrap intervals]
+    S[Sensitivity scan] --> P[Pick D free weights + count flat axes]
+    P --> R[Budgeted refine / CMA-ES / AMM runs]
+    R --> C[Screening, full-window and held-out confirmation]
+    C --> V{"screening CI < 0 and held-out mean ≤ 0 and full mean ≤ 0?"}
+    V -->|yes| B[first arm better]
+    V -->|no| I[inconclusive or worse]
 ```
 
 ## Acceptance Criteria
 
 <!-- vibe-spec-review inputs="diff+issue-body" -->
 
-- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `lamarck/tests/weight_bench_reference.rs::committed_evidence_parses_and_summarises`, `docs/evidence/weight-router/reference-summary.json` — reviewer: partial — reason: `lamarck-refine` is a random-axis surrogate (`lamarck/src/weight_bench/refine.rs`), not the production `generate_candidate_batch` pipeline.
-- **partial** — Test plateaus/kinks and activation families, then full/held-out confirmation. — evidence: `lamarck/tests/weight_bench.rs::confirmation_losses_are_measured_at_the_arms_best_point`, `docs/weight-optimiser-routing.md` (tanh, relu, hard-tanh; per-cell held-out results in `summary.json`) — reviewer: partial — reason: activation families are tested, but (1) full-window confirmation is computed per run and never compared or reported: `summarise_cells` reads only the normalised screening and held-out losses, the verdict ignores the full-window loss, `summary.json` and `reference-summary.json` carry no full-window field and `runs.jsonl` is not committed; (2) no plateau-bearing problem is demonstrated: `select_influential` frees the most loss-sensitive synapses, the plateau/kink probes were removed, and no test or committed evidence shows a plateau axis, so the `hard-tanh` label in `docs/weight-optimiser-routing.md` no longer claims plateaus.
-- **partial** — Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `lamarck/tests/weight_bench.rs::corpus_runs_fingerprint_the_model_and_records`, `lamarck/tests/weight_bench.rs::total_evaluations_count_confirmations_and_preparation_once_per_problem` — reviewer: partial — reason: code is named by crate version only (no git commit or neat-core version), no model/data version is frozen for a representative run, and costs are counted in evaluations only, with no wall-clock time.
-- **partial** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. — evidence: `lamarck/examples/weight_router_bench.rs`, `docs/evidence/weight-router/manifest.json`, `summary.json` (648/648 runs) — reviewer: partial — reason: `amm-runs.jsonl` and `method-check.json` come from the router-era build 0.1.46 and are not regenerated from head, `runs.jsonl` is not committed, and representative coverage is 0 runs.
-- **unrequested** — `.gitleaks.toml` replaces an empty `[allowlist]` with `[extend] useDefault = true` — reviewer: unrequested — reason: gitleaks 8.30.1 refuses to load the old config, so the secret scan could not run.
-- **unrequested** — `Cargo.lock` bumps `rustix` 1.1.4 → 1.1.6 — reviewer: unrequested — reason: RUSTSEC-2026-0486, flagged by the dependency audit.
-- **unrequested** — `.gitignore` adds `__pycache__/` — reviewer: unrequested — reason: a side effect of the new Python AMM scripts.
+- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `docs/evidence/weight-router/reference-summary.json`, `lamarck/tests/weight_bench_reference.rs::committed_evidence_is_reproduced_by_the_summariser` — reviewer: met — reason: the AMM reference is regenerated and reproduced, but `lamarck-refine` is still a random-axis surrogate (`lamarck/src/weight_bench/refine.rs`), not the production candidate pipeline.
+- **met** — Optimise 20–100 influential weights with budgets 10D, 30D, 100D; mark D>40 as extrapolation requiring validation. — evidence: `lamarck/tests/weight_bench_reference.rs::committed_evidence_parses_and_summarises`, `lamarck/tests/weight_bench.rs::extrapolation_flag_marks_rows_and_cells_just_past_the_boundary` — reviewer: met
+- **met** — Count landscape probes within the budget. — evidence: `lamarck/tests/weight_bench.rs::plateau_free_axes_count_only_the_flat_synapses_chosen`, `lamarck/tests/weight_bench.rs::total_evaluations_count_confirmations_and_preparation_once_per_problem` — reviewer: met
+- **partial** — Test plateaus/kinks and activation families, then full/held-out confirmation. — evidence: `lamarck/tests/weight_bench_reference.rs::full_window_veto_turns_a_screening_win_inconclusive`, `lamarck/tests/weight_bench.rs::corpus_rows_record_the_plateau_count_of_their_problem` — reviewer: partial — reason: full and held-out confirmation and the flat-axis count are done, but the synthetic suite has no flat axes, the test is one-sided, and kinks are not measured.
+- **met** — Port only winning probes/router to Rust after measurement; no topology optimisation or unverified third-party dependency added by default. — evidence: `lamarck/src/weight_bench/arms.rs` (router stays removed), no new dependency in `lamarck/Cargo.toml` — reviewer: met
+- **met** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms; if functionality already exists, this issue still owns the missing controlled comparison rather than a second implementation. — evidence: `lamarck/src/weight_bench/objective.rs` (`scan_sensitivities` split out of `select_influential`) — reviewer: met
+- **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change. — evidence: changes confined to `lamarck/src/weight_bench/` and `lamarck/examples/weight_router_bench.rs` — reviewer: met
+- **partial** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `lamarck/src/weight_bench/provenance.rs::tests::real_lock_pins_neat_core_to_its_git_source`, `docs/evidence/weight-router/summary.json` (`gitCommit`, `neatCoreSource`, `wallClockSeconds`) — reviewer: partial — reason: the full-window veto was added after format 2 was seen (stricter only, documented), and no model or data version exists for a representative run.
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks. Research runs are separate from routine feature CI. — evidence: `lamarck/tests/weight_bench_reference.rs::full_window_veto_turns_a_screening_win_inconclusive`, `lamarck/src/weight_bench/provenance.rs::tests::lock_without_neat_core_errors_naming_it`, `./quality.sh` passed — reviewer: met
+- **partial** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — evidence: `docs/evidence/weight-router/runs.jsonl`, `lamarck/tests/weight_bench_reference.rs::committed_evidence_is_reproduced_by_the_summariser` — reviewer: met — reason: synthetic results are reproducible and fully covered, but representative coverage is 0 runs, so no optimisation benefit is shown.
+- **met** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/weight-optimiser-routing.md` Finding 4 (no flat axes), AMM worse in 54 of 54 — reviewer: met
+- **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private. — evidence: synthetic and temp-dir fixtures in `lamarck/tests/weight_bench.rs` — reviewer: met
+- **missing** — Representative full/held-out confirmation on production inputs. — reviewer: missing — reason: no authorised production creature or corpus exists on this host; `representativeCoverage` is 0 in `docs/evidence/weight-router/method-check.json`.
+- **unrequested** — `summarise_runs` made public and re-exported — reviewer: unrequested — reason: `run_manifest` uses it, and it lets the committed rows be re-summarised to prove the committed summaries.
+- **unrequested** — the bootstrap stream shift from the shared RNG — reviewer: unrequested — reason: a side effect of adding the full-window column; documented, with the one verdict it moved.
 
 ## Standards Review
 
 <!-- vibe-standards-review inputs="diff+CODING-STANDARDS.md" -->
 
-The repository has no `CODING-STANDARDS.md`; the reviewer used `CONTRIBUTING.md`, the README development rules, `.codespellrc`, `.markdownlint.json` and the workspace lints. It reviewed up to `cc4adbd`, before the fingerprint commit.
+The repository has no `CODING-STANDARDS.md`. The reviewer used `CONTRIBUTING.md`, the README's development rules and the workspace lints.
 
-- **violation** — `CONTRIBUTING.md` › Version bumping: "Every binary-affecting change must bump the patch version in `lamarck/Cargo.toml`" — evidence: `lamarck/Cargo.toml:3` (still 0.1.47, equal to `Develop`) — reason: not fixed. The PR workflow's auto-increment bumps an equal version ("Equal versions may still auto-patch-bump"). A local bump would also make the committed evidence's `crateVersion` 0.1.47 differ from the code.
-- **clean** — `CONTRIBUTING.md` › Changelog: "Record notable changes under **[Unreleased]**" — evidence: `CHANGELOG.md` `### Security` now records the `.gitleaks.toml` change (the secret scan loads and runs the default rule set) and the `rustix` 1.1.4 → 1.1.6 bump for RUSTSEC-2026-0486, and the benchmark entry records the AMM driver keeping a failed run's row. The earlier review listed this as a violation (not fixed); it is fixed in the review-fix commit.
-- **clean** — new tests follow TDD and were red-checked; `cargo fmt --check` passes; codespell and markdownlint are clean on the changed files; no new crate dependency; corpus loading is bounded by `maxRecords`; the README layout lists `weight_bench/`; commits carry the Co-Authored-By trailer.
+- **violation** — `CONTRIBUTING.md` › Version bumping: "Every binary-affecting change must bump the patch version" — evidence: `lamarck/Cargo.toml:3` — reason: fixed in this diff; bumped 0.1.48 → 0.1.49 with `scripts/bump-lamarck-version.sh`, and all evidence was regenerated at that commit (`f0a7b4c`).
+- **clean** — Changes to existing test expectations: `format_version` 2 → 3, the `routedTo` assertion replaced by a `plateau_free_axes` check, and the added `full.failures` assertions. Each still fails without its code. The full-window veto test uses different held-out and full offsets.
+- **clean** — Lint rules: `missing_docs` is met on every new public item, and Clippy is clean.
+- **clean** — Housekeeping: there is a changelog entry under [Unreleased], and every named test exists.
+- **clean** — Behaviour and security: `git` runs with fixed arguments and null stdin, and a missing `neat-core` pin fails loudly. The standards name no review-only rules.
 
 ## Test Plan
 
-- `timeout 1700 ./quality.sh < /dev/null` passed on `e037572`, which carries every code and test change here (exit 0, "All quality checks passed!"): shell and workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc.
-- `timeout 1700 ./quality.sh < /dev/null` was re-run on the review-fix working tree (the changes after `e037572` are the AMM driver and its test, `CHANGELOG.md`, `docs/weight-optimiser-routing.md` and this summary) and passed (exit 0, "All quality checks passed!"). markdownlint is clean on the three changed Markdown files.
-- `cargo test --test weight_bench --test weight_bench_reference < /dev/null` (from `lamarck/`) passed 22 and 13, with one debug-mode ignore; `cargo test --lib weight_bench` passed 2.
-- Tests added by this PR include `lamarck/tests/weight_bench.rs::manifest_rejects_unknown_fields`, `manifest_rejects_duplicate_trial_identifiers` and `extrapolation_flag_marks_rows_and_cells_just_past_the_boundary`; `lamarck/tests/weight_bench_reference.rs::held_out_veto_turns_a_screening_win_inconclusive`, `failed_reference_with_completed_metrics_is_excluded_from_pairs` and `committed_evidence_parses_and_summarises`; `lamarck/src/weight_bench/experiment.rs::tests::failed_confirmations_keep_the_calls_already_spent`; and `lamarck/src/weight_bench/arms.rs::tests::arm_seeds_are_pinned`.
-- `scripts/amm-reference.py` now closes the server's stdin after sending `done`, swallows the `BrokenPipeError` there and sets `proc.stdin = None`, so `Popen.__exit__` cannot re-raise past a row already read.
-- Behaviour pins added after the pre-PR verifier, each shown red by breaking the code and green when it is restored:
-  - `weight_bench.rs::select_influential_picks_the_most_sensitive_synapses` uses a creature whose third hidden neuron reaches the output through a zero weight. It asserts the exact indices returned for every `d`, that the two dead synapses are left out while live ones remain, and that the tied dead pair keeps the lower index. It goes red when the sensitivity comparator in `objective.rs` is reversed, and when the tie-break is reversed.
-  - `weight_bench.rs::confirmation_losses_are_measured_at_the_arms_best_point` replays each `run_manifest` row's arm on the same budget and seed. It asserts the final screening, full and held-out losses and both normalised losses equal that best point's losses, on a fixture where the best point's full and held-out losses differ from the start's. It goes red when `finish_row` confirms the start instead of `best_x` on the held-out window, and again on the full window.
-  - `weight_bench_reference.rs` fixtures now give CMA-ES (0.7 / 0.86) different values from refine (0.8 / 0.9). The verdict tests assert each comparison's mean, wins and verdict against its own second arm. They go red when `summarise_cells` reads refine rows for every pair.
-  - `weight_bench.rs::corpus_runs_fingerprint_the_model_and_records` checks the creature hash against an independent FNV-1a computation. It shows that the same files give the same fingerprint, that one flipped record byte moves only the records hash, that one edited creature weight moves only the creature hash, and that a smaller `maxRecords` changes the count and records hash. Synthetic results serialise without the field. It goes red when the fingerprint is dropped, when only the first record or the first 10 creature bytes are hashed, and when the count is off by one.
-  - `committed_evidence_parses_and_summarises` asserts the committed manifest equals `predeclared_manifest()`. It derives the AMM row count from the manifest's planned runs and requires every planned run complete. It goes red when the predeclared seeds or dimensions are changed.
-- `scripts/test-amm-reference.py` (offline integration checks against the real pinned AMM and Rust server) was not re-run here: no scratch AMM environment exists, and building one needs network access. Its new case `test_server_error_before_done_keeps_the_real_row` (a server that answers a point with an error, writes its row and exits before `done`; asserts the row keeps `evaluationsUsed`, `preparationEvaluations`, `confirmationEvaluations` and the server's error text) was exercised only through an equivalent harness with stub `numpy` and `amm_optimizer` modules: the driver before the fix returned a zero-cost `BrokenPipeError` failure row, and after the fix returns the real row (7 / 145 / 3 evaluations).
-- No existing test assertion is removed relative to `Develop`; the benchmark module and its test files are new.
+- `timeout 1700 ./quality.sh < /dev/null` passed on `e360bf9` with exit 0 and "All quality checks passed!". That run covered shell and workflow checks, spelling, dependency audit, formatting, Clippy, workspace tests and rustdoc. It was re-run on `e69261d` (after the version bump and the final evidence regeneration, with this summary in the working tree) and passed again with exit 0.
+- `cargo test --test weight_bench --test weight_bench_reference < /dev/null` (from `lamarck/`): 26 passed with 1 ignored, and 15 passed. `cargo test --lib weight_bench`: 7 passed. After the final evidence regeneration, `cargo test --test weight_bench_reference --test contributing_contract`: 21 passed.
+- Added tests:
+  - `lamarck/tests/weight_bench_reference.rs`: `full_window_veto_turns_a_screening_win_inconclusive` and `committed_evidence_is_reproduced_by_the_summariser`.
+  - `lamarck/tests/weight_bench.rs`: `plateau_free_axes_count_only_the_flat_synapses_chosen`, `corpus_rows_record_the_plateau_count_of_their_problem`, `synthetic_rows_carry_their_problem_plateau_count` and `rows_without_the_plateau_field_load_as_none`.
+  - `lamarck/src/weight_bench/provenance.rs::tests`: four lock-parse tests and `git_state_reports_the_commit_and_whether_the_tree_is_dirty`.
+- Red-first: the new tests failed before the code existed, either by not compiling or by failing at runtime against stubs. `full_window_veto_turns_a_screening_win_inconclusive` also went red with the full-window term dropped from `verdict`.
+- Removed from `lamarck/tests/weight_bench_reference.rs`: `assert!(rows.contains("routedTo") && rows.contains("probeEvaluations"));`
+  - Obsolete: the committed AMM rows were regenerated from current code and no longer carry router-era fields.
+  - Still covered by: `lamarck/tests/weight_bench.rs::rows_without_the_plateau_field_load_as_none` (older rows still load).
+  - Replaced by: `assert!(parsed.iter().all(|r| r.plateau_free_axes.is_some()));`
+- Changed in `lamarck/tests/weight_bench_reference.rs::clearly_better_and_worse_references_get_matching_verdicts`: `format_version` 2 → 3, as the format bump requires.
+- `scripts/test-amm-reference.py` was not re-run. The AMM driver is unchanged, and the real campaign and method check were run end to end instead.
 
 ## Merge verification
 
-- Pushed through the normal guarded `git push`. GitHub CI is not yet verified.
+- GitHub CI not yet verified.
 
-Not done: representative runs on production inputs, production-baseline
-equivalence, full authoritative confirmation, and a re-run of the AMM campaign
-(its committed rows are re-summarised against the current in-process runs).
-These prevent any optimisation-benefit or issue-completion claim.
+Not done: representative runs on production inputs, a production-pipeline
+refinement arm, a kink measurement, and a family with real flat axes. The
+example's git-failure warning path is only covered at the probe level.

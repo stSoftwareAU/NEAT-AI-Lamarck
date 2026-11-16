@@ -30,6 +30,7 @@ pub mod arms;
 pub mod cmaes;
 pub mod experiment;
 pub mod objective;
+pub mod provenance;
 pub mod reference;
 pub mod refine;
 pub mod stats;
@@ -39,7 +40,7 @@ pub use arms::{Arm, arm_seed, run_arm};
 pub use cmaes::{CMA_SIGMA0, cma_es};
 pub use experiment::{
     CellSummary, Comparison, CorpusFingerprint, Coverage, ExperimentResults, Manifest,
-    MetricSummary, RunRow, predeclared_manifest, run_manifest,
+    MetricSummary, RunRow, predeclared_manifest, run_manifest, summarise_runs,
 };
 pub use objective::{BenchError, Budget, BudgetedObjective, WeightObjective, select_influential};
 pub use reference::{

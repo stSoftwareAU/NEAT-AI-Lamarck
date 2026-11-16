@@ -12,7 +12,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use super::objective::{BenchError, select_influential};
+use super::objective::{BenchError, count_plateau_axes, pick_influential, scan_sensitivities};
 
 const INPUTS: usize = 16;
 const HIDDEN: usize = 16;
@@ -94,6 +94,11 @@ pub struct Problem {
     pub held_out: Vec<f32>,
     /// Evaluations spent selecting the free weights.
     pub preparation_evaluations: usize,
+    /// Chosen free weights that are flat: a one-sided step of the weight leaves
+    /// the loss unchanged within
+    /// [`PLATEAU_REL_TOL`](super::objective::PLATEAU_REL_TOL). Counted from the
+    /// same scan that chose them, so it costs no evaluations.
+    pub plateau_free_axes: usize,
 }
 
 /// Whether `dimension` lies beyond the calibrated range.
@@ -212,8 +217,11 @@ pub fn build_problem(spec: &ProblemSpec) -> Result<Problem, BenchError> {
     let creature = parse_creature_json(&json)
         .map_err(|e| BenchError::Evaluation(format!("building creature: {e}")))?;
 
-    let (synapse_indices, preparation_evaluations) =
-        select_influential(&creature, &screening, spec.dimension)?;
+    // Synapse counts are fixed by the generator (144), so the dimension bounds
+    // checked above are enough for the pick.
+    let (base, changes, preparation_evaluations) = scan_sensitivities(&creature, &screening)?;
+    let synapse_indices = pick_influential(&changes, spec.dimension);
+    let plateau_free_axes = count_plateau_axes(&synapse_indices, &changes, base);
     Ok(Problem {
         spec: *spec,
         creature,
@@ -222,6 +230,7 @@ pub fn build_problem(spec: &ProblemSpec) -> Result<Problem, BenchError> {
         full,
         held_out,
         preparation_evaluations,
+        plateau_free_axes,
     })
 }
 
@@ -326,8 +335,9 @@ pub fn problem_from_corpus(
     let screening = window[..spec.screening_records * width].to_vec();
     let full = window[..held_start].to_vec();
     let held_out = window[held_start..].to_vec();
-    let (synapse_indices, preparation_evaluations) =
-        select_influential(creature, &screening, dimension)?;
+    let (base, changes, preparation_evaluations) = scan_sensitivities(creature, &screening)?;
+    let synapse_indices = pick_influential(&changes, dimension);
+    let plateau_free_axes = count_plateau_axes(&synapse_indices, &changes, base);
     Ok(Problem {
         spec: ProblemSpec {
             family: Family::Corpus,
@@ -340,5 +350,6 @@ pub fn problem_from_corpus(
         full,
         held_out,
         preparation_evaluations,
+        plateau_free_axes,
     })
 }
