@@ -80,9 +80,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is now committed. The format 3 synthetic run (648 of 648 runs, 0 failed) gives
   CMA-ES better in 18 of 27 cells, worse in none and inconclusive in 9. The AMM
   campaign (324 of 324 runs, 0 failed) and the AMM method check were regenerated
-  at commit `f0a7b4c` (crate 0.1.49); later commits change only documentation and
-  evidence. AMM remains worse in all 54 comparisons, and the method check's
-  v0.3.0 and v0.7.0 runs (27 rows each) are identical.
+  at commit `f0a7b4c` (crate 0.1.49); later commits leave the benchmark code
+  (`lamarck/src/weight_bench/`, the `weight_router_bench` example and
+  `Cargo.lock`) unchanged. AMM remains worse in all 54 comparisons, and the
+  method check's v0.3.0 and v0.7.0 runs (27 rows each) are identical.
 
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
