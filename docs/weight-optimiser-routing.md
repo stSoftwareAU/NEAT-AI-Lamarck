@@ -443,8 +443,12 @@ columns are the router-era run's router verdicts.
    predeclared run).** `weight_bench::landscape` takes `f(x±h)` and
    `f(x±h/2)` (`h` = 0.05) on every chosen axis from the start weights over the
    screening records, 4 evaluations per axis plus 1 base, outside every arm's
-   budget. An axis is `flat` when both one-sided changes are within
-   `PLATEAU_REL_TOL` (1e-6) of the base loss and `edge` when exactly one is.
+   budget. Building each problem also runs the 145-evaluation selection scan
+   (`scan_sensitivities`), which the summary counts once per problem as
+   `preparationEvaluations`. Neither count is charged to any arm's budget,
+   because the diagnosis is not an arm. An axis is `flat` when both one-sided
+   changes are within `PLATEAU_REL_TOL` (1e-6) of the base loss and `edge`
+   when exactly one is.
    Otherwise, with `D2(s) = f(x+s) + f(x-s) - 2f(x)`, it is `indeterminate`
    when `|D2(h)|` is at most `CURVATURE_REL_TOL` (1e-9) of the base loss,
    `kinked` when `D2(h)/D2(h/2)` is more than `KINK_RATIO_REL_TOL` (0.25)
@@ -458,7 +462,8 @@ columns are the router-era run's router verdicts.
    and `docs/evidence/weight-router/` are unchanged. Totals over the 12
    validation seeds (1001..1012) in
    `docs/evidence/weight-router-landscape/landscape-summary.json` (crate
-   0.1.49, commit `8badaf5`, clean tree, 1.9 s, 30 864 evaluations):
+   0.1.49, commit `d505d1a`, clean tree, 1.2 s, 51 744 evaluations: 30 864
+   diagnosis plus 20 880 selection-scan preparation):
 
    | Family | D | flat | edge | kinked | smooth | indeterminate | one-sided `plateauFreeAxes` |
    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

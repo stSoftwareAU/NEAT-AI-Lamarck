@@ -14,9 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   flat, edge, kinked, smooth or indeterminate (`classify_axis`,
   `CURVATURE_REL_TOL` 1e-9, `KINK_RATIO_REL_TOL` 0.25), and
   `weight_router_bench --landscape` writes `landscape.jsonl` and
-  `landscape-summary.json`. The new `saturated-hard-tanh` family clamps 14 of 16
-  hidden units with a ±12 bias, so only 32 axes are live and D=40/D=100 must
-  choose flat ones. The predeclared manifest, the other families' problems and
+  `landscape-summary.json`. The summary also counts the selection scan that
+  builds each problem (`preparationEvaluations`, 145 per problem) alongside the
+  diagnosis's own evaluations, so `totalEvaluations` (51 744 for the committed
+  run) is every evaluation the command runs, and no arm's budget is charged.
+  The new `saturated-hard-tanh` family clamps 14 of 16 hidden units with a ±12
+  bias, so only 32 axes are live and D=40/D=100 must choose flat ones. The
+  predeclared manifest, the other families' problems and
   `docs/evidence/weight-router/` are unchanged. In
   `docs/evidence/weight-router-landscape/`, the predeclared families have no
   flat or edge axis, relu and hard-tanh have many kinked axes (349 and 428 of
