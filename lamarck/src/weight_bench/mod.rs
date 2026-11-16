@@ -23,12 +23,16 @@
 //! [`reference::summarise_reference`] compares its rows with the in-process
 //! arms using the same paired bootstrap. It only ever runs on validation seeds.
 //!
+//! [`landscape`] adds a two-sided diagnosis of each problem's free axes
+//! (flat, plateau edge, kinked, smooth), measured outside every arm's budget.
+//!
 //! Every evaluation is counted against an explicit [`Budget`]; exceeding it is
 //! an error ([`BenchError::BudgetExhausted`]), never a silent value.
 
 pub mod arms;
 pub mod cmaes;
 pub mod experiment;
+pub mod landscape;
 pub mod objective;
 pub mod provenance;
 pub mod reference;
@@ -41,6 +45,10 @@ pub use cmaes::{CMA_SIGMA0, cma_es};
 pub use experiment::{
     CellSummary, Comparison, CorpusFingerprint, Coverage, ExperimentResults, Manifest,
     MetricSummary, RunRow, predeclared_manifest, run_manifest, summarise_runs,
+};
+pub use landscape::{
+    AxisShape, CURVATURE_REL_TOL, KINK_RATIO_REL_TOL, LandscapeCell, LandscapeRow, ShapeCounts,
+    classify_axis, diagnose, diagnose_manifest, summarise_landscape,
 };
 pub use objective::{BenchError, Budget, BudgetedObjective, WeightObjective, select_influential};
 pub use reference::{

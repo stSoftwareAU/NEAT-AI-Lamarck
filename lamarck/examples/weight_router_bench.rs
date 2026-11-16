@@ -34,6 +34,22 @@
 //! `--held-out-records` (default 512) are held out, and the rest of the window
 //! is the full set. The window needs screening + held-out records.
 //!
+//! Landscape diagnosis (synthetic manifests only, i.e. the default or
+//! `--manifest`; refused with `--smoke`, corpus flags or the reference flags):
+//!
+//! ```text
+//! weight_router_bench OUT_DIR [--manifest FILE] --landscape
+//! ```
+//!
+//! builds every (family, dimension, validation seed) problem of the manifest,
+//! classifies each free axis from the start weights with two-sided steps of
+//! `±h` and `±h/2` (`h = 0.05`; see `weight_bench::landscape`) as flat, edge,
+//! kinked, smooth or indeterminate, and writes `OUT_DIR/landscape.jsonl` (one
+//! row per problem) and `OUT_DIR/landscape-summary.json` (totals per family and
+//! dimension, the manifest, the classifier tolerances and the same provenance
+//! fields as `summary.json`, including `wallClockSeconds`). It runs no arm and
+//! does not write `OUT_DIR/manifest.json`.
+//!
 //! AMM reference arm (offline; the optimiser itself is `scripts/amm-reference.py`):
 //!
 //! ```text
@@ -56,11 +72,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use neat_ai_lamarck::weight_bench::landscape::{CURVATURE_REL_TOL, SMOOTH_RATIO};
+use neat_ai_lamarck::weight_bench::objective::PLATEAU_REL_TOL;
 use neat_ai_lamarck::weight_bench::provenance;
 use neat_ai_lamarck::weight_bench::suite::{CorpusSpec, Family};
 use neat_ai_lamarck::weight_bench::{
-    Manifest, ReferenceRequest, RunRow, predeclared_manifest, run_manifest, serve_reference,
-    summarise_reference,
+    KINK_RATIO_REL_TOL, Manifest, ReferenceRequest, RunRow, diagnose_manifest,
+    predeclared_manifest, run_manifest, serve_reference, summarise_landscape, summarise_reference,
 };
 use serde_json::json;
 
@@ -190,6 +208,62 @@ fn compare_reference(out_dir: &Path, amm_rows: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
+    let provenance = Provenance::probe()?;
+    let started = Instant::now();
+    let rows = diagnose_manifest(manifest).map_err(|e| e.to_string())?;
+    let wall_clock_seconds = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
+    let cells = summarise_landscape(manifest, &rows);
+    fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    let mut lines = String::new();
+    for row in &rows {
+        lines.push_str(&serde_json::to_string(row).map_err(|e| e.to_string())?);
+        lines.push('\n');
+    }
+    let rows_path = out_dir.join("landscape.jsonl");
+    fs::write(&rows_path, lines).map_err(|e| format!("{}: {e}", rows_path.display()))?;
+    let mut summary = json!({
+        "formatVersion": 1,
+        "crateVersion": env!("CARGO_PKG_VERSION"),
+        "wallClockSeconds": wall_clock_seconds,
+        "manifest": manifest,
+        "stepHalfWidth": neat_ai_lamarck::candidates::RANDOM_DELTA_HALF_WIDTH,
+        "plateauRelTol": PLATEAU_REL_TOL,
+        "curvatureRelTol": CURVATURE_REL_TOL,
+        "smoothRatio": SMOOTH_RATIO,
+        "kinkRatioRelTol": KINK_RATIO_REL_TOL,
+        "totalEvaluations": rows.iter().map(|r| r.evaluations).sum::<usize>(),
+        "cells": cells,
+    });
+    if let Some(object) = summary.as_object_mut() {
+        provenance.insert_into(object);
+    }
+    let summary_path = out_dir.join("landscape-summary.json");
+    let pretty = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
+    fs::write(&summary_path, pretty).map_err(|e| format!("{}: {e}", summary_path.display()))?;
+    for cell in &cells {
+        println!(
+            "{:?} D={} ({} problems): flat {} edge {} kinked {} smooth {} indeterminate {}; one-sided plateau {}; {} evaluations",
+            cell.family,
+            cell.dimension,
+            cell.problems,
+            cell.shapes.flat,
+            cell.shapes.edge,
+            cell.shapes.kinked,
+            cell.shapes.smooth,
+            cell.shapes.indeterminate,
+            cell.plateau_free_axes,
+            cell.evaluations
+        );
+    }
+    println!(
+        "wrote {} and {}",
+        rows_path.display(),
+        summary_path.display()
+    );
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let mut out_dir = PathBuf::from("weight-router-bench");
     let mut manifest: Option<Manifest> = None;
@@ -203,10 +277,12 @@ fn run() -> Result<(), String> {
     let mut seed: Option<u64> = None;
     let mut budget_multiple: Option<usize> = None;
     let mut compare: Option<PathBuf> = None;
+    let mut landscape_only = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--smoke" => smoke = true,
+            "--landscape" => landscape_only = true,
             "--serve-reference" => serve = true,
             "--family" => {
                 let text = args.next().ok_or("--family needs a name")?;
@@ -246,6 +322,11 @@ fn run() -> Result<(), String> {
             other => out_dir = PathBuf::from(other),
         }
     }
+    if landscape_only
+        && (smoke || serve || compare.is_some() || creature.is_some() || training_data.is_some())
+    {
+        return Err("--landscape needs a synthetic manifest (the default or --manifest) and no --smoke, corpus or reference flags".into());
+    }
     let mut manifest = match (manifest, smoke) {
         (Some(_), true) => return Err("--manifest and --smoke are mutually exclusive".into()),
         (Some(m), false) => m,
@@ -267,6 +348,9 @@ fn run() -> Result<(), String> {
         _ => return Err("--creature and --training-data must be given together".into()),
     }
 
+    if landscape_only {
+        return landscape(&out_dir, &manifest);
+    }
     if serve && compare.is_some() {
         return Err("--serve-reference and --compare-reference are mutually exclusive".into());
     }
