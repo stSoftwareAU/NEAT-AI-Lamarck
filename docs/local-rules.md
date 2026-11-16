@@ -48,13 +48,30 @@ and `https://arxiv.org/pdf/2611.12248` failed with
 `CONNECT tunnel failed, response 403`. Fetching the abstract, HTML and PDF pages
 and the alphaxiv and Hugging Face mirrors failed with "proxy refused the
 connection". Only web-search summaries of those pages could be retrieved.
+On 15 November 2026 the same fetches were retried and failed the same way:
+`curl` gave `CONNECT tunnel failed, response 403`, and WebFetch of the abstract,
+HTML, alphaxiv and Hugging Face pages gave "proxy refused the connection". The
+sandbox proxy does reach GitHub, but no code release by the authors was found
+(`gh search repos "symbolic local learning rules"` returned nothing).
+A later retry the same day also failed: `curl` of the arXiv abstract and PDF,
+`export.arxiv.org`, the Semantic Scholar page and API, and an `r.jina.ai`
+reader proxy got no HTTP response (`000`), and WebFetch of the PDF gave "proxy
+refused the connection". On 16 November 2026 the fetch was retried once more:
+`curl https://arxiv.org/html/2611.12248v1` gave
+`CONNECT tunnel failed, response 403`, and WebFetch of the same URL gave "proxy
+refused the connection".
 
-**Outline from web-search summaries (secondary, not read from the paper, so not a pin of the full method):**
+**Outline from web-search summaries and the PR #276 review's report (secondary,
+not read from the paper in this run, so not a pin of the full method). The
+bullets from monomial order onwards come from search snippets of the paper's
+HTML version taken on 15 November 2026, plus the PR #276 review's report of the
+training horizons:**
 
 - **Paper:** "A method to automatically discover symbolic local learning rules".
   Andrea Perin (Aalto University), Fabio Anselmi (University of
   Trieste), Stéphane Deny (Aalto University). Submitted 9 November 2026, in
-  cs.LG, cs.NE and stat.ML. The arXiv version number was not visible.
+  cs.LG, cs.NE and stat.ML. The summaries name v1, and list it among
+  NeurIPS 2026 papers.
 - **Object learned:** a separate *local loss* per layer, not an update rule.
   The update is that loss's gradient.
 - **Dictionary:** monomials of local tensor variables, enumerated using
@@ -71,11 +88,37 @@ connection". Only web-search summaries of those pages could be retrieved.
   small multilayer networks and minimal datasets.
 - **Reported limitation:** loss falls more slowly under the discovered rules
   than under backprop.
+- **Monomial order:** fixed to 4 in all experiments (the paper calls this
+  order K; it is unrelated to this harness's step count K).
+- **Meta-optimisation:** the outer loop unrolls the inner learning dynamics.
+  The authors call it numerically delicate. It is sensitive to monomial scale,
+  unroll length and the stability of the induced weight updates (their
+  section 2.1).
+- **Training horizon (per task, not read in this run):** the PR #276 review,
+  which read the versioned paper at <https://arxiv.org/html/2611.12248v1>,
+  reports that the number of inner steps T grows per task. Classification
+  (section 3.1) ramps T from 1 to 500 over 4,000 episodes, then holds 500 for
+  200 more. Reconstruction (section 3.2) ramps from 1 to 300 over 2,000
+  episodes. Self-supervised learning (section 3.3) grows to 100 over 6,000
+  episodes, a schedule the authors shortened for stability. These per-task
+  figures come from that review and were not checked here, because the paper
+  could not be fetched in this run either. Search snippets add a random jitter
+  J on the step count per episode, a data subset B per episode with minibatches
+  of size b, and that rules are evaluated for about the number of steps they
+  were trained for.
+- **Transfer test:** rules learned on classes 0–4 of Sliced MNIST are tested on
+  a held-out part, on a network with different layer sizes.
+- **Example learned terms (classification):** terms such as `Y1·(Y1 + W1·X)`,
+  `‖W1ᵀ·Y1‖²` and `‖W1‖²`, and forward-looking terms that use layer 2's
+  quantities, such as `Y2·(Y2 + W2·Y1)`.
 
-**Not pinned.** How the coefficient regression is optimised was not found, for
-example whether the inner training loop is unrolled. Also missing: the exact
-variable set per degree, step counts, network sizes, datasets and
-hyperparameters. A faithful reproduction of the paper is therefore still open.
+**Not pinned.** The paper has still not been read in this run, so none of this
+is a pin. Known only from snippets or the PR #276 review's report: unrolling,
+monomial order 4, and per-task horizons of 500 (classification), 300
+(reconstruction) and 100 (self-supervised), with T starting at 1. Still
+missing: the values of B, b and J, the exact variable set per degree, the
+outer optimiser and its hyperparameters, network widths and depths, and the
+reconstruction and self-supervised datasets. A faithful reproduction is therefore still open.
 
 **How this harness differs from that outline** (the left column is only as reliable as the search summaries):
 
@@ -86,9 +129,16 @@ hyperparameters. A faithful reproduction of the paper is therefore still open.
 | Penrose-diagram monomials of local tensors, degree 1–3 | Fixed library of 9 scalar per-synapse features (section 3), polynomial order up to 3 (`XYY`, `WYY`), each using only the synapse's own neurons, so purely local in the paper's degree-1 sense. The residual exists only on output neurons (section 4) |
 | Coefficients regressed against a global loss, with a Hadamard-product sparse prior | Seeded random sampling of sparse rules (at most 3 terms, coefficients from a fixed grid), keeping a candidate only when it lowers calibration training MSE (sections 3 and 6) |
 | No equal-budget accounting reported in the summaries | The meta-search cost is charged to the symbolic arm (section 5) |
+| Rules trained and evaluated over unrolled horizons of up to 500 steps (classification), 300 (reconstruction) or 100 (self-supervised), as the PR #276 review reports | Rules applied for K = 5, 10 or 20 steps, as the issue asks (section 5), and scored during discovery with `calibration_steps` = 10 steps |
 
 So this experiment tests the issue's description, which the summaries match
-only in outline. A negative result here does not refute the paper's method.
+only in outline. Search snippets say the paper's loss falls more slowly than
+under backprop, which suggests (but does not establish) that short horizons
+are an unfavourable regime for its rules. The 5–20 step window the issue asks
+for is shorter than every horizon reported for the paper (100–500 steps), so a
+negative result here says nothing about the paper's longer-horizon regimes. A
+negative result here does not refute the paper's method. This harness is not a
+faithful reproduction of the paper.
 
 ## 3. Rule language
 
