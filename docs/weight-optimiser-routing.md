@@ -487,7 +487,7 @@ columns are the router-era run's router verdicts.
    Finding 4 with a two-sided test. Kinks, however, are common: 8 to 29% of the
    relu axes and 16 to 36% of the hard-tanh axes, rising with D. The
    extra axes chosen at larger D are less sensitive ones; the data do not
-   establish why those kink more often. The smooth tanh family has **one** kinked axis in 2160
+   establish why those kink more often. The smooth tanh family has **one** kinked axis in 1920
    (D=100, seed 1006). That is a false positive at rounding level:
    `D2(h)` is only about 1.5e-7 of the loss and the ratio is about 13. It is
    reported as measured; the declared tolerances were not changed after the

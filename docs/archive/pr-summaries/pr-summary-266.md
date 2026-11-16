@@ -153,7 +153,7 @@ flowchart LR
 ## Test Plan
 
 - `timeout 1700 ./quality.sh < /dev/null` on `955882b` (the last commit that touches code, tests or evidence): exited 0, "All quality checks passed!". It ran `weight_bench_reference` (17 passed) along with the rest of the suite, plus `cargo doc`.
-- After that commit, the branch changes only the `CHANGELOG.md` wording, this summary and the worker's handover note. `markdownlint-cli2 CHANGELOG.md` reported 0 issues, and `scripts/spell-check.sh` found no typos.
+- After that commit, the branch changes only the `CHANGELOG.md` wording, this summary, the worker's handover note and the tanh-total correction below (two docs and one doc comment). `markdownlint-cli2 CHANGELOG.md` reported 0 issues, and `scripts/spell-check.sh` found no typos.
 - Tests added by the re-landed #275, #280 and #281 commits:
   - `lamarck/tests/weight_bench_landscape.rs`:
     - the classifier, saturated-family, determinism, reproduction and committed-evidence tests;
@@ -180,6 +180,7 @@ flowchart LR
   - Still covered by: `lamarck/tests/weight_bench_reference.rs::router_era_reference_rows_still_load_and_summarise`
   - Replaced by: `assert!(parsed.iter().all(|r| r.plateau_free_axes.is_some()));`
 - Changed in `lamarck/tests/weight_bench_reference.rs::clearly_better_and_worse_references_get_matching_verdicts`: `format_version` 2 → 3, as the run-format bump requires.
+- Tanh axis total corrected from 2160 to 1920 in three places: `docs/weight-optimiser-routing.md` (Finding 5), `CHANGELOG.md` and the `CURVATURE_REL_TOL` doc comment in `lamarck/src/weight_bench/landscape.rs`. The total is 12 seeds × (20 + 40 + 100) = 1920, which matches `docs/evidence/weight-router-landscape/landscape-summary.json` (240 + 480 + 1200 axes, 1 kinked). The doc comment no longer calls every one of those axes smooth. After the fix, `cargo test -p neat_ai_lamarck --test weight_bench_landscape` passed (15 tests) and `markdownlint-cli2` reported 0 issues.
 - Docs: I grepped `CHANGELOG.md`, `README.md` and `docs/weight-optimiser-routing.md` for "beat the refinement", "than the refinement" and "current refinement". The only hit was `CHANGELOG.md:84`, which is now fixed. `docs/weight-optimiser-routing.md` already calls the arm a "random-axis surrogate".
 
 ## Merge verification

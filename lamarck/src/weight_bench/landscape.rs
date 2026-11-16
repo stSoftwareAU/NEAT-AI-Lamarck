@@ -33,7 +33,7 @@ use crate::candidates::RANDOM_DELTA_HALF_WIDTH;
 /// whose second difference is only about `1e-7` of the loss can have its ratio
 /// set by rounding rather than by shape. In the committed evidence
 /// (`docs/evidence/weight-router-landscape/`) that misclassifies exactly one
-/// of the 2160 smooth `TANH` axes as kinked (D=100, seed 1006:
+/// of the 1920 `TANH` axes as kinked (D=100, seed 1006:
 /// `D2(h) / base ≈ 1.5e-7`, ratio ≈ 13).
 pub const CURVATURE_REL_TOL: f64 = 1e-9;
 

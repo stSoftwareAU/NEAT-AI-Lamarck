@@ -28,7 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `docs/evidence/weight-router/` are unchanged. In
   `docs/evidence/weight-router-landscape/`, the predeclared families have no
   flat or edge axis, relu and hard-tanh have many kinked axes (349 and 428 of
-  1200 at D=100), and tanh has one rounding-level false-positive kink in 2160
+  1200 at D=100), and tanh has one rounding-level false-positive kink in 1920
   axes. On `saturated-hard-tanh` (96 flat axes at D=40, 816 at D=100) CMA-ES is
   worse than the refine surrogate in every 30D and 100D cell, with full-window
   and held-out agreement. This reverses the plain hard-tanh result, and it holds
