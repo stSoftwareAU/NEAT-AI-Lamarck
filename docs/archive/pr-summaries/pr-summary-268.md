@@ -49,7 +49,11 @@ Part of #268
 
 - On 16 November 2026, `curl https://arxiv.org/html/2611.12248v1` gave
   `curl: (56) CONNECT tunnel failed, response 403`. WebFetch of the same URL
-  gave "proxy refused the connection".
+  gave "proxy refused the connection". A later retry in the same run also
+  failed for `https://arxiv.org/pdf/2611.12248v1` and
+  `https://export.arxiv.org/abs/2611.12248` (curl: same 403), and for
+  `https://www.semanticscholar.org/arxiv/2611.12248` (WebFetch: proxy refused).
+  No route to the paper exists from this sandbox.
 - The per-task schedules (sections 3.1–3.3 of the paper) come from the PR #276
   review comment on GitHub, not from this repository.
 
