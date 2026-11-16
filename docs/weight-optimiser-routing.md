@@ -462,8 +462,14 @@ columns are the router-era run's router verdicts.
    and `docs/evidence/weight-router/` are unchanged. Totals over the 12
    validation seeds (1001..1012) in
    `docs/evidence/weight-router-landscape/landscape-summary.json` (crate
-   0.1.49, commit `d505d1a`, clean tree, 1.2 s, 51 744 evaluations: 30 864
-   diagnosis plus 20 880 selection-scan preparation):
+   0.1.49, `formatVersion` 3, commit `cf2ff11`, clean tree, 1.3 s, 51 744
+   evaluations: 30 864 diagnosis plus 20 880 selection-scan preparation).
+   Coverage was 144 of 144 problems, 0 failed. A problem that fails to build
+   or diagnose is recorded as a row with its `error` and the evaluations it
+   spent, counted in its cell's `failures` and in the summary's `coverage`
+   (planned, completed and failed problems), and the run goes on. Before
+   format 3 the command stopped at the first failure. The rows and cell counts
+   are unchanged from the format 2 run at `d505d1a`.
 
    | Family | D | flat | edge | kinked | smooth | indeterminate | one-sided `plateauFreeAxes` |
    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -643,6 +649,30 @@ per the issue, the in-repo router stays unported too. No default changed. The
 synthetic suite does not demonstrate any NEAT-AI benefit either way; the
 representative run on the private corpus remains unperformed.
 
+## Compute ledger
+
+Every committed campaign, in loss evaluations. Each total includes the
+145-evaluation selection scan (preparation) once per problem built, and the
+confirmation evaluations. No calibration was run by the current code.
+
+| Campaign | Evidence | Runs or problems | Failed | Evaluations | Commit |
+|---|---|---:|---:|---:|---|
+| Predeclared synthetic suite (refine, CMA-ES) | `weight-router/summary.json` | 648 runs | 0 | 1,631,615 | `f0a7b4c` |
+| AMM reference, predeclared suite | `weight-router/reference-summary.json` | 324 runs | 0 | 855,000 | `f0a7b4c` |
+| `saturated-hard-tanh` arms (refine, CMA-ES) | `weight-router-landscape/saturated/summary.json` | 216 runs | 0 | 543,852 | `8badaf5` |
+| AMM reference, `saturated-hard-tanh` | `weight-router-landscape/saturated/reference-summary.json` | 108 runs | 0 | 285,000 | `84096bb` |
+| Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `cf2ff11` |
+| **Committed total** | | | 0 | 3,367,211 | |
+
+The router-era campaign (crate 0.1.46), whose code was removed, and its
+calibration are not in this total; their counts are in the router-era sections
+above. Also outside it are the method check (27 rows per AMM version), the
+`cargo test` fixtures and the development and smoke runs made while building
+the bench. Those were not logged, so their cost is **not counted**. All
+campaigns use validation seeds 1001 to 1012, and none tunes a parameter on
+them. The landscape tolerances were declared before its evidence run and were
+not changed afterwards (Finding 5).
+
 ## Controls and remaining experiment
 
 Inspection found that `refine.rs` reuses two production constants, but manually
@@ -716,5 +746,10 @@ from routine feature CI and are not representative optimisation measurements.
 * Plateau axes among the free weights on a representative problem. The
   predeclared synthetic suite has none (Findings 4 and 5); only the added
   `saturated-hard-tanh` family has them by construction (Finding 5).
+* Whether `weight_bench::landscape` and `--landscape` earn their keep. Nothing
+  routes on the diagnosis; it is kept, opt-in and example-only, because it is
+  the only reproducer of the committed plateau and kink evidence (Finding 5).
+  It refuses corpus manifests, so it cannot yet diagnose a representative
+  problem. Remove it if the representative run does not use it.
 * Box-size sensitivity and search-radius controls, predeclared on fresh data.
   No production optimiser or default change is supported by the current evidence.

@@ -17,7 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `landscape-summary.json`. The summary also counts the selection scan that
   builds each problem (`preparationEvaluations`, 145 per problem) alongside the
   diagnosis's own evaluations, so `totalEvaluations` (51 744 for the committed
-  run) is every evaluation the command runs, and no arm's budget is charged.
+  run) is every evaluation the command runs, and no arm's budget is charged. A
+  problem that fails is recorded with its `error` and the evaluations it spent,
+  and the run goes on. The summary (`formatVersion` 3) reports coverage
+  (planned, completed and failed problems), and each cell counts its
+  `failures`. The committed run covered 144 of 144 problems, 0 failed.
   The new `saturated-hard-tanh` family clamps 14 of 16 hidden units with a ±12
   bias, so only 32 axes are live and D=40/D=100 must choose flat ones. The
   predeclared manifest, the other families' problems and
