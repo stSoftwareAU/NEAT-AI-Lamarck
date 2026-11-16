@@ -68,11 +68,10 @@ Docs-only change; no behaviour changed. Checked:
 
 ## Acceptance Criteria
 
-The issue's "Execution and acceptance" list is not an acceptance-criteria
-heading, so no reviewer ran. The parts still undone:
+<!-- vibe-spec-review inputs="diff+issue-body" -->
 
-- **missing** — Read and pin the full method before reproducing it — reason: the sandbox proxy refuses arXiv and its mirrors (403, `000`, "proxy refused the connection", retried on 16 November 2026). The threshold and safety-bound values, B, b, J, the variable set per degree, the outer optimiser, the widths, and the other tasks' depths and datasets are still unknown.
-- **missing** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — reason: the synthetic negative finding is recorded and no success is claimed, but the owner's representative files-mode run has not happened. The section 8 removal decision depends on it, and no representative creature or corpus exists on this host.
+- **missing** — Read and pin the full method before reproducing it — reviewer: missing — reason: the sandbox proxy refuses arXiv and its mirrors (retried again in the completion-check turn: `curl` of the abs, PDF, `export.arxiv.org`, Semantic Scholar and alphaXiv pages gave `000`, and WebFetch of the HTML gave "proxy refused the connection"), so section 2 of `docs/local-rules.md` is still secondary, not a pin.
+- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/local-rules.md` section 7, `docs/evidence/local-rules/summary.json` — reviewer: partial — reason: the negative synthetic verdict is recorded and no success is claimed (`not-claimable-synthetic`), but the code is kept until the owner's representative files-mode run (section 8), which cannot run here because no representative creature or corpus exists on this host.
 
 ## Test Plan
 
