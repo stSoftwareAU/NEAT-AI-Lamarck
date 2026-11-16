@@ -70,7 +70,8 @@ the connection".
 not read from the paper in this run, so not a pin of the full method). The
 bullets from monomial order onwards come from search snippets of the paper's
 HTML version taken on 15 and 16 November 2026, plus the PR #276 review's report
-of the training horizons:**
+of the training horizons. Snippet material added to earlier bullets names its
+source inline:**
 
 - **Paper:** "A method to automatically discover symbolic local learning rules".
   Andrea Perin (Aalto University), Fabio Anselmi (University of
@@ -97,10 +98,11 @@ of the training horizons:**
   small multilayer networks and minimal datasets.
 - **Reported limitation:** loss falls more slowly under the discovered rules
   than under backprop.
-- **Abstract wording differs between mirrors:** the Papers-with-Code mirror's
-  abstract says "trace monomials" and claims classification accuracy comparable
-  to backprop; the arXiv v1 abstract as summarised does not make that accuracy
-  claim, so the claim is not relied on here.
+- **Abstract wording differs between mirrors:** a 16 November 2026 web-search
+  summary of the Papers-with-Code mirror's abstract (the page itself could not
+  be fetched) says the rules reach classification accuracy comparable to
+  backprop. The arXiv v1 abstract, as summarised, makes no such accuracy claim,
+  so the claim is not relied on here.
 - **Monomial order:** fixed to 4 in all experiments (the paper calls this
   order K; it is unrelated to this harness's step count K).
 - **Meta-optimisation:** the outer loop unrolls the inner learning dynamics.
