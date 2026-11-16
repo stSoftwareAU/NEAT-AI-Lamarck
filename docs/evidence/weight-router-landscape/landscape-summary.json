@@ -9,6 +9,7 @@
       "indeterminate": 0,
       "kinked": 0,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 240
     },
@@ -21,6 +22,7 @@
       "indeterminate": 0,
       "kinked": 0,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 480
     },
@@ -33,6 +35,7 @@
       "indeterminate": 0,
       "kinked": 1,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 1199
     },
@@ -45,6 +48,7 @@
       "indeterminate": 0,
       "kinked": 19,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 221
     },
@@ -57,6 +61,7 @@
       "indeterminate": 0,
       "kinked": 67,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 413
     },
@@ -69,6 +74,7 @@
       "indeterminate": 0,
       "kinked": 349,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 851
     },
@@ -81,6 +87,7 @@
       "indeterminate": 0,
       "kinked": 39,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 201
     },
@@ -93,6 +100,7 @@
       "indeterminate": 0,
       "kinked": 108,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 372
     },
@@ -105,6 +113,7 @@
       "indeterminate": 0,
       "kinked": 428,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 772
     },
@@ -117,6 +126,7 @@
       "indeterminate": 0,
       "kinked": 12,
       "plateauFreeAxes": 0,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 228
     },
@@ -129,6 +139,7 @@
       "indeterminate": 0,
       "kinked": 78,
       "plateauFreeAxes": 96,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 305
     },
@@ -141,14 +152,16 @@
       "indeterminate": 0,
       "kinked": 78,
       "plateauFreeAxes": 816,
+      "preparationEvaluations": 1740,
       "problems": 12,
       "smooth": 305
     }
   ],
   "crateVersion": "0.1.49",
   "curvatureRelTol": 1e-9,
-  "formatVersion": 1,
-  "gitCommit": "8badaf5cc369dffd5ab5ba4e2643cdbd523c34cd",
+  "diagnosisEvaluations": 30864,
+  "formatVersion": 2,
+  "gitCommit": "d505d1a103c3570f6495f81ae268f4408ab3559a",
   "gitDirty": false,
   "kinkRatioRelTol": 0.25,
   "manifest": {
@@ -187,8 +200,9 @@
   },
   "neatCoreSource": "git+https://github.com/stSoftwareAU/NEAT-AI-core?tag=v0.23.7#3759355634b1cabc8034cd76df5dbd44a867d18c",
   "plateauRelTol": 1e-6,
+  "preparationEvaluations": 20880,
   "smoothRatio": 4.0,
   "stepHalfWidth": 0.05,
-  "totalEvaluations": 30864,
-  "wallClockSeconds": 1.907
+  "totalEvaluations": 51744,
+  "wallClockSeconds": 1.201
 }
