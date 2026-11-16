@@ -64,12 +64,16 @@ failed: `curl` of `https://arxiv.org/abs/2611.12248`,
 `https://arxiv.org/html/2611.12248v1` and the `export.arxiv.org` API query gave
 `CONNECT tunnel failed, response 403`, and WebFetch of the alphaXiv page and the
 Papers-with-Code mirror (`paperswithcode.co/paper/127548`) gave "proxy refused
-the connection".
+the connection". A final retry on 16 November 2026 also failed: `curl` of
+`https://arxiv.org/pdf/2611.12248v1` gave `CONNECT tunnel failed, response 403`,
+and WebFetch of the same URL gave "proxy refused the connection". Two more web
+searches for the outer optimiser, its learning rate, b and the network widths
+found none of them in the indexed snippets.
 
 **Outline from web-search summaries and the PR #276 review's report (secondary,
 not read from the paper in this run, so not a pin of the full method). The
 bullets from monomial order onwards come from search snippets of the paper's
-HTML version taken on 15 and 16 November 2026, plus the PR #276 review's report
+HTML and PDF versions taken on 15 and 16 November 2026, plus the PR #276 review's report
 of the training horizons. Snippet material added to earlier bullets names its
 source inline:**
 
@@ -108,7 +112,10 @@ source inline:**
 - **Meta-optimisation:** the outer loop unrolls the inner learning dynamics.
   The authors call it numerically delicate. It is sensitive to monomial scale,
   unroll length and the stability of the induced weight updates (their
-  section 2.1).
+  section 2.1). A 16 November 2026 search snippet of the PDF adds that each
+  episode ends with an update of every layer's rule coefficients, and that the
+  outer loop runs until the global loss L falls below a chosen threshold. The
+  threshold value is not given.
 - **Training horizon (per task, not read in this run):** the PR #276 review,
   which read the versioned paper at <https://arxiv.org/html/2611.12248v1>,
   reports that the number of inner steps T grows per task. Classification
@@ -128,14 +135,16 @@ source inline:**
   quantities, such as `Y2·(Y2 + W2·Y1)`. The 16 November snippets add that
   layers 2 and 3 pick up the target-loss term `Ŷ·Y3` and a logit-alignment
   monomial `Ŷᵀ·W3·Y2`, and that layer 2 also has a squared cross-entropy term
-  whose gradient is aligned with the cross-entropy but has the opposite sign.
+  whose gradient points along the cross-entropy gradient but in the
+  opposite direction.
 
 **Not pinned.** The paper has still not been read in this run, so none of this
 is a pin. Known only from snippets or the PR #276 review's report: unrolling,
 monomial order 4, and per-task horizons of 500 (classification), 300
 (reconstruction) and 100 (self-supervised), with T starting at 1, a
-three-layer classification network, and the degree-2 neighbourhood for that
-network. Still missing: the values of B, b and J, the exact variable set per
+three-layer classification network, the degree-2 neighbourhood for that
+network, and an outer loop that stops at a loss threshold. Still missing: the
+threshold value, the values of B, b and J, the exact variable set per
 degree, the outer optimiser and its hyperparameters, network widths, the
 reconstruction and self-supervised depths, and the reconstruction and
 self-supervised datasets. A faithful reproduction is therefore still open.
