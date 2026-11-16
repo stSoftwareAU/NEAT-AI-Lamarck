@@ -756,3 +756,65 @@ fn committed_evidence_is_reproduced_by_the_summariser() {
         summary["cells"]
     );
 }
+
+#[test]
+fn committed_saturated_amm_evidence_is_reproduced_and_amm_loses_every_cell() {
+    // AMM against refine and CMA-ES on `saturated-hard-tanh`, the family
+    // with real flat axes, paired with the committed in-process arm runs.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../docs/evidence/weight-router-landscape/saturated");
+    let read_rows = |name: &str| -> Vec<RunRow> {
+        std::fs::read_to_string(dir.join(name))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    let m: Manifest =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(m.families, vec![Family::SaturatedHardTanh]);
+    let runs = read_rows("runs.jsonl");
+    let amm_rows = read_rows("amm-runs.jsonl");
+
+    // Every planned AMM run finished, spending exactly its budget.
+    assert_eq!(amm_rows.len(), 108);
+    assert!(amm_rows.iter().all(|r| r.error.is_none()));
+    assert!(
+        amm_rows
+            .iter()
+            .all(|r| r.evaluations_used == r.budget_multiple * r.dimension)
+    );
+
+    let summary: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("reference-summary.json")).unwrap())
+            .unwrap();
+    let r = summarise_reference(&m, &runs, &amm_rows).unwrap();
+    assert_eq!(serde_json::to_value(&r.cells).unwrap(), summary["cells"]);
+    assert_eq!(
+        serde_json::to_value(r.coverage).unwrap(),
+        summary["coverage"]
+    );
+    assert_eq!(
+        serde_json::json!(r.total_evaluations),
+        summary["totalEvaluations"]
+    );
+    assert_eq!(summary["totalEvaluations"], serde_json::json!(285_000));
+    assert_eq!(summary["gitDirty"], serde_json::json!(false));
+
+    // The recorded finding: AMM is worse than both arms in all 9 cells.
+    assert_eq!(r.cells.len(), 9);
+    let verdicts: Vec<Value> = summary["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["comparisons"].as_array().unwrap().iter())
+        .map(|c| c["verdict"].clone())
+        .collect();
+    assert_eq!(verdicts.len(), 18);
+    assert!(
+        verdicts
+            .iter()
+            .all(|v| *v == serde_json::json!("amm-reference-worse")),
+        "{verdicts:?}"
+    );
+}
