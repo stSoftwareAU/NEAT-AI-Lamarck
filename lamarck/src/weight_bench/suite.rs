@@ -12,7 +12,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use super::objective::{BenchError, select_influential};
+use super::objective::{BenchError, count_plateau_axes, pick_influential, scan_sensitivities};
 
 const INPUTS: usize = 16;
 const HIDDEN: usize = 16;
@@ -39,6 +39,11 @@ pub enum Family {
     Relu,
     /// `HARD_TANH`.
     HardTanh,
+    /// `HARD_TANH` with most hidden units driven into saturation by a large
+    /// teacher bias (see [`SATURATION_BIAS`]), so their input weights are
+    /// exactly flat axes. Added after the predeclared manifest to test
+    /// plateaus; it is not part of that manifest.
+    SaturatedHardTanh,
     /// A real creature and fixed records supplied by the caller (see
     /// [`problem_from_corpus`]); not a synthetic family.
     Corpus,
@@ -50,7 +55,7 @@ impl Family {
         match self {
             Self::Tanh => Some("TANH"),
             Self::Relu => Some("RELU"),
-            Self::HardTanh => Some("HARD_TANH"),
+            Self::HardTanh | Self::SaturatedHardTanh => Some("HARD_TANH"),
             Self::Corpus => None,
         }
     }
@@ -59,9 +64,37 @@ impl Family {
         match self {
             Self::Tanh => x.tanh(),
             Self::Relu => x.max(0.0),
-            Self::HardTanh => x.clamp(-1.0, 1.0),
+            Self::HardTanh | Self::SaturatedHardTanh => x.clamp(-1.0, 1.0),
             // Never reached for a built problem; identity is harmless.
             Self::Corpus => x,
+        }
+    }
+}
+
+/// Teacher bias magnitude of each saturated hidden unit of
+/// [`Family::SaturatedHardTanh`]. It exceeds the largest possible
+/// `|sum(w * x)|` of a hidden unit, `FAN_IN * (1 + START_PERTURBATION)` plus one
+/// scan step, so `HARD_TANH` clamps the unit for every record and every
+/// weight the sensitivity scan tries.
+pub const SATURATION_BIAS: f64 = 12.0;
+
+/// Hidden units of [`Family::SaturatedHardTanh`] with index below this stay
+/// unbiased (live); the rest are saturated. With fan-in 8 that leaves
+/// `2 * 8` input and `16` output synapses, 32 axes, that are not flat.
+pub const LIVE_HIDDEN_UNITS: usize = 2;
+
+impl Family {
+    /// Teacher (and start) bias of hidden unit `h`: `±SATURATION_BIAS`
+    /// (alternating by `h`) for the saturated units of
+    /// [`Family::SaturatedHardTanh`], `None` (no bias) otherwise.
+    fn hidden_bias(self, h: usize) -> Option<f64> {
+        match self {
+            Self::SaturatedHardTanh if h >= LIVE_HIDDEN_UNITS => Some(if h.is_multiple_of(2) {
+                SATURATION_BIAS
+            } else {
+                -SATURATION_BIAS
+            }),
+            _ => None,
         }
     }
 }
@@ -94,6 +127,11 @@ pub struct Problem {
     pub held_out: Vec<f32>,
     /// Evaluations spent selecting the free weights.
     pub preparation_evaluations: usize,
+    /// Chosen free weights that are flat: a one-sided step of the weight leaves
+    /// the loss unchanged within
+    /// [`PLATEAU_REL_TOL`](super::objective::PLATEAU_REL_TOL). Counted from the
+    /// same scan that chose them, so it costs no evaluations.
+    pub plateau_free_axes: usize,
 }
 
 /// Whether `dimension` lies beyond the calibrated range.
@@ -127,11 +165,16 @@ fn records(
             .collect();
         let mut y = 0.0;
         for h in 0..HIDDEN {
-            let pre: f64 = taps[h]
+            let mut pre: f64 = taps[h]
                 .iter()
                 .zip(&w_in[h])
                 .map(|(&i, &w)| w * f64::from(x[i]))
                 .sum();
+            // Only the saturated family has a bias; the other families keep
+            // their historical arithmetic exactly.
+            if let Some(bias) = family.hidden_bias(h) {
+                pre += bias;
+            }
             y += w_out[h] * family.apply(pre);
         }
         y += rng.random_range(-TARGET_NOISE..TARGET_NOISE);
@@ -188,10 +231,15 @@ pub fn build_problem(spec: &ProblemSpec) -> Result<Problem, BenchError> {
     let mut neurons = Vec::new();
     let mut synapses = Vec::new();
     for h in 0..HIDDEN {
-        neurons.push(format!(
-            r#"{{"type":"hidden","uuid":"h{h}","bias":0.0,"squash":"{}"}}"#,
-            squash
-        ));
+        neurons.push(match spec.family.hidden_bias(h) {
+            Some(bias) => {
+                format!(r#"{{"type":"hidden","uuid":"h{h}","bias":{bias:?},"squash":"{squash}"}}"#)
+            }
+            None => format!(
+                r#"{{"type":"hidden","uuid":"h{h}","bias":0.0,"squash":"{}"}}"#,
+                squash
+            ),
+        });
         for (k, &i) in taps[h].iter().enumerate() {
             let w = w_in[h][k] + rng.random_range(-START_PERTURBATION..START_PERTURBATION);
             synapses.push(format!(
@@ -212,8 +260,11 @@ pub fn build_problem(spec: &ProblemSpec) -> Result<Problem, BenchError> {
     let creature = parse_creature_json(&json)
         .map_err(|e| BenchError::Evaluation(format!("building creature: {e}")))?;
 
-    let (synapse_indices, preparation_evaluations) =
-        select_influential(&creature, &screening, spec.dimension)?;
+    // Synapse counts are fixed by the generator (144), so the dimension bounds
+    // checked above are enough for the pick.
+    let (base, changes, preparation_evaluations) = scan_sensitivities(&creature, &screening)?;
+    let synapse_indices = pick_influential(&changes, spec.dimension);
+    let plateau_free_axes = count_plateau_axes(&synapse_indices, &changes, base);
     Ok(Problem {
         spec: *spec,
         creature,
@@ -222,6 +273,7 @@ pub fn build_problem(spec: &ProblemSpec) -> Result<Problem, BenchError> {
         full,
         held_out,
         preparation_evaluations,
+        plateau_free_axes,
     })
 }
 
@@ -326,8 +378,9 @@ pub fn problem_from_corpus(
     let screening = window[..spec.screening_records * width].to_vec();
     let full = window[..held_start].to_vec();
     let held_out = window[held_start..].to_vec();
-    let (synapse_indices, preparation_evaluations) =
-        select_influential(creature, &screening, dimension)?;
+    let (base, changes, preparation_evaluations) = scan_sensitivities(creature, &screening)?;
+    let synapse_indices = pick_influential(&changes, dimension);
+    let plateau_free_axes = count_plateau_axes(&synapse_indices, &changes, base);
     Ok(Problem {
         spec: ProblemSpec {
             family: Family::Corpus,
@@ -340,5 +393,6 @@ pub fn problem_from_corpus(
         full,
         held_out,
         preparation_evaluations,
+        plateau_free_axes,
     })
 }

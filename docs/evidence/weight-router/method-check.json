@@ -40,16 +40,6 @@
         30,
         100
       ],
-      "calibrationSeeds": [
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8
-      ],
       "dimensions": [
         20,
         40,
@@ -64,17 +54,18 @@
         1001
       ]
     },
+    "manifestSource": "Committed docs/evidence/weight-router/manifest.json; scripts/check-amm-method.py keeps only its first validation seed, so the manifest above has validationSeeds [1001] and no calibrationSeeds.",
     "rowsPerVersion": 27,
     "failuresPerVersion": 0,
     "completedRunRowsIdentical": true,
-    "canonicalRowsSha256": "970568ee7ff19fefb5a438cc8de1740faaf474530102f1ed0c92777a035a456e",
+    "canonicalRowsSha256": "33203af0f8395ec26943932907fa60e54198109f89a9cbf4814a76581a39e96a",
     "canonicalisation": "json.dumps(rows, sort_keys=True, separators=(comma, colon), allow_nan=False), UTF-8",
     "seedMapping": "int(SeedSequence(arm_seed).generate_state(1)[0]) for both versions",
-    "rustHarnessCodeCheckpoint": "8f77004d1c51738a294d7298a41e25161befd946",
-    "rustHarnessCrateVersion": "0.1.46",
-    "rustHarnessBinarySha256": "c15f7d37151572b772dd13077c4440cf4c7e2a4862f9b6959410052e3b735ab3",
+    "rustHarnessCodeCheckpoint": "f0a7b4caa52163435bca556d38ab2da000eadc42",
+    "rustHarnessCrateVersion": "0.1.49",
+    "rustHarnessBinarySha256": "8ccd83c8177f8a7ed8a749f76a9abbb56f9ca1a299cc6bccb22df4e8bf16204a",
     "rustc": "1.99.1",
-    "coreTag": "v0.23.4",
+    "coreTag": "v0.23.7",
     "extrapolationDimensions": [
       100
     ],
