@@ -47,8 +47,11 @@
 //! kinked, smooth or indeterminate, and writes `OUT_DIR/landscape.jsonl` (one
 //! row per problem) and `OUT_DIR/landscape-summary.json` (totals per family and
 //! dimension, the manifest, the classifier tolerances and the same provenance
-//! fields as `summary.json`, including `wallClockSeconds`). It runs no arm and
-//! does not write `OUT_DIR/manifest.json`.
+//! fields as `summary.json`, including `wallClockSeconds`). The summary's
+//! `diagnosisEvaluations` counts the diagnosis itself, `preparationEvaluations`
+//! the selection scan that built each problem (counted once per problem), and
+//! `totalEvaluations` is their sum, every loss evaluation the command runs. It
+//! runs no arm and does not write `OUT_DIR/manifest.json`.
 //!
 //! AMM reference arm (offline; the optimiser itself is `scripts/amm-reference.py`):
 //!
@@ -78,7 +81,8 @@ use neat_ai_lamarck::weight_bench::provenance;
 use neat_ai_lamarck::weight_bench::suite::{CorpusSpec, Family};
 use neat_ai_lamarck::weight_bench::{
     KINK_RATIO_REL_TOL, Manifest, ReferenceRequest, RunRow, diagnose_manifest,
-    predeclared_manifest, run_manifest, serve_reference, summarise_landscape, summarise_reference,
+    landscape_total_evaluations, predeclared_manifest, run_manifest, serve_reference,
+    summarise_landscape, summarise_reference,
 };
 use serde_json::json;
 
@@ -223,7 +227,7 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
     let rows_path = out_dir.join("landscape.jsonl");
     fs::write(&rows_path, lines).map_err(|e| format!("{}: {e}", rows_path.display()))?;
     let mut summary = json!({
-        "formatVersion": 1,
+        "formatVersion": 2,
         "crateVersion": env!("CARGO_PKG_VERSION"),
         "wallClockSeconds": wall_clock_seconds,
         "manifest": manifest,
@@ -232,7 +236,9 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
         "curvatureRelTol": CURVATURE_REL_TOL,
         "smoothRatio": SMOOTH_RATIO,
         "kinkRatioRelTol": KINK_RATIO_REL_TOL,
-        "totalEvaluations": rows.iter().map(|r| r.evaluations).sum::<usize>(),
+        "diagnosisEvaluations": rows.iter().map(|r| r.evaluations).sum::<usize>(),
+        "preparationEvaluations": rows.iter().map(|r| r.preparation_evaluations).sum::<usize>(),
+        "totalEvaluations": landscape_total_evaluations(&rows),
         "cells": cells,
     });
     if let Some(object) = summary.as_object_mut() {
@@ -243,7 +249,7 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
     fs::write(&summary_path, pretty).map_err(|e| format!("{}: {e}", summary_path.display()))?;
     for cell in &cells {
         println!(
-            "{:?} D={} ({} problems): flat {} edge {} kinked {} smooth {} indeterminate {}; one-sided plateau {}; {} evaluations",
+            "{:?} D={} ({} problems): flat {} edge {} kinked {} smooth {} indeterminate {}; one-sided plateau {}; {} diagnosis + {} preparation evaluations",
             cell.family,
             cell.dimension,
             cell.problems,
@@ -253,11 +259,13 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
             cell.shapes.smooth,
             cell.shapes.indeterminate,
             cell.plateau_free_axes,
-            cell.evaluations
+            cell.evaluations,
+            cell.preparation_evaluations
         );
     }
     println!(
-        "wrote {} and {}",
+        "{} evaluations in total (diagnosis and preparation); wrote {} and {}",
+        landscape_total_evaluations(&rows),
         rows_path.display(),
         summary_path.display()
     );

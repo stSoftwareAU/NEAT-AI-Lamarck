@@ -4,7 +4,8 @@
 
 use neat_ai_lamarck::weight_bench::landscape::{
     AxisShape, CURVATURE_REL_TOL, KINK_RATIO_REL_TOL, LandscapeCell, LandscapeRow, ShapeCounts,
-    axis_shapes, classify_axis, diagnose, diagnose_manifest, summarise_landscape,
+    axis_shapes, classify_axis, diagnose, diagnose_manifest, landscape_total_evaluations,
+    summarise_landscape,
 };
 use neat_ai_lamarck::weight_bench::suite::{
     CorpusSpec, Family, LIVE_HIDDEN_UNITS, Problem, ProblemSpec, SATURATION_BIAS,
@@ -177,11 +178,48 @@ fn diagnosis_finds_the_saturated_plateau() {
     assert_eq!((row.dimension, row.seed), (100, 1001));
     assert_eq!(row.shapes.total(), 100);
     assert_eq!(row.evaluations, 1 + 4 * 100);
+    // The selection scan that built the problem is counted once, separately.
+    assert_eq!(row.preparation_evaluations, p.preparation_evaluations);
+    assert_eq!(row.preparation_evaluations, 145);
     assert!(row.shapes.flat > 0);
     // Only 32 synapses feed live units, so at most 100 - 32 chosen axes can be
     // flat, and here the one-sided and two-sided counts agree exactly.
     assert!(row.shapes.flat <= 100 - 32);
     assert_eq!(row.shapes.flat, row.plateau_free_axes);
+}
+
+#[test]
+fn landscape_command_total_counts_preparation_once_per_problem() {
+    // 2 families x 2 dimensions x 2 seeds = 8 problems. Each costs 145
+    // selection-scan evaluations, once. The diagnoses cost 1 + 4D per axis
+    // set: D=20 gives 81 and D=40 gives 161, each for 4 problems (2 families
+    // x 2 seeds).
+    let m = manifest(
+        vec![Family::Tanh, Family::Relu],
+        vec![20, 40],
+        vec![1001, 1002],
+    );
+    let rows = diagnose_manifest(&m).unwrap();
+    assert_eq!(rows.len(), 8);
+    assert!(rows.iter().all(|r| r.preparation_evaluations == 145));
+    assert_eq!(
+        landscape_total_evaluations(&rows),
+        8 * 145 + 4 * (1 + 4 * 20) + 4 * (1 + 4 * 40)
+    );
+    assert_eq!(landscape_total_evaluations(&rows), 2128);
+    let cells = summarise_landscape(&m, &rows);
+    assert_eq!(cells.iter().map(|c| c.problems).sum::<usize>(), 8);
+    assert_eq!(
+        cells
+            .iter()
+            .map(|c| c.preparation_evaluations)
+            .sum::<usize>(),
+        8 * 145
+    );
+    assert_eq!(
+        cells.iter().map(|c| c.evaluations).sum::<usize>(),
+        4 * (1 + 4 * 20) + 4 * (1 + 4 * 40)
+    );
 }
 
 #[test]
@@ -221,6 +259,7 @@ fn landscape_rows_and_cells_serialise_in_camel_case() {
         "smooth",
         "indeterminate",
         "evaluations",
+        "preparationEvaluations",
         "plateauFreeAxes",
     ] {
         assert!(value.get(key).is_some(), "row lacks {key}: {value}");
@@ -333,10 +372,25 @@ fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() 
         m.families.len() * m.dimensions.len() * m.validation_seeds.len()
     );
     assert_eq!(summarise_landscape(&m, &rows), cells);
+    assert_eq!(summary["formatVersion"], serde_json::json!(2));
     assert_eq!(
-        summary["totalEvaluations"],
+        summary["diagnosisEvaluations"],
         serde_json::json!(rows.iter().map(|r| r.evaluations).sum::<usize>())
     );
+    assert_eq!(
+        summary["preparationEvaluations"],
+        serde_json::json!(
+            rows.iter()
+                .map(|r| r.preparation_evaluations)
+                .sum::<usize>()
+        )
+    );
+    assert_eq!(
+        summary["totalEvaluations"],
+        serde_json::json!(landscape_total_evaluations(&rows))
+    );
+    // 30,864 diagnosis + 20,880 preparation (144 problems x 145).
+    assert_eq!(summary["totalEvaluations"], serde_json::json!(51744));
     for cell in &cells {
         let axes = cell.dimension * cell.problems;
         assert_eq!(cell.shapes.total(), axes);

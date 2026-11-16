@@ -9,8 +9,10 @@
 //! [`RANDOM_DELTA_HALF_WIDTH`], and classifies the axis (see [`classify_axis`]).
 //!
 //! It is a measurement only: nothing in the experiment or the optimisers reads
-//! it, and its evaluations are counted separately (`evaluations`), never
-//! against an arm's budget.
+//! it, and its evaluations are counted separately, never against an arm's
+//! budget. The diagnosis's own evaluations are `evaluations`; the selection scan
+//! that built each problem is `preparation_evaluations`, counted once per
+//! problem. [`landscape_total_evaluations`] sums both.
 
 use serde::{Deserialize, Serialize};
 
@@ -159,8 +161,12 @@ pub struct LandscapeRow {
     /// Shape counts over the free axes.
     #[serde(flatten)]
     pub shapes: ShapeCounts,
-    /// Loss evaluations the diagnosis spent: one base plus four per axis.
+    /// Diagnosis evaluations: one base plus four per axis. The selection scan
+    /// is in `preparation_evaluations`.
     pub evaluations: usize,
+    /// Loss evaluations of the selection scan that built the problem
+    /// ([`Problem::preparation_evaluations`]), counted once per problem.
+    pub preparation_evaluations: usize,
     /// The one-sided plateau count of the same axes from the selection scan
     /// ([`Problem::plateau_free_axes`]), for comparison.
     pub plateau_free_axes: usize,
@@ -205,8 +211,17 @@ pub fn diagnose(problem: &Problem) -> Result<LandscapeRow, BenchError> {
         seed: problem.spec.seed,
         shapes: ShapeCounts::of(&shapes),
         evaluations,
+        preparation_evaluations: problem.preparation_evaluations,
         plateau_free_axes: problem.plateau_free_axes,
     })
+}
+
+/// Every loss evaluation the diagnosis of `rows` executes: each row's
+/// `evaluations` plus its `preparation_evaluations`.
+pub fn landscape_total_evaluations(rows: &[LandscapeRow]) -> usize {
+    rows.iter()
+        .map(|r| r.evaluations + r.preparation_evaluations)
+        .sum()
 }
 
 /// Diagnose every (family, dimension, validation seed) problem of a synthetic
@@ -247,8 +262,11 @@ pub struct LandscapeCell {
     /// Shape totals over every axis of every problem.
     #[serde(flatten)]
     pub shapes: ShapeCounts,
-    /// Total evaluations spent.
+    /// Total diagnosis evaluations (see [`LandscapeRow::evaluations`]).
     pub evaluations: usize,
+    /// Total selection-scan evaluations (see
+    /// [`LandscapeRow::preparation_evaluations`]).
+    pub preparation_evaluations: usize,
     /// Total one-sided plateau count from the selection scans.
     pub plateau_free_axes: usize,
 }
@@ -264,6 +282,7 @@ pub fn summarise_landscape(m: &Manifest, rows: &[LandscapeRow]) -> Vec<Landscape
                 problems: 0,
                 shapes: ShapeCounts::default(),
                 evaluations: 0,
+                preparation_evaluations: 0,
                 plateau_free_axes: 0,
             };
             for row in rows
@@ -273,6 +292,7 @@ pub fn summarise_landscape(m: &Manifest, rows: &[LandscapeRow]) -> Vec<Landscape
                 cell.problems += 1;
                 cell.shapes.add(&row.shapes);
                 cell.evaluations += row.evaluations;
+                cell.preparation_evaluations += row.preparation_evaluations;
                 cell.plateau_free_axes += row.plateau_free_axes;
             }
             cells.push(cell);
