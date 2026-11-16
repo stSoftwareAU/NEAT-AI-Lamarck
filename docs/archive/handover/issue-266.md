@@ -9,8 +9,8 @@ one agent provider.
 
 ## This attempt
 
-- 2026-11-16T21:11:20Z — execute hit the Claude subscription usage limit after
-  286s; 0 uncommitted file(s) preserved; 25 commit(s) added to the branch
+- 2026-11-16T21:11:25Z — execute hit the Claude subscription usage limit after
+  291s; 0 uncommitted file(s) preserved; 26 commit(s) added to the branch
 - Branch: `issue-266-experiment-benchmark-budget-aware-routing-of-local-redo-2`
 - Wind-down notice: not delivered — the interruption arrived without warning
 
@@ -18,6 +18,8 @@ one agent provider.
 
 Commits this run added to the branch, newest first:
 
+- wip: handover note for the interrupted run on issue #266 Vibe-Coder-Run-Id:
+  vibe-mwjqn4yr-b1e2ce
 - Record this run's work and the reviewers' verdicts in the #266 PR summary
 - Correct the claim that later commits leave the bench code unchanged (#266)
 - Document landscape coverage and the compute ledger (#266)
@@ -49,11 +51,11 @@ committed on this branch.
 
 ## What remains
 
-The run was interrupted after 286s, so it never reported completion: whatever
+The run was interrupted after 291s, so it never reported completion: whatever
 the issue still asks for beyond the changes above is outstanding.
 
 Diff `issue-266-experiment-benchmark-budget-aware-routing-of-local-redo-2`
-against its base branch to see the 25 commit(s) and 0 preserved file(s) named
+against its base branch to see the 26 commit(s) and 0 preserved file(s) named
 above, continue from them, and do not revert them unless they are wrong.
 
 The closing deliverables are outstanding too unless the list above names them:
@@ -65,3 +67,10 @@ run that finishes without it fails at the gate however complete the code is.
 
 None were recorded. The run was stopped by the interruption named above, not by
 a blocker it reported.
+
+## Previous attempts
+
+Earlier runs on this issue were interrupted too:
+
+- 2026-11-16T21:11:20Z — execute hit the Claude subscription usage limit after
+  286s; 0 uncommitted file(s) preserved; 25 commit(s) added to the branch
