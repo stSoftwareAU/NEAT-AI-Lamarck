@@ -81,10 +81,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and failed confirmation attempts retain their costs. The AMM driver records
   process startup/non-zero-exit failures, drains verbose stderr safely and keeps
   a failed run's real row and costs when the server exits before `done`.
-  On the synthetic suite CMA-ES beat the refinement in 18 of 27 cells in format 3
-  (19 of 27 in format 2; 20 of 27 in the earlier run, one cell on the interval
-  boundary), but the router always routed to CMA-ES and never beat it, so it was
-  removed.
+  On the synthetic suite CMA-ES beat the refine surrogate in 18 of 27 cells in
+  format 3 (19 of 27 in format 2; 20 of 27 in the earlier run, one cell on the
+  interval boundary), but the router always routed to CMA-ES and never beat it,
+  so it was removed.
   The AMM method (arXiv 2611.06879) was run as an offline reference arm
   through its authors' pinned implementation (scratch Python environment, no new
   dependency, never in CI) and lost in all 27 cells against refine, CMA-ES and
