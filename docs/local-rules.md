@@ -59,13 +59,18 @@ reader proxy got no HTTP response (`000`), and WebFetch of the PDF gave "proxy
 refused the connection". On 16 November 2026 the fetch was retried once more:
 `curl https://arxiv.org/html/2611.12248v1` gave
 `CONNECT tunnel failed, response 403`, and WebFetch of the same URL gave "proxy
-refused the connection".
+refused the connection". A further retry later on 16 November 2026 also
+failed: `curl` of `https://arxiv.org/abs/2611.12248`,
+`https://arxiv.org/html/2611.12248v1` and the `export.arxiv.org` API query gave
+`CONNECT tunnel failed, response 403`, and WebFetch of the alphaXiv page and the
+Papers-with-Code mirror (`paperswithcode.co/paper/127548`) gave "proxy refused
+the connection".
 
 **Outline from web-search summaries and the PR #276 review's report (secondary,
 not read from the paper in this run, so not a pin of the full method). The
 bullets from monomial order onwards come from search snippets of the paper's
-HTML version taken on 15 November 2026, plus the PR #276 review's report of the
-training horizons:**
+HTML version taken on 15 and 16 November 2026, plus the PR #276 review's report
+of the training horizons:**
 
 - **Paper:** "A method to automatically discover symbolic local learning rules".
   Andrea Perin (Aalto University), Fabio Anselmi (University of
@@ -83,11 +88,19 @@ training horizons:**
   implicit sparse prior. The authors report that this improves results.
 - **Locality degree:** degree 1 is purely local, degree 2 is local but not
   purely local, and degree 3 is global. Degree sweeps are run on
-  classification and reconstruction.
+  classification and reconstruction. A 16 November 2026 search snippet of the
+  HTML version adds that in the classification setup the network has three
+  layers. Degree 2 adds nearest-neighbour interactions, so layers 2 and 3 see
+  the whole downstream computational graph while layer 1 sees only itself and
+  layer 2. At degree 3 every layer sees the whole downstream graph.
 - **Experiments:** classification, reconstruction and self-supervised tasks on
   small multilayer networks and minimal datasets.
 - **Reported limitation:** loss falls more slowly under the discovered rules
   than under backprop.
+- **Abstract wording differs between mirrors:** the Papers-with-Code mirror's
+  abstract says "trace monomials" and claims classification accuracy comparable
+  to backprop; the arXiv v1 abstract as summarised does not make that accuracy
+  claim, so the claim is not relied on here.
 - **Monomial order:** fixed to 4 in all experiments (the paper calls this
   order K; it is unrelated to this harness's step count K).
 - **Meta-optimisation:** the outer loop unrolls the inner learning dynamics.
@@ -110,16 +123,20 @@ training horizons:**
   a held-out part, on a network with different layer sizes.
 - **Example learned terms (classification):** terms such as `Y1·(Y1 + W1·X)`,
   `‖W1ᵀ·Y1‖²` and `‖W1‖²`, and forward-looking terms that use layer 2's
-  quantities, such as `Y2·(Y2 + W2·Y1)`.
+  quantities, such as `Y2·(Y2 + W2·Y1)`. The 16 November snippets add that
+  layers 2 and 3 pick up the target-loss term `Ŷ·Y3` and a logit-alignment
+  monomial `Ŷᵀ·W3·Y2`, and that layer 2 also has a squared cross-entropy term
+  whose gradient is aligned with the cross-entropy but has the opposite sign.
 
 **Not pinned.** The paper has still not been read in this run, so none of this
 is a pin. Known only from snippets or the PR #276 review's report: unrolling,
 monomial order 4, and per-task horizons of 500 (classification), 300
-(reconstruction) and 100 (self-supervised), with T starting at 1. Still
-missing: the values of B, b and J, the exact variable set per degree, the
-outer optimiser and its hyperparameters, network widths and depths, and the
-reconstruction and self-supervised datasets. A faithful reproduction is
-therefore still open.
+(reconstruction) and 100 (self-supervised), with T starting at 1, a
+three-layer classification network, and the degree-2 neighbourhood for that
+network. Still missing: the values of B, b and J, the exact variable set per
+degree, the outer optimiser and its hyperparameters, network widths, the
+reconstruction and self-supervised depths, and the reconstruction and
+self-supervised datasets. A faithful reproduction is therefore still open.
 
 **How this harness differs from that outline** (the left column is only as reliable as the search summaries):
 
