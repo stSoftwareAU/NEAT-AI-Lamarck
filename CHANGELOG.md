@@ -17,9 +17,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `landscape-summary.json`. The summary also counts the selection scan that
   builds each problem (`preparationEvaluations`, 145 per problem) alongside the
   diagnosis's own evaluations, so `totalEvaluations` (51 744 for the committed
-  run) is every evaluation the command runs, and no arm's budget is charged. A
+  run) is every evaluation the command runs; the selection scan is charged to no
+  arm's budget (every arm shares it), and the diagnosis now draws from the
+  tightest arm budget (see Changed). A
   problem that fails is recorded with its `error` and the evaluations it spent,
-  and the run goes on. The summary (`formatVersion` 3) reports coverage
+  and the run goes on. The summary (`formatVersion` 4, regenerated at crate
+  0.1.50 with a 10D `budget` on every row) reports coverage
   (planned, completed and failed problems), and each cell counts its
   `failures`. The committed run covered 144 of 144 problems, 0 failed.
   The new `saturated-hard-tanh` family clamps 14 of 16 hidden units with a ±12
@@ -110,7 +113,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is now committed. The format 3 synthetic run (648 of 648 runs, 0 failed) gives
   CMA-ES better in 18 of 27 cells, worse in none and inconclusive in 9. The AMM
   campaign (324 of 324 runs, 0 failed) and the AMM method check were regenerated
-  at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and `Cargo.lock` are unchanged. AMM remains worse in all 54 comparisons, and the
+  at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). AMM remains worse in all 54 comparisons, and the
   method check's v0.3.0 and v0.7.0 runs (27 rows each) are identical.
 
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
@@ -179,6 +182,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   0.17.0 so the breaking-bump gate can pass and this install script can land.
 
 ### Changed
+
+- **The landscape diagnosis now draws its probes from the tightest arm budget
+  (Issue #266).** `diagnose` and `axis_shapes` take a budget and
+  `diagnose_specs` a budget multiple (times each problem's dimension), and the
+  probes go through the same
+  `BudgetedObjective` the arms use. `diagnose_manifest` uses the manifest's
+  smallest budget multiple times the dimension (10D for the predeclared
+  manifest), so a diagnose-then-optimise router would have `budget -
+  evaluations` left. A diagnosis needing more than the budget (`1 + 4D`) records
+  `BudgetExhausted` as its row's `error`. `LandscapeRow` and `LandscapeCell` gain
+  `budget` (absent in older evidence, read as `None` and 0), and the summary
+  gains `diagnosisBudgetMultiple`. The committed evidence in
+  `docs/evidence/weight-router-landscape/` was regenerated in format 4: every
+  row carries `budget` = 10D, every diagnosis fits within it, and apart from
+  `budget` the rows are identical to the format 3 rows. The selection scan stays
+  counted separately because every arm shares it.
 
 - **The security workflow no longer compiles cargo-audit on every run (Issue
   #253).** `security.yml` now installs a prebuilt, version-pinned

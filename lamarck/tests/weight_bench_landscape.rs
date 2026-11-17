@@ -173,7 +173,7 @@ fn saturated_start_creature_carries_the_teacher_biases() {
 #[test]
 fn diagnosis_finds_the_saturated_plateau() {
     let p = build(Family::SaturatedHardTanh, 100, 1001);
-    let row = diagnose(&p).unwrap();
+    let row = diagnose(&p, 10 * 100).unwrap();
     assert_eq!(row.family, Family::SaturatedHardTanh);
     assert_eq!((row.dimension, row.seed), (100, 1001));
     assert_eq!(row.shapes.total(), 100);
@@ -262,7 +262,7 @@ fn failed_problems_are_recorded_and_counted_not_fatal() {
         dimension: 20,
         seed: 1003,
     };
-    let rows = diagnose_specs(&specs, |spec| {
+    let rows = diagnose_specs(&specs, 10, |spec| {
         if *spec == build_fails {
             return Err(BenchError::InvalidConfig("injected build failure".into()));
         }
@@ -381,7 +381,7 @@ fn a_clean_run_covers_every_planned_problem() {
         vec![1001, 1002],
     );
     let rows = diagnose_manifest(&m).unwrap();
-    assert_eq!(rows, diagnose_specs(&specs_of(&m), build_problem));
+    assert_eq!(rows, diagnose_specs(&specs_of(&m), 10, build_problem));
     assert_eq!(
         landscape_coverage(&m, &rows),
         LandscapeCoverage {
@@ -401,13 +401,13 @@ fn a_clean_run_covers_every_planned_problem() {
 fn tanh_axes_are_smooth_and_relu_and_hard_tanh_axes_kink() {
     for seed in [1001, 1002] {
         for dimension in [20, 40] {
-            let row = diagnose(&build(Family::Tanh, dimension, seed)).unwrap();
+            let row = diagnose(&build(Family::Tanh, dimension, seed), 10 * dimension).unwrap();
             assert_eq!(row.shapes.kinked, 0, "tanh D={dimension} seed={seed}");
             assert_eq!(row.shapes.flat + row.shapes.edge, 0);
         }
     }
     for family in [Family::Relu, Family::HardTanh] {
-        let row = diagnose(&build(family, 20, 1001)).unwrap();
+        let row = diagnose(&build(family, 20, 1001), 10 * 20).unwrap();
         assert!(row.shapes.kinked > 0, "{family:?}: {:?}", row.shapes);
     }
 }
@@ -415,7 +415,10 @@ fn tanh_axes_are_smooth_and_relu_and_hard_tanh_axes_kink() {
 #[test]
 fn axis_shapes_are_deterministic() {
     let p = build(Family::Relu, 20, 1003);
-    assert_eq!(axis_shapes(&p).unwrap(), axis_shapes(&p).unwrap());
+    assert_eq!(
+        axis_shapes(&p, 10 * 20).unwrap(),
+        axis_shapes(&p, 10 * 20).unwrap()
+    );
 }
 
 #[test]
@@ -558,7 +561,17 @@ fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() 
         m.families.len() * m.dimensions.len() * m.validation_seeds.len()
     );
     assert_eq!(summarise_landscape(&m, &rows), cells);
-    assert_eq!(summary["formatVersion"], serde_json::json!(3));
+    assert_eq!(summary["formatVersion"], serde_json::json!(4));
+    assert_eq!(summary["diagnosisBudgetMultiple"], serde_json::json!(10));
+    // Every committed diagnosis drew its probes from the tightest arm budget
+    // (10D) and stayed inside it.
+    for row in &rows {
+        assert_eq!(row.budget, Some(10 * row.dimension), "{row:?}");
+        assert!(row.evaluations <= 10 * row.dimension, "{row:?}");
+    }
+    for cell in &cells {
+        assert_eq!(cell.budget, cell.problems * 10 * cell.dimension, "{cell:?}");
+    }
     let coverage: LandscapeCoverage = serde_json::from_value(summary["coverage"].clone()).unwrap();
     assert_eq!(coverage, landscape_coverage(&m, &rows));
     assert_eq!(
@@ -629,4 +642,93 @@ fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() 
         .cloned()
         .collect();
     assert_eq!(diagnose_manifest(&first_seed).unwrap(), expected);
+}
+
+#[test]
+fn diagnosis_draws_its_probes_from_the_tightest_budget() {
+    let mut m = manifest(
+        vec![Family::Tanh, Family::Relu],
+        vec![20, 40],
+        vec![1001, 1002],
+    );
+    m.budget_multiples = vec![30, 10, 100];
+    let rows = diagnose_manifest(&m).unwrap();
+    assert_eq!(rows.len(), 8);
+    for row in &rows {
+        let budget = 10 * row.dimension;
+        assert_eq!(row.budget, Some(budget), "{row:?}");
+        assert!(row.error.is_none(), "{row:?}");
+        assert_eq!(row.evaluations, 1 + 4 * row.dimension);
+        assert!(row.evaluations <= budget);
+    }
+    for cell in summarise_landscape(&m, &rows) {
+        let expected: usize = rows
+            .iter()
+            .filter(|r| r.family == cell.family && r.dimension == cell.dimension)
+            .map(|r| r.budget.unwrap())
+            .sum();
+        assert_eq!(cell.budget, expected);
+        assert_eq!(cell.budget, 2 * 10 * cell.dimension);
+    }
+}
+
+#[test]
+fn a_diagnosis_over_its_budget_is_recorded_as_budget_exhausted() {
+    let specs = [ProblemSpec {
+        family: Family::Tanh,
+        dimension: 20,
+        seed: 1001,
+    }];
+    // 1 + 4 * 20 = 81 evaluations are needed; a budget of 4 * 20 = 80 is one short.
+    let rows = diagnose_specs(&specs, 4, build_problem);
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(
+        row.error.as_deref(),
+        Some(
+            BenchError::BudgetExhausted { limit: 80 }
+                .to_string()
+                .as_str()
+        )
+    );
+    assert_eq!(
+        row.error.as_deref(),
+        Some("evaluation budget of 80 exhausted")
+    );
+    assert_eq!((row.evaluations, row.budget), (80, Some(80)));
+    assert_eq!(row.shapes, ShapeCounts::default());
+    assert_eq!(row.shapes.total(), 0);
+
+    // Positive control: a budget of 5 * 20 = 100 completes.
+    let rows = diagnose_specs(&specs, 5, build_problem);
+    let row = &rows[0];
+    assert!(row.error.is_none(), "{row:?}");
+    assert_eq!((row.evaluations, row.budget), (81, Some(100)));
+    assert_eq!(row.shapes.total(), 20);
+}
+
+#[test]
+fn landscape_rows_without_a_budget_still_load() {
+    // A row and a summary cell exactly as landscape summary format 3 (crate
+    // 0.1.49, before the diagnosis budget) wrote them.
+    let row: LandscapeRow = serde_json::from_str(
+        r#"{"family":"tanh","dimension":20,"seed":1001,"flat":0,"edge":0,"kinked":0,"smooth":20,"indeterminate":0,"evaluations":81,"preparationEvaluations":145,"plateauFreeAxes":0,"error":null}"#,
+    )
+    .unwrap();
+    assert_eq!(row.budget, None);
+    assert_eq!(row.family, Family::Tanh);
+    assert_eq!((row.dimension, row.seed), (20, 1001));
+    assert_eq!(row.shapes.smooth, 20);
+    assert_eq!(row.shapes.total(), 20);
+    assert_eq!((row.evaluations, row.preparation_evaluations), (81, 145));
+    assert_eq!(row.plateau_free_axes, 0);
+    assert_eq!(row.error, None);
+
+    let cell: LandscapeCell = serde_json::from_str(
+        r#"{"dimension": 20, "edge": 0, "evaluations": 972, "failures": 0, "family": "tanh", "flat": 0, "indeterminate": 0, "kinked": 0, "plateauFreeAxes": 0, "preparationEvaluations": 1740, "problems": 12, "smooth": 240}"#,
+    )
+    .unwrap();
+    assert_eq!(cell.budget, 0);
+    assert_eq!((cell.dimension, cell.problems), (20, 12));
+    assert_eq!(cell.shapes.smooth, 240);
 }

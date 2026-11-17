@@ -19,8 +19,9 @@ current code runs two in-process arms, refinement and CMA-ES, on paired
 validation seeds with no calibration phase. The committed `manifest.json`,
 `summary.json` and `reference-summary.json` in
 [`docs/evidence/weight-router/`](evidence/weight-router/summary.json) are
-output of the current code (crate 0.1.49, `formatVersion` 3) and are reproduced
-by the commands in [How to run](#how-to-run). The router, probe and calibration
+produced by crate 0.1.49 (`formatVersion` 3) and are still reproduced by the
+commands in [How to run](#how-to-run), because crate 0.1.50 changes only the
+landscape diagnosis, which writes its own `weight-router-landscape/` files. The router, probe and calibration
 sections below describe an **earlier router-era run** (crate 0.1.46). Its
 numbers are kept as a recorded negative finding; they cannot be reproduced from
 the current code, because that code was removed.
@@ -173,7 +174,7 @@ evaluation trace or every AMM route. The source/dependency pins and observed
 result are recorded in
 [`method-check.json`](evidence/weight-router/method-check.json). It was
 regenerated at commit `f0a7b4c` (crate 0.1.49) after the router was removed;
-later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and `Cargo.lock` are unchanged. The v0.7.0 package
+later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The v0.7.0 package
 completed 27 rows, identical to the v0.3.0 tree's, with no failures. The check
 takes the committed manifest and keeps only its first validation seed, so the
 `manifest` it records has `validationSeeds` [1001] and no `calibrationSeeds`. A
@@ -273,7 +274,7 @@ provenance fields listed above. The committed
 synthetic run's per-run rows, and the committed
 [`summary.json`](evidence/weight-router/summary.json) carries the per-cell
 paired distributions. The AMM campaign was regenerated at commit `f0a7b4c`
-(crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and `Cargo.lock` are unchanged. The committed `amm-runs.jsonl` (324 rows) no longer
+(crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The committed `amm-runs.jsonl` (324 rows) no longer
 carries `routedTo` or `probeEvaluations`; its rows carry `plateauFreeAxes`. The
 AMM reference adds three committed files:
 
@@ -439,11 +440,19 @@ columns are the router-era run's router verdicts.
 5. **Plateaus and kinks, measured with a two-sided diagnosis (added after the
    predeclared run).** `weight_bench::landscape` takes `f(x±h)` and
    `f(x±h/2)` (`h` = 0.05) on every chosen axis from the start weights over the
-   screening records, 4 evaluations per axis plus 1 base, outside every arm's
-   budget. Building each problem also runs the 145-evaluation selection scan
-   (`scan_sensitivities`), which the summary counts once per problem as
-   `preparationEvaluations`. Neither count is charged to any arm's budget,
-   because the diagnosis is not an arm. An axis is `flat` when both one-sided
+   screening records, 4 evaluations per axis plus 1 base (`1 + 4D`). Since the
+   change that budgeted it, the diagnosis draws those probes from a
+   `BudgetedObjective` of the manifest's tightest multiple × D (10D for the
+   predeclared manifest), recorded per row as `budget` and summed per cell. A
+   diagnosis that needs more than its budget is recorded as `BudgetExhausted`.
+   The committed landscape evidence was regenerated with that change (crate
+   0.1.50, format 4): every row carries `budget` = 10D and every diagnosis fits
+   within it (`1 + 4D` < 10D), with no `BudgetExhausted` row. Nothing routes on the diagnosis, but a
+   diagnose-then-optimise router at that budget would have `budget -
+   evaluations` left. Building each problem also runs the 145-evaluation
+   selection scan (`scan_sensitivities`), which the summary counts once per
+   problem as `preparationEvaluations`. That scan stays outside the arms'
+   budgets, because every arm shares the same selection scan. An axis is `flat` when both one-sided
    changes are within `PLATEAU_REL_TOL` (1e-6) of the base loss and `edge`
    when exactly one is.
    Otherwise, with `D2(s) = f(x+s) + f(x-s) - 2f(x)`, it is `indeterminate`
@@ -459,14 +468,17 @@ columns are the router-era run's router verdicts.
    and `docs/evidence/weight-router/` are unchanged. Totals over the 12
    validation seeds (1001..1012) in
    `docs/evidence/weight-router-landscape/landscape-summary.json` (crate
-   0.1.49, `formatVersion` 3, commit `cf2ff11`, clean tree, 1.3 s, 51 744
+   0.1.50, `formatVersion` 4, commit `8e79db7`, clean tree, 1.8 s, 51 744
    evaluations: 30 864 diagnosis plus 20 880 selection-scan preparation).
    Coverage was 144 of 144 problems, 0 failed. A problem that fails to build
    or diagnose is recorded as a row with its `error` and the evaluations it
    spent, counted in its cell's `failures` and in the summary's `coverage`
    (planned, completed and failed problems), and the run goes on. Before
    format 3 the command stopped at the first failure. The rows and cell counts
-   are unchanged from the format 2 run at `d505d1a`.
+   are unchanged from the format 2 run at `d505d1a` and the format 3 run at
+   `cf2ff11`. Format 4 (crate 0.1.50) adds `diagnosisBudgetMultiple` (10) and
+   the per-row and per-cell `budget`; apart from `budget`, the regenerated rows
+   are identical to the format 3 rows.
 
    | Family | D | flat | edge | kinked | smooth | indeterminate | one-sided `plateauFreeAxes` |
    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -537,7 +549,7 @@ columns are the router-era run's router verdicts.
 
 Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 855,000
 evaluations (budgeted, preparation per AMM run and 5 confirmation evaluations
-per run). The campaign was regenerated at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and `Cargo.lock` are unchanged. It ran with
+per run). The campaign was regenerated at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). It ran with
 `--jobs 8`: 133.038 s wall on a shared host, so the time is indicative only. Its
 normalised screening losses are identical to the previously committed router-era
 rows.
@@ -656,7 +668,7 @@ confirmation evaluations. No calibration was run by the current code.
 | AMM reference, predeclared suite | `weight-router/reference-summary.json` | 324 runs | 0 | 855,000 | `f0a7b4c` |
 | `saturated-hard-tanh` arms (refine, CMA-ES) | `weight-router-landscape/saturated/summary.json` | 216 runs | 0 | 543,852 | `8badaf5` |
 | AMM reference, `saturated-hard-tanh` | `weight-router-landscape/saturated/reference-summary.json` | 108 runs | 0 | 285,000 | `84096bb` |
-| Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `cf2ff11` |
+| Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `8e79db7` |
 | **Committed total** | | | 0 | 3,367,211 | |
 
 The router-era campaign (crate 0.1.46), whose code was removed, and its
