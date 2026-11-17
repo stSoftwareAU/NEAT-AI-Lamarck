@@ -197,20 +197,25 @@ mod tests {
         let config = BackpropConfig::default();
         // delta -0.02 puts the twin at -99_999.97 (inside); delta +0.02 puts it at
         // -100_000.01 (past the limit).
-        let (_, inside) = mirror_check(&obj, &x, &config, -0.02);
+        let (_, inside) = mirrored_pair(&obj, &x, 1, -0.02, &config);
         assert!(inside.is_some(), "positive control: mirror stays inside");
-        let (plus, outside) = mirror_check(&obj, &x, &config, 0.02);
+        let (plus, outside) = mirrored_pair(&obj, &x, 1, 0.02, &config);
         assert!(outside.is_none(), "twin at -100_000.01 must be refused");
         assert!(close(plus[1], -99_999.97));
     }
 
-    fn mirror_check(
-        obj: &WeightObjective,
-        x: &[f64],
-        config: &BackpropConfig,
-        delta: f64,
-    ) -> (Vec<f64>, Option<Vec<f64>>) {
-        mirrored_pair(obj, x, 1, delta, config)
+    #[test]
+    fn twin_is_refused_below_the_plank_constant() {
+        let obj = objective(1.0, -2.0);
+        let x = obj.start();
+        let config = BackpropConfig {
+            plank_constant: 0.05,
+            ..BackpropConfig::default()
+        };
+        let (_, below) = mirrored_pair(&obj, &x, 1, 0.03, &config);
+        assert!(below.is_none(), "a 0.03 step is below the 0.05 plank");
+        let (_, above) = mirrored_pair(&obj, &x, 1, 0.06, &config);
+        assert!(above.is_some(), "a 0.06 step clears the 0.05 plank");
     }
 
     #[test]
@@ -239,7 +244,8 @@ mod tests {
         let previous = vec![1.0, 99_999.89];
         let winner = vec![1.0, 99_999.97];
         let points = follow_up_points(&obj, &previous, &winner, &BackpropConfig::default());
-        // Move of +0.08: +0.04 -> 100_000.01 dropped; -0.04 and +0.08 -> 100_000.05 dropped.
+        // Move of +0.08: the +0.04 probe (to 100_000.01) and the +0.08 probe (to
+        // 100_000.05) are dropped; only the -0.04 probe (to 99_999.93) survives.
         assert_eq!(points.len(), 1);
         assert!(close(points[0][1], 99_999.93));
     }

@@ -109,9 +109,11 @@ impl WeightObjective {
         &self.synapse_indices
     }
 
-    /// The creature with the chosen synapse weights set to `x`; every other
-    /// parameter is unchanged. `x` must have [`Self::dimension`] entries, and
-    /// any extra or missing entries are ignored by the zip.
+    /// The creature with `x` written into the chosen synapses; every other
+    /// parameter is unchanged. Callers pass [`Self::dimension`] weights
+    /// ([`Self::loss_on`] checks the length first). On a length mismatch the zip
+    /// stops at the shorter side: extra entries of `x` are unused and synapses
+    /// beyond `x` keep their current weights.
     pub fn creature_at(&self, x: &[f64]) -> CreatureExport {
         let mut creature = self.creature.clone();
         for (&i, &w) in self.synapse_indices.iter().zip(x) {

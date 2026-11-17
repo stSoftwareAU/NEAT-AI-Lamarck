@@ -192,9 +192,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   weight limit (`limit_weight_scale`, 100000) would clamp, or whose step is below
   `plank_constant` (1e-7), is not evaluated, and a round with a refused twin
   spends one evaluation instead of two. It remains a simplified random-axis
-  surrogate, not `generate_candidate_batch`. Re-running the predeclared manifest
-  at `a5484b0` reproduced the committed `runs.jsonl` (648 of 648 rows) and
-  `saturated/runs.jsonl` (216 of 216), so no committed evidence changes.
+  surrogate, not `generate_candidate_batch`. The twin is also skipped when
+  `signed_perturbation` finds no single-weight change (for example
+  `x + delta == x` in floating point), not only when `mirror_candidate` refuses
+  it. Re-running the predeclared manifest at `a5484b0` reproduced
+  `docs/evidence/weight-router/runs.jsonl` (648 of 648 rows), and re-running
+  `docs/evidence/weight-router-landscape/saturated/manifest.json` reproduced
+  `docs/evidence/weight-router-landscape/saturated/runs.jsonl` (216 of 216), so
+  no committed evidence changes.
 - **The landscape diagnosis now draws its probes from the tightest arm budget
   (Issue #266).** `diagnose` and `axis_shapes` take a budget and
   `diagnose_specs` a budget multiple (times each problem's dimension), and the

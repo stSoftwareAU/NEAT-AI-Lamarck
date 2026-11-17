@@ -769,7 +769,10 @@ fn rows_without_the_plateau_field_load_as_none() {
 
 /// The refine arm routes its twin and follow-up probes through
 /// `mirror_candidate` and `probe_candidate`; that must not move a single
-/// committed row.
+/// committed row. This is a pin, expected green before and after the helper
+/// change. It covers 8 of the 324 committed refine rows (tanh and hard-tanh,
+/// D=20, 10D and 30D, two seeds); the full 648/216 reproduction was a manual
+/// re-run.
 #[test]
 fn the_refine_arm_reproduces_its_committed_rows() {
     let dir =
