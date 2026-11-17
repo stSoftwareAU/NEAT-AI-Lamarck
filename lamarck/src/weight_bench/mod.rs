@@ -24,7 +24,8 @@
 //! arms using the same paired bootstrap. It only ever runs on validation seeds.
 //!
 //! [`landscape`] adds a two-sided diagnosis of each problem's free axes
-//! (flat, plateau edge, kinked, smooth), measured outside every arm's budget.
+//! (flat, plateau edge, kinked, smooth), its probes drawn from a
+//! `BudgetedObjective` of the manifest's tightest arm budget.
 //!
 //! Every evaluation is counted against an explicit [`Budget`]; exceeding it is
 //! an error ([`BenchError::BudgetExhausted`]), never a silent value.

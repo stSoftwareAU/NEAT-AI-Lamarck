@@ -174,7 +174,7 @@ evaluation trace or every AMM route. The source/dependency pins and observed
 result are recorded in
 [`method-check.json`](evidence/weight-router/method-check.json). It was
 regenerated at commit `f0a7b4c` (crate 0.1.49) after the router was removed;
-later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and `Cargo.lock` are unchanged. The v0.7.0 package
+later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The v0.7.0 package
 completed 27 rows, identical to the v0.3.0 tree's, with no failures. The check
 takes the committed manifest and keeps only its first validation seed, so the
 `manifest` it records has `validationSeeds` [1001] and no `calibrationSeeds`. A
@@ -274,7 +274,7 @@ provenance fields listed above. The committed
 synthetic run's per-run rows, and the committed
 [`summary.json`](evidence/weight-router/summary.json) carries the per-cell
 paired distributions. The AMM campaign was regenerated at commit `f0a7b4c`
-(crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and `Cargo.lock` are unchanged. The committed `amm-runs.jsonl` (324 rows) no longer
+(crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The committed `amm-runs.jsonl` (324 rows) no longer
 carries `routedTo` or `probeEvaluations`; its rows carry `plateauFreeAxes`. The
 AMM reference adds three committed files:
 
@@ -549,7 +549,7 @@ columns are the router-era run's router verdicts.
 
 Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 855,000
 evaluations (budgeted, preparation per AMM run and 5 confirmation evaluations
-per run). The campaign was regenerated at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and `Cargo.lock` are unchanged. It ran with
+per run). The campaign was regenerated at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). It ran with
 `--jobs 8`: 133.038 s wall on a shared host, so the time is indicative only. Its
 normalised screening losses are identical to the previously committed router-era
 rows.

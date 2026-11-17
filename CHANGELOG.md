@@ -113,7 +113,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is now committed. The format 3 synthetic run (648 of 648 runs, 0 failed) gives
   CMA-ES better in 18 of 27 cells, worse in none and inconclusive in 9. The AMM
   campaign (324 of 324 runs, 0 failed) and the AMM method check were regenerated
-  at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and `Cargo.lock` are unchanged. AMM remains worse in all 54 comparisons, and the
+  at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). AMM remains worse in all 54 comparisons, and the
   method check's v0.3.0 and v0.7.0 runs (27 rows each) are identical.
 
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
@@ -184,8 +184,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - **The landscape diagnosis now draws its probes from the tightest arm budget
-  (Issue #266).** `diagnose`, `diagnose_specs`, `axis_shapes` and
-  `measure_axes` take a budget, and the probes go through the same
+  (Issue #266).** `diagnose` and `axis_shapes` take a budget and
+  `diagnose_specs` a budget multiple (times each problem's dimension), and the
+  probes go through the same
   `BudgetedObjective` the arms use. `diagnose_manifest` uses the manifest's
   smallest budget multiple times the dimension (10D for the predeclared
   manifest), so a diagnose-then-optimise router would have `budget -
