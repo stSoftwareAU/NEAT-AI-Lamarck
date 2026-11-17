@@ -9,8 +9,8 @@ use neat_ai_lamarck::weight_bench::suite::{
 };
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, CMA_SIGMA0, Manifest, RunRow, WeightObjective,
-    build_problem, cma_es, is_extrapolation, lamarck_refine, run_arm, run_manifest,
-    select_influential,
+    build_problem, cma_es, is_extrapolation, lamarck_refine, predeclared_manifest, run_arm,
+    run_manifest, select_influential,
 };
 
 fn problem(family: Family, seed: u64) -> (Problem, WeightObjective) {
@@ -765,4 +765,50 @@ fn rows_without_the_plateau_field_load_as_none() {
     value.as_object_mut().unwrap().remove("plateauFreeAxes");
     let older: RunRow = serde_json::from_value(value).unwrap();
     assert_eq!(older.plateau_free_axes, None);
+}
+
+/// The refine arm routes its twin and follow-up probes through
+/// `mirror_candidate` and `probe_candidate`; that must not move a single
+/// committed row.
+#[test]
+fn the_refine_arm_reproduces_its_committed_rows() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/evidence/weight-router");
+    let text = std::fs::read_to_string(dir.join("runs.jsonl")).unwrap();
+    let committed: Vec<RunRow> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    let full = predeclared_manifest();
+    let m = Manifest {
+        families: vec![Family::Tanh, Family::HardTanh],
+        dimensions: vec![20],
+        budget_multiples: vec![10, 30],
+        validation_seeds: full.validation_seeds.iter().take(2).copied().collect(),
+        ..full
+    };
+    assert!(m.validate().is_ok());
+
+    let results = run_manifest(&m).unwrap();
+    let mut compared = 0;
+    for row in results.runs.iter().filter(|r| r.arm == Arm::LamarckRefine) {
+        let expected = committed
+            .iter()
+            .find(|c| {
+                c.arm == row.arm
+                    && c.family == row.family
+                    && c.dimension == row.dimension
+                    && c.budget_multiple == row.budget_multiple
+                    && c.seed == row.seed
+            })
+            .expect("a committed row for every refine run");
+        assert_eq!(row, expected);
+        compared += 1;
+    }
+    assert!(compared > 0);
+    assert_eq!(
+        compared,
+        m.families.len() * m.dimensions.len() * m.budget_multiples.len() * m.validation_seeds.len()
+    );
 }

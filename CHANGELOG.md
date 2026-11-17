@@ -183,6 +183,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The weight bench's refinement arm now calls the production mirror and
+  follow-up helpers (Issue #266).** `lamarck-refine` (`weight_bench/refine.rs`,
+  crate 0.1.51) builds its `-delta` twin with `mirror::signed_perturbation` and
+  `mirror::mirror_candidate`, and its follow-up probes with
+  `followup::plan_probes` and `followup::probe_candidate`, instead of
+  hand-written copies. It inherits their refusals: a twin or probe the hard
+  weight limit (`limit_weight_scale`, 100000) would clamp, or whose step is below
+  `plank_constant` (1e-7), is not evaluated, and a round with a refused twin
+  spends one evaluation instead of two. It remains a simplified random-axis
+  surrogate, not `generate_candidate_batch`. Re-running the predeclared manifest
+  at `a5484b0` reproduced the committed `runs.jsonl` (648 of 648 rows) and
+  `saturated/runs.jsonl` (216 of 216), so no committed evidence changes.
 - **The landscape diagnosis now draws its probes from the tightest arm budget
   (Issue #266).** `diagnose` and `axis_shapes` take a budget and
   `diagnose_specs` a budget multiple (times each problem's dimension), and the
