@@ -76,7 +76,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   predeclared `maxRecordPasses`, uses manifest version 2, and `summary.json`
   now carries `versions.gitCommit` and per-arm means in `arms`. The sweep only
   considers rates that completed every calibration seed, and a failed run still
-  charges the passes it spent before failing. The
+  charges the passes it spent before failing, and a run that stops early
+  (`run_manifest` returns an `AbortedRun`) keeps its rows and cost, which the
+  example writes. The
   test-only `record_skip::schedule::output_strata` wrapper is removed; use
   `StratumEdges::from_values` and `StratumEdges::assign`. The method pin in
   the doc now also covers the authors' HyenaDNA (accuracy and perplexity)

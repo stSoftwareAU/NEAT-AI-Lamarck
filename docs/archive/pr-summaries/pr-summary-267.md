@@ -42,6 +42,12 @@ test-only `schedule::output_strata` wrapper is removed. The representative
   after every epoch, so its full cost is charged, in its `runs.jsonl` row
   (`recordPasses`, `revisitPasses`, `scheduleOps`) and in its phase cost.
   `PhaseCost.runs` still counts completed runs only.
+- A run that stops early is not lost. `run_manifest` returns
+  `Err(Box<AbortedRun>)` carrying every row made so far, the coverage, the
+  preparation and calibration cost and `compute`. `write_aborted_outputs` writes
+  the same three files (`summary.json` gains an `error`), and the example calls
+  it, so the passes a failed preparation spent are on disk. A refusal before any
+  run has no rows and writes nothing.
 - Manifest version 2 is a breaking change: `validate` refuses any other
   version, and a version-1 file also fails to load because the new fields are
   missing. Old manifests are therefore refused, never read with made-up
@@ -50,8 +56,8 @@ test-only `schedule::output_strata` wrapper is removed. The representative
   chooses by mean final **training** MSE, so validation stays untouched.
   Only a rate that completed every calibration seed is eligible. A rate scored
   on the surviving seeds alone would be compared over different corpora in
-  synthetic mode. When no rate qualifies the run stops and names the first
-  failure.
+  synthetic mode. When no rate qualifies the run stops, names the first
+  failure and keeps its rows and cost (`AbortedRun`).
 - `git_commit` returns `unavailable: <first stderr line>` when git fails. The
   library leaves `gitCommit` null, and only the example fills it in.
 - In corpus mode the bound reads the loaded training record count, not
@@ -137,8 +143,8 @@ results private. That run decides whether `record_skip/` stays.
 - **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change. — evidence: `lamarck/tests/record_skip.rs::refine_full_lowers_train_mse_and_keeps_parent` — reviewer: met
 - **met** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria — evidence: `lamarck/tests/record_skip.rs::compute_limit_refuses_a_manifest_over_budget`, `manifest_refusals`; `stats.rs::verdict` — reviewer: met
 - **met** — Identify code/model/data versions — evidence: `lamarck/tests/record_skip.rs::git_commit_names_the_commit_or_the_cause`; `source` in `summary.json` — reviewer: partial — reason: the reviewer said corpus mode records no creature or data identity. But `source` reads `files: corpus corpus:<training_data_key>:… parent <fingerprint>` (`corpus.rs::load_corpus`, `experiment.rs::run_validated`), and `training_data_key` hashes every corpus file's name, length and modification time. The doc now says so.
-- **met** — separate calibration from untouched validation and count all preparation/search costs — evidence: `lamarck/tests/record_skip.rs::learning_rate_sweep_is_counted_and_chooses_by_training_mse`; `preparationCost` in `summary.json` — reviewer: met
-- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `lamarck/tests/record_skip.rs` (23 tests) and `lamarck/src/record_skip/experiment.rs` (5 unit tests), including `files_mode_compute_bound_uses_the_loaded_training_count`, `all_failed_calibration_names_the_first_failure`, `a_rate_that_missed_a_seed_is_never_chosen` and `failed_runs_charge_the_passes_they_spent`; `./quality.sh` result below — reviewer: partial — reason: the corpus-mode compute limit, the calibration all-failed error and a partly failed sweep had no test at the earlier head. Each now has one.
+- **met** — separate calibration from untouched validation and count all preparation/search costs — evidence: `lamarck/tests/record_skip.rs::learning_rate_sweep_is_counted_and_chooses_by_training_mse`; `preparationCost` in `summary.json`; failed and aborted runs through `run_manifest` and the written outputs: `lamarck/src/record_skip/experiment.rs::an_aborted_preparation_keeps_the_passes_it_spent`, `an_aborted_calibration_keeps_the_preparation_cost`, `a_rate_that_fails_on_one_seed_is_not_chosen_and_its_cost_is_counted` — reviewer: partial — reason: an aborted preparation or calibration dropped the passes already spent, and the failed-run cost test never went through `run_manifest`. The abort now returns them and the tests above drive it end to end.
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `lamarck/tests/record_skip.rs` (23 tests) and `lamarck/src/record_skip/experiment.rs` (8 unit tests), including `files_mode_compute_bound_uses_the_loaded_training_count`, `compute_limit_refuses_a_manifest_over_budget`, `all_failed_calibration_names_the_first_failure`, `a_rate_that_fails_on_one_seed_is_not_chosen_and_its_cost_is_counted` and `an_aborted_preparation_keeps_the_passes_it_spent`; `./quality.sh` result below — reviewer: partial — reason: the corpus-mode compute limit, the calibration all-failed error, a partly failed sweep and the limit-versus-bound figures lacked a test that would fail on a wrong value. Each now has one.
 - **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage — evidence: `docs/evidence/record-skip/summary.json` (252/252, `validationDiffs`, CIs) — reviewer: met
 - **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source": the pin at `804aedb` now covers DNABERT-2, Nucleotide Transformer, HyenaDNA accuracy and perplexity, the RP controls, DSI and the baselines, plus the PDF fragments from a web search) — reviewer: partial — reason: the pin is thorough, but the paper text is still unread (proxy 403 on three retries, see Undiscoverable Facts), so "read the full method" is not met.
 - **met** — Record negative findings — evidence: `docs/easy-record-skipping.md` ("Findings": preparation plus calibration cost about 136 times the passes easy-75 saves per run) — reviewer: met
@@ -162,7 +168,7 @@ results private. That run decides whether `record_skip/` stays.
 
 - Added to `lamarck/tests/record_skip.rs`:
   - `version_1_manifest_file_fails_loudly`: the merged version-1 `manifest.json` fails to load, naming a missing field.
-  - `compute_limit_refuses_a_manifest_over_budget`: bound − 1 is refused, naming `maxRecordPasses`. At exactly the bound the run is accepted, and the actual passes equal the sum of the three phases.
+  - `compute_limit_refuses_a_manifest_over_budget`: bound − 1 is refused, naming `maxRecordPasses`, with no rows and `limitRecordPasses` bound − 1. At exactly the bound the run is accepted, and the actual passes equal the sum of the three phases. A run with the default limit of 16,000,000 reports a planned bound of 14 × 4 × 100 = 5,600 beside that limit, in the report and in `summary.json`, so the two fields cannot be swapped unnoticed.
   - `learning_rate_sweep_is_counted_and_chooses_by_training_mse`: the tiny rate loses; preparation runs and coverage count the sweep. Each sweep entry equals that seed's preparation `finalTrainMse` and differs from its `finalValidationMse`, so a choice read from validation MSE fails.
   - `files_mode_compute_bound_uses_the_loaded_training_count`: 170 records less 50 validation give 120 training records against `tiny()`'s `trainRecords` of 100. The bound `14 × epochs × 120` is accepted, one pass less is refused naming the bound, and `planned_bound_record_passes` equals it.
   - `arms_summarise_validation_runs`.
@@ -172,10 +178,13 @@ results private. That run decides whether `record_skip/` stays.
   - `all_failed_calibration_names_the_first_failure`: restored. `reductions = [1.5]` passes every full preparation run and fails every random and easy calibration run, so `run_validated` returns "no matched pairs", "first failure: random-150 seed 1 calibration" and "invalid reduction".
   - `all_failed_preparation_names_the_first_failure`: kept beside it, for the preparation error.
   - `a_rate_that_missed_a_seed_is_never_chosen`: a rate scored on one of two seeds has a lower mean but is not chosen. Control: the same rate wins when complete. No rate eligible gives `None`.
+  - `an_aborted_preparation_keeps_the_passes_it_spent`: with a NaN validation target every rate diverges, and `run_manifest` returns an `AbortedRun` holding the 4 failed rows, `preparationCost.recordPasses` and `compute.actualRecordPasses` of 4 × epochs × records. `write_aborted_outputs` puts the same figures, the `error` and each row's `recordPasses` in the files, and `summary.json` has no `rows`.
+  - `an_aborted_calibration_keeps_the_preparation_cost`: an out-of-range reduction aborts calibration with the 4 completed preparation runs and 4 failed calibration rows kept; `actualRecordPasses` equals the preparation passes.
+  - `a_rate_that_fails_on_one_seed_is_not_chosen_and_its_cost_is_counted`: through `run_validated`, the rate that wins a clean two-seed sweep is made to diverge on seed 2 only (a test-only hook; no real rate diverges deterministically, the update clips). Its entry has `nRuns` 1 and a lower-looking mean, yet the runner-up that completed both seeds is chosen, in the report and in `summary.json`. The failed run is reported, and its passes are in `preparationCost`, `actualRecordPasses` and the `runs.jsonl` row. Without the eligibility rule the favourite would be chosen.
   - `failed_runs_charge_the_passes_they_spent`: a NaN validation target makes every run diverge after all epochs. Each `FailureRow` carries the full `epochs × trainRecords` passes, `phase_cost` and `total_record_passes` include them while `runs` stays 0, and `runs.jsonl` carries `recordPasses`.
 - `stratum_edges_bin_first_targets` replaces `output_strata_bins`. It checks the same bins through `StratumEdges::from_values` and `StratumEdges::assign`.
 - `cargo test -p neat_ai_lamarck --test record_skip`: 23 passed.
-  `cargo test -p neat_ai_lamarck --lib record_skip`: 5 passed.
+  `cargo test -p neat_ai_lamarck --lib record_skip`: 8 passed.
 - `timeout 1700 ./quality.sh < /dev/null` passed on the tree committed with this summary (exit 0, "All quality checks passed!"). That includes clippy `-D warnings`, the full test suite, rustdoc, codespell and markdownlint.
 - Removed from `lamarck/src/record_skip/experiment.rs`: `assert_eq!(report.coverage.planned, 10);`
   - Obsolete: the plan had no preparation phase. Still covered by: `lamarck/src/record_skip/experiment.rs::refused_grid_point_is_reported_beside_a_valid_one`. Replaced by: `assert_eq!(report.coverage.planned, 14);`

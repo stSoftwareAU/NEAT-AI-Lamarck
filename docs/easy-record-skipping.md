@@ -341,7 +341,13 @@ Compute (`compute` in `summary.json`): limit 16,000,000 record passes, planned
 bound 15,120,000, actual 8,856,000. A run that fails still charges the passes
 it spent before failing (a diverged run spends all of them), in its
 `runs.jsonl` row and in its phase's cost and `actualRecordPasses`; `Runs`
-counts completed runs only. This suite had no failures.
+counts completed runs only. A run that stops early (no learning rate completed
+every seed, or calibration had no matched pair) is not lost: `run_manifest`
+returns an `AbortedRun` with the rows and costs so far, and the example writes
+`manifest.json`, `runs.jsonl` and a `summary.json` holding the `error`,
+`coverage`, `preparationCost`, `calibrationCost` and `compute`. A refusal
+before any run (invalid manifest, bound over the limit) has no rows and writes
+nothing. This suite had no failures.
 
 ## Findings
 

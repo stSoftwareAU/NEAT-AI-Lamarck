@@ -639,8 +639,13 @@ fn compute_limit_refuses_a_manifest_over_budget() {
     m.max_record_passes = bound - 1;
     assert!(m.validate().is_ok());
     let err = run_manifest(&m, &CorpusSource::Synthetic).unwrap_err();
-    assert!(err.contains("maxRecordPasses"), "{err}");
-    assert!(err.contains(&bound.to_string()), "{err}");
+    assert!(err.error.contains("maxRecordPasses"), "{err}");
+    assert!(err.error.contains(&bound.to_string()), "{err}");
+    // A refusal happens before any run, so it spent nothing.
+    assert!(err.rows.is_empty());
+    assert_eq!(err.compute.actual_record_passes, 0);
+    assert_eq!(err.compute.planned_bound_record_passes, bound);
+    assert_eq!(err.compute.limit_record_passes, bound - 1);
 
     m.max_record_passes = bound;
     let report = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
@@ -654,6 +659,17 @@ fn compute_limit_refuses_a_manifest_over_budget() {
             + report.validation_cost.record_passes
     );
     assert!(report.compute.actual_record_passes > 0);
+
+    // The limit and the planned bound are different figures: with the
+    // predeclared limit the bound is the smaller one.
+    let roomy = tiny();
+    assert_eq!(roomy.max_record_passes, 16_000_000);
+    let report = run_manifest(&roomy, &CorpusSource::Synthetic).unwrap();
+    assert_eq!(report.compute.planned_bound_record_passes, bound);
+    assert_eq!(report.compute.limit_record_passes, 16_000_000);
+    let summary: serde_json::Value = serde_json::from_str(&report.summary_json().unwrap()).unwrap();
+    assert_eq!(summary["compute"]["plannedBoundRecordPasses"], bound);
+    assert_eq!(summary["compute"]["limitRecordPasses"], 16_000_000);
 }
 
 #[test]
@@ -674,8 +690,13 @@ fn files_mode_compute_bound_uses_the_loaded_training_count() {
     let bound = 14 * u64::from(m.epochs) * 120;
     m.max_record_passes = bound - 1;
     let err = run_manifest(&m, &source).unwrap_err();
-    assert!(err.contains("maxRecordPasses"), "{err}");
-    assert!(err.contains(&bound.to_string()), "{err}");
+    assert!(err.error.contains("maxRecordPasses"), "{err}");
+    assert!(err.error.contains(&bound.to_string()), "{err}");
+    // A refusal happens before any run, so it spent nothing.
+    assert!(err.rows.is_empty());
+    assert_eq!(err.compute.actual_record_passes, 0);
+    assert_eq!(err.compute.planned_bound_record_passes, bound);
+    assert_eq!(err.compute.limit_record_passes, bound - 1);
 
     m.max_record_passes = bound;
     let report = run_manifest(&m, &source).unwrap();

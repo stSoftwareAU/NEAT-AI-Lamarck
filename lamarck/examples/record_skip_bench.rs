@@ -6,14 +6,16 @@
 //!     [--creature FILE --training-data DIR [--validation-records N] [--max-records N]]
 //! ```
 //!
-//! Writes `manifest.json`, `runs.jsonl` and `summary.json` into `OUT_DIR`. The
+//! Writes `manifest.json`, `runs.jsonl` and `summary.json` into `OUT_DIR`, also when
+//! the run stops early (the summary then holds the error and the cost so far). The
 //! creature and training-data paths are only ever read.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use neat_ai_lamarck::record_skip::experiment::{
-    CorpusSource, Manifest, git_commit, load_corpus, run_manifest, write_outputs,
+    CorpusSource, Manifest, git_commit, load_corpus, run_manifest, write_aborted_outputs,
+    write_outputs,
 };
 use neat_core::parse_creature_json;
 
@@ -87,8 +89,26 @@ fn run() -> Result<(), String> {
         }
         _ => CorpusSource::Synthetic,
     };
-    let mut report = run_manifest(&manifest, &source)?;
-    report.versions.git_commit = Some(git_commit(Path::new(env!("CARGO_MANIFEST_DIR"))));
+    let commit = git_commit(Path::new(env!("CARGO_MANIFEST_DIR")));
+    let mut report = match run_manifest(&manifest, &source) {
+        Ok(report) => report,
+        Err(mut aborted) => {
+            // Runs made before the stop still cost compute: keep their rows
+            // and cost. A refusal before any run has nothing to write.
+            if !aborted.rows.is_empty() {
+                aborted.versions.git_commit = Some(commit);
+                write_aborted_outputs(&args.out, &aborted)?;
+                eprintln!(
+                    "run stopped after {} run(s), {} record passes; outputs written to {}",
+                    aborted.rows.len(),
+                    aborted.compute.actual_record_passes,
+                    args.out.display()
+                );
+            }
+            return Err(aborted.error);
+        }
+    };
+    report.versions.git_commit = Some(commit);
     write_outputs(&args.out, &report)?;
 
     println!("source: {}", report.source);
