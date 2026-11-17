@@ -194,7 +194,7 @@ pub struct LandscapeRow {
     /// `BudgetExhausted` as its `error` with `evaluations == budget`. `None`
     /// only in rows written before this change (the committed
     /// `docs/evidence/weight-router-landscape/landscape.jsonl`, crate 0.1.49),
-    /// which drew from no budget.
+    /// which drew from no budget: absent (`None`) in format 3 and earlier.
     #[serde(default)]
     pub budget: Option<usize>,
 }
@@ -421,8 +421,8 @@ pub struct LandscapeCell {
     /// Total one-sided plateau count from the selection scans.
     pub plateau_free_axes: usize,
     /// Total evaluation budget the cell's diagnoses drew from (see
-    /// [`LandscapeRow::budget`]). Absent (0) in summaries written before the
-    /// diagnosis was budgeted.
+    /// [`LandscapeRow::budget`]). Absent (0) in format 3 and earlier, written
+    /// before the diagnosis was budgeted.
     #[serde(default)]
     pub budget: usize,
 }
@@ -466,10 +466,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_failure_partway_through_the_axes_keeps_the_evaluations_spent() {
+    fn classify_axes_stops_at_the_first_failed_evaluation() {
         let x0 = [0.0, 0.5, 1.0];
         // The base and the first axis succeed; the 7th call (axis 1, second
-        // step) fails, and the calls made are the evaluations spent.
+        // step) fails, and the calls stop at the failure.
         let mut calls = 0usize;
         let result = classify_axes(&x0, |x| {
             calls += 1;

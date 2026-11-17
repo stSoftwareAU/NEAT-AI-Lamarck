@@ -55,6 +55,8 @@
 //! budget multiple times the dimension (the tightest arm budget; the summary's
 //! `diagnosisBudgetMultiple`, and `budget` on each row and cell); a problem
 //! whose `1 + 4D` probes exceed it records `BudgetExhausted` as its `error`.
+//! These fields are landscape summary format 4 (crate 0.1.50); the committed
+//! landscape evidence is format 3, without them.
 //! A problem that cannot be built or diagnosed is recorded, not fatal: its row
 //! carries `error` (null on success) and zero shapes, its cell counts it in
 //! `failures`, and the summary's `coverage` gives planned, completed and failed
@@ -237,7 +239,7 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
     let rows_path = out_dir.join("landscape.jsonl");
     fs::write(&rows_path, lines).map_err(|e| format!("{}: {e}", rows_path.display()))?;
     let mut summary = json!({
-        "formatVersion": 3,
+        "formatVersion": 4,
         "crateVersion": env!("CARGO_PKG_VERSION"),
         "wallClockSeconds": wall_clock_seconds,
         "manifest": manifest,

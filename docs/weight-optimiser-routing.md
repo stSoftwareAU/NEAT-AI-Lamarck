@@ -19,8 +19,9 @@ current code runs two in-process arms, refinement and CMA-ES, on paired
 validation seeds with no calibration phase. The committed `manifest.json`,
 `summary.json` and `reference-summary.json` in
 [`docs/evidence/weight-router/`](evidence/weight-router/summary.json) are
-output of the current code (crate 0.1.49, `formatVersion` 3) and are reproduced
-by the commands in [How to run](#how-to-run). The router, probe and calibration
+produced by crate 0.1.49 (`formatVersion` 3) and are still reproduced by the
+commands in [How to run](#how-to-run), because crate 0.1.50 changes only the
+landscape diagnosis, which writes its own `weight-router-landscape/` files. The router, probe and calibration
 sections below describe an **earlier router-era run** (crate 0.1.46). Its
 numbers are kept as a recorded negative finding; they cannot be reproduced from
 the current code, because that code was removed.
@@ -474,7 +475,9 @@ columns are the router-era run's router verdicts.
    spent, counted in its cell's `failures` and in the summary's `coverage`
    (planned, completed and failed problems), and the run goes on. Before
    format 3 the command stopped at the first failure. The rows and cell counts
-   are unchanged from the format 2 run at `d505d1a`.
+   are unchanged from the format 2 run at `d505d1a`. The landscape summary
+   format is 4 from crate 0.1.50, which adds `diagnosisBudgetMultiple` and the
+   per-row and per-cell `budget`; the committed landscape evidence is format 3.
 
    | Family | D | flat | edge | kinked | smooth | indeterminate | one-sided `plateauFreeAxes` |
    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
