@@ -21,7 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   arm's budget (every arm shares it), and the diagnosis now draws from the
   tightest arm budget (see Changed). A
   problem that fails is recorded with its `error` and the evaluations it spent,
-  and the run goes on. The summary (`formatVersion` 3) reports coverage
+  and the run goes on. The summary (`formatVersion` 4, regenerated at crate
+  0.1.50 with a 10D `budget` on every row) reports coverage
   (planned, completed and failed problems), and each cell counts its
   `failures`. The committed run covered 144 of 144 problems, 0 failed.
   The new `saturated-hard-tanh` family clamps 14 of 16 hidden units with a ±12
@@ -191,8 +192,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   evaluations` left. A diagnosis needing more than the budget (`1 + 4D`) records
   `BudgetExhausted` as its row's `error`. `LandscapeRow` and `LandscapeCell` gain
   `budget` (absent in older evidence, read as `None` and 0), and the summary
-  gains `diagnosisBudgetMultiple`. The committed evidence predates this and is
-  unchanged; every diagnosis in it fits within 10D. The selection scan stays
+  gains `diagnosisBudgetMultiple`. The committed evidence in
+  `docs/evidence/weight-router-landscape/` was regenerated in format 4: every
+  row carries `budget` = 10D, every diagnosis fits within it, and apart from
+  `budget` the rows are identical to the format 3 rows. The selection scan stays
   counted separately because every arm shares it.
 
 - **The security workflow no longer compiles cargo-audit on every run (Issue

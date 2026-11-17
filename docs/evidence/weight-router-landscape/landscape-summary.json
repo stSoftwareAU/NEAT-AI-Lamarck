@@ -1,6 +1,7 @@
 {
   "cells": [
     {
+      "budget": 2400,
       "dimension": 20,
       "edge": 0,
       "evaluations": 972,
@@ -15,6 +16,7 @@
       "smooth": 240
     },
     {
+      "budget": 4800,
       "dimension": 40,
       "edge": 0,
       "evaluations": 1932,
@@ -29,6 +31,7 @@
       "smooth": 480
     },
     {
+      "budget": 12000,
       "dimension": 100,
       "edge": 0,
       "evaluations": 4812,
@@ -43,6 +46,7 @@
       "smooth": 1199
     },
     {
+      "budget": 2400,
       "dimension": 20,
       "edge": 0,
       "evaluations": 972,
@@ -57,6 +61,7 @@
       "smooth": 221
     },
     {
+      "budget": 4800,
       "dimension": 40,
       "edge": 0,
       "evaluations": 1932,
@@ -71,6 +76,7 @@
       "smooth": 413
     },
     {
+      "budget": 12000,
       "dimension": 100,
       "edge": 0,
       "evaluations": 4812,
@@ -85,6 +91,7 @@
       "smooth": 851
     },
     {
+      "budget": 2400,
       "dimension": 20,
       "edge": 0,
       "evaluations": 972,
@@ -99,6 +106,7 @@
       "smooth": 201
     },
     {
+      "budget": 4800,
       "dimension": 40,
       "edge": 0,
       "evaluations": 1932,
@@ -113,6 +121,7 @@
       "smooth": 372
     },
     {
+      "budget": 12000,
       "dimension": 100,
       "edge": 0,
       "evaluations": 4812,
@@ -127,6 +136,7 @@
       "smooth": 772
     },
     {
+      "budget": 2400,
       "dimension": 20,
       "edge": 0,
       "evaluations": 972,
@@ -141,6 +151,7 @@
       "smooth": 228
     },
     {
+      "budget": 4800,
       "dimension": 40,
       "edge": 1,
       "evaluations": 1932,
@@ -155,6 +166,7 @@
       "smooth": 305
     },
     {
+      "budget": 12000,
       "dimension": 100,
       "edge": 1,
       "evaluations": 4812,
@@ -174,11 +186,12 @@
     "failedProblems": 0,
     "plannedProblems": 144
   },
-  "crateVersion": "0.1.49",
+  "crateVersion": "0.1.50",
   "curvatureRelTol": 1e-9,
+  "diagnosisBudgetMultiple": 10,
   "diagnosisEvaluations": 30864,
-  "formatVersion": 3,
-  "gitCommit": "cf2ff11e49a97acb08c53de9556c2d06129880e8",
+  "formatVersion": 4,
+  "gitCommit": "8e79db75de0ab5e2b39d8847e0f3a1b5c48d4f04",
   "gitDirty": false,
   "kinkRatioRelTol": 0.25,
   "manifest": {
@@ -221,5 +234,5 @@
   "smoothRatio": 4.0,
   "stepHalfWidth": 0.05,
   "totalEvaluations": 51744,
-  "wallClockSeconds": 1.298
+  "wallClockSeconds": 1.808
 }

@@ -561,7 +561,17 @@ fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() 
         m.families.len() * m.dimensions.len() * m.validation_seeds.len()
     );
     assert_eq!(summarise_landscape(&m, &rows), cells);
-    assert_eq!(summary["formatVersion"], serde_json::json!(3));
+    assert_eq!(summary["formatVersion"], serde_json::json!(4));
+    assert_eq!(summary["diagnosisBudgetMultiple"], serde_json::json!(10));
+    // Every committed diagnosis drew its probes from the tightest arm budget
+    // (10D) and stayed inside it.
+    for row in &rows {
+        assert_eq!(row.budget, Some(10 * row.dimension), "{row:?}");
+        assert!(row.evaluations <= 10 * row.dimension, "{row:?}");
+    }
+    for cell in &cells {
+        assert_eq!(cell.budget, cell.problems * 10 * cell.dimension, "{cell:?}");
+    }
     let coverage: LandscapeCoverage = serde_json::from_value(summary["coverage"].clone()).unwrap();
     assert_eq!(coverage, landscape_coverage(&m, &rows));
     assert_eq!(
@@ -631,20 +641,7 @@ fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() 
         .filter(|r| r.seed == m.validation_seeds[0])
         .cloned()
         .collect();
-    // The committed rows predate the diagnosis budget, so they carry none; the
-    // current code records the tightest budget (10D) on each, and nothing else
-    // differs.
-    let current = diagnose_manifest(&first_seed).unwrap();
-    assert!(
-        current
-            .iter()
-            .all(|r| r.budget == Some(10 * r.dimension) && r.evaluations <= 10 * r.dimension)
-    );
-    let without_budget: Vec<LandscapeRow> = current
-        .into_iter()
-        .map(|r| LandscapeRow { budget: None, ..r })
-        .collect();
-    assert_eq!(without_budget, expected);
+    assert_eq!(diagnose_manifest(&first_seed).unwrap(), expected);
 }
 
 #[test]
@@ -712,18 +709,12 @@ fn a_diagnosis_over_its_budget_is_recorded_as_budget_exhausted() {
 
 #[test]
 fn landscape_rows_without_a_budget_still_load() {
-    let dir = format!(
-        "{}/../docs/evidence/weight-router-landscape",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let rows_path = format!("{dir}/landscape.jsonl");
-    assert!(
-        std::path::Path::new(&rows_path).exists(),
-        "missing {rows_path}"
-    );
-    let text = std::fs::read_to_string(&rows_path).unwrap();
-    let first = text.lines().next().unwrap();
-    let row: LandscapeRow = serde_json::from_str(first).unwrap();
+    // A row and a summary cell exactly as landscape summary format 3 (crate
+    // 0.1.49, before the diagnosis budget) wrote them.
+    let row: LandscapeRow = serde_json::from_str(
+        r#"{"family":"tanh","dimension":20,"seed":1001,"flat":0,"edge":0,"kinked":0,"smooth":20,"indeterminate":0,"evaluations":81,"preparationEvaluations":145,"plateauFreeAxes":0,"error":null}"#,
+    )
+    .unwrap();
     assert_eq!(row.budget, None);
     assert_eq!(row.family, Family::Tanh);
     assert_eq!((row.dimension, row.seed), (20, 1001));
@@ -733,17 +724,11 @@ fn landscape_rows_without_a_budget_still_load() {
     assert_eq!(row.plateau_free_axes, 0);
     assert_eq!(row.error, None);
 
-    let summary_path = format!("{dir}/landscape-summary.json");
-    assert!(
-        std::path::Path::new(&summary_path).exists(),
-        "missing {summary_path}"
-    );
-    let summary: Value =
-        serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
-    let cells = summary["cells"].as_array().unwrap();
-    assert!(!cells.is_empty());
-    for cell in cells {
-        let cell: LandscapeCell = serde_json::from_value(cell.clone()).unwrap();
-        assert_eq!(cell.budget, 0);
-    }
+    let cell: LandscapeCell = serde_json::from_str(
+        r#"{"dimension": 20, "edge": 0, "evaluations": 972, "failures": 0, "family": "tanh", "flat": 0, "indeterminate": 0, "kinked": 0, "plateauFreeAxes": 0, "preparationEvaluations": 1740, "problems": 12, "smooth": 240}"#,
+    )
+    .unwrap();
+    assert_eq!(cell.budget, 0);
+    assert_eq!((cell.dimension, cell.problems), (20, 12));
+    assert_eq!(cell.shapes.smooth, 240);
 }

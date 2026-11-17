@@ -55,8 +55,8 @@
 //! budget multiple times the dimension (the tightest arm budget; the summary's
 //! `diagnosisBudgetMultiple`, and `budget` on each row and cell); a problem
 //! whose `1 + 4D` probes exceed it records `BudgetExhausted` as its `error`.
-//! These fields are landscape summary format 4 (crate 0.1.50); the committed
-//! landscape evidence is format 3, without them.
+//! These fields are landscape summary format 4 (crate 0.1.50), the format of
+//! the committed landscape evidence.
 //! A problem that cannot be built or diagnosed is recorded, not fatal: its row
 //! carries `error` (null on success) and zero shapes, its cell counts it in
 //! `failures`, and the summary's `coverage` gives planned, completed and failed

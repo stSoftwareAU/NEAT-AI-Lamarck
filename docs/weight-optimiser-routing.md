@@ -445,9 +445,9 @@ columns are the router-era run's router verdicts.
    `BudgetedObjective` of the manifest's tightest multiple × D (10D for the
    predeclared manifest), recorded per row as `budget` and summed per cell. A
    diagnosis that needs more than its budget is recorded as `BudgetExhausted`.
-   The committed landscape evidence predates that change (its rows carry no
-   `budget`, crate 0.1.49), and every diagnosis in it fits within 10D
-   (`1 + 4D` < 10D). Nothing routes on the diagnosis, but a
+   The committed landscape evidence was regenerated with that change (crate
+   0.1.50, format 4): every row carries `budget` = 10D and every diagnosis fits
+   within it (`1 + 4D` < 10D), with no `BudgetExhausted` row. Nothing routes on the diagnosis, but a
    diagnose-then-optimise router at that budget would have `budget -
    evaluations` left. Building each problem also runs the 145-evaluation
    selection scan (`scan_sensitivities`), which the summary counts once per
@@ -468,16 +468,17 @@ columns are the router-era run's router verdicts.
    and `docs/evidence/weight-router/` are unchanged. Totals over the 12
    validation seeds (1001..1012) in
    `docs/evidence/weight-router-landscape/landscape-summary.json` (crate
-   0.1.49, `formatVersion` 3, commit `cf2ff11`, clean tree, 1.3 s, 51 744
+   0.1.50, `formatVersion` 4, commit `8e79db7`, clean tree, 1.8 s, 51 744
    evaluations: 30 864 diagnosis plus 20 880 selection-scan preparation).
    Coverage was 144 of 144 problems, 0 failed. A problem that fails to build
    or diagnose is recorded as a row with its `error` and the evaluations it
    spent, counted in its cell's `failures` and in the summary's `coverage`
    (planned, completed and failed problems), and the run goes on. Before
    format 3 the command stopped at the first failure. The rows and cell counts
-   are unchanged from the format 2 run at `d505d1a`. The landscape summary
-   format is 4 from crate 0.1.50, which adds `diagnosisBudgetMultiple` and the
-   per-row and per-cell `budget`; the committed landscape evidence is format 3.
+   are unchanged from the format 2 run at `d505d1a` and the format 3 run at
+   `cf2ff11`. Format 4 (crate 0.1.50) adds `diagnosisBudgetMultiple` (10) and
+   the per-row and per-cell `budget`; apart from `budget`, the regenerated rows
+   are identical to the format 3 rows.
 
    | Family | D | flat | edge | kinked | smooth | indeterminate | one-sided `plateauFreeAxes` |
    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -667,7 +668,7 @@ confirmation evaluations. No calibration was run by the current code.
 | AMM reference, predeclared suite | `weight-router/reference-summary.json` | 324 runs | 0 | 855,000 | `f0a7b4c` |
 | `saturated-hard-tanh` arms (refine, CMA-ES) | `weight-router-landscape/saturated/summary.json` | 216 runs | 0 | 543,852 | `8badaf5` |
 | AMM reference, `saturated-hard-tanh` | `weight-router-landscape/saturated/reference-summary.json` | 108 runs | 0 | 285,000 | `84096bb` |
-| Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `cf2ff11` |
+| Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `8e79db7` |
 | **Committed total** | | | 0 | 3,367,211 | |
 
 The router-era campaign (crate 0.1.46), whose code was removed, and its

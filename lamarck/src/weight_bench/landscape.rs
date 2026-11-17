@@ -192,9 +192,8 @@ pub struct LandscapeRow {
     /// dimension`, the manifest's tightest budget). A diagnosis that needs
     /// more than the budget (`1 + 4 * dimension` evaluations) records
     /// `BudgetExhausted` as its `error` with `evaluations == budget`. `None`
-    /// only in rows written before this change (the committed
-    /// `docs/evidence/weight-router-landscape/landscape.jsonl`, crate 0.1.49),
-    /// which drew from no budget: absent (`None`) in format 3 and earlier.
+    /// only in rows written before this change (landscape format 3 and
+    /// earlier, crate 0.1.49), which drew from no budget.
     #[serde(default)]
     pub budget: Option<usize>,
 }
