@@ -439,11 +439,19 @@ columns are the router-era run's router verdicts.
 5. **Plateaus and kinks, measured with a two-sided diagnosis (added after the
    predeclared run).** `weight_bench::landscape` takes `f(x±h)` and
    `f(x±h/2)` (`h` = 0.05) on every chosen axis from the start weights over the
-   screening records, 4 evaluations per axis plus 1 base, outside every arm's
-   budget. Building each problem also runs the 145-evaluation selection scan
-   (`scan_sensitivities`), which the summary counts once per problem as
-   `preparationEvaluations`. Neither count is charged to any arm's budget,
-   because the diagnosis is not an arm. An axis is `flat` when both one-sided
+   screening records, 4 evaluations per axis plus 1 base (`1 + 4D`). Since the
+   change that budgeted it, the diagnosis draws those probes from a
+   `BudgetedObjective` of the manifest's tightest multiple × D (10D for the
+   predeclared manifest), recorded per row as `budget` and summed per cell. A
+   diagnosis that needs more than its budget is recorded as `BudgetExhausted`.
+   The committed landscape evidence predates that change (its rows carry no
+   `budget`, crate 0.1.49), and every diagnosis in it fits within 10D
+   (`1 + 4D` < 10D). Nothing routes on the diagnosis, but a
+   diagnose-then-optimise router at that budget would have `budget -
+   evaluations` left. Building each problem also runs the 145-evaluation
+   selection scan (`scan_sensitivities`), which the summary counts once per
+   problem as `preparationEvaluations`. That scan stays outside the arms'
+   budgets, because every arm shares the same selection scan. An axis is `flat` when both one-sided
    changes are within `PLATEAU_REL_TOL` (1e-6) of the base loss and `edge`
    when exactly one is.
    Otherwise, with `D2(s) = f(x+s) + f(x-s) - 2f(x)`, it is `indeterminate`

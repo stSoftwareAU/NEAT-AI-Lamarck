@@ -17,7 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `landscape-summary.json`. The summary also counts the selection scan that
   builds each problem (`preparationEvaluations`, 145 per problem) alongside the
   diagnosis's own evaluations, so `totalEvaluations` (51 744 for the committed
-  run) is every evaluation the command runs, and no arm's budget is charged. A
+  run) is every evaluation the command runs; the selection scan is charged to no
+  arm's budget (every arm shares it), and the diagnosis now draws from the
+  tightest arm budget (see Changed). A
   problem that fails is recorded with its `error` and the evaluations it spent,
   and the run goes on. The summary (`formatVersion` 3) reports coverage
   (planned, completed and failed problems), and each cell counts its
@@ -179,6 +181,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   0.17.0 so the breaking-bump gate can pass and this install script can land.
 
 ### Changed
+
+- **The landscape diagnosis now draws its probes from the tightest arm budget
+  (Issue #266).** `diagnose`, `diagnose_specs`, `axis_shapes` and
+  `measure_axes` take a budget, and the probes go through the same
+  `BudgetedObjective` the arms use. `diagnose_manifest` uses the manifest's
+  smallest budget multiple times the dimension (10D for the predeclared
+  manifest), so a diagnose-then-optimise router would have `budget -
+  evaluations` left. A diagnosis needing more than the budget (`1 + 4D`) records
+  `BudgetExhausted` as its row's `error`. `LandscapeRow` and `LandscapeCell` gain
+  `budget` (absent in older evidence, read as `None` and 0), and the summary
+  gains `diagnosisBudgetMultiple`. The committed evidence predates this and is
+  unchanged; every diagnosis in it fits within 10D. The selection scan stays
+  counted separately because every arm shares it.
 
 - **The security workflow no longer compiles cargo-audit on every run (Issue
   #253).** `security.yml` now installs a prebuilt, version-pinned

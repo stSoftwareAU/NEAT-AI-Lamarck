@@ -51,6 +51,10 @@
 //! `diagnosisEvaluations` counts the diagnosis itself, `preparationEvaluations`
 //! the selection scan that built each problem (counted once per problem), and
 //! `totalEvaluations` is their sum, every loss evaluation the command runs.
+//! The diagnosis draws its probes from a budget of the manifest's smallest
+//! budget multiple times the dimension (the tightest arm budget; the summary's
+//! `diagnosisBudgetMultiple`, and `budget` on each row and cell); a problem
+//! whose `1 + 4D` probes exceed it records `BudgetExhausted` as its `error`.
 //! A problem that cannot be built or diagnosed is recorded, not fatal: its row
 //! carries `error` (null on success) and zero shapes, its cell counts it in
 //! `failures`, and the summary's `coverage` gives planned, completed and failed
@@ -242,6 +246,7 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
         "curvatureRelTol": CURVATURE_REL_TOL,
         "smoothRatio": SMOOTH_RATIO,
         "kinkRatioRelTol": KINK_RATIO_REL_TOL,
+        "diagnosisBudgetMultiple": manifest.budget_multiples.iter().min(),
         "diagnosisEvaluations": rows.iter().map(|r| r.evaluations).sum::<usize>(),
         "preparationEvaluations": rows.iter().map(|r| r.preparation_evaluations).sum::<usize>(),
         "totalEvaluations": landscape_total_evaluations(&rows),
@@ -256,7 +261,7 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
     fs::write(&summary_path, pretty).map_err(|e| format!("{}: {e}", summary_path.display()))?;
     for cell in &cells {
         println!(
-            "{:?} D={} ({} problems, {} failed): flat {} edge {} kinked {} smooth {} indeterminate {}; one-sided plateau {}; {} diagnosis + {} preparation evaluations",
+            "{:?} D={} ({} problems, {} failed): flat {} edge {} kinked {} smooth {} indeterminate {}; one-sided plateau {}; {} diagnosis (of a {} budget) + {} preparation evaluations",
             cell.family,
             cell.dimension,
             cell.problems,
@@ -268,15 +273,17 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
             cell.shapes.indeterminate,
             cell.plateau_free_axes,
             cell.evaluations,
+            cell.budget,
             cell.preparation_evaluations
         );
     }
     println!(
-        "problems {}/{} completed ({} failed); {} evaluations in total (diagnosis and preparation); wrote {} and {}",
+        "problems {}/{} completed ({} failed); {} evaluations in total (diagnosis and preparation; diagnosis budget {}x dimension); wrote {} and {}",
         coverage.completed_problems,
         coverage.planned_problems,
         coverage.failed_problems,
         landscape_total_evaluations(&rows),
+        manifest.budget_multiples.iter().min().copied().unwrap_or(0),
         rows_path.display(),
         summary_path.display()
     );
