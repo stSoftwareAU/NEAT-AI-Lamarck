@@ -219,13 +219,62 @@ impl<'a> BudgetedObjective<'a> {
     }
 }
 
+/// Relative tolerance for calling an axis flat: a one-sided step of
+/// [`RANDOM_DELTA_HALF_WIDTH`] that changes the loss by at most this fraction
+/// of the base loss.
+pub const PLATEAU_REL_TOL: f64 = 1e-6;
+
+/// The sensitivity scan behind [`select_influential`]: every synapse gets a
+/// one-sided finite difference of [`RANDOM_DELTA_HALF_WIDTH`] from the start
+/// weights.
+///
+/// Returns the base loss at the start weights, the absolute loss change for
+/// each synapse (indexed by synapse), and the evaluations spent (`synapses + 1`).
+pub fn scan_sensitivities(
+    creature: &CreatureExport,
+    records: &[f32],
+) -> Result<(f64, Vec<f64>, usize), BenchError> {
+    let n = creature.synapses.len();
+    let all: Vec<usize> = (0..n).collect();
+    let objective = WeightObjective::new(creature.clone(), all, records)?;
+    let x0 = objective.start();
+    let eval = |x: &[f64]| objective.loss(x).map_err(BenchError::Evaluation);
+    let base = eval(&x0)?;
+    let mut changes = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut x = x0.clone();
+        x[i] += RANDOM_DELTA_HALF_WIDTH;
+        changes.push((eval(&x)? - base).abs());
+    }
+    Ok((base, changes, n + 1))
+}
+
+/// The `d` largest sensitivities in `changes`, ascending; ties go to the lower
+/// index. `d` above `changes.len()` simply takes them all.
+pub fn pick_influential(changes: &[f64], d: usize) -> Vec<usize> {
+    let mut scored: Vec<(usize, f64)> = changes.iter().copied().enumerate().collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut picked: Vec<usize> = scored.iter().take(d).map(|s| s.0).collect();
+    picked.sort_unstable();
+    picked
+}
+
+/// How many of the `chosen` axes are flat: their one-sided step changes the
+/// loss by at most [`PLATEAU_REL_TOL`] times `base_loss`. `changes` is the
+/// per-synapse sensitivity from [`scan_sensitivities`], which the indices
+/// in `chosen` must index.
+pub fn count_plateau_axes(chosen: &[usize], changes: &[f64], base_loss: f64) -> usize {
+    let tolerance = PLATEAU_REL_TOL * base_loss;
+    chosen.iter().filter(|&&i| changes[i] <= tolerance).count()
+}
+
 /// Preparation step: pick the `d` synapses whose weight the loss is most
 /// sensitive to.
 ///
 /// Sensitivity is the absolute change in loss from a one-sided finite
-/// difference of [`RANDOM_DELTA_HALF_WIDTH`]. Returns the chosen indices
-/// (ascending; ties go to the lower index) and the evaluations spent
-/// (`synapses + 1`).
+/// difference of [`RANDOM_DELTA_HALF_WIDTH`] (see [`scan_sensitivities`]).
+/// Returns the chosen indices (ascending; ties go to the lower index) and the
+/// evaluations spent (`synapses + 1`).
 pub fn select_influential(
     creature: &CreatureExport,
     records: &[f32],
@@ -237,19 +286,6 @@ pub fn select_influential(
             "cannot select {d} synapses from {n}"
         )));
     }
-    let all: Vec<usize> = (0..n).collect();
-    let objective = WeightObjective::new(creature.clone(), all, records)?;
-    let x0 = objective.start();
-    let eval = |x: &[f64]| objective.loss(x).map_err(BenchError::Evaluation);
-    let base = eval(&x0)?;
-    let mut scored = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut x = x0.clone();
-        x[i] += RANDOM_DELTA_HALF_WIDTH;
-        scored.push((i, (eval(&x)? - base).abs()));
-    }
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    let mut picked: Vec<usize> = scored.iter().take(d).map(|s| s.0).collect();
-    picked.sort_unstable();
-    Ok((picked, n + 1))
+    let (_, changes, evaluations) = scan_sensitivities(creature, records)?;
+    Ok((pick_influential(&changes, d), evaluations))
 }

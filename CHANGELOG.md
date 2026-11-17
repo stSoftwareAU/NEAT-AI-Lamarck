@@ -8,6 +8,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Plateau and kink diagnosis for the #266 weight bench, plus a saturated
+  hard-tanh family (Issue #266).** `lamarck/src/weight_bench/landscape.rs`
+  classifies each chosen free axis from `f(x±h)` and `f(x±h/2)` (`h` = 0.05) as
+  flat, edge, kinked, smooth or indeterminate (`classify_axis`,
+  `CURVATURE_REL_TOL` 1e-9, `KINK_RATIO_REL_TOL` 0.25), and
+  `weight_router_bench --landscape` writes `landscape.jsonl` and
+  `landscape-summary.json`. The summary also counts the selection scan that
+  builds each problem (`preparationEvaluations`, 145 per problem) alongside the
+  diagnosis's own evaluations, so `totalEvaluations` (51 744 for the committed
+  run) is every evaluation the command runs; the selection scan is charged to no
+  arm's budget (every arm shares it), and the diagnosis now draws from the
+  tightest arm budget (see Changed). A
+  problem that fails is recorded with its `error` and the evaluations it spent,
+  and the run goes on. The summary (`formatVersion` 4, regenerated at crate
+  0.1.50 with a 10D `budget` on every row) reports coverage
+  (planned, completed and failed problems), and each cell counts its
+  `failures`. The committed run covered 144 of 144 problems, 0 failed.
+  The new `saturated-hard-tanh` family clamps 14 of 16 hidden units with a ±12
+  bias, so only 32 axes are live and D=40/D=100 must choose flat ones. The
+  predeclared manifest, the other families' problems and
+  `docs/evidence/weight-router/` are unchanged. In
+  `docs/evidence/weight-router-landscape/`, the predeclared families have no
+  flat or edge axis, relu and hard-tanh have many kinked axes (349 and 428 of
+  1200 at D=100), and tanh has one rounding-level false-positive kink in 1920
+  axes. On `saturated-hard-tanh` (96 flat axes at D=40, 816 at D=100) CMA-ES is
+  worse than the refine surrogate in every 30D and 100D cell, with full-window
+  and held-out agreement. This reverses the plain hard-tanh result, and it holds
+  at D=20, which has no flat axis. See Finding 5 in
+  `docs/weight-optimiser-routing.md`. The pinned AMM reference (0.7.0, preset
+  `c46`) was also run on `saturated-hard-tanh`: 108 of 108 runs, 0 failed,
+  285,000 evaluations, and AMM is worse than both refine and CMA-ES in all 18
+  comparisons (`docs/evidence/weight-router-landscape/saturated/reference-summary.json`).
+
+- **Sparse symbolic local update rules are tested as an opt-in research harness, with a negative synthetic verdict (Issue #268).**
+  `lamarck/src/local_rules/` discovers one sparse rule per activation family on
+  calibration tasks only, then scores it on untouched validation tasks against
+  Lamarck's sparse backprop and a derivative-free search built on Lamarck's
+  mirrored signed-perturbation helpers (`lamarck/src/mirror.rs`) at an equal record
+  budget, with the meta-search cost charged in full. Nothing in
+  `run_optimisation` or the CLI calls it, so defaults are unchanged. On the
+  synthetic fixtures (`docs/evidence/local-rules/summary.json`) the overall verdict
+  is `negative`: the rules are worse than both primary baselines at every step
+  count once the meta-search is included. Every report also carries
+  `successClaim`. A synthetic run is always `not-claimable-synthetic`, and a
+  files run that earns its place is only `pending-owner-review`, so no success
+  is claimed before a representative run. A comparison needs at least 8 paired
+  tasks (`minPairedTasks`) and goes `inconclusive` if any run behind it failed.
+  The example runner stamps every report with `versions.sourceCommit` and
+  `versions.sourceTreeDirty` as well as the crate version (both `null` when the
+  library is called without the runner, or when git is unavailable).
+  Files mode refuses validation creatures that duplicate each other (same
+  fingerprint) and refuses to run without an explicit `OUT_DIR`. Reproduce with
+  `cargo run --release --example local_rules_bench`; the method, protocol and
+  results are in [`docs/local-rules.md`](docs/local-rules.md).
 - **Opt-in offline easy-record skipping experiment (Issue #267).** Adds
   `lamarck/src/record_skip/` (difficulty EWMA schedule with rare-stratum
   protection and revisits, matched random-skip control, paired bootstrap
@@ -40,9 +94,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and failed confirmation attempts retain their costs. The AMM driver records
   process startup/non-zero-exit failures, drains verbose stderr safely and keeps
   a failed run's real row and costs when the server exits before `done`.
-  On the synthetic suite CMA-ES beat the refinement in 19 of 27 cells with the
-  current code (20 of 27 in the earlier run, one cell on the interval boundary),
-  but the router always routed to CMA-ES and never beat it, so it was removed.
+  On the synthetic suite CMA-ES beat the refine surrogate in 18 of 27 cells in
+  format 3 (19 of 27 in format 2; 20 of 27 in the earlier run, one cell on the
+  interval boundary), but the router always routed to CMA-ES and never beat it,
+  so it was removed.
   The AMM method (arXiv 2611.06879) was run as an offline reference arm
   through its authors' pinned implementation (scratch Python environment, no new
   dependency, never in CI) and lost in all 27 cells against refine, CMA-ES and
@@ -58,6 +113,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Write-up and
   committed evidence:
   `docs/weight-optimiser-routing.md`, `docs/evidence/weight-router/`.
+- **Issue #266 benchmark, output `formatVersion` 3 (crate 0.1.49).** Each
+  comparison adds a full-window column, and a `-better` verdict now also needs
+  its full-window mean to be non-positive; two verdicts changed, and the
+  intervals of later cells moved because the bootstrap stream changed. Each
+  problem counts its flat chosen axes against `PLATEAU_REL_TOL`; none were found
+  in the synthetic suite (0 in every run and cell). Summaries record the git
+  commit, dirty flag, neat-core source and wall-clock seconds, and `runs.jsonl`
+  is now committed. The format 3 synthetic run (648 of 648 runs, 0 failed) gives
+  CMA-ES better in 18 of 27 cells, worse in none and inconclusive in 9. The AMM
+  campaign (324 of 324 runs, 0 failed) and the AMM method check were regenerated
+  at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). AMM remains worse in all 54 comparisons, and the
+  method check's v0.3.0 and v0.7.0 runs (27 rows each) are identical.
+
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
   every PR (Issue #235, NEAT-AI-core#681).** `lamarck/Cargo.toml` replaces the
   `path = "../../NEAT-AI-core/neat-core"` dependency with
@@ -124,6 +192,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   0.17.0 so the breaking-bump gate can pass and this install script can land.
 
 ### Changed
+
+- **The landscape diagnosis now draws its probes from the tightest arm budget
+  (Issue #266).** `diagnose` and `axis_shapes` take a budget and
+  `diagnose_specs` a budget multiple (times each problem's dimension), and the
+  probes go through the same
+  `BudgetedObjective` the arms use. `diagnose_manifest` uses the manifest's
+  smallest budget multiple times the dimension (10D for the predeclared
+  manifest), so a diagnose-then-optimise router would have `budget -
+  evaluations` left. A diagnosis needing more than the budget (`1 + 4D`) records
+  `BudgetExhausted` as its row's `error`. `LandscapeRow` and `LandscapeCell` gain
+  `budget` (absent in older evidence, read as `None` and 0), and the summary
+  gains `diagnosisBudgetMultiple`. The committed evidence in
+  `docs/evidence/weight-router-landscape/` was regenerated in format 4: every
+  row carries `budget` = 10D, every diagnosis fits within it, and apart from
+  `budget` the rows are identical to the format 3 rows. The selection scan stays
+  counted separately because every arm shares it.
 
 - **The security workflow no longer compiles cargo-audit on every run (Issue
   #253).** `security.yml` now installs a prebuilt, version-pinned

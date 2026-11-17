@@ -7,7 +7,7 @@ use neat_ai_lamarck::weight_bench::suite::ProblemSpec;
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, Comparison, Manifest, REFERENCE_BOX_HALF_WIDTH,
     ReferenceRequest, RunRow, WeightObjective, build_problem, predeclared_manifest, run_arm,
-    serve_reference, summarise_reference,
+    serve_reference, summarise_reference, summarise_runs,
 };
 use serde_json::Value;
 
@@ -236,6 +236,7 @@ fn fixture(arm: Arm, seed: u64, screening: f64, held_out: f64) -> RunRow {
         normalised_held_out_loss: Some(held_out),
         confirmation_evaluations: 5,
         extrapolation: false,
+        plateau_free_axes: None,
         error: None,
     }
 }
@@ -309,13 +310,41 @@ fn reference_rows(offset: f64) -> Vec<RunRow> {
     reference_rows_split(offset, offset / 2.0)
 }
 
+/// Reference rows like `reference_rows_split`, with the full-window column
+/// offset by `full_offset` from the screening base. `fixture` sets the full
+/// column to the screening value, so this offset is the only change to it.
+fn reference_rows_with_full(
+    screening_offset: f64,
+    held_out_offset: f64,
+    full_offset: f64,
+) -> Vec<RunRow> {
+    reference_rows_split(screening_offset, held_out_offset)
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut row)| {
+            // The normalised full loss is final over start (2.0 / 2.0 here, so
+            // exact) and so equals the value written.
+            row.full_loss_final = Some(START_LOSS * (0.8 + 0.01 * i as f64 + full_offset));
+            row
+        })
+        .collect()
+}
+
+/// Expected paired full-window mean of AMM minus `second` for
+/// `reference_rows_with_full(_, _, full_offset)`.
+fn expected_full_mean(second: Arm, full_offset: f64) -> f64 {
+    let (refine_full, _) = base(Arm::LamarckRefine);
+    let (second_full, _) = base(second);
+    refine_full + full_offset - second_full
+}
+
 #[test]
 fn clearly_better_and_worse_references_get_matching_verdicts() {
     let m = many_seeds();
     let runs = in_process_rows();
 
     let better = summarise_reference(&m, &runs, &reference_rows(-0.3)).unwrap();
-    assert_eq!(better.format_version, 2);
+    assert_eq!(better.format_version, 3);
     assert_eq!(better.cells.len(), 1);
     let comparisons = &better.cells[0].comparisons;
     let pairs: Vec<(Arm, Arm)> = comparisons.iter().map(|c| (c.first, c.second)).collect();
@@ -406,6 +435,59 @@ fn held_out_veto_turns_a_screening_win_inconclusive() {
     }
 }
 
+/// The rule also reads the full-window column: a screening win whose held-out
+/// mean is not above zero is still vetoed when the full-window mean is above
+/// zero. The held-out and full offsets differ, so the test fails if either
+/// column is read in place of the other.
+#[test]
+fn full_window_veto_turns_a_screening_win_inconclusive() {
+    let m = many_seeds();
+    let runs = in_process_rows();
+
+    // Screening clearly better; held out not above zero (-0.05 against refine,
+    // -0.01 against CMA-ES); full window worse (+0.05 against refine, +0.15
+    // against CMA-ES). Vetoed against both.
+    let vetoed =
+        summarise_reference(&m, &runs, &reference_rows_with_full(-0.3, -0.05, 0.05)).unwrap();
+    for c in &vetoed.cells[0].comparisons {
+        assert_eq!(c.verdict, "inconclusive", "{:?}", c.second);
+        assert_means(c, -0.3, -0.05);
+        assert!(c.screening.ci_high.unwrap() < 0.0);
+        assert!(c.held_out.mean.unwrap() <= 0.0);
+        assert_eq!(c.full.losses, 6);
+        let expected = expected_full_mean(c.second, 0.05);
+        assert!(
+            (c.full.mean.unwrap() - expected).abs() < 1e-9,
+            "{:?} full {:?} != {expected}",
+            c.second,
+            c.full.mean
+        );
+    }
+
+    // Control at exactly zero: the boundary is inclusive, so refine stays
+    // "better". The full column sits 0.1 above CMA-ES at the same offset (the
+    // in-process gap), so that comparison is still inconclusive.
+    let at_zero =
+        summarise_reference(&m, &runs, &reference_rows_with_full(-0.3, -0.05, 0.0)).unwrap();
+    let [vs_refine, vs_cma] = &at_zero.cells[0].comparisons[..] else {
+        panic!("expected two comparisons");
+    };
+    assert_eq!(vs_refine.full.ties, 6);
+    assert!(vs_refine.full.mean.unwrap().abs() < 1e-9);
+    assert_eq!(vs_refine.verdict, "amm-reference-better");
+    assert_eq!(vs_cma.verdict, "inconclusive");
+
+    // Control below zero: a full-window mean of -0.2 keeps "better" against both.
+    let below =
+        summarise_reference(&m, &runs, &reference_rows_with_full(-0.3, -0.05, -0.2)).unwrap();
+    for c in &below.cells[0].comparisons {
+        assert_eq!(c.verdict, "amm-reference-better", "{:?}", c.second);
+        assert_eq!(c.full.wins, 6);
+        let expected = expected_full_mean(c.second, -0.2);
+        assert!((c.full.mean.unwrap() - expected).abs() < 1e-9);
+    }
+}
+
 #[test]
 fn coverage_counts_failed_rows_and_missing_runs() {
     let m = many_seeds();
@@ -425,6 +507,9 @@ fn coverage_counts_failed_rows_and_missing_runs() {
     let c = &r.cells[0].comparisons[0];
     assert_eq!(c.screening.paired_differences.len(), 4);
     assert_eq!(c.screening.failures, 2);
+    // A failed row and a missing row both count as full-window failures.
+    assert_eq!(c.full.paired_differences.len(), 4);
+    assert_eq!(c.full.failures, 2);
 }
 
 #[test]
@@ -444,6 +529,7 @@ fn failed_reference_with_completed_metrics_is_excluded_from_pairs() {
         assert_eq!(comparison.screening.failures, 1);
         assert_eq!(comparison.held_out.wins, 5);
         assert_eq!(comparison.held_out.failures, 1);
+        assert_eq!(comparison.full.failures, 1);
     }
 }
 
@@ -513,13 +599,16 @@ fn hand_built_error_row_with_null_fields_counts_as_failed() {
     let c = &r.cells[0].comparisons[0];
     assert_eq!(c.screening.failures, 1);
     assert_eq!(c.held_out.failures, 1);
+    // Its full-window losses are absent too, so it fails the full column.
+    assert_eq!(c.full.failures, 1);
     assert_eq!(c.screening.paired_differences.len(), 5);
 }
 
-/// The committed manifest is current-code output; the committed AMM rows were
-/// written while the router existed and still carry `routedTo` and
-/// `probeEvaluations`. Both must load and summarise, as `--compare-reference`
-/// does with these AMM rows.
+/// The committed manifest and AMM rows are current-code output. The rows carry
+/// `plateauFreeAxes` and no router fields. They must load and summarise, as
+/// `--compare-reference` does with these AMM rows.
+/// Router-era compatibility is covered by
+/// `router_era_reference_rows_still_load_and_summarise`.
 #[test]
 fn committed_evidence_parses_and_summarises() {
     let dir =
@@ -531,12 +620,12 @@ fn committed_evidence_parses_and_summarises() {
     // The committed manifest is exactly the one the code declares.
     assert_eq!(m, predeclared_manifest());
     let rows = std::fs::read_to_string(dir.join("amm-runs.jsonl")).unwrap();
-    assert!(rows.contains("routedTo") && rows.contains("probeEvaluations"));
     let parsed: Vec<RunRow> = rows
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert!(parsed.iter().all(|r| r.arm == Arm::AmmReference));
+    assert!(parsed.iter().all(|r| r.plateau_free_axes.is_some()));
     let r = summarise_reference(&m, &[], &parsed).unwrap();
     // One AMM row per planned (family, dimension, budget, seed) of the
     // manifest, none failed.
@@ -547,4 +636,185 @@ fn committed_evidence_parses_and_summarises() {
     assert_eq!(r.coverage.completed_runs, r.coverage.planned_runs);
     assert_eq!(r.coverage.failed_runs, 0);
     assert_eq!(parsed.len(), r.coverage.planned_runs);
+}
+
+/// A router-era AMM row: it has `routedTo` and `probeEvaluations`, and no
+/// `plateauFreeAxes`.
+const ROUTER_ERA_AMM_ROW: &str = r#"{"arm": "amm-reference", "budget": 200, "budgetMultiple": 10, "confirmationEvaluations": 5, "dimension": 20, "error": null, "evaluationsUsed": 200, "extrapolation": false, "family": "tanh", "finalScreeningLoss": 0.23903799143076257, "fullLossFinal": 0.23498690183149004, "fullLossStart": 0.33862076535884356, "heldOutLossFinal": 0.24526140860580345, "heldOutLossStart": 0.3203737483400896, "normalisedHeldOutLoss": 0.7655477699922174, "normalisedScreeningLoss": 0.6652639937232112, "phase": "validation", "preparationEvaluations": 145, "probeEvaluations": 0, "routedTo": null, "seed": 1001, "startScreeningLoss": 0.35931298504968595}"#;
+
+/// Router-era rows must still load and summarise, as the unknown router fields
+/// are ignored and the missing `plateauFreeAxes` reads as absent.
+#[test]
+fn router_era_reference_rows_still_load_and_summarise() {
+    assert!(ROUTER_ERA_AMM_ROW.contains("routedTo"));
+    assert!(ROUTER_ERA_AMM_ROW.contains("probeEvaluations"));
+    assert!(!ROUTER_ERA_AMM_ROW.contains("plateauFreeAxes"));
+    let row: RunRow = serde_json::from_str(ROUTER_ERA_AMM_ROW).unwrap();
+    assert_eq!(row.plateau_free_axes, None);
+    assert_eq!(row.arm, Arm::AmmReference);
+    assert_eq!(row.evaluations_used, 200);
+    assert_eq!(row.preparation_evaluations, 145);
+    assert_eq!(row.confirmation_evaluations, 5);
+    assert_eq!(row.normalised_screening_loss, Some(0.6652639937232112));
+    assert_eq!(row.normalised_held_out_loss, Some(0.7655477699922174));
+
+    let runs = [
+        fixture(Arm::LamarckRefine, 1001, 0.8, 0.9),
+        fixture(Arm::CmaEs, 1001, 0.7, 0.86),
+    ];
+    let r = summarise_reference(&manifest(), &runs, &[row]).unwrap();
+    assert_eq!(r.coverage.planned_runs, 1);
+    assert_eq!(r.coverage.completed_runs, 1);
+    assert_eq!(r.coverage.failed_runs, 0);
+    assert_eq!(r.total_evaluations, 200 + 145 + 5);
+    let cell = &r.cells[0];
+    assert_eq!(cell.plateau_free_axes, vec![None]);
+    // The difference is the AMM arm (first) minus the second arm.
+    let amm = 0.6652639937232112;
+    let [vs_refine, vs_cma] = &cell.comparisons[..] else {
+        panic!("expected two comparisons");
+    };
+    assert_eq!(vs_refine.second, Arm::LamarckRefine);
+    assert_eq!(vs_cma.second, Arm::CmaEs);
+    for (c, other) in [(vs_refine, 0.8), (vs_cma, 0.7)] {
+        let [d] = c.screening.paired_differences[..] else {
+            panic!("expected one paired difference");
+        };
+        assert!((d - (amm - other)).abs() < 1e-12);
+    }
+}
+
+/// The committed in-process runs and AMM rows are reproduced by the current
+/// summariser: both committed summary files are what re-summarising the
+/// committed rows gives.
+#[test]
+fn committed_evidence_is_reproduced_by_the_summariser() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/evidence/weight-router");
+    let m: Manifest =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    let runs: Vec<RunRow> = std::fs::read_to_string(dir.join("runs.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let amm_rows: Vec<RunRow> = std::fs::read_to_string(dir.join("amm-runs.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    // (a) The in-process rows: every planned run finished, each with its
+    // plateau-free axis count.
+    assert_eq!(runs.len(), 648);
+    assert!(runs.iter().all(|r| r.error.is_none()));
+    assert!(runs.iter().all(|r| r.plateau_free_axes.is_some()));
+
+    // (b) The AMM reference summary is reproduced from the committed rows.
+    let reference_summary: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("reference-summary.json")).unwrap())
+            .unwrap();
+    let r = summarise_reference(&m, &runs, &amm_rows).unwrap();
+    assert_eq!(
+        serde_json::to_value(&r.cells).unwrap(),
+        reference_summary["cells"]
+    );
+    assert_eq!(
+        serde_json::to_value(r.coverage).unwrap(),
+        reference_summary["coverage"]
+    );
+    assert_eq!(
+        serde_json::json!(r.total_evaluations),
+        reference_summary["totalEvaluations"]
+    );
+    assert_eq!(
+        serde_json::json!(r.format_version),
+        reference_summary["formatVersion"]
+    );
+
+    // (c) The main summary is well-formed and its cells are reproduced from the
+    // committed in-process runs.
+    let summary: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["formatVersion"], serde_json::json!(3));
+    assert_eq!(summary["gitDirty"], serde_json::json!(false));
+    let commit = summary["gitCommit"].as_str().unwrap();
+    assert!(
+        commit.len() == 40 && commit.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+        "gitCommit {commit:?} is not 40 lower-hex characters"
+    );
+    assert!(
+        summary["neatCoreSource"]
+            .as_str()
+            .unwrap()
+            .starts_with("git+https://github.com/stSoftwareAU/NEAT-AI-core")
+    );
+    assert_eq!(summary["coverage"]["plannedRuns"], serde_json::json!(648));
+    assert_eq!(summary["coverage"]["completedRuns"], serde_json::json!(648));
+    assert_eq!(
+        serde_json::to_value(summarise_runs(&m, &runs)).unwrap(),
+        summary["cells"]
+    );
+}
+
+#[test]
+fn committed_saturated_amm_evidence_is_reproduced_and_amm_loses_every_cell() {
+    // AMM against refine and CMA-ES on `saturated-hard-tanh`, the family
+    // with real flat axes, paired with the committed in-process arm runs.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../docs/evidence/weight-router-landscape/saturated");
+    let read_rows = |name: &str| -> Vec<RunRow> {
+        std::fs::read_to_string(dir.join(name))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    let m: Manifest =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(m.families, vec![Family::SaturatedHardTanh]);
+    let runs = read_rows("runs.jsonl");
+    let amm_rows = read_rows("amm-runs.jsonl");
+
+    // Every planned AMM run finished, spending exactly its budget.
+    assert_eq!(amm_rows.len(), 108);
+    assert!(amm_rows.iter().all(|r| r.error.is_none()));
+    assert!(
+        amm_rows
+            .iter()
+            .all(|r| r.evaluations_used == r.budget_multiple * r.dimension)
+    );
+
+    let summary: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("reference-summary.json")).unwrap())
+            .unwrap();
+    let r = summarise_reference(&m, &runs, &amm_rows).unwrap();
+    assert_eq!(serde_json::to_value(&r.cells).unwrap(), summary["cells"]);
+    assert_eq!(
+        serde_json::to_value(r.coverage).unwrap(),
+        summary["coverage"]
+    );
+    assert_eq!(
+        serde_json::json!(r.total_evaluations),
+        summary["totalEvaluations"]
+    );
+    assert_eq!(summary["totalEvaluations"], serde_json::json!(285_000));
+    assert_eq!(summary["gitDirty"], serde_json::json!(false));
+
+    // The recorded finding: AMM is worse than both arms in all 9 cells.
+    assert_eq!(r.cells.len(), 9);
+    let verdicts: Vec<Value> = summary["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["comparisons"].as_array().unwrap().iter())
+        .map(|c| c["verdict"].clone())
+        .collect();
+    assert_eq!(verdicts.len(), 18);
+    assert!(
+        verdicts
+            .iter()
+            .all(|v| *v == serde_json::json!("amm-reference-worse")),
+        "{verdicts:?}"
+    );
 }

@@ -19,8 +19,9 @@ current code runs two in-process arms, refinement and CMA-ES, on paired
 validation seeds with no calibration phase. The committed `manifest.json`,
 `summary.json` and `reference-summary.json` in
 [`docs/evidence/weight-router/`](evidence/weight-router/summary.json) are
-output of the current code (crate 0.1.47, `formatVersion` 2) and are reproduced
-by the commands in [How to run](#how-to-run). The router, probe and calibration
+produced by crate 0.1.49 (`formatVersion` 3) and are still reproduced by the
+commands in [How to run](#how-to-run), because crate 0.1.50 changes only the
+landscape diagnosis, which writes its own `weight-router-landscape/` files. The router, probe and calibration
 sections below describe an **earlier router-era run** (crate 0.1.46). Its
 numbers are kept as a recorded negative finding; they cannot be reproduced from
 the current code, because that code was removed.
@@ -65,11 +66,14 @@ the manifest it used to `manifest.json` (the committed copy is
 [`manifest.json`](evidence/weight-router/manifest.json)).
 
 * **Families.** Hidden squash `tanh` (smooth), `relu` (kinks at zero) and
-  `hard-tanh` (kinks where it clips). No test or committed evidence shows that
-  any tested problem has a flat (plateau) axis among its free weights: the free
-  weights are the most loss-sensitive synapses, which steers away from flat
-  ones, and the plateau probes were removed. The families vary the activation,
-  not a demonstrated plateau.
+  `hard-tanh` (kinks where it clips). The free weights are the most
+  loss-sensitive synapses, which steers away from flat ones. Format 3 measures
+  the flat-axis count directly (Finding 4): no chosen free weight was flat in
+  any problem, so the predeclared suite does not exercise plateaus. Its families
+  vary the activation, not plateau structure. The format 3 flat-axis test is
+  one-sided (see Finding 4). The two-sided landscape diagnosis and the
+  `saturated-hard-tanh` family that does have flat axes were added after the
+  predeclared run, outside this protocol (Finding 5).
 * **Problem construction** (`suite.rs`). A random teacher network with 16
   inputs, 16 hidden neurons of one family, fan-in 8 and one identity output
   generates the records (target noise `0.01`). That is 16 x 8 + 16 = 144
@@ -95,7 +99,9 @@ the manifest it used to `manifest.json` (the committed copy is
   axis is a **plateau** when both moves change the loss by at most
   `PLATEAU_REL_TOL = 1e-6` relative to the start loss. Otherwise it is a
   **kink** when the left and right slopes differ by more than
-  `KINK_ASYMMETRY = 0.5` of the sum of their magnitudes.
+  `KINK_ASYMMETRY = 0.5` of the sum of their magnitudes. The format 3 flat-axis
+  count reuses `PLATEAU_REL_TOL` against the base loss (the loss at the start
+  weights); see Finding 4.
 * **Calibration** (removed; router-era run only). Grid search on calibration seeds only: `minBudgetMultiple` in
   `{10, 30, 100, never}` by `maxNonSmoothShare` in `{0.25, 0.5, 0.75, 1.01}`,
   minimising the mean normalised loss of the arm each row would be routed to.
@@ -105,18 +111,27 @@ the manifest it used to `manifest.json` (the committed copy is
   Calibrated result: `minBudgetMultiple` 10, `maxNonSmoothShare` 0.25,
   `probeAxes` 8.
 * **Metric.** Normalised loss, final over start, on the screening records;
-  confirmed on the held-out records. Negative paired differences favour the first
-  arm.
+  confirmed on the held-out records and, from format 3, on the full-window
+  records (`full`: the full-record loss at the best point over the full-record
+  loss at the start). Negative paired differences favour the first arm.
 * **Success and failure criteria** (`verdict` in `experiment.rs`). Per cell, the
   paired differences over the 12 validation seeds are bootstrapped (2000
-  resamples, seed 266, 95% percentile interval of the mean). The first arm is
-  `-better` iff the interval's upper bound on screening loss is below zero **and**
-  the held-out mean difference is at most zero. It is `-worse` iff the interval's
+  resamples, seed 266, 95% percentile interval of the mean). The screening,
+  held-out and full-window draws share one bootstrap RNG, the full-window draw
+  coming after the other two in every comparison, so format 3 moved the interval
+  of every cell after the first (the paired differences did not change). The
+  first arm is `-better` iff the interval's upper bound on screening loss is
+  below zero **and** the held-out mean difference is at most zero **and** the
+  full-window mean difference is at most zero (the full-window term is format 3;
+  format 2 had only the first two conditions). The full-window veto was added
+  after the format 2 results had been seen; it can only turn a `-better` verdict
+  into `inconclusive`, never create one, and it changed exactly one verdict
+  (hard-tanh, D=40, 100D). It is `-worse` iff the interval's
   lower bound is above zero. Otherwise the cell is `inconclusive`. A run that
   fails is recorded with its error and counted in coverage. In validation it is
   dropped from that pair even if it retained finite metrics (counted under
   `failures`). In the router-era calibration it counted as 1.0, no improvement.
-  The router-era and current runs had no failures.
+  The router-era, format 2 and format 3 runs had no failures.
 * **Compute limits.** Each run's evaluation budget is enforced by
   `BudgetedObjective`, which refuses (fails loud with `BudgetExhausted`) any
   evaluation past the limit.
@@ -135,8 +150,8 @@ The full method is pinned to [arXiv:2611.06879v1](https://arxiv.org/pdf/2611.068
 (submitted 4 November 2026): Section 3, Algorithms 1–2, Tables 2 and 6,
 Appendices A–B and Section 6 were read. It specifies preset `c46`, documents
 probe defaults and validity ranges, and requires the harness to stop evaluations
-at the budget. Its probes depend on the box width; the local router here uses
-different plateau/kink tests and is not AMM. The tested dimension range ends at
+at the budget. Its probes depend on the box width; the removed router-era probes
+used different plateau/kink tests and were not AMM. The tested dimension range ends at
 40, so D=100 remains extrapolation. These are constraints on reproduction, not
 evidence of transfer to neural weight search.
 
@@ -152,18 +167,21 @@ matching config hash alone is not a behavioural proof.
 
 The offline compatibility check is `scripts/check-amm-method.py`: it uses the
 existing driver and real Rust objective server, one validation seed (1001),
-three families, three dimensions and three budgets. It explicitly supplies
-`c46` and converts `SeedSequence` to its first 32-bit word so both public APIs
-receive the same seed and configuration. This checks completed RunRows, not
-every evaluation trace or every AMM route. The source/dependency pins and
-observed result are recorded in
-[`method-check.json`](evidence/weight-router/method-check.json). That file is **router-era output** (crate 0.1.46, code checkpoint
-`8f77004`), like `amm-runs.jsonl`: the manifest it embeds still carries
-`calibrationSeeds`, which the current `Manifest` refuses, and its binary hash
-is of the removed code. It was not re-run after the router was removed, because
-no scratch AMM environment was available. Re-running the check with the current
-manifest records a different `manifest` field, and its `canonicalRowsSha256`
-has not been confirmed to reproduce.
+three families, three dimensions and three budgets. It explicitly supplies `c46`
+and converts `SeedSequence` to its first 32-bit word so both public APIs receive
+the same seed and configuration. This checks completed RunRows, not every
+evaluation trace or every AMM route. The source/dependency pins and observed
+result are recorded in
+[`method-check.json`](evidence/weight-router/method-check.json). It was
+regenerated at commit `f0a7b4c` (crate 0.1.49) after the router was removed;
+later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The v0.7.0 package
+completed 27 rows, identical to the v0.3.0 tree's, with no failures. The check
+takes the committed manifest and keeps only its first validation seed, so the
+`manifest` it records has `validationSeeds` [1001] and no `calibrationSeeds`. A
+second run, at `f0a7b4c`, reproduced the earlier run at `757ac15` (crate 0.1.48)
+exactly: the canonical-rows hash (`33203af0…`) and every row file (`runs.jsonl`,
+`amm-runs.jsonl`, and the cell values of both summaries). The bench binary hash
+(`8ccd83c8…`) is that build's (crate 0.1.49), not the 0.1.48 build's.
 
 To repeat the compatibility check, extract the two pinned source tarballs
 (after verifying the SHA-256 values above), share the wheels produced by
@@ -245,37 +263,83 @@ The run writes `manifest.json`, `runs.jsonl` and `summary.json` to `OUT_DIR`
 | File | Contents |
 |------|----------|
 | `manifest.json` | The manifest that was run. |
-| `runs.jsonl` | One line per run, failures included: arm, start and final screening, full and held-out losses, evaluations used, preparation and confirmation evaluations, error. |
-| `summary.json` | Format version (`formatVersion`, 2), crate version (`crateVersion`, 0.1.47), total evaluations, coverage (planned, completed, failed runs) and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening and held-out loss, plus the verdict. A corpus run also carries `corpusFingerprint`: FNV-1a 64-bit hashes of the creature file (`creatureFnv1a64`) and of the records actually loaded (`recordsFnv1a64`), and the record count. The synthetic suite omits it, since the crate version and manifest seeds fix its problems. |
+| [`runs.jsonl`](evidence/weight-router/runs.jsonl) | One line per run (648 for the synthetic suite), failures included: arm, start and final screening, full and held-out losses, normalised screening and held-out losses, evaluations used, preparation and confirmation evaluations, flat-axis count (`plateauFreeAxes`), error. |
+| `summary.json` | Format version (`formatVersion`, 3), crate version (`crateVersion`, 0.1.49), `gitCommit`, `gitDirty`, `neatCoreSource` (the neat-core source pinned in `Cargo.lock`), `wallClockSeconds`, total evaluations, coverage (planned, completed, failed runs), `plateauFreeAxes` per validation seed, and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening, held-out and full-window loss, plus the verdict. A corpus run also carries `corpusFingerprint`: FNV-1a 64-bit hashes of the creature file (`creatureFnv1a64`) and of the records actually loaded (`recordsFnv1a64`), and the record count. The synthetic suite omits it, since the crate version and manifest seeds fix its problems. |
 
-Output format version 2 drops the router-era fields: `calibratedRule` from
-`summary.json`, and `routedTo` and `probeEvaluations` from run rows. The
-committed `amm-runs.jsonl` was written by the router-era driver and still
-carries `routedTo` and `probeEvaluations`; run rows tolerate and ignore them.
-`runs.jsonl` (about 360 KB) is not committed. The committed
-[`summary.json`](evidence/weight-router/summary.json) carries the per-cell paired
-distributions. The AMM reference adds three committed files:
+Output format version 2 dropped the router-era fields: `calibratedRule` from
+`summary.json`, and `routedTo` and `probeEvaluations` from run rows. Format 3
+adds the full-window column, `plateauFreeAxes` on rows and cells, and the
+provenance fields listed above. The committed
+[`runs.jsonl`](evidence/weight-router/runs.jsonl) (about 364 KB) holds the
+synthetic run's per-run rows, and the committed
+[`summary.json`](evidence/weight-router/summary.json) carries the per-cell
+paired distributions. The AMM campaign was regenerated at commit `f0a7b4c`
+(crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The committed `amm-runs.jsonl` (324 rows) no longer
+carries `routedTo` or `probeEvaluations`; its rows carry `plateauFreeAxes`. The
+AMM reference adds three committed files:
 
 | File | Contents |
 |------|----------|
 | [`amm-runs.jsonl`](evidence/weight-router/amm-runs.jsonl) | One `RunRow` per AMM validation run (324). |
 | [`amm-meta.json`](evidence/weight-router/amm-meta.json) | AMM version, commit, preset and config hash, numpy, scipy and Python versions, coverage and wall time. |
-| [`reference-summary.json`](evidence/weight-router/reference-summary.json) | Crate version (`formatVersion` 2, `crateVersion` 0.1.47), coverage, total evaluations and per-cell paired comparisons of AMM against refine and CMA-ES, with verdicts. Regenerated from the committed `amm-runs.jsonl` with `--compare-reference`. |
+| [`reference-summary.json`](evidence/weight-router/reference-summary.json) | Format version (`formatVersion` 3), crate version (`crateVersion` 0.1.49) and provenance, coverage, total evaluations and per-cell paired comparisons of AMM against refine and CMA-ES, with verdicts. Regenerated from the committed `amm-runs.jsonl` with `--compare-reference`. |
 
 ## Results (synthetic suite only)
 
-**Current committed results** (`summary.json`, crate 0.1.47, `formatVersion`
-2): `cargo run --release --example weight_router_bench -- OUT_DIR`, 648 of 648
-runs completed, 0 failed, 1,631,615 evaluations, 3 min 32 s single-threaded on a
-shared container (indicative only). CMA-ES beat the random-axis surrogate in
-**19 of 27** cells, was worse in 1 and inconclusive in 7. The CMA-ES-minus-refine
-paired differences are identical to the router-era run's in all 27 cells, on
-screening and held-out loss, as are the refine and CMA-ES medians below. The
-bootstrap RNG no longer draws resamples for the two router pairs first, so the
-intervals moved slightly. One verdict changed: relu, D=40, 100D is now
-`inconclusive`, with interval `[-0.0043, 0.00004]`. That cell sits on the
-interval boundary and its verdict is not robust. The per-cell table below shows
-the current CMA-ES-minus-refine values and verdicts.
+**Current committed results** (`summary.json`, crate 0.1.49, `formatVersion`
+3, git commit `f0a7b4c`, clean tree): `cargo run --release --example
+weight_router_bench -- OUT_DIR`, 648 of 648 runs completed, 0 failed, 1,631,615
+evaluations, 224.355 s wall on a shared host (indicative only). CMA-ES beat the
+random-axis surrogate in **18 of 27** cells, was worse in **0** and inconclusive
+in **9**. The per-cell table below gives the current CMA-ES-minus-refine values
+and verdicts.
+
+**Changes from format 2** (crate 0.1.47, `formatVersion` 2, the previously
+committed evidence). The screening and held-out paired differences and means are
+unchanged in all 27 cells. The bootstrap intervals moved, because the full-window
+draws now come from the same RNG stream after the other two. Two verdicts
+changed:
+
+* tanh, D=100, 30D: `cma-es-worse` is now `inconclusive`. The screening mean
+  (+0.0033) is the same; the interval moved from `[0.0001, 0.0066]` to
+  `[-0.0001, 0.0065]`.
+* hard-tanh, D=40, 100D: `cma-es-better` is now `inconclusive`, because the
+  full-window mean is +0.0004 and the full-window term vetoes the verdict. The
+  screening mean (-0.0024) is the same.
+
+Format 2 counted 19 better, 1 worse and 7 inconclusive. relu, D=40, 100D stays
+`inconclusive`, with interval `[-0.0041, 0.00004]` (format 2: `[-0.0043, 0.00004]`).
+That cell sits on the interval boundary and its verdict is not robust.
+
+| Family | D | Budget | CMA-ES − refine (screening mean, 95% CI) | held-out mean | full-window mean | verdict |
+|---|---|---|---|---|---|---|
+| tanh | 20 | 10D | -0.1485 [-0.1819, -0.1162] | -0.1572 | -0.1540 | cma-es-better |
+| tanh | 20 | 30D | -0.0087 [-0.0153, -0.0009] | -0.0162 | -0.0139 | cma-es-better |
+| tanh | 20 | 100D | -0.0011 [-0.0019, -0.0005] | -0.0012 | -0.0007 | cma-es-better |
+| tanh | 40 | 10D | -0.0899 [-0.1212, -0.0606] | -0.1078 | -0.0985 | cma-es-better |
+| tanh | 40 | 30D | -0.0051 [-0.0135, 0.0019] | -0.0063 | -0.0031 | inconclusive |
+| tanh | 40 | 100D | -0.0038 [-0.0051, -0.0026] | -0.0024 | -0.0032 | cma-es-better |
+| tanh | 100 (extrapolation) | 10D | -0.0459 [-0.0676, -0.0286] | -0.0515 | -0.0515 | cma-es-better |
+| tanh | 100 (extrapolation) | 30D | 0.0033 [-0.0001, 0.0065] | 0.0066 | 0.0059 | inconclusive |
+| tanh | 100 (extrapolation) | 100D | -0.0028 [-0.0040, -0.0014] | -0.0072 | -0.0060 | cma-es-better |
+| relu | 20 | 10D | -0.1481 [-0.1888, -0.1120] | -0.1382 | -0.1459 | cma-es-better |
+| relu | 20 | 30D | -0.0205 [-0.0333, -0.0077] | -0.0120 | -0.0179 | cma-es-better |
+| relu | 20 | 100D | -0.0005 [-0.0007, -0.0002] | 0.0002 | 0.0006 | inconclusive |
+| relu | 40 | 10D | -0.1395 [-0.1623, -0.1170] | -0.1360 | -0.1392 | cma-es-better |
+| relu | 40 | 30D | -0.0158 [-0.0227, -0.0088] | -0.0136 | -0.0137 | cma-es-better |
+| relu | 40 | 100D | -0.0018 [-0.0041, 0.0000] | -0.0023 | -0.0020 | inconclusive |
+| relu | 100 (extrapolation) | 10D | -0.0964 [-0.1078, -0.0844] | -0.0970 | -0.0963 | cma-es-better |
+| relu | 100 (extrapolation) | 30D | -0.0003 [-0.0068, 0.0065] | -0.0093 | -0.0040 | inconclusive |
+| relu | 100 (extrapolation) | 100D | -0.0011 [-0.0036, 0.0013] | -0.0039 | -0.0035 | inconclusive |
+| hard-tanh | 20 | 10D | -0.1653 [-0.2031, -0.1263] | -0.1877 | -0.1790 | cma-es-better |
+| hard-tanh | 20 | 30D | -0.0177 [-0.0258, -0.0108] | -0.0179 | -0.0190 | cma-es-better |
+| hard-tanh | 20 | 100D | -0.0009 [-0.0013, -0.0005] | -0.0000 | -0.0005 | cma-es-better |
+| hard-tanh | 40 | 10D | -0.0901 [-0.1222, -0.0562] | -0.0959 | -0.0887 | cma-es-better |
+| hard-tanh | 40 | 30D | 0.0022 [-0.0039, 0.0080] | -0.0006 | 0.0040 | inconclusive |
+| hard-tanh | 40 | 100D | -0.0024 [-0.0032, -0.0016] | -0.0004 | 0.0004 | inconclusive |
+| hard-tanh | 100 (extrapolation) | 10D | -0.0624 [-0.0839, -0.0441] | -0.0743 | -0.0701 | cma-es-better |
+| hard-tanh | 100 (extrapolation) | 30D | 0.0017 [-0.0041, 0.0077] | 0.0034 | 0.0003 | inconclusive |
+| hard-tanh | 100 (extrapolation) | 100D | -0.0033 [-0.0054, -0.0013] | -0.0051 | -0.0060 | cma-es-better |
 
 **Earlier router-era run** (crate 0.1.46; not reproducible from the current
 code). The full suite and the AMM reference were run twice; re-running reproduced every
@@ -291,15 +355,16 @@ paired validation seeds each):
 
 | Comparison | First arm better | First arm worse | Inconclusive |
 |------------|-----------------:|----------------:|-------------:|
-| CMA-ES vs random-axis surrogate (router-era run; 19 / 1 / 7 now) | 20 | 1 | 6 |
+| CMA-ES vs random-axis surrogate (router-era run; format 2: 19 / 1 / 7, format 3: 18 / 0 / 9) | 20 | 1 | 6 |
 | Router vs CMA-ES | 0 | 13 | 14 |
 | Router vs random-axis surrogate | 19 | 0 | 8 |
 
 Per cell, differences in normalised screening loss (final over start); negative
 means the first arm is better. The mean and interval are CMA-ES minus refinement
 on screening loss, the held-out column is the same difference on held-out loss,
-and the verdict is the current code's; all three come from the committed
-`summary.json`. The last two columns are the router-era run's router verdicts.
+and the verdict is the format 2 verdict (crate 0.1.47), as it stood before the
+format 3 regeneration; the format 3 values are in the table above. The last two
+columns are the router-era run's router verdicts.
 
 | Family | D | Budget | CMA-ES − refine (screening mean, 95% CI) | held-out mean | verdict | router − CMA-ES verdict | router − refine verdict |
 |---|---|---|---|---|---|---|---|
@@ -333,9 +398,9 @@ and the verdict is the current code's; all three come from the committed
 
 ## Findings
 
-1. **CMA-ES beat the random-axis surrogate in 19 of 27 synthetic cells** with
-   the current code (20 of 27 in the router-era run; relu D=40 100D sits on the
-   interval boundary), by the
+1. **CMA-ES beat the random-axis surrogate in 18 of 27 synthetic cells** with
+   the format 3 code (19 of 27 in format 2; 20 of 27 in the router-era run; relu
+   D=40 100D sits on the interval boundary and is inconclusive), by the
    most at 10D (mean normalised-loss reduction of about 0.05 to 0.17, mostly
    0.09 to 0.17), with the held-out confirmation agreeing in sign in most cells.
    This is a hypothesis for the representative run. It is **not** evidence of a
@@ -351,18 +416,143 @@ and the verdict is the current code's; all three come from the committed
    **removed** because it did not earn its maintenance cost. The router-era
    numbers above are kept as the record of this negative finding.
 3. **The CMA-ES margin shrinks with budget and is not uniform.** At 30D the
-   margins are smaller and four cells are inconclusive (tanh D=40, relu D=100,
-   hard-tanh D=40 and D=100). The one `cma-es-worse` cell is tanh, D=100, 30D
-   (an extrapolation cell; mean difference +0.0033, interval `[0.0001, 0.0066]`,
-   held-out +0.0066). At 100D the mean differences are about 0.001 to 0.004 in
-   size. The data do not say why.
+   margins are smaller and five cells are inconclusive (tanh D=40 and D=100,
+   relu D=100, hard-tanh D=40 and D=100). The tanh, D=100, 30D cell was
+   `cma-es-worse` in format 2 (an extrapolation cell; mean difference +0.0033,
+   interval `[0.0001, 0.0066]`, held-out +0.0066). In format 3 it is
+   `inconclusive` (interval `[-0.0001, 0.0065]`, full-window mean +0.0059). At
+   100D the mean differences are about 0.0005 to 0.004 in size. The data do not
+   say why.
+4. **Plateaus: none found in the synthetic suite.** For each problem, format 3
+   counts how many of its chosen free weights are flat: a one-sided 0.05 step
+   changes the loss by at most `PLATEAU_REL_TOL` (1e-6) times the base loss, the
+   loss at the start weights. The count reuses the sensitivity scan that chose
+   the weights, so it costs no extra evaluations. Every row and every cell has 0
+   flat axes (`plateauFreeAxes` is 0 in all 648 runs and in all 324 cell-seed
+   entries). This is a measured negative: the suite does not exercise plateaus,
+   so it says nothing about how the method behaves on flat axes. The test is
+   one-sided (a +0.05 step only), so an axis flat on one side of a kink (relu at
+   zero, hard-tanh at its clip) can count as flat, and a flat axis with a kink
+   just past +0.05 can count as not flat. Finding 5 measures kinks and plateaus
+   with a two-sided test; the representative run still has to measure them on
+   real inputs rather than assume them.
+
+5. **Plateaus and kinks, measured with a two-sided diagnosis (added after the
+   predeclared run).** `weight_bench::landscape` takes `f(x±h)` and
+   `f(x±h/2)` (`h` = 0.05) on every chosen axis from the start weights over the
+   screening records, 4 evaluations per axis plus 1 base (`1 + 4D`). Since the
+   change that budgeted it, the diagnosis draws those probes from a
+   `BudgetedObjective` of the manifest's tightest multiple × D (10D for the
+   predeclared manifest), recorded per row as `budget` and summed per cell. A
+   diagnosis that needs more than its budget is recorded as `BudgetExhausted`.
+   The committed landscape evidence was regenerated with that change (crate
+   0.1.50, format 4): every row carries `budget` = 10D and every diagnosis fits
+   within it (`1 + 4D` < 10D), with no `BudgetExhausted` row. Nothing routes on the diagnosis, but a
+   diagnose-then-optimise router at that budget would have `budget -
+   evaluations` left. Building each problem also runs the 145-evaluation
+   selection scan (`scan_sensitivities`), which the summary counts once per
+   problem as `preparationEvaluations`. That scan stays outside the arms'
+   budgets, because every arm shares the same selection scan. An axis is `flat` when both one-sided
+   changes are within `PLATEAU_REL_TOL` (1e-6) of the base loss and `edge`
+   when exactly one is.
+   Otherwise, with `D2(s) = f(x+s) + f(x-s) - 2f(x)`, it is `indeterminate`
+   when `|D2(h)|` is at most `CURVATURE_REL_TOL` (1e-9) of the base loss,
+   `kinked` when `D2(h)/D2(h/2)` is more than `KINK_RATIO_REL_TOL` (0.25)
+   away from 4 (the smooth value; a slope jump pulls it towards 2) or
+   `D2(h/2)` has the other sign or is zero, and `smooth` otherwise. A new
+   family, `saturated-hard-tanh`, gives 14 of the 16 hidden units a teacher and
+   start bias of ±12. That is more than any `|sum(w x)|` can reach, so
+   `HARD_TANH` clamps those units and their 112 input weights are exactly flat.
+   Only 2 × 8 input and 16 output synapses (32 axes) are live, so D=40 and D=100
+   have to choose flat axes. The other families, the predeclared manifest
+   and `docs/evidence/weight-router/` are unchanged. Totals over the 12
+   validation seeds (1001..1012) in
+   `docs/evidence/weight-router-landscape/landscape-summary.json` (crate
+   0.1.50, `formatVersion` 4, commit `8e79db7`, clean tree, 1.8 s, 51 744
+   evaluations: 30 864 diagnosis plus 20 880 selection-scan preparation).
+   Coverage was 144 of 144 problems, 0 failed. A problem that fails to build
+   or diagnose is recorded as a row with its `error` and the evaluations it
+   spent, counted in its cell's `failures` and in the summary's `coverage`
+   (planned, completed and failed problems), and the run goes on. Before
+   format 3 the command stopped at the first failure. The rows and cell counts
+   are unchanged from the format 2 run at `d505d1a` and the format 3 run at
+   `cf2ff11`. Format 4 (crate 0.1.50) adds `diagnosisBudgetMultiple` (10) and
+   the per-row and per-cell `budget`; apart from `budget`, the regenerated rows
+   are identical to the format 3 rows.
+
+   | Family | D | flat | edge | kinked | smooth | indeterminate | one-sided `plateauFreeAxes` |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+   | tanh | 20 | 0 | 0 | 0 | 240 | 0 | 0 |
+   | tanh | 40 | 0 | 0 | 0 | 480 | 0 | 0 |
+   | tanh | 100 | 0 | 0 | 1 | 1199 | 0 | 0 |
+   | relu | 20 | 0 | 0 | 19 | 221 | 0 | 0 |
+   | relu | 40 | 0 | 0 | 67 | 413 | 0 | 0 |
+   | relu | 100 | 0 | 0 | 349 | 851 | 0 | 0 |
+   | hard-tanh | 20 | 0 | 0 | 39 | 201 | 0 | 0 |
+   | hard-tanh | 40 | 0 | 0 | 108 | 372 | 0 | 0 |
+   | hard-tanh | 100 | 0 | 0 | 428 | 772 | 0 | 0 |
+   | saturated-hard-tanh | 20 | 0 | 0 | 12 | 228 | 0 | 0 |
+   | saturated-hard-tanh | 40 | 96 | 1 | 78 | 305 | 0 | 96 |
+   | saturated-hard-tanh | 100 | 816 | 1 | 78 | 305 | 0 | 816 |
+
+   The three predeclared families have **no flat or edge axis**, which confirms
+   Finding 4 with a two-sided test. Kinks, however, are common: 8 to 29% of the
+   relu axes and 16 to 36% of the hard-tanh axes, rising with D. The
+   extra axes chosen at larger D are less sensitive ones; the data do not
+   establish why those kink more often. The smooth tanh family has **one** kinked axis in 1920
+   (D=100, seed 1006). That is a false positive at rounding level:
+   `D2(h)` is only about 1.5e-7 of the loss and the ratio is about 13. It is
+   reported as measured; the declared tolerances were not changed after the
+   run. On `saturated-hard-tanh`, every flat axis is the one-sided scan's
+   plateau axis (96 = 8 × 12 at D=40, 816 = 68 × 12 at D=100). The one `edge`
+   axis in each of those cells is a live-unit weight that is flat on one side.
+
+   Refine against CMA-ES on `saturated-hard-tanh`, with the same protocol
+   (12 seeds, budgets 10D/30D/100D, bootstrap 2000, seed 266) in
+   `docs/evidence/weight-router-landscape/saturated/summary.json` (216/216 runs,
+   0 failed, 543 852 evaluations, 108.6 s, commit `8badaf5`, clean tree). The
+   values are mean paired differences CMA-ES − refine of normalised loss
+   (negative favours CMA-ES), as screening `[95% interval]` / full window /
+   held out:
+
+   | D | 10D | 30D | 100D |
+   | ---: | --- | --- | --- |
+   | 20 | inconclusive: −0.01648 `[−0.04012, +0.00890]` / −0.01865 / −0.02217 | cma-es-worse: +0.00925 `[+0.00385, +0.01610]` / +0.01000 / +0.00964 | cma-es-worse: +0.00036 `[+0.00012, +0.00067]` / +0.00027 / +0.00021 |
+   | 40 | inconclusive: −0.01433 `[−0.05913, +0.01988]` / −0.01134 / −0.01241 | cma-es-worse: +0.01442 `[+0.00662, +0.02450]` / +0.01439 / +0.01440 | cma-es-worse: +0.00272 `[+0.00095, +0.00517]` / +0.00290 / +0.00301 |
+   | 100 | cma-es-better: −0.01628 `[−0.03180, −0.00312]` / −0.01679 / −0.01810 | cma-es-worse: +0.00772 `[+0.00219, +0.01680]` / +0.00737 / +0.00727 | cma-es-worse: +0.00339 `[+0.00107, +0.00686]` / +0.00354 / +0.00395 |
+
+   The full-window and held-out means agree in sign with the screening mean
+   in all 9 cells. This **reverses Finding 1 on this family**: CMA-ES is worse
+   in 6 of 9 cells (every 30D and 100D cell), better only at D=100, 10D, and
+   inconclusive at 10D for D=20 and D=40. On plain hard-tanh it was better in
+   6 of 9 cells and worse in none. The reversal is **not explained by flat
+   axes alone**: D=20 has no flat axis yet shows the same 30D/100D losses.
+   That points to the family's very different live landscape (2 live hidden
+   units) as the cause, not just the plateaus. D=100 is extrapolation. These
+   are synthetic fixtures, so they are a hypothesis for the representative
+   run, not evidence about NEAT-AI creatures.
+
+   Reproduce (from `lamarck/`, release build). The arm run reads its manifest
+   from outside its `OUT_DIR`, because it writes `OUT_DIR/manifest.json`
+   itself. The committed files were written to a scratch directory, so the
+   provenance probe saw a clean tree, and then copied in:
+
+   ```bash
+   cargo run --release --example weight_router_bench -- ../docs/evidence/weight-router-landscape \
+       --manifest ../docs/evidence/weight-router-landscape/manifest.json --landscape
+   cargo run --release --example weight_router_bench -- ../docs/evidence/weight-router-landscape/saturated \
+       --manifest ../docs/evidence/weight-router-landscape/saturated-manifest.json
+   cargo test --test weight_bench_landscape
+   ```
 
 ## AMM reference results
 
 Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 855,000
 evaluations (budgeted, preparation per AMM run and 5 confirmation evaluations
-per run). AMM took 100.2 s wall with
-18 workers on a shared, parallel container, so the time is indicative only.
+per run). The campaign was regenerated at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). It ran with
+`--jobs 8`: 133.038 s wall on a shared host, so the time is indicative only. Its
+normalised screening losses are identical to the previously committed router-era
+rows.
 
 **Verdict: `amm-reference-worse` in all 27 cells against both refine and
 CMA-ES** in the committed `reference-summary.json` (54 of 54 comparisons; 0
@@ -371,7 +561,9 @@ rows. The router-era run also found AMM worse than the router in all 27 cells
 (81 of 81 comparisons then). The `router` column below is from that run.
 
 Median normalised screening loss (final over start, lower is better) on the
-validation seeds, and AMM's held-out loss:
+validation seeds, and AMM's held-out loss. The refine, CMA-ES and AMM columns
+were recomputed at format 3 from the committed `runs.jsonl` and `amm-runs.jsonl`
+and are unchanged; the router column is from the router-era run:
 
 | Family | D | Budget | refine | cma-es | router | AMM | AMM held-out |
 |---|---|---|---|---|---|---|---|
@@ -403,6 +595,52 @@ validation seeds, and AMM's held-out loss:
 | tanh | 100 (extrapolation) | 30D | 0.0366 | 0.0368 | 0.0370 | 0.1622 | 0.1963 |
 | tanh | 100 (extrapolation) | 100D | 0.0157 | 0.0139 | 0.0139 | 0.1728 | 0.2134 |
 
+### AMM on `saturated-hard-tanh` (added after the predeclared run)
+
+AMM was also run on the family with real flat axes (Finding 5), with the same
+pinned package (0.7.0, preset `c46`, config hash `2153948ebed51150`), the same
+box (start ± 0.5), the same 12 validation seeds and the same paired bootstrap.
+It was paired with the committed refine and CMA-ES rows in
+`docs/evidence/weight-router-landscape/saturated/`. Coverage: 108 of 108 AMM
+runs completed, 0 failed, each spending exactly its budget, 285,000
+evaluations in all (budgeted, preparation per AMM run and confirmation). The
+summary was written at commit `84096bb` on a clean tree, `--jobs 8`, 3.2 s
+wall. The files are
+[`amm-runs.jsonl`](evidence/weight-router-landscape/saturated/amm-runs.jsonl),
+[`amm-meta.json`](evidence/weight-router-landscape/saturated/amm-meta.json) and
+[`reference-summary.json`](evidence/weight-router-landscape/saturated/reference-summary.json).
+
+**Verdict: `amm-reference-worse` in all 9 cells against both refine and
+CMA-ES** (18 of 18 comparisons). Each value is the mean paired difference of
+normalised loss, AMM minus the other arm (positive means AMM is worse), as
+screening `[95% interval]` / full window / held out:
+
+| D | Budget | AMM − refine | AMM − CMA-ES |
+| ---: | --- | --- | --- |
+| 20 | 10D | +0.1813 `[+0.0833, +0.2994]` / +0.1826 / +0.1864 | +0.1978 `[+0.1056, +0.3177]` / +0.2012 / +0.2086 |
+| 20 | 30D | +0.0679 `[+0.0382, +0.1110]` / +0.0697 / +0.0742 | +0.0586 `[+0.0295, +0.1000]` / +0.0597 / +0.0645 |
+| 20 | 100D | +0.0652 `[+0.0325, +0.1038]` / +0.0665 / +0.0686 | +0.0649 `[+0.0320, +0.1012]` / +0.0663 / +0.0683 |
+| 40 | 10D | +0.2614 `[+0.1270, +0.4230]` / +0.2675 / +0.2716 | +0.2757 `[+0.1394, +0.4212]` / +0.2788 / +0.2840 |
+| 40 | 30D | +0.1032 `[+0.0545, +0.1600]` / +0.1057 / +0.1071 | +0.0887 `[+0.0438, +0.1386]` / +0.0913 / +0.0927 |
+| 40 | 100D | +0.1210 `[+0.0588, +0.1936]` / +0.1293 / +0.1286 | +0.1182 `[+0.0542, +0.1909]` / +0.1264 / +0.1256 |
+| 100 (extrapolation) | 10D | +0.2548 `[+0.1186, +0.3867]` / +0.2566 / +0.2582 | +0.2711 `[+0.1430, +0.4298]` / +0.2734 / +0.2763 |
+| 100 (extrapolation) | 30D | +0.0957 `[+0.0474, +0.1545]` / +0.1030 / +0.1052 | +0.0880 `[+0.0433, +0.1431]` / +0.0957 / +0.0979 |
+| 100 (extrapolation) | 100D | +0.1113 `[+0.0497, +0.1802]` / +0.1168 / +0.1140 | +0.1079 `[+0.0477, +0.1767]` / +0.1133 / +0.1101 |
+
+The plateau family does not change the AMM result: its online probes are
+charged to its own budget, and it still trails both local arms in every cell.
+`committed_saturated_amm_evidence_is_reproduced_and_amm_loses_every_cell` in
+`lamarck/tests/weight_bench_reference.rs` re-summarises the committed rows and
+pins the 18 verdicts. To reproduce (release build; the bench reads the arm run
+from a scratch copy so the committed directory is not written to):
+
+```bash
+cp -r docs/evidence/weight-router-landscape/saturated /tmp/sat
+env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONPATH=... python3 scripts/amm-reference.py \
+  --bench BIN --manifest /tmp/sat/manifest.json --out-dir /tmp/sat-amm --jobs 8
+BIN /tmp/sat --compare-reference /tmp/sat-amm/amm-runs.jsonl
+```
+
 Interpretation (a negative finding, stated carefully). On this suite, under the
 predeclared box, AMM as published is a poor fit for local weight refinement from
 a good incumbent. At 10D its median final/start loss is 0.70 to 0.95; the 30D and 100D
@@ -417,6 +655,30 @@ Consequence: nothing from AMM is ported, its probes do not justify a port and,
 per the issue, the in-repo router stays unported too. No default changed. The
 synthetic suite does not demonstrate any NEAT-AI benefit either way; the
 representative run on the private corpus remains unperformed.
+
+## Compute ledger
+
+Every committed campaign, in loss evaluations. Each total includes the
+145-evaluation selection scan (preparation) once per problem built, and the
+confirmation evaluations. No calibration was run by the current code.
+
+| Campaign | Evidence | Runs or problems | Failed | Evaluations | Commit |
+|---|---|---:|---:|---:|---|
+| Predeclared synthetic suite (refine, CMA-ES) | `weight-router/summary.json` | 648 runs | 0 | 1,631,615 | `f0a7b4c` |
+| AMM reference, predeclared suite | `weight-router/reference-summary.json` | 324 runs | 0 | 855,000 | `f0a7b4c` |
+| `saturated-hard-tanh` arms (refine, CMA-ES) | `weight-router-landscape/saturated/summary.json` | 216 runs | 0 | 543,852 | `8badaf5` |
+| AMM reference, `saturated-hard-tanh` | `weight-router-landscape/saturated/reference-summary.json` | 108 runs | 0 | 285,000 | `84096bb` |
+| Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `8e79db7` |
+| **Committed total** | | | 0 | 3,367,211 | |
+
+The router-era campaign (crate 0.1.46), whose code was removed, and its
+calibration are not in this total; their counts are in the router-era sections
+above. Also outside it are the method check (27 rows per AMM version), the
+`cargo test` fixtures and the development and smoke runs made while building
+the bench. Those were not logged, so their cost is **not counted**. All
+campaigns use validation seeds 1001 to 1012, and none tunes a parameter on
+them. The landscape tolerances were declared before its evidence run and were
+not changed afterwards (Finding 5).
 
 ## Controls and remaining experiment
 
@@ -462,7 +724,7 @@ candidate. Ordinary production acceptance in `run.rs` is unchanged.
 ## Verification and process failures
 
 ```bash
-cargo test --test weight_bench --test weight_bench_reference
+cargo test --test weight_bench --test weight_bench_reference --test weight_bench_landscape
 cargo test --lib failed_confirmations_keep_the_calls_already_spent
 # Integration checks, using the pinned scratch Python environment and a built bench:
 env PYTHONPATH=... python3 scripts/test-amm-reference.py --bench BIN
@@ -488,10 +750,13 @@ from routine feature CI and are not representative optimisation measurements.
 
 * The comparison against the actual production refinement pipeline and a frozen
   representative model/corpus campaign, including full authoritative confirmation.
-* Full-window confirmation is computed for every run but the verdicts, `summary.json`
-  and `reference-summary.json` read only the screening and held-out losses, and
-  `runs.jsonl` is not committed, so full-window results are neither compared
-  nor reported.
-* A problem proven by a test to contain plateau axes among its free weights.
+* Plateau axes among the free weights on a representative problem. The
+  predeclared synthetic suite has none (Findings 4 and 5); only the added
+  `saturated-hard-tanh` family has them by construction (Finding 5).
+* Whether `weight_bench::landscape` and `--landscape` earn their keep. Nothing
+  routes on the diagnosis; it is kept, opt-in and example-only, because it is
+  the only reproducer of the committed plateau and kink evidence (Finding 5).
+  It refuses corpus manifests, so it cannot yet diagnose a representative
+  problem. Remove it if the representative run does not use it.
 * Box-size sensitivity and search-radius controls, predeclared on fresh data.
   No production optimiser or default change is supported by the current evidence.

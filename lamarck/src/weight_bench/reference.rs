@@ -223,7 +223,7 @@ pub fn summarise_reference(
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
     let cells = summarise_cells(m, &all, &pairs, &mut rng);
     Ok(ReferenceResults {
-        format_version: 2,
+        format_version: 3,
         manifest: m.clone(),
         total_evaluations,
         coverage: Coverage {

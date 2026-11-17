@@ -1,0 +1,537 @@
+//! Runs the predeclared protocol and reduces it to a verdict.
+//!
+//! Every arm starts from the same immutable validation parent. Held-out and
+//! training MSE are measurements taken after the arm, and are not charged.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use neat_core::CreatureExport;
+use serde::Serialize;
+
+use super::apply::{Cost, apply_rule_steps, mse};
+use super::baselines::{derivative_free, matched_count, sparse_backprop};
+use super::manifest::{Manifest, Versions};
+use super::rule::{RuleSet, describe};
+use super::search::{SearchStep, discover};
+use super::stats::{Verdict, bootstrap_mean_ci, mean, paired_verdict};
+use super::tasks::{TASK_GENERATOR_VERSION, Task, TaskSpec, build_task};
+
+/// Calibration tasks and `(group, task)` validation pairs.
+type TaskSets = (Vec<Task>, Vec<(String, Task)>);
+
+const SYMBOLIC: &str = "symbolic";
+const SPARSE_BACKPROP: &str = "sparse-backprop";
+const DERIVATIVE_FREE: &str = "derivative-free";
+const SPARSE_BACKPROP_APP: &str = "sparse-backprop-app-only";
+const DERIVATIVE_FREE_APP: &str = "derivative-free-app-only";
+const ARMS: [&str; 5] = [
+    SYMBOLIC,
+    SPARSE_BACKPROP,
+    DERIVATIVE_FREE,
+    SPARSE_BACKPROP_APP,
+    DERIVATIVE_FREE_APP,
+];
+const BASELINES: [&str; 4] = [
+    SPARSE_BACKPROP,
+    DERIVATIVE_FREE,
+    SPARSE_BACKPROP_APP,
+    DERIVATIVE_FREE_APP,
+];
+/// Equal-total-budget baselines that decide the verdict.
+const PRIMARY: [&str; 2] = [SPARSE_BACKPROP, DERIVATIVE_FREE];
+
+/// One completed (task, K, arm) run.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRow {
+    /// Task label, `group:seed:width:squash` (synthetic) or `group:creature-N` (files).
+    pub task: String,
+    /// Validation group.
+    pub group: String,
+    /// Step count K of the symbolic arm this run is paired with.
+    pub k: u32,
+    /// Arm name.
+    pub arm: String,
+    /// Held-out MSE after the arm.
+    pub held_out_mse: f64,
+    /// Training MSE after the arm.
+    pub train_mse: f64,
+    /// Record units charged to the arm.
+    pub record_units: u64,
+    /// Steps (or evaluations) the arm ran.
+    pub steps: u64,
+}
+
+/// One (task, K, arm) run that errored or produced a non-finite MSE.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Failure {
+    /// Task label.
+    pub task: String,
+    /// Step count K.
+    pub k: u32,
+    /// Arm name.
+    pub arm: String,
+    /// Why the run failed.
+    pub reason: String,
+}
+
+/// Planned, completed and failed run counts.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Coverage {
+    /// Validation tasks × K values × arms.
+    pub planned: u64,
+    /// Runs that produced a row.
+    pub completed: u64,
+    /// Runs recorded as failures.
+    pub failed: u64,
+}
+
+/// One paired difference, symbolic minus baseline held-out MSE.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedDifference {
+    /// Task label.
+    pub task: String,
+    /// Symbolic minus baseline held-out MSE.
+    pub difference: f64,
+}
+
+/// Paired comparison of the symbolic arm against one baseline at one K.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comparison {
+    /// Baseline arm.
+    pub arm: String,
+    /// Step count K.
+    pub k: u32,
+    /// `all`, `same-width` or `new-width`.
+    pub group: String,
+    /// Whether the baseline is a primary (equal-total-budget) arm.
+    pub primary: bool,
+    /// Number of paired tasks.
+    pub n: usize,
+    /// Validation tasks in this scope that have no pair because the symbolic or
+    /// baseline run failed. Any value above zero makes the verdict `Inconclusive`.
+    pub missing: usize,
+    /// Mean paired difference (negative favours symbolic).
+    pub mean_difference: f64,
+    /// Lower bound of the bootstrap 95% interval.
+    pub ci_low: f64,
+    /// Upper bound of the bootstrap 95% interval.
+    pub ci_high: f64,
+    /// Verdict on the interval.
+    pub verdict: Verdict,
+    /// Every paired difference behind the mean.
+    pub paired_differences: Vec<PairedDifference>,
+}
+
+/// Result of the predeclared success rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverallVerdict {
+    /// Better than both primary baselines at some K, and worse than neither at any K.
+    EarnsItsPlace,
+    /// Worse than sparse-backprop at every K.
+    Negative,
+    /// Neither of the above.
+    Inconclusive,
+}
+
+/// Where the records behind a report came from.
+///
+/// A files run records only a corpus key and creature fingerprints: never a
+/// path or a record value, so private data stays private.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DataSource {
+    /// Tasks generated by the synthetic generator.
+    #[serde(rename_all = "camelCase")]
+    Synthetic {
+        /// Version of the generator that produced the tasks.
+        generator: String,
+    },
+    /// A calibration creature and validation creatures on a training corpus.
+    #[serde(rename_all = "camelCase")]
+    Files {
+        /// Hash of the corpus directory, as `training_data_key` gives it.
+        corpus_key: String,
+        /// Fingerprint of the calibration creature, as hex.
+        calibration_creature: String,
+        /// Fingerprint of each validation creature, as hex, in input order.
+        validation_creatures: Vec<String>,
+    },
+}
+
+/// Whether a report may be cited as a success, kept apart from the verdict.
+///
+/// The verdict is the predeclared rule applied to the intervals; this says
+/// whether the data behind it can support a success claim at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SuccessClaim {
+    /// Synthetic fixtures never support a success claim, whatever the verdict.
+    NotClaimableSynthetic,
+    /// A files run whose verdict is `EarnsItsPlace`. The code cannot know
+    /// whether the supplied creature and corpus are representative, so the
+    /// owner must confirm before anything is called a success.
+    PendingOwnerReview,
+    /// A files run whose verdict is not `EarnsItsPlace`.
+    NoSuccess,
+}
+
+/// The success claim a report with this source and verdict supports.
+pub fn success_claim(source: &DataSource, verdict: OverallVerdict) -> SuccessClaim {
+    match (source, verdict) {
+        (DataSource::Synthetic { .. }, _) => SuccessClaim::NotClaimableSynthetic,
+        (DataSource::Files { .. }, OverallVerdict::EarnsItsPlace) => {
+            SuccessClaim::PendingOwnerReview
+        }
+        (DataSource::Files { .. }, _) => SuccessClaim::NoSuccess,
+    }
+}
+
+/// Everything one manifest run produces.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Report {
+    /// Versions of the harness.
+    pub versions: Versions,
+    /// Where the records came from.
+    pub data_source: DataSource,
+    /// The protocol that was run.
+    pub manifest: Manifest,
+    /// Discovered rules, one readable string per family.
+    pub discovered_rules: BTreeMap<String, String>,
+    /// Cost of rule discovery (charged to the meta budget).
+    pub meta_cost: Cost,
+    /// Every candidate rule discovery evaluated, accepted or not.
+    pub search_trace: Vec<SearchStep>,
+    /// Every completed run.
+    pub runs: Vec<RunRow>,
+    /// Every failed run.
+    pub failures: Vec<Failure>,
+    /// Planned, completed and failed counts.
+    pub coverage: Coverage,
+    /// Paired comparisons.
+    pub comparisons: Vec<Comparison>,
+    /// Predeclared success rule applied to the comparisons.
+    pub overall_verdict: OverallVerdict,
+    /// Whether the data source lets the verdict be cited as a success.
+    pub success_claim: SuccessClaim,
+}
+
+impl Report {
+    /// Pretty JSON of the whole report.
+    pub fn summary_json(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(self).map_err(|e| e.to_string())
+    }
+}
+
+/// Tracked directory that holds the public synthetic evidence.
+pub const DEFAULT_OUT_DIR: &str = "docs/evidence/local-rules";
+
+/// The directory a run writes to.
+///
+/// Synthetic mode may default to the tracked public evidence. Files mode never
+/// does: its report names a private corpus and creatures, so an absent `out`
+/// is refused instead of overwriting the public files.
+pub fn resolve_out_dir(files_mode: bool, out: Option<&str>) -> Result<String, String> {
+    match (out, files_mode) {
+        (Some(dir), _) => Ok(dir.to_string()),
+        (None, false) => Ok(DEFAULT_OUT_DIR.to_string()),
+        (None, true) => Err(format!(
+            "files mode needs an explicit OUT_DIR, because the default {DEFAULT_OUT_DIR} holds the public evidence and a private run must not overwrite it"
+        )),
+    }
+}
+
+/// Write `manifest.json` and `summary.json` into `dir`.
+pub fn write_outputs(dir: &Path, report: &Report) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let manifest = serde_json::to_string_pretty(&report.manifest).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("manifest.json"), manifest + "\n").map_err(|e| e.to_string())?;
+    let summary = report.summary_json()?;
+    std::fs::write(dir.join("summary.json"), summary + "\n").map_err(|e| e.to_string())
+}
+
+/// Report label of a validation task: its group, then its own name.
+fn label(group: &str, task: &Task) -> String {
+    format!("{group}:{}", task.name)
+}
+
+/// Calibration tasks, then `(group, task)` validation pairs.
+fn build_tasks(manifest: &Manifest) -> Result<TaskSets, String> {
+    let make = |seed: u64, width: usize, squash: &str| {
+        build_task(
+            TaskSpec {
+                seed,
+                hidden_width: width,
+                hidden_squash: squash.to_string(),
+            },
+            manifest.inputs,
+            manifest.train_records,
+            manifest.held_out_records,
+        )
+    };
+    let mut calibration = Vec::new();
+    let mut validation = Vec::new();
+    for squash in &manifest.hidden_squashes {
+        for &seed in &manifest.calibration_seeds {
+            calibration.push(make(seed, manifest.calibration_width, squash)?);
+        }
+        for group in &manifest.validation_groups {
+            for &seed in &group.seeds {
+                let task = make(seed, group.hidden_width, squash)?;
+                validation.push((group.group.clone(), task));
+            }
+        }
+    }
+    Ok((calibration, validation))
+}
+
+/// Held-out and training MSE of an arm's creature. Non-finite values are errors.
+fn measure(creature: &CreatureExport, task: &Task) -> Result<(f64, f64), String> {
+    let held_out = mse(creature, &task.held_out)?;
+    let train = mse(creature, &task.train)?;
+    if !held_out.is_finite() || !train.is_finite() {
+        return Err(format!(
+            "non-finite MSE (train {train}, held-out {held_out})"
+        ));
+    }
+    Ok((held_out, train))
+}
+
+/// Run one arm on one validation task at step count `k`.
+///
+/// Returns the creature, its cost and its step (or evaluation) count. The
+/// primary arms get the symbolic budget plus `meta_share`; the app-only arms get
+/// the symbolic budget alone.
+fn run_arm(
+    name: &str,
+    task: &Task,
+    rules: &RuleSet,
+    manifest: &Manifest,
+    k: u32,
+    meta_share: u64,
+) -> Result<(CreatureExport, Cost, u64), String> {
+    let n = manifest.train_records;
+    let symbolic_units = 2 * u64::from(k) * n as u64;
+    let primary = matches!(name, SPARSE_BACKPROP | DERIVATIVE_FREE);
+    let seed = task
+        .spec
+        .as_ref()
+        .map_or(manifest.meta_seed, |spec| spec.seed);
+    let units = symbolic_units + if primary { meta_share } else { 0 };
+    let (parent, train) = (&task.parent, &task.train);
+    match name {
+        SYMBOLIC => {
+            let (creature, cost) =
+                apply_rule_steps(parent, train, rules, k, manifest.eta, manifest.max_step)?;
+            Ok((creature, cost, u64::from(k)))
+        }
+        SPARSE_BACKPROP | SPARSE_BACKPROP_APP => {
+            let steps = matched_count(units, 2, n);
+            let steps_u32 = u32::try_from(steps).map_err(|e| e.to_string())?;
+            let (creature, cost) = sparse_backprop(
+                parent,
+                train,
+                steps_u32,
+                manifest.backprop_learning_rate,
+                manifest.sparse_ratio,
+                seed,
+            )?;
+            Ok((creature, cost, steps))
+        }
+        DERIVATIVE_FREE | DERIVATIVE_FREE_APP => {
+            let evaluations = matched_count(units, 1, n);
+            let (creature, cost) = derivative_free(
+                parent,
+                train,
+                evaluations,
+                manifest.derivative_free_sigma,
+                seed,
+            )?;
+            Ok((creature, cost, evaluations))
+        }
+        other => Err(format!("unknown arm {other}")),
+    }
+}
+
+fn held_out_of(runs: &[RunRow], task: &str, k: u32, arm: &str) -> Option<f64> {
+    runs.iter()
+        .find(|r| r.task == task && r.k == k && r.arm == arm)
+        .map(|r| r.held_out_mse)
+}
+
+/// The predeclared success rule, applied to the `all`-group comparisons.
+///
+/// `steps` are the K values the comparisons cover. A K with no `all`
+/// comparison for an arm counts as neither Better nor Worse.
+pub fn predeclared_verdict(comparisons: &[Comparison], steps: &[u32]) -> OverallVerdict {
+    let at = |arm: &str, k: u32| {
+        comparisons
+            .iter()
+            .find(|c| c.group == "all" && c.arm == arm && c.k == k)
+            .map(|c| c.verdict)
+    };
+    let mut better_than_both = false;
+    let mut worse_than_any_primary = false;
+    let mut worse_than_backprop_everywhere = true;
+    for &k in steps {
+        let backprop = at(SPARSE_BACKPROP, k);
+        let free = at(DERIVATIVE_FREE, k);
+        better_than_both |= backprop == Some(Verdict::Better) && free == Some(Verdict::Better);
+        worse_than_any_primary |= backprop == Some(Verdict::Worse) || free == Some(Verdict::Worse);
+        worse_than_backprop_everywhere &= backprop == Some(Verdict::Worse);
+    }
+    if better_than_both && !worse_than_any_primary {
+        OverallVerdict::EarnsItsPlace
+    } else if worse_than_backprop_everywhere {
+        OverallVerdict::Negative
+    } else {
+        OverallVerdict::Inconclusive
+    }
+}
+
+/// Run the whole synthetic protocol for `manifest`.
+pub fn run_manifest(manifest: &Manifest) -> Result<Report, String> {
+    manifest.validate()?;
+    let (calibration, validation) = build_tasks(manifest)?;
+    let source = DataSource::Synthetic {
+        generator: TASK_GENERATOR_VERSION.to_string(),
+    };
+    run_protocol(manifest, &calibration, &validation, source)
+}
+
+/// Discover rules on `calibration`, then run every arm on every labelled
+/// validation task, measure and reduce to a verdict.
+///
+/// The synthetic and files paths both end here, so their comparison and verdict
+/// logic cannot drift apart. Callers validate `manifest` first.
+pub(super) fn run_protocol(
+    manifest: &Manifest,
+    calibration: &[Task],
+    validation: &[(String, Task)],
+    data_source: DataSource,
+) -> Result<Report, String> {
+    if validation.is_empty() {
+        return Err("manifest has no validation tasks".to_string());
+    }
+    let (rules, meta_cost, trace) = discover(manifest, calibration)?;
+    let meta_share = meta_cost.record_units.div_ceil(validation.len() as u64);
+
+    let mut runs = Vec::new();
+    let mut failures = Vec::new();
+    for (group, task) in validation {
+        let name = label(group, task);
+        for &k in &manifest.steps {
+            for arm in ARMS {
+                let outcome = run_arm(arm, task, &rules, manifest, k, meta_share).and_then(
+                    |(creature, cost, steps)| {
+                        let (held_out_mse, train_mse) = measure(&creature, task)?;
+                        Ok(RunRow {
+                            task: name.clone(),
+                            group: group.clone(),
+                            k,
+                            arm: arm.to_string(),
+                            held_out_mse,
+                            train_mse,
+                            record_units: cost.record_units,
+                            steps,
+                        })
+                    },
+                );
+                match outcome {
+                    Ok(row) => runs.push(row),
+                    Err(reason) => failures.push(Failure {
+                        task: name.clone(),
+                        k,
+                        arm: arm.to_string(),
+                        reason,
+                    }),
+                }
+            }
+        }
+    }
+
+    let names: Vec<(String, String)> = validation
+        .iter()
+        .map(|(group, task)| (group.clone(), label(group, task)))
+        .collect();
+    // `all`, then each validation group in first-appearance order.
+    let mut scopes = vec!["all".to_string()];
+    for (group, _) in validation {
+        if !scopes.contains(group) {
+            scopes.push(group.clone());
+        }
+    }
+    let mut comparisons = Vec::new();
+    for &k in &manifest.steps {
+        for baseline in BASELINES {
+            for scope in scopes.iter().map(String::as_str) {
+                let paired: Vec<PairedDifference> = names
+                    .iter()
+                    .filter(|(group, _)| scope == "all" || group == scope)
+                    .filter_map(|(_, task)| {
+                        let symbolic = held_out_of(&runs, task, k, SYMBOLIC)?;
+                        let other = held_out_of(&runs, task, k, baseline)?;
+                        Some(PairedDifference {
+                            task: task.clone(),
+                            difference: symbolic - other,
+                        })
+                    })
+                    .collect();
+                let in_scope = names
+                    .iter()
+                    .filter(|(group, _)| scope == "all" || group == scope)
+                    .count();
+                let diffs: Vec<f64> = paired.iter().map(|p| p.difference).collect();
+                let missing = in_scope - diffs.len();
+                let ci = bootstrap_mean_ci(
+                    &diffs,
+                    manifest.bootstrap_resamples,
+                    manifest.bootstrap_seed,
+                );
+                comparisons.push(Comparison {
+                    arm: baseline.to_string(),
+                    k,
+                    group: scope.to_string(),
+                    primary: PRIMARY.contains(&baseline),
+                    n: diffs.len(),
+                    missing,
+                    mean_difference: mean(&diffs),
+                    ci_low: ci.0,
+                    ci_high: ci.1,
+                    verdict: paired_verdict(ci, diffs.len(), manifest.min_paired_tasks, missing),
+                    paired_differences: paired,
+                });
+            }
+        }
+    }
+
+    let planned = (validation.len() * manifest.steps.len() * ARMS.len()) as u64;
+    let coverage = Coverage {
+        planned,
+        completed: runs.len() as u64,
+        failed: failures.len() as u64,
+    };
+    let overall_verdict = predeclared_verdict(&comparisons, &manifest.steps);
+    let success_claim = success_claim(&data_source, overall_verdict);
+    Ok(Report {
+        versions: Versions::current(),
+        data_source,
+        manifest: manifest.clone(),
+        discovered_rules: describe(&rules),
+        meta_cost,
+        search_trace: trace,
+        runs,
+        failures,
+        coverage,
+        comparisons,
+        overall_verdict,
+        success_claim,
+    })
+}
