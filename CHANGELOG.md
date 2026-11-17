@@ -191,8 +191,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hand-written copies. It inherits their refusals: a twin or probe the hard
   weight limit (`limit_weight_scale`, 100000) would clamp, or whose step is below
   `plank_constant` (1e-7), is not evaluated, and a round with a refused twin
-  spends one evaluation instead of two. It remains a simplified random-axis
-  surrogate, not `generate_candidate_batch`. The twin is also skipped when
+  spends one evaluation instead of two (`the_refine_arm_skips_a_refused_twin`
+  and `the_refine_arm_skips_a_refused_follow_up_probe` in
+  `lamarck/tests/weight_bench.rs` drive both refusals through `lamarck_refine`).
+  It remains a simplified random-axis surrogate, not `generate_candidate_batch`. The twin is also skipped when
   `signed_perturbation` finds no single-weight change (for example
   `x + delta == x` in floating point), not only when `mirror_candidate` refuses
   it. Re-running the predeclared manifest at `a5484b0` reproduced

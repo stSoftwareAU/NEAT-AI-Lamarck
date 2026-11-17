@@ -815,3 +815,74 @@ fn the_refine_arm_reproduces_its_committed_rows() {
         m.families.len() * m.dimensions.len() * m.budget_multiples.len() * m.validation_seeds.len()
     );
 }
+
+/// One IDENTITY output fed by one synapse `input-0 -> o1` at `weight`, scored
+/// on a single record (input 1, target 200000): the loss falls as the weight
+/// rises, so a step towards the hard weight limit (100000) always improves.
+fn one_weight(weight: f64) -> WeightObjective {
+    let json = format!(
+        r#"{{
+          "semanticVersion": "4.0.0",
+          "forwardOnly": true,
+          "input": 1,
+          "output": 1,
+          "neurons": [{{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}}],
+          "synapses": [{{"fromUUID":"input-0","toUUID":"o1","weight":{weight:?}}}]
+        }}"#
+    );
+    let creature = neat_core::parse_creature_json(&json).unwrap();
+    WeightObjective::new(creature, vec![0], &[1.0, 200_000.0]).unwrap()
+}
+
+/// A twin `mirror_candidate` refuses is not evaluated: the round spends one
+/// evaluation instead of two. At the hard weight limit (100000), seed 4 draws a
+/// negative delta, so `+delta` lowers the weight (worse) and the twin would
+/// land past the limit. Had the twin been evaluated it would have won (the loss
+/// falls as the weight rises) and the budget of 3 would be spent.
+#[test]
+fn the_refine_arm_skips_a_refused_twin() {
+    let o = one_weight(100_000.0);
+    let mut b = BudgetedObjective::new(&o, 3);
+    lamarck_refine(&mut b, 4).unwrap();
+    assert_eq!(
+        b.used(),
+        2,
+        "seed 4 must draw a negative delta, so the twin lands past the limit"
+    );
+    assert_eq!(b.best().unwrap().1, &[100_000.0]);
+
+    // Control: away from the limit the same seed evaluates both twins and
+    // accepts the upward one.
+    let o = one_weight(5.0);
+    let mut b = BudgetedObjective::new(&o, 3);
+    lamarck_refine(&mut b, 4).unwrap();
+    assert_eq!(b.used(), 3);
+    assert!(b.best().unwrap().1[0] > 5.0);
+}
+
+/// A follow-up probe `probe_candidate` refuses is not evaluated. A budget of 6
+/// covers the start plus one round: plus, twin and three probes (+0.5, -0.5
+/// and +1.0 of the accepted move `m`). The delta draw does not depend on the
+/// weight, so both runs below make the same move `m`. Seed 1 accepts an upward move; from
+/// 99999.9 every probe stays inside the limit and the best is `w + 2m`, but
+/// from 99999.95 the `+1.0` probe would pass 100000, so it is dropped, one
+/// evaluation is left unspent and the best is the `+0.5` probe, `w + 1.5m`.
+#[test]
+fn the_refine_arm_skips_a_refused_follow_up_probe() {
+    let control_w = 99_999.9;
+    let o = one_weight(control_w);
+    let mut b = BudgetedObjective::new(&o, 6);
+    lamarck_refine(&mut b, 1).unwrap();
+    assert_eq!(b.used(), 6);
+    let m = (b.best().unwrap().1[0] - control_w) / 2.0;
+    assert!(m > 0.0);
+
+    let w = 99_999.95;
+    assert!(w + 1.5 * m <= 100_000.0 && w + 2.0 * m > 100_000.0);
+    let o = one_weight(w);
+    let mut b = BudgetedObjective::new(&o, 6);
+    lamarck_refine(&mut b, 1).unwrap();
+    assert_eq!(b.used(), 5);
+    let best = b.best().unwrap().1[0];
+    assert!((best - (w + 1.5 * m)).abs() < 1e-6, "best {best}");
+}
