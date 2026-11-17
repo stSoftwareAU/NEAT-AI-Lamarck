@@ -1,36 +1,35 @@
 ## Summary
 
-Most of #266's weight benchmark was merged in #282. That left the landscape
-diagnosis outside every evaluation budget. This PR makes the diagnosis draw its
-`1 + 4D` probes from the same `BudgetedObjective` the arms use, limited to the
-manifest's tightest budget (smallest budget multiple × D, so 10D for the
-predeclared manifest). Each landscape row and cell records that `budget`, and a
-diagnosis that needs more is recorded as `BudgetExhausted` with the evaluations
-it spent. Rows and summaries written before this change still load, with no
-budget. The landscape summary moves to format 4, and the committed landscape
-evidence (`docs/evidence/weight-router-landscape/`) is regenerated in format 4:
-every row carries `budget` = 10D, and apart from that field the rows are
-identical to the format 3 rows. The crate goes from 0.1.49 to 0.1.50.
+Most of #266's weight benchmark has already merged (#282, #283). One reuse gap
+remained: the `lamarck-refine` arm built its antithetic twin and its follow-up
+probes with a hand-written copy of what `mirror.rs` and `followup.rs` do. This
+PR makes `lamarck/src/weight_bench/refine.rs` call the production helpers
+instead: `mirror::signed_perturbation` and `mirror::mirror_candidate` for the
+`-delta` twin, and `followup::plan_probes` and `followup::probe_candidate` for
+the follow-up probes. The arm therefore inherits their refusals (the hard
+weight limit and the plank constant). Re-running both committed refine
+suites with this code reproduced every committed row, so no evidence file and
+no reported number changes.
 
-The representative runs, a production refinement baseline and a predeclared
-protocol for the post-hoc additions are still outstanding, so this PR is
+The refinement arm is still a random-axis surrogate, not the production
+candidate pipeline, and no representative run has been made, so this PR is
 Part of #266.
 
 ## Spec
 
 ### Intent and Rationale
 
-- The open "Count landscape probes within the budget" gap was that the diagnosis's probes were counted but charged to no budget; reusing `BudgetedObjective` puts them under the same counter and refusal the arms use, with no new counting code.
+- The issue says "Reuse existing mechanisms", and the routing doc recorded that `refine.rs` "manually recreates mirrors and follow-up steps". Calling the production helpers removes that second copy without changing the arm's predeclared protocol on the committed suites.
 
 ### Essential Design Decisions
 
-- The budget is the manifest's *smallest* multiple × D, the tightest budget any arm gets, so a diagnosis fits there or fails loudly as `BudgetExhausted`. Preparation (the 145-evaluation selection scan) stays outside the budget, because every arm shares that scan and no arm's budget pays for it either.
-- Persisted shape: `LandscapeRow.budget` is `Option<usize>` and `LandscapeCell.budget` is `usize`, both `#[serde(default)]`, so format-3 rows read as `None`/`0` (old shape read, key not bumped). `landscape_rows_without_a_budget_still_load` seeds a row and a cell copied verbatim from the format-3 files this PR replaces.
-- The budget is a cap on the diagnosis, not a reduction of any arm's budget: nothing routes on the diagnosis, and the router was removed in #282 after it never beat CMA-ES.
+- The RNG draw order (axis, then a nonzero delta), the `remaining() >= 2` loop, start-first evaluation and the tie-break (plus wins ties) are kept, so the committed rows still reproduce exactly.
+- The limits come from `BackpropConfig::default()` (`limit_weight_scale` 100000, `plank_constant` 1e-7). A twin that `signed_perturbation` or `mirror_candidate` refuses is not evaluated, so that round spends one evaluation instead of two. A refused follow-up probe is skipped.
+- `WeightObjective` gains `creature_at` and `synapse_indices`, and `BudgetedObjective` gains `objective()`, only so the arm can hand creatures to the helpers. `loss_on` now builds its creature through `creature_at`.
 
 ### Undiscoverable Facts
 
-- #282 (the earlier branch for this issue) was merged into `Develop` as `06c250b` while the issue stayed open as `Part of #266`; this branch starts from that commit.
+- The new arithmetic is not bit-identical by construction: the twin is now `x - ((x + delta) - x)` instead of `x - delta`. Re-running both suites still gave identical rows (Evidence below).
 
 ## Evidence
 
@@ -38,60 +37,83 @@ Backend/CLI only, no UI file touched.
 
 ```mermaid
 flowchart LR
-    M[Manifest budget multiples] -->|min x D| B[BudgetedObjective]
-    P[Problem: 145-eval selection scan, counted separately] --> D[Diagnosis: 1 + 4D probes]
-    B --> D
-    D -->|fits| R[Row: shapes, evaluations, budget]
-    D -->|over budget| E[Row: error BudgetExhausted, evaluations = budget]
+    R[seeded axis + delta] --> P[plus creature]
+    P --> S[mirror::signed_perturbation]
+    S --> M[mirror::mirror_candidate]
+    M -->|Some| T[evaluate twin]
+    M -->|None: limit or plank| K[skip twin, 1 evaluation]
+    T --> A{strict improvement?}
+    K --> A
+    A -->|yes| F[followup::plan_probes + probe_candidate]
+    F --> E[evaluate the probes not refused, keep best]
 ```
 
-- `lamarck/tests/weight_bench_landscape.rs::diagnosis_draws_its_probes_from_the_tightest_budget`: multiples `[30, 10, 100]` give every row `budget == 10D`, `evaluations == 1 + 4D`, and cell budgets equal to the sum of their rows'.
-- `lamarck/tests/weight_bench_landscape.rs::a_diagnosis_over_its_budget_is_recorded_as_budget_exhausted`: at D=20 a budget of 80 (one short of 81) records `evaluation budget of 80 exhausted` with 80 evaluations. The positive control, a budget of 100, completes with 81.
-- `lamarck/tests/weight_bench_landscape.rs::landscape_rows_without_a_budget_still_load`: a format-3 row and summary cell (copied from the replaced files) load with `budget` `None` and `0`.
-- `lamarck/tests/weight_bench_landscape.rs::committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau`: the committed format-4 summary has `formatVersion` 4 and `diagnosisBudgetMultiple` 10; every committed row has `budget == Some(10D)` and `evaluations <= 10D`, every cell has `budget == problems × 10D`, and the current code reproduces the first-seed rows exactly, `budget` included.
-- `docs/evidence/weight-router-landscape/landscape-summary.json` / `landscape.jsonl`: regenerated by `cargo run --release --example weight_router_bench -- ../docs/evidence/weight-router-landscape --manifest ../docs/evidence/weight-router-landscape/manifest.json --landscape` at `8e79db7` (clean tree, crate 0.1.50, 1.8 s): 144 of 144 problems, 0 failed, 51 744 evaluations. Stripping `budget` from the new rows gives the old rows byte for byte.
+- **Main suite:** `cargo run --release --example weight_router_bench -- /tmp/wrb-266/main` at `a5484b0` finished 648/648 runs, 0 failed, 1,631,615 evaluations. Comparing its `runs.jsonl` with the committed `docs/evidence/weight-router/runs.jsonl` row by row as parsed JSON gave 648 equal, 0 different. Every cell verdict is unchanged.
+- **Saturated suite:** the same binary with `--manifest docs/evidence/weight-router-landscape/saturated/manifest.json` finished 216/216 runs. All 216 rows are equal to the committed `docs/evidence/weight-router-landscape/saturated/runs.jsonl`.
+- **Pin test:** `lamarck/tests/weight_bench.rs::the_refine_arm_reproduces_its_committed_rows` pins 8 of those rows in CI.
+- **Unit tests** in `lamarck/src/weight_bench/refine.rs`:
+  - `twin_straddles_x_on_the_chosen_axis`
+  - `twin_is_refused_past_the_hard_weight_limit` (positive control included)
+  - `twin_is_refused_below_the_plank_constant` (positive control included)
+  - `follow_up_steps_around_the_winning_move` (steps +0.5, -0.5 and +1.0 of the move, in that order)
+  - `follow_up_drops_a_probe_past_the_hard_limit`
 
 ## Acceptance Criteria
 
 <!-- vibe-spec-review inputs="diff+issue-body" -->
 
-- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `docs/evidence/weight-router/reference-summary.json`, `scripts/amm-reference.py`, `lamarck/src/weight_bench/cmaes.rs` — reviewer: partial — reason: the refinement arm is a simplified random-axis surrogate (`refine.rs`), not the production refinement pipeline.
-- **met** — Optimise 20–100 influential weights with budgets 10D, 30D, 100D; mark D>40 as extrapolation requiring validation. — evidence: `predeclared_manifest`, `EXTRAPOLATION_ABOVE`, `docs/evidence/weight-router/manifest.json` — reviewer: met
-- **met** — Count landscape probes within the budget. — evidence: `lamarck/src/weight_bench/landscape.rs` (`measure_axes` on `BudgetedObjective`), `lamarck/tests/weight_bench_landscape.rs::diagnosis_draws_its_probes_from_the_tightest_budget`, `lamarck/tests/weight_bench_landscape.rs::a_diagnosis_over_its_budget_is_recorded_as_budget_exhausted`, committed format-4 evidence with `budget` = 10D on every row (`committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau`) — reviewer: met (synthetic); it notes that `1 + 4D` < 10D, so `BudgetExhausted` never fires on the predeclared manifest, and nothing routes on the diagnosis.
-- **partial** — Test plateaus/kinks and activation families — evidence: `lamarck/tests/weight_bench_landscape.rs::diagnosis_finds_the_saturated_plateau`, `lamarck/tests/weight_bench_landscape.rs::tanh_axes_are_smooth_and_relu_and_hard_tanh_axes_kink` — reviewer: partial — reason: the plateau-bearing `saturated-hard-tanh` family and the two-sided diagnosis were added after the predeclared run, outside the protocol; everything is synthetic.
-- **partial** — then full/held-out confirmation. — evidence: `docs/evidence/weight-router/summary.json` (held-out and full-window comparisons), `lamarck/tests/weight_bench_reference.rs::held_out_veto_turns_a_screening_win_inconclusive` — reviewer: partial — reason: confirmation exists on synthetic fixtures only; none on a representative corpus.
-- **met** — Port only winning probes/router to Rust after measurement; no topology optimisation or unverified third-party dependency added by default. — evidence: the router was removed in #282; `Cargo.lock` changes only the crate version — reviewer: met
-- **met** — Read and pin the full method before reproducing it — evidence: `docs/evidence/weight-router/method-check.json`, `scripts/check-amm-method.py`, `amm-meta.json` — reviewer: met
-- **met** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms; if functionality already exists, this issue still owns the missing controlled comparison rather than a second implementation. — evidence: the diagnosis reuses `BudgetedObjective`, `PLATEAU_REL_TOL` and `RANDOM_DELTA_HALF_WIDTH`; this run started from the merged #282 — reviewer: met
-- **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change. — evidence: only `lamarck/examples/weight_router_bench.rs` and tests call `weight_bench` — reviewer: met
-- **partial** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `lamarck/src/weight_bench/provenance.rs`, committed landscape evidence (`gitCommit` `8e79db7`, `gitDirty` false, `preparationEvaluations` counted), `docs/weight-optimiser-routing.md` (compute ledger) — reviewer: partial — reason: the diagnosis and its 10D budget were chosen after the run; the current code has no calibration phase; no predeclared protocol exists for a representative run.
-- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks. Research runs are separate from routine feature CI. — evidence: `lamarck/tests/weight_bench_landscape.rs::a_diagnosis_over_its_budget_is_recorded_as_budget_exhausted` (negative case, positive control), `landscape_rows_without_a_budget_still_load`, `committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau`; `./quality.sh < /dev/null` exited 0 on `02c7356` ("All quality checks passed!"); the later doc-only edits passed `cargo fmt --check` and `cargo doc` with `-D warnings` — reviewer: met (for the tests; the reviewer did not run the gate itself)
-- **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — evidence: `--landscape` command with `docs/evidence/weight-router-landscape/manifest.json`, format-4 `landscape-summary.json` (coverage 144/144, 0 failed), `docs/evidence/weight-router/summary.json` — reviewer: met (synthetic only; no optimisation benefit is claimed from fixtures)
-- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/weight-optimiser-routing.md` (Findings, Outstanding); router removed in #282 — reviewer: partial — reason: the landscape diagnosis is optional code nothing routes on, and this branch extends it rather than justifying or removing it; no representative run has been made (no success is claimed).
-- **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private. — evidence: synthetic teacher networks only; corpus mode records only FNV hashes — reviewer: met
-- **met** — Leave unassigned until an implementer actively starts. `work-on` authorises the investigation, not skipping prerequisite verification. — evidence: the worker unassigned the issue between runs; this run inspected the merged #282 before changing anything — reviewer: not assessed (a process requirement the diff cannot show); it was followed by the worker.
-- **unrequested** — doc wording about what "a diagnose-then-optimise router at that budget would have left" (`landscape.rs` docs, CHANGELOG, routing doc) — reviewer: unrequested — reason: kept to explain what the recorded `budget` means; no router exists or is added.
-- **unrequested** — `classify_each_axis` folded into `classify_axes`, and the internal test renamed to `classify_axes_stops_at_the_first_failed_evaluation` — reviewer: unrequested — reason: cleanup that falls out of moving the evaluation count into `measure_axes`.
+- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `docs/evidence/weight-router/reference-summary.json`, `lamarck/src/weight_bench/refine.rs` — reviewer: partial — reason: the refinement arm now reuses the production mirror and follow-up helpers, but it is still a random-axis surrogate, not `generate_candidate_batch` with its focus, statistics and backprop proposals.
+- **met** — Optimise 20–100 influential weights with budgets 10D, 30D, 100D; mark D>40 as extrapolation requiring validation. — evidence: `predeclared_manifest`, `is_extrapolation` in `lamarck/src/weight_bench/` — reviewer: met
+- **met** — Count landscape probes within the budget. — evidence: `lamarck/src/weight_bench/landscape.rs` on `BudgetedObjective` (merged in #283) — reviewer: met
+- **partial** — Test plateaus/kinks and activation families, then full/held-out confirmation. — evidence: `docs/evidence/weight-router-landscape/`, `docs/evidence/weight-router/summary.json` — reviewer: partial — reason: synthetic fixtures only; the saturated family was added after the predeclared run, and there is no representative or authoritative confirmation.
+- **met** — Port only winning probes/router to Rust after measurement; no topology optimisation or unverified third-party dependency added by default. — evidence: router removed in #282; `Cargo.lock` changes only the crate's own version — reviewer: met
+- **met** — Read and pin the full method before reproducing it — evidence: `docs/evidence/weight-router/method-check.json`, `scripts/check-amm-method.py` — reviewer: met
+- **partial** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms; if functionality already exists, this issue still owns the missing controlled comparison rather than a second implementation. — evidence: `lamarck/src/weight_bench/refine.rs` (`mirrored_pair`, `follow_up_points`) — reviewer: partial — reason: the mirror and follow-up copies are gone; the greedy accept loop and the `+delta` step are still a simplified stand-in for refinement.
+- **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change. — evidence: only `weight_bench/` code and a doc comment in `lamarck/src/followup.rs` change; `creature_at` clones the creature — reviewer: met
+- **partial** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `docs/evidence/weight-router/manifest.json`, `docs/weight-optimiser-routing.md` — reviewer: partial — reason: the saturated family, landscape diagnosis and full-window veto came after results were seen, and the arm's refusal limits come from `BackpropConfig::default()` rather than the manifest.
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks. Research runs are separate from routine feature CI. — evidence: `lamarck/src/weight_bench/refine.rs` tests (hard-limit and plank-constant refusals with positive controls), `./quality.sh < /dev/null` exit 0 on `1ef7b58` — reviewer: partial — reason: the reviewer asked for a plank-constant test, now added as `twin_is_refused_below_the_plank_constant`, and could not run the gate itself. No test drives a refused twin through `lamarck_refine` to show the round spends one evaluation; the loop's `if let Some(minus)` is the only path, and the helper tests cover when it is `None`.
+- **partial** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — evidence: `docs/evidence/weight-router/`, `lamarck/tests/weight_bench.rs::the_refine_arm_reproduces_its_committed_rows` — reviewer: partial — reason: synthetic only; the committed summaries carry crate 0.1.49 provenance, and CI pins 8 rows (the full 648 + 216 reproduction was a manual re-run, recorded above).
+- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/weight-optimiser-routing.md` (Findings, Outstanding) — reviewer: met — reason: kept partial because no representative run has been made, and the landscape diagnosis, which nothing routes on, is kept only to reproduce Finding 5.
+- **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private. — evidence: synthetic fixtures only — reviewer: met
+- **met** — Leave unassigned until an implementer actively starts. `work-on` authorises the investigation, not skipping prerequisite verification. — evidence: this run inspected the merged #283 before changing code — reviewer: missing — reason: the reviewer said "not judgeable" (a process item the diff cannot show); the worker managed assignment.
 
 ## Standards Review
 
 <!-- vibe-standards-review inputs="diff+CODING-STANDARDS.md" -->
 
-- **violation** — a changed test no longer failed without the code it was named for (`a_failure_partway_through_the_axes_keeps_the_evaluations_spent` counted its own closure calls once the evaluation count moved to `measure_axes`) — evidence: `lamarck/src/weight_bench/landscape.rs` — reason: fixed in this diff (renamed to `classify_axes_stops_at_the_first_failed_evaluation`, which is what it proves).
-- **violation** — stale claim that `Cargo.lock` is unchanged since `f0a7b4c`, though this branch moves the crate's own version in it — evidence: `CHANGELOG.md:116`, `docs/weight-optimiser-routing.md:177`, `:277`, `:552` — reason: fixed in this diff (now "the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves)").
-- **violation** — stale module doc saying the diagnosis is "measured outside every arm's budget" — evidence: `lamarck/src/weight_bench/mod.rs:27` — reason: fixed in this diff (now drawn from a `BudgetedObjective` of the tightest arm budget).
-- **violation** — CHANGELOG listed the private `measure_axes` and said `diagnose_specs` takes a budget (it takes a budget multiple) — evidence: `CHANGELOG.md:187` — reason: fixed in this diff.
-- **clean** — version bump and Cargo.lock agree (0.1.50); regenerated landscape evidence matches the CHANGELOG and doc claims (rows identical to format 3 apart from `budget`, every row `budget` = 10D, totals and coverage unchanged); tests do what their names say with negative and positive cases; no assertion removed without replacement. `CODING-STANDARDS.md` is absent, so the review used `CONTRIBUTING.md`.
+- **clean** — Reviewed against `CONTRIBUTING.md`, because the repository has no `CODING-STANDARDS.md`. No violation was found.
+  - The version bump (0.1.50 → 0.1.51) and the CHANGELOG entry follow `CONTRIBUTING.md`.
+  - `refine.rs` calls the four helpers its docs name.
+  - The refusal conditions and default limits match `lamarck/src/mirror.rs`, `lamarck/src/followup.rs` and `lamarck/src/backprop.rs`.
+  - The probe order and tie-break are preserved.
+  - No review-only rules are declared, so none needed checking.
+- **clean** — The reviewer's optional items were fixed in `6f0efa8`:
+  - the CHANGELOG had credited the saturated rows to the predeclared manifest, and gave the wrong `saturated/` path;
+  - the twin skip by `signed_perturbation` was undocumented;
+  - the `creature_at` doc contradicted itself;
+  - a pass-through test wrapper was removed;
+  - a test comment was misleading;
+  - the plank-constant test was missing.
 
 ## Test Plan
 
-- Added in `lamarck/tests/weight_bench_landscape.rs`: `diagnosis_draws_its_probes_from_the_tightest_budget`, `a_diagnosis_over_its_budget_is_recorded_as_budget_exhausted`, `landscape_rows_without_a_budget_still_load`.
-- Edited, signature only (a `10 * D` budget passed, every assertion kept): `diagnosis_finds_the_saturated_plateau`, `failed_problems_are_recorded_and_counted_not_fatal`, `tanh_axes_are_smooth_and_relu_and_hard_tanh_axes_kink`, `axis_shapes_are_deterministic` and the `diagnose_specs` equality in `lamarck/tests/weight_bench_landscape.rs`.
-- Edited in `lamarck/tests/weight_bench_landscape.rs`: `committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau` now expects `formatVersion` 4 and `diagnosisBudgetMultiple` 10, adds per-row and per-cell budget assertions on the committed evidence, and keeps `assert_eq!(diagnose_manifest(&first_seed).unwrap(), expected);` unchanged (the committed rows now carry `budget`). `landscape_rows_without_a_budget_still_load` reads an inline format-3 row and cell instead of the committed files, which are now format 4.
-- Renamed in `lamarck/src/weight_bench/landscape.rs`: `a_failure_partway_through_the_axes_keeps_the_evaluations_spent` → `classify_axes_stops_at_the_first_failed_evaluation`, with all assertions kept. It now counts calls in its own closure, because `classify_axes` no longer returns a count.
-- `cargo test --test weight_bench_landscape`: 18 passed. `cargo test --lib weight_bench::landscape`: 1 passed. `cargo test --test weight_bench_reference`: 17 passed. Clippy (`-D warnings`) and `cargo fmt --check` were clean.
-- `./quality.sh < /dev/null` exited 0 on `02c7356` (the regenerated evidence and test changes): "All quality checks passed!". The later doc-only commit (CHANGELOG, routing doc, `mod.rs` doc comment) passed `cargo fmt --check` and `cargo doc` with `-D warnings`.
-- Docs read and updated: `docs/weight-optimiser-routing.md` (the evidence provenance paragraph, Finding 5, the compute ledger row and the three `Cargo.lock` provenance sentences), the `weight_router_bench.rs` module doc, the `weight_bench` module doc (`mod.rs`), the `landscape.rs` field docs, and `CHANGELOG.md`. `README.md` has no `--landscape` mention.
+- **Added in `lamarck/src/weight_bench/refine.rs`:**
+  - `twin_straddles_x_on_the_chosen_axis`
+  - `twin_is_refused_past_the_hard_weight_limit`
+  - `twin_is_refused_below_the_plank_constant`
+  - `follow_up_steps_around_the_winning_move`
+  - `follow_up_drops_a_probe_past_the_hard_limit`
+- **Added in `lamarck/tests/weight_bench.rs`:** `the_refine_arm_reproduces_its_committed_rows`. It is a pin, expected green both before and after this change, because the rows did not move.
+- **Unchanged:** no existing assertion was edited or removed. `arms_respect_budget_and_improve`, `arms_are_deterministic_and_seed_sensitive` and `arms_share_the_start_without_mutating_the_parent` still drive `lamarck_refine` through the new helpers.
+- **Callers of the changed `WeightObjective::loss_on`:** the arms, confirmation and landscape code. They are covered by `cargo test --test weight_bench_reference` and the gate's full suite.
+- **Results:**
+  - `cargo test --lib weight_bench::refine`: 5 passed on `6f0efa8`.
+  - `cargo test --test weight_bench`: 27 passed, 1 ignored.
+  - `cargo test --test weight_bench_reference`: 17 passed.
+  - `cargo test --lib mirror`: 15 passed. `cargo test --lib followup`: 13 passed.
+  - `cargo clippy --all-targets -- -D warnings` and `cargo doc` with `-D warnings`: clean on `6f0efa8`.
+  - `./quality.sh < /dev/null`: exited 0 on `1ef7b58` ("All quality checks passed!"). `6f0efa8` changes only one added test, test comments, doc comments, the CHANGELOG and the routing doc.
+- **Docs read and updated:** in `docs/weight-optimiser-routing.md`, the status paragraph, the evidence-provenance paragraph, the `lamarck-refine` row of the Arms table and "Controls and remaining experiment". Also the `STEP_FRACTIONS` doc in `lamarck/src/followup.rs`, the `refine.rs` module doc and `CHANGELOG.md`. `README.md` does not mention the refine arm.
 
 ## Merge verification
 
@@ -99,8 +121,8 @@ flowchart LR
 
 ## Not done
 
-- Representative runs on a production creature and corpus: none is available on this host, so no optimisation benefit is claimed.
-- A refinement arm on the production candidate pipeline.
-- Removing or justifying the landscape diagnosis, which nothing routes on (kept as the instrument behind Finding 5; recorded as partial).
-- A predeclared protocol for the post-hoc additions.
-- `scripts/test-amm-reference.py` not re-run, because it needs a scratch AMM environment.
+- **Production refinement arm:** the arm does not call `generate_candidate_batch`, so the comparison is still against a surrogate.
+- **Representative runs:** no production creature or corpus is available here, so no optimisation benefit is claimed.
+- **Predeclared protocol:** none exists for the post-hoc additions, and the refusal limits are not echoed in the manifest.
+- **Refused twin in the loop:** no `lamarck_refine`-level test shows that a refused twin costs one evaluation.
+- **AMM reference script:** `scripts/test-amm-reference.py` was not re-run, because it needs a scratch AMM environment.
