@@ -164,7 +164,8 @@ value checked against a fixed bound, and its removal is permanent.
 - Fitness and validation records are never pruned. After refinement the full
   training MSE is measured over every training record in every run, and the
   untouched validation MSE over every held-out record in validation-phase runs
-  only. This audit is not charged to the arm's record-pass count.
+  only. This audit is not charged to the arm's record passes but is counted
+  in `auditPasses` (per run, per phase and in `compute.actualAuditPasses`).
 
 ## Schedule rules
 
@@ -311,8 +312,8 @@ the manifest's `trainRecords`. It runs only when `--manifest FILE` supplies a
 a shared, parallel container, so it is indicative only. Re-running the suite
 reproduces every field of `summary.json` except `versions` (crate version,
 neat-core tag and git commit). The committed evidence was regenerated on commit
-`e13a19a`, whose results match the earlier run at `da4edff` in every other
-field. The committed evidence is `docs/evidence/record-skip/manifest.json` and
+`327f8e8`; its results are identical to the run at `e13a19a` except for the
+new audit-pass counts. The committed evidence is `docs/evidence/record-skip/manifest.json` and
 `summary.json` (`runs.jsonl` is not committed).
 
 Per-arm means over the 12 validation seeds (initial train MSE 0.3875). The
@@ -346,15 +347,16 @@ treatment minus control, 12 pairs each):
 
 Costs:
 
-| Phase | Runs | Record passes | Revisit passes | Schedule ops |
-|-------|-----:|--------------:|---------------:|-------------:|
-| Preparation | 24 | 1,440,000 | 0 | 0 |
-| Calibration | 144 | 4,464,000 | 322,944 | 49,790,789 |
-| Validation | 84 | 2,952,000 | 230,811 | 24,876,869 |
-| Total | 252 | 8,856,000 | 553,755 | 74,667,658 |
+| Phase | Runs | Record passes | Revisit passes | Schedule ops | Audit passes |
+|-------|-----:|--------------:|---------------:|-------------:|-------------:|
+| Preparation | 24 | 1,440,000 | 0 | 0 | 96,000 |
+| Calibration | 144 | 4,464,000 | 322,944 | 49,790,789 | 576,000 |
+| Validation | 84 | 2,952,000 | 230,811 | 24,876,869 | 420,000 |
+| Total | 252 | 8,856,000 | 553,755 | 74,667,658 | 1,092,000 |
 
 Compute (`compute` in `summary.json`): limit 16,000,000 record passes, planned
-bound 15,120,000, actual 8,856,000. A run that fails still charges the passes
+bound 15,120,000, actual 8,856,000, plus 1,092,000 actual audit passes
+(`actualAuditPasses`), which the limit does not govern. A run that fails still charges the passes
 it spent before failing (a diverged run spends all of them), in its
 `runs.jsonl` row and in its phase's cost and `actualRecordPasses`; `Runs`
 counts completed runs only. A run that stops early (no learning rate completed
@@ -383,7 +385,8 @@ These are findings on this synthetic suite only.
 5. Preparation plus calibration cost 5,904,000 record passes. That is twice
    the validation phase (2,952,000) and about 136 times the 43,500 passes
    easy-75 saves per run (60,000 - 16,500), so at this scale the search does
-   not pay for itself.
+   not pay for itself. Preparation and calibration also spent 672,000 audit
+   passes.
 
 This is a negative and inconclusive result. Nothing is ported, and no success
 is claimed.

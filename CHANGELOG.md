@@ -87,7 +87,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   run. Held-out records are read only by validation-phase runs, so they can no
   longer steer the learning rate or schedule, and `runs.jsonl` preparation and
   calibration rows now carry null validation fields (`finalValidationMse`,
-  `rareStratumValidationMse`) and an empty `strataValidationMse`.
+  `rareStratumValidationMse`) and an empty `strataValidationMse`. Audit (measurement) passes are now counted in
+  `auditPasses` per run and phase and in `compute.actualAuditPasses`, apart
+  from the record passes `maxRecordPasses` governs.
 - **Offline benchmark of budget-aware routing between local weight optimisers
   (Issue #266).** New `lamarck/src/weight_bench/` module and
   `weight_router_bench` example compare a simplified random-axis surrogate and

@@ -1,8 +1,9 @@
 //! Refinement driver and manifest runner for the record-skip experiment.
 //!
 //! Every arm refines a clone of the same immutable parent through the real
-//! refinement update path. Audit measurements are taken after the loop; they are
-//! not charged to the arm's `record_passes` but are counted in `audit_passes`. Full training MSE is audited in every phase; held-out
+//! refinement update path. Audit measurements are taken after the loop; they
+//! are not charged to the arm's `record_passes` but are counted in
+//! `audit_passes`. Full training MSE is audited in every phase; held-out
 //! (validation) records are read only by validation-phase runs, so preparation
 //! and calibration choices never depend on them.
 
