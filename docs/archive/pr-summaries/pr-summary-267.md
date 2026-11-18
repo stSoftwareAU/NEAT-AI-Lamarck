@@ -182,7 +182,7 @@ flowchart LR
   - `cargo clippy --all-targets -- -D warnings`: clean.
   - `cargo fmt --check`: clean.
   - `cargo test --lib provenance`: 7 passed.
-  - `./quality.sh < /dev/null` on the tree with the git-probe change: "All quality checks passed!" (1007 tests, 0 failed).
+  - `./quality.sh < /dev/null` passed ("All quality checks passed!", 1007 tests, 0 failed) on an earlier head, before the `DIVERGE` seam and its two in-module tests were removed; it was not re-run on the current head.
 
 ## Merge verification
 
