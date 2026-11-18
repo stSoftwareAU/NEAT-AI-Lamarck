@@ -7,7 +7,7 @@
 //! so the arm inherits their refusals (the hard weight limit and the plank
 //! constant).
 //!
-//! Those helpers address a weight by `(from_uuid, to_uuid)` and take the first
+//! The follow-up helpers (`plan_probes` and `probe_candidate`) address a weight by `(from_uuid, to_uuid)` and take the first
 //! match, whereas the bench's axes are synapse indices. The arm therefore
 //! refuses, before any evaluation, a creature in which one `(from, to)` pair
 //! appears on more than one synapse (for example one source feeding an `IF`
@@ -55,7 +55,8 @@ fn random_candidate(creature: CreatureExport) -> Candidate {
 
 /// The `+delta` point on `axis` and its `-delta` twin from
 /// [`mirror_candidate`], or `None` for the twin when that helper refuses (the
-/// hard weight limit would clamp it, or the step is below the plank constant).
+/// hard weight limit would clamp it, or the step is below the plank constant)
+/// or when `signed_perturbation` finds no single-weight change.
 fn mirrored_pair(
     objective: &WeightObjective,
     x: &[f64],

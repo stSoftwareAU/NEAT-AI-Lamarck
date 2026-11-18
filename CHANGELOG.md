@@ -197,7 +197,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `lamarck/tests/weight_bench.rs` drive both refusals through
   `lamarck_refine`). The twin is also skipped when `signed_perturbation` finds
   no single-weight change (for example `x + delta == x` in floating point), not
-  only when `mirror_candidate` refuses it. Those helpers address a weight by
+  only when `mirror_candidate` refuses it. The follow-up helpers (`plan_probes` and `probe_candidate`) address a weight by
   `(from_uuid, to_uuid)` and take the first match, while the bench's axes are
   synapse indices, so `lamarck_refine` now refuses, before any evaluation, a
   creature in which a `(from, to)` pair appears on more than one synapse (for
@@ -215,7 +215,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   216/216, 0 failed, 543,852 evaluations, with 216 of 216 rows equal to
   `docs/evidence/weight-router-landscape/saturated/runs.jsonl`. No committed
   evidence file or reported number changes
-  (`the_refine_arm_reproduces_its_committed_rows` pins the rows). The arm
+  (`the_refine_arm_reproduces_its_committed_rows` pins 8 of the 324 committed refine rows; the full 648/216 reproduction was a manual re-run). The arm
   remains a simplified random-axis surrogate, not `generate_candidate_batch`
   nor the focus, statistics and backprop pipeline.
 - **The landscape diagnosis now draws its probes from the tightest arm budget
