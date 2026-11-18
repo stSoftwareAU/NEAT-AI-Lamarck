@@ -183,6 +183,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The weight bench's refinement arm now calls the production mirror and
+  follow-up helpers (Issue #266).** `lamarck-refine` (`weight_bench/refine.rs`,
+  crate 0.1.51) builds its `-delta` twin with `mirror::signed_perturbation` and
+  `mirror::mirror_candidate`, and its follow-up probes with
+  `followup::plan_probes` and `followup::probe_candidate`, instead of
+  hand-written copies. It inherits their refusals: a twin or probe the hard
+  weight limit (`limit_weight_scale`, 100000 by default) would clamp, or whose
+  step is below `plank_constant` (1e-7), is not evaluated, and a round whose
+  twin is refused spends one evaluation instead of two
+  (`the_refine_arm_skips_a_refused_twin` and
+  `the_refine_arm_skips_a_refused_follow_up_probe` in
+  `lamarck/tests/weight_bench.rs` drive both refusals through
+  `lamarck_refine`). The twin is also skipped when `signed_perturbation` finds
+  no single-weight change (for example `x + delta == x` in floating point), not
+  only when `mirror_candidate` refuses it. Those helpers address a weight by
+  `(from_uuid, to_uuid)` and take the first match, while the bench's axes are
+  synapse indices, so `lamarck_refine` now refuses, before any evaluation, a
+  creature in which a `(from, to)` pair appears on more than one synapse (for
+  example one source feeding an `IF` neuron in two roles, which neat-core
+  allows), with `BenchError::InvalidConfig` naming the pair
+  (`the_refine_arm_refuses_a_creature_with_a_repeated_synapse_pair`). Through
+  `run_manifest` and corpus mode that refine run is recorded as a failed row,
+  counted in coverage and dropped from the paired distributions; the CMA-ES arm
+  on the same problem still runs. At `68ed75d` (clean tree, crate 0.1.51),
+  `cargo run --release --example weight_router_bench -- /tmp/wrb-266/main`
+  finished 648/648 runs, 0 failed, 1,631,615 evaluations, and its `runs.jsonl`
+  equals the committed `docs/evidence/weight-router/runs.jsonl` row by row as
+  parsed JSON (648 equal, 0 different); `--manifest
+  docs/evidence/weight-router-landscape/saturated/manifest.json` finished
+  216/216, 0 failed, 543,852 evaluations, with 216 of 216 rows equal to
+  `docs/evidence/weight-router-landscape/saturated/runs.jsonl`. No committed
+  evidence file or reported number changes
+  (`the_refine_arm_reproduces_its_committed_rows` pins the rows). The arm
+  remains a simplified random-axis surrogate, not `generate_candidate_batch`
+  nor the focus, statistics and backprop pipeline.
 - **The landscape diagnosis now draws its probes from the tightest arm budget
   (Issue #266).** `diagnose` and `axis_shapes` take a budget and
   `diagnose_specs` a budget multiple (times each problem's dimension), and the

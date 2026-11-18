@@ -9,7 +9,10 @@ made**. AMM (arXiv 2611.06879) is **not ported and not reimplemented**. It was
 run as an offline reference arm through its authors' implementation and lost in
 all 27 cells (see [AMM reference results](#amm-reference-results)). The full method has now been read and pinned to
 [arXiv:2611.06879v1](https://arxiv.org/pdf/2611.06879v1). The refinement control
-is a simplified surrogate, **not the production candidate pipeline**; the
+is a simplified surrogate, **not the production candidate pipeline**, though
+its mirror twin and follow-up probes call the production `mirror.rs` and
+`followup.rs` helpers (crate 0.1.51, rows identical to the committed ones, re-run
+at `68ed75d`); the
 reported margins do not establish superiority over current Lamarck refinement.
 
 **The router and its landscape probes have been removed.** They never beat
@@ -21,7 +24,11 @@ validation seeds with no calibration phase. The committed `manifest.json`,
 [`docs/evidence/weight-router/`](evidence/weight-router/summary.json) are
 produced by crate 0.1.49 (`formatVersion` 3) and are still reproduced by the
 commands in [How to run](#how-to-run), because crate 0.1.50 changes only the
-landscape diagnosis, which writes its own `weight-router-landscape/` files. The router, probe and calibration
+landscape diagnosis, which writes its own `weight-router-landscape/` files, and
+crate 0.1.51 routes the refinement arm through the production mirror and
+follow-up helpers with identical rows (648 of 648 `runs.jsonl` rows, and 216 of
+216 for `weight-router-landscape/saturated/runs.jsonl`, re-run at `68ed75d`).
+The router, probe and calibration
 sections below describe an **earlier router-era run** (crate 0.1.46). Its
 numbers are kept as a recorded negative finding; they cannot be reproduced from
 the current code, because that code was removed.
@@ -49,7 +56,7 @@ alone.
 
 | Arm | What it is |
 |-----|------------|
-| `lamarck-refine` | A simplified random-axis surrogate on a fixed weight set, not a call to `generate_candidate_batch`. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), tries the mirrored pair `x ± delta` as `mirror.rs` does, and accepts the better one only if it strictly improves. After an accept it probes the #219 follow-up `STEP_FRACTIONS` (`[0.5, -0.5, 1.0]`, from `followup.rs`) along the winning move and takes the best strict improvement. |
+| `lamarck-refine` | A simplified random-axis surrogate on a fixed weight set, not a call to `generate_candidate_batch`. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), builds the `-delta` twin of `x + delta` with `mirror::signed_perturbation` and `mirror::mirror_candidate` (the twin is skipped when `mirror_candidate` refuses it or when `signed_perturbation` finds no single-weight change), and accepts the better one only if it strictly improves. After an accept it plans the #219 follow-up probes with `followup::plan_probes` (`STEP_FRACTIONS` `[0.5, -0.5, 1.0]` of the winning move), evaluates each through `followup::probe_candidate` (a refused probe is skipped) and takes the best strict improvement. A twin or probe that the hard weight limit (`limit_weight_scale`, 100000 by default) would clamp, or whose step is below `plank_constant` (1e-7), is refused, and a round whose twin is refused spends one evaluation instead of two. Those helpers address a weight by `(from_uuid, to_uuid)` and take the first match, while the bench's axes are synapse indices, so `lamarck_refine` refuses, before any evaluation, a creature in which a `(from, to)` pair appears on more than one synapse (`BenchError::InvalidConfig` naming the pair); through `run_manifest` or corpus mode that run is a failed row, counted in coverage and dropped from the paired distributions, while the CMA-ES arm still runs. |
 | `cma-es` | Full-covariance (mu/mu_w, lambda)-CMA-ES, written in-repo with no third-party dependency. Strategy parameters are Hansen's tutorial defaults (arXiv:1604.00772); the eigendecomposition is a cyclic Jacobi method. Initial per-coordinate standard deviation `CMA_SIGMA0 = 0.05`. This equals the surrogate's uniform half-width numerically, but CMA-ES moves all coordinates and the search radii are not matched. |
 | `router` (removed; router-era run only) | Spent `2 * probe_axes + 1` evaluations probing the landscape, then ran `lamarck-refine` or `cma-es` on the remaining budget. The probe was charged to the **same** budget. The chosen arm re-evaluated the start, one further counted evaluation. |
 | AMM (reference only) | Adaptive Multi Mode, run offline through its authors' reference implementation, not reimplemented here and not ported. It needs a known budget and a finite box, spends a counted part of the budget on online probes and routes the rest among several engines. See [AMM reference](#amm-reference). |
@@ -682,10 +689,16 @@ not changed afterwards (Finding 5).
 
 ## Controls and remaining experiment
 
-Inspection found that `refine.rs` reuses two production constants, but manually
-recreates mirrors and follow-up steps. It does not call `generate_candidate_batch`,
-`mirror_candidate` or `FollowUpPlan`, nor use the production focus/statistics/
-learning pipeline. Its uniform half-width and CMA-ES's coordinate standard
+Inspection found that `refine.rs` reused two production constants but
+hand-wrote its mirrors and follow-up steps. Since crate 0.1.51 (commit
+`68ed75d`) it builds the twin with `mirror::mirror_candidate` and its probes with
+`followup::plan_probes` and `followup::probe_candidate`, with identical committed
+rows. It still does not call `generate_candidate_batch`, nor use the production
+focus/statistics/learning pipeline or its statistical and backprop proposals.
+Because those helpers address a weight by `(from, to)`, a representative
+creature that repeats a `(from, to)` pair fails the refine arm loudly (a failed
+row) rather than running a different protocol, so the private run must check
+that its creature has none, or role-aware helpers are needed first. Its uniform half-width and CMA-ES's coordinate standard
 deviation also define different search radii. The archived comparison therefore
 has a **surrogate baseline**, not baseline equivalence. Correcting that baseline
 changes the protocol and needs fresh validation data; the archived results must
@@ -731,7 +744,8 @@ env PYTHONPATH=... python3 scripts/test-amm-reference.py --bench BIN
 ```
 
 `Manifest::validate` refuses duplicate cells/seeds; `WeightObjective::new`
-requires positive input/output counts and distinct synapse indices. The tests
+requires positive input/output counts and distinct synapse indices;
+`lamarck_refine` refuses repeated `(from, to)` pairs before any evaluation. The tests
 also check fixed starting weights, immutable parents, disjoint corpus halves
 and budget refusal. Successful confirmation uses five calls; failures retain
 the attempts already spent. Failed rows are excluded from paired distributions
