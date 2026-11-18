@@ -237,10 +237,12 @@ The learning rate is chosen by a counted **preparation** phase. It runs the
 full arm at each rate in `learningRateGrid` on the calibration seeds (1-6) and
 picks the lowest mean final **training** MSE among the rates that completed
 every calibration seed; a rate that failed on any seed is not eligible, because
-its mean would cover different corpora. If no rate completed them all, the run
-stops and names the first failure. That rate is used for calibration and
-validation. The sweep (`learningRateSweep` in `summary.json`, 6 runs per
-rate) chose 0.2:
+its mean would cover different corpora. No input reaches that case today: the
+update clips, so no tested rate diverges on the synthetic corpus, and a file
+corpus is the same for every seed, so the rule is a defensive guard. If no rate
+completed them all, the run stops and names the first failure. That rate is
+used for calibration and validation. The sweep (`learningRateSweep` in
+`summary.json`, 6 runs per rate) chose 0.2:
 
 | Learning rate | Mean final train MSE |
 |--------------:|---------------------:|
@@ -418,6 +420,12 @@ result was removed:
   formats that probe's result (`<sha>`, `<sha>-dirty` or
   `unavailable: <cause>`). Untracked files now count as dirty too, as they do
   for the weight-router bench;
+- the record-skip copies of the mean and the percentile bootstrap.
+  `stats::mean` and `stats::bootstrap_mean_ci` now call
+  `weight_bench::stats::mean` and `weight_bench::stats::bootstrap_ci_mean`.
+  The two bootstraps draw the same resamples and differ only in how they pick
+  the percentile; at the manifest's 2000 resamples both pick the same order
+  statistics (indices 50 and 1949), so the committed intervals are unchanged;
 - the `LEARNING_RATE` re-export from `experiment` (the constant itself has
   since been replaced by the manifest's `learningRateGrid`). `arm_label`,
   `stats::mean` and `stats::bootstrap_mean_ci` became private to the module.

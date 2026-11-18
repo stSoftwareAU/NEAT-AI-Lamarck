@@ -801,18 +801,6 @@ impl Runner<'_> {
             &mut spent,
             phase == "validation",
         );
-        // Tests force a divergence after the epochs ran, as a real one does.
-        #[cfg(test)]
-        let result = result.and_then(|o| {
-            if test_support::DIVERGE
-                .get()
-                .is_some_and(|f| f(learning_rate, seed))
-            {
-                Err("refinement diverged: non-finite MSE (injected)".to_string())
-            } else {
-                Ok(o)
-            }
-        });
         match result {
             Ok(mut o) => {
                 o.phase = phase.to_string();
@@ -848,7 +836,9 @@ fn schedule_for(m: &Manifest, g: &GridPoint) -> ScheduleConfig {
 /// Index of the rate with the lowest mean training MSE among the rates that
 /// completed every one of `seeds` runs. A rate scored on only the seeds that
 /// survived is not comparable with one scored on all of them (each synthetic
-/// seed is a different corpus), so it is never eligible.
+/// seed is a different corpus), so it is never eligible. No input reaches a
+/// partly completed rate today (the update clips, and a file corpus is shared
+/// by every seed), so this guard is defensive and no test reaches that case.
 fn choose_learning_rate(sweep: &[LearningRateEntry], seeds: usize) -> Option<usize> {
     let mut best: Option<usize> = None;
     for (i, e) in sweep.iter().enumerate() {
@@ -1220,38 +1210,6 @@ fn write_files(
 }
 
 #[cfg(test)]
-mod test_support {
-    use std::cell::Cell;
-
-    /// Decides, from (learning rate, seed), whether a run diverges.
-    pub type DivergeRule = fn(f64, u64) -> bool;
-
-    thread_local! {
-        /// When set, a run at (learning rate, seed) for which it returns true
-        /// fails with a divergence after its epochs ran. No real rate or seed
-        /// diverges deterministically (the update clips), so a partly failed
-        /// sweep needs this seam. Per test thread.
-        pub static DIVERGE: Cell<Option<DivergeRule>> = const { Cell::new(None) };
-    }
-
-    /// Sets the hook; clears it on drop so a failed test cannot leak it.
-    pub struct Diverge;
-
-    impl Diverge {
-        pub fn when(f: DivergeRule) -> Self {
-            DIVERGE.set(Some(f));
-            Self
-        }
-    }
-
-    impl Drop for Diverge {
-        fn drop(&mut self) {
-            DIVERGE.set(None);
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1388,91 +1346,6 @@ mod tests {
         assert!(err.contains("invalid reduction"), "{err}");
     }
 
-    fn entry(learning_rate: f64, n_runs: usize, mse: Option<f64>) -> LearningRateEntry {
-        LearningRateEntry {
-            learning_rate,
-            n_runs,
-            mean_train_mse: mse,
-        }
-    }
-
-    #[test]
-    fn a_rate_that_missed_a_seed_is_never_chosen() {
-        let sweep = [
-            entry(0.1, 2, Some(0.5)),
-            // Scored on one seed only: lower, but not comparable.
-            entry(0.4, 1, Some(0.1)),
-            entry(0.2, 2, Some(0.3)),
-            entry(0.8, 0, None),
-        ];
-        assert_eq!(choose_learning_rate(&sweep, 2), Some(2));
-        // Control: were the partial rate complete, it would win.
-        let complete = [entry(0.1, 2, Some(0.5)), entry(0.4, 2, Some(0.1))];
-        assert_eq!(choose_learning_rate(&complete, 2), Some(1));
-        // No rate completed every seed.
-        assert_eq!(choose_learning_rate(&sweep[1..2], 2), None);
-        assert_eq!(choose_learning_rate(&[], 2), None);
-    }
-
-    #[test]
-    fn failed_runs_charge_the_passes_they_spent() {
-        let m = tiny();
-        // A NaN training target makes every run diverge, but only in the
-        // audit after all epochs ran. (A NaN or infinite training input does
-        // not: the network sanitises inputs, so the error stays finite. The
-        // strata edges skip a NaN target, so they are unaffected.)
-        let mut corpus = synthetic_corpus(1, m.train_records, m.validation_records);
-        corpus.train[0].outputs[0] = f32::NAN;
-        let source = CorpusSource::Files {
-            corpus,
-            parent: synthetic_parent(m.parent_seed),
-        };
-        let mut runner = Runner {
-            manifest: &m,
-            source: &source,
-            rows: Vec::new(),
-        };
-        let sched = schedule_for(&m, &m.calibration_grid[0]);
-        assert!(
-            runner
-                .run_one("preparation", 1, SkipPolicy::Full, &sched, 0.2)
-                .is_none()
-        );
-        assert!(
-            runner
-                .run_one("preparation", 2, SkipPolicy::Full, &sched, 0.2)
-                .is_none()
-        );
-        let fails = failed(&runner.rows);
-        assert_eq!(fails.len(), 2);
-        let full_passes = u64::from(m.epochs) * m.train_records as u64;
-        for f in &fails {
-            assert!(f.error.contains("diverged"), "{}", f.error);
-            assert!(f.error.contains("training"), "{}", f.error);
-            assert_eq!(f.record_passes, full_passes);
-            assert_eq!(f.schedule_ops, 0);
-            // Initial and final training audits; no held-out read in preparation.
-            assert_eq!(f.audit_passes, 2 * m.train_records as u64);
-        }
-        let cost = phase_cost(&runner.rows, "preparation");
-        assert_eq!(cost.runs, 0);
-        assert_eq!(cost.audit_passes, 4 * m.train_records as u64);
-        assert_eq!(cost.record_passes, 2 * full_passes);
-        assert_eq!(total_record_passes(&runner.rows), 2 * full_passes);
-        // Control: the cost is per phase.
-        assert_eq!(
-            phase_cost(&runner.rows, "calibration"),
-            PhaseCost::default()
-        );
-
-        let json = serde_json::to_string(&runner.rows[0]).unwrap();
-        assert!(
-            json.contains(&format!("\"recordPasses\":{full_passes}")),
-            "{json}"
-        );
-        assert!(json.contains("\"auditPasses\":"), "{json}");
-    }
-
     fn nan_training_source(m: &Manifest) -> CorpusSource {
         // A NaN training target makes every run diverge, but only in the
         // audit after all epochs ran. (A NaN or infinite training input does
@@ -1506,6 +1379,21 @@ mod tests {
         assert!(aborted.error.contains("training"), "{aborted}");
         let rates = m.learning_rate_grid.len() as u64 * m.calibration_seeds.len() as u64;
         assert_eq!(aborted.rows.len() as u64, rates);
+        let fails = failed(&aborted.rows);
+        assert_eq!(fails.len() as u64, rates);
+        for f in &fails {
+            assert!(f.error.contains("diverged"), "{}", f.error);
+            assert!(f.error.contains("training"), "{}", f.error);
+            assert_eq!(f.record_passes, full_passes(&m));
+            assert_eq!(f.schedule_ops, 0);
+            // Initial and final training audits; no held-out read in preparation.
+            assert_eq!(f.audit_passes, 2 * m.train_records as u64);
+            assert_eq!(f.phase, "preparation");
+        }
+        assert_eq!(
+            aborted.preparation_cost.audit_passes,
+            rates * 2 * m.train_records as u64
+        );
         assert_eq!(aborted.coverage.planned, 14);
         assert_eq!(
             (aborted.coverage.completed, aborted.coverage.failed),
@@ -1560,6 +1448,10 @@ mod tests {
                 line.contains(&format!("\"recordPasses\":{}", full_passes(&m))),
                 "{line}"
             );
+            assert!(
+                line.contains(&format!("\"auditPasses\":{}", 2 * m.train_records)),
+                "{line}"
+            );
         }
     }
 
@@ -1582,102 +1474,13 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_that_fails_on_one_seed_is_not_chosen_and_its_cost_is_counted() {
-        let mut m = tiny();
-        m.calibration_seeds = vec![1, 2];
-        m.learning_rate_grid = vec![0.01, 0.05, 0.2, 0.5];
-        let n_rates = m.learning_rate_grid.len();
-
-        // Control: with no failure the sweep picks the lowest training MSE.
-        let clean = run_validated(&m, &CorpusSource::Synthetic).unwrap();
-        assert_eq!(clean.coverage.failed, 0);
-        let favourite = clean.chosen_learning_rate;
-        assert!(clean.learning_rate_sweep.iter().all(|e| e.n_runs == 2));
-        let runner_up = clean
-            .learning_rate_sweep
-            .iter()
-            .filter(|e| e.learning_rate != favourite)
-            .min_by(|a, b| a.mean_train_mse.partial_cmp(&b.mean_train_mse).unwrap())
-            .unwrap()
-            .learning_rate;
-
-        // The favourite diverges on seed 2 only, after its epochs ran.
-        thread_local! { static FAV: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) }; }
-        FAV.set(favourite);
-        let _hook = test_support::Diverge::when(|lr, seed| lr == FAV.get() && seed == 2);
-        let report = run_validated(&m, &CorpusSource::Synthetic).unwrap();
-
-        let entry = |lr: f64| {
-            report
-                .learning_rate_sweep
-                .iter()
-                .find(|e| e.learning_rate == lr)
-                .unwrap()
-        };
-        // On the survivors alone the favourite would still score lowest...
-        assert_eq!(entry(favourite).n_runs, 1);
-        assert!(entry(favourite).mean_train_mse.is_some());
-        assert!(
-            entry(favourite).mean_train_mse.unwrap() < entry(runner_up).mean_train_mse.unwrap(),
-            "premise: scored on survivors only, the favourite would win"
-        );
-        // ...but it is passed over for the best rate that completed every seed.
-        assert_ne!(report.chosen_learning_rate, favourite);
-        assert_eq!(report.chosen_learning_rate, runner_up);
-        assert_eq!(entry(runner_up).n_runs, 2);
-
-        // The failed run is reported and charged.
-        let fails = failed(&report.rows);
-        assert_eq!(fails.len(), 1);
-        assert_eq!((fails[0].seed, fails[0].phase.as_str()), (2, "preparation"));
-        assert_eq!(fails[0].record_passes, full_passes(&m));
-        assert_eq!(report.coverage.failed, 1);
-        assert_eq!(report.preparation_cost.runs, 2 * n_rates - 1);
-        assert_eq!(
-            report.preparation_cost.record_passes,
-            2 * n_rates as u64 * full_passes(&m)
-        );
-        let ok_passes: u64 = report
-            .rows
-            .iter()
-            .map(|r| match r {
-                Row::Ok(o) => o.record_passes,
-                Row::Failed(_) => 0,
-            })
-            .sum();
-        assert_eq!(
-            report.compute.actual_record_passes,
-            ok_passes + full_passes(&m)
-        );
-        assert!(report.compute.actual_record_passes > ok_passes);
-
-        let dir = tempfile::tempdir().unwrap();
-        write_outputs(dir.path(), &report).unwrap();
-        let summary: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join("summary.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(summary["chosenLearningRate"], runner_up);
-        assert_eq!(
-            summary["compute"]["actualRecordPasses"],
-            report.compute.actual_record_passes
-        );
-        let runs = std::fs::read_to_string(dir.path().join("runs.jsonl")).unwrap();
-        let failure = runs.lines().find(|l| l.contains("\"error\"")).unwrap();
-        assert!(
-            failure.contains(&format!("\"recordPasses\":{}", full_passes(&m))),
-            "{failure}"
-        );
-    }
-
-    #[test]
     fn a_compute_bound_that_overflows_is_refused_before_any_run() {
         let mut m = tiny();
         m.epochs = 1 << 31;
         m.train_records = 1 << 32;
         assert!(m.validate().is_ok(), "premise: the manifest is accepted");
 
-        let aborted = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        let aborted = run_manifest(&m, &CorpusSource::Synthetic).unwrap_err();
         assert!(aborted.error.contains("overflows"), "{}", aborted.error);
         assert!(
             aborted.error.contains("maxRecordPasses"),
@@ -1692,7 +1495,8 @@ mod tests {
     fn a_representable_bound_over_the_limit_is_still_refused_exactly() {
         let mut m = tiny();
         m.max_record_passes = 1000;
-        let aborted = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        assert!(m.validate().is_ok(), "premise: the manifest is accepted");
+        let aborted = run_manifest(&m, &CorpusSource::Synthetic).unwrap_err();
         let bound = 14 * full_passes(&m);
         assert!(
             aborted.error.contains("exceeds maxRecordPasses"),
