@@ -1,8 +1,11 @@
 //! Refinement driver and manifest runner for the record-skip experiment.
 //!
 //! Every arm refines a clone of the same immutable parent through the real
-//! refinement update path. Audit measurements (full training MSE, validation
-//! MSE) are taken after the loop and are not charged to the arm.
+//! refinement update path. Audit measurements are taken after the loop; they
+//! are not charged to the arm's `record_passes` but are counted in
+//! `audit_passes`. Full training MSE is audited in every phase; held-out
+//! (validation) records are read only by validation-phase runs, so preparation
+//! and calibration choices never depend on them.
 
 use std::path::Path;
 
@@ -47,13 +50,25 @@ pub fn neat_core_tag_from(manifest: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Identify the checkout in `dir` for `versions.gitCommit`: the commit hash,
+/// with `-dirty` appended when `git status --porcelain` reports any change, or
+/// `unavailable: <cause>` when git cannot say. The probe itself is the shared
+/// [`crate::weight_bench::provenance::git_state`].
+pub fn git_commit(dir: &Path) -> String {
+    match crate::weight_bench::provenance::git_state(dir) {
+        Ok(state) if state.dirty => format!("{}-dirty", state.commit),
+        Ok(state) => state.commit,
+        Err(cause) => format!("unavailable: {cause}"),
+    }
+}
+
 /// Result of one refinement run.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunOutcome {
     /// Arm label, for example `easy-50`.
     pub arm: String,
-    /// `calibration` or `validation` (set by the runner).
+    /// `preparation`, `calibration` or `validation` (set by the runner).
     pub phase: String,
     /// Seed driving the random and revisit draws.
     pub seed: u64,
@@ -65,14 +80,21 @@ pub struct RunOutcome {
     pub initial_train_mse: f64,
     /// Training MSE of the refined creature over all training records.
     pub final_train_mse: f64,
-    /// Held-out validation MSE.
-    pub final_validation_mse: f64,
-    /// Validation MSE over records in protected (rare) strata.
+    /// Held-out validation MSE (null on preparation and calibration runs,
+    /// which never read held-out records).
+    pub final_validation_mse: Option<f64>,
+    /// Validation MSE over records in protected (rare) strata (null on
+    /// preparation and calibration runs, which never read held-out records).
     pub rare_stratum_validation_mse: Option<f64>,
-    /// Validation MSE per stratum.
+    /// Validation MSE per stratum (empty on preparation and calibration runs,
+    /// which never read held-out records).
     pub strata_validation_mse: Vec<Option<f64>>,
     /// Forward and backward record passes charged to the arm.
     pub record_passes: u64,
+    /// Forward-only measurement passes (initial and final training MSE, plus
+    /// held-out records on validation runs); a search cost counted apart from
+    /// `record_passes`.
+    pub audit_passes: u64,
     /// Record passes as a share of epochs times training records.
     pub processed_share: f64,
     /// Passes spent on easy-pool revisits.
@@ -130,7 +152,19 @@ fn squared_error(out: &[f32], expected: &[f32]) -> f64 {
         / n as f64
 }
 
-/// Refine a clone of `parent` over `corpus.train` under `policy`.
+/// Passes and operations a run has spent so far. `refine_inner` keeps it
+/// current, so a run that fails after processing records still reports them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Spend {
+    record_passes: u64,
+    audit_passes: u64,
+    revisit_passes: u64,
+    schedule_ops: u64,
+}
+
+/// Refine a clone of `parent` over `corpus.train` under `policy` at `learning_rate`.
+// The arms differ only in these inputs; a parameter struct would add noise.
+#[allow(clippy::too_many_arguments)]
 pub fn refine(
     parent: &CreatureExport,
     corpus: &Corpus,
@@ -138,7 +172,37 @@ pub fn refine(
     policy: &SkipPolicy,
     schedule: &ScheduleConfig,
     manifest: &Manifest,
+    learning_rate: f64,
     rng_seed: u64,
+) -> Result<RunOutcome, String> {
+    refine_inner(
+        parent,
+        corpus,
+        scope,
+        policy,
+        schedule,
+        manifest,
+        learning_rate,
+        rng_seed,
+        &mut Spend::default(),
+        true,
+    )
+}
+
+/// [`refine`], recording what was spent in `spent` even when it returns an error.
+/// Held-out records are read only when `audit_held_out` is set.
+#[allow(clippy::too_many_arguments)]
+fn refine_inner(
+    parent: &CreatureExport,
+    corpus: &Corpus,
+    scope: &DifficultyScope,
+    policy: &SkipPolicy,
+    schedule: &ScheduleConfig,
+    manifest: &Manifest,
+    learning_rate: f64,
+    rng_seed: u64,
+    spent: &mut Spend,
+    audit_held_out: bool,
 ) -> Result<RunOutcome, String> {
     let n = corpus.train.len();
     let first: Vec<f32> = corpus.train.iter().map(|r| r.outputs[0]).collect();
@@ -153,16 +217,16 @@ pub fn refine(
         .map_err(|e| e.to_string())?;
 
     let config = BackpropConfig {
-        learning_rate: manifest.learning_rate,
-        initial_learning_rate: manifest.learning_rate,
+        learning_rate,
+        initial_learning_rate: learning_rate,
         ..BackpropConfig::default()
     };
 
     let initial = mean(&record_errors(parent, &corpus.train)?);
+    spent.audit_passes += corpus.train.len() as u64;
     let mut creature = parent.clone();
     let mut sched_rng = StdRng::seed_from_u64(rng_seed);
     let mut plan_rng = StdRng::seed_from_u64(rng_seed ^ 0x9E37_79B9_7F4A_7C15);
-    let (mut passes, mut revisit_passes, mut ops) = (0u64, 0u64, 0u64);
 
     for epoch in 0..manifest.epochs {
         tracker.ensure_scope(scope).map_err(|e| e.to_string())?;
@@ -183,43 +247,54 @@ pub fn refine(
         let signal = scan.finish();
         let lr = calculate_learning_rate(&config, u64::from(epoch), None);
         creature = apply_learnings(&creature, &signal, &config, lr);
-        passes += sel.processed as u64;
-        revisit_passes += sel.revisits as u64;
-        ops += sel.schedule_ops;
+        spent.record_passes += sel.processed as u64;
+        spent.revisit_passes += sel.revisits as u64;
+        spent.schedule_ops += sel.schedule_ops;
     }
 
-    // Audit: measurement only, not charged to the arm.
+    // Audit: measurement only. Not charged to the arm's `record_passes`, but
+    // counted in `audit_passes` because selection depends on it.
     let train_errors = record_errors(&creature, &corpus.train)?;
-    let val_errors = record_errors(&creature, &corpus.validation)?;
+    spent.audit_passes += corpus.train.len() as u64;
     let final_train = mean(&train_errors);
-    let final_val = mean(&val_errors);
-    if !final_train.is_finite() || !final_val.is_finite() {
-        return Err("refinement diverged: non-finite MSE".to_string());
+    if !final_train.is_finite() {
+        return Err("refinement diverged: non-finite training MSE".to_string());
     }
 
-    let val_strata: Vec<u16> = corpus
-        .validation
-        .iter()
-        .map(|r| edges.assign(r.outputs[0]))
-        .collect();
-    let mut sums = vec![(0.0f64, 0usize); manifest.strata_bins.max(1)];
-    for (s, e) in val_strata.iter().zip(&val_errors) {
-        let slot = &mut sums[usize::from(*s)];
-        slot.0 += e;
-        slot.1 += 1;
-    }
-    let strata_mse: Vec<Option<f64>> = sums
-        .iter()
-        .map(|&(s, c)| (c > 0).then(|| s / c as f64))
-        .collect();
-    let flags = rare_flags(&strata, schedule.rare_stratum_share);
-    let rare: Vec<f64> = val_strata
-        .iter()
-        .zip(&val_errors)
-        .filter(|(s, _)| flags.get(usize::from(**s)).copied().unwrap_or(false))
-        .map(|(_, e)| *e)
-        .collect();
-    let rare_mse = (!rare.is_empty()).then(|| mean(&rare));
+    let (final_val, rare_mse, strata_mse) = if audit_held_out {
+        let val_errors = record_errors(&creature, &corpus.validation)?;
+        spent.audit_passes += corpus.validation.len() as u64;
+        let final_val = mean(&val_errors);
+        if !final_val.is_finite() {
+            return Err("refinement diverged: non-finite validation MSE".to_string());
+        }
+        let val_strata: Vec<u16> = corpus
+            .validation
+            .iter()
+            .map(|r| edges.assign(r.outputs[0]))
+            .collect();
+        let mut sums = vec![(0.0f64, 0usize); manifest.strata_bins.max(1)];
+        for (s, e) in val_strata.iter().zip(&val_errors) {
+            let slot = &mut sums[usize::from(*s)];
+            slot.0 += e;
+            slot.1 += 1;
+        }
+        let strata_mse: Vec<Option<f64>> = sums
+            .iter()
+            .map(|&(s, c)| (c > 0).then(|| s / c as f64))
+            .collect();
+        let flags = rare_flags(&strata, schedule.rare_stratum_share);
+        let rare: Vec<f64> = val_strata
+            .iter()
+            .zip(&val_errors)
+            .filter(|(s, _)| flags.get(usize::from(**s)).copied().unwrap_or(false))
+            .map(|(_, e)| *e)
+            .collect();
+        let rare_mse = (!rare.is_empty()).then(|| mean(&rare));
+        (Some(final_val), rare_mse, strata_mse)
+    } else {
+        (None, None, Vec::new())
+    };
 
     let (mut observed, mut forgotten) = (0usize, 0usize);
     for (i, final_err) in train_errors.iter().enumerate() {
@@ -249,10 +324,11 @@ pub fn refine(
         final_validation_mse: final_val,
         rare_stratum_validation_mse: rare_mse,
         strata_validation_mse: strata_mse,
-        record_passes: passes,
-        processed_share: passes as f64 / (f64::from(manifest.epochs) * n as f64),
-        revisit_passes,
-        schedule_ops: ops,
+        record_passes: spent.record_passes,
+        audit_passes: spent.audit_passes,
+        processed_share: spent.record_passes as f64 / (f64::from(manifest.epochs) * n as f64),
+        revisit_passes: spent.revisit_passes,
+        schedule_ops: spent.schedule_ops,
         forgotten_share,
         parent_fingerprint: format!("{:016x}", own_scope.parent_fingerprint),
         corpus_key: corpus.key.clone(),
@@ -286,6 +362,14 @@ pub struct FailureRow {
     pub phase: String,
     /// Error text.
     pub error: String,
+    /// Record passes spent before the failure; a diverged run spends them all.
+    pub record_passes: u64,
+    /// Measurement passes spent before the failure.
+    pub audit_passes: u64,
+    /// Easy-pool revisit passes spent before the failure.
+    pub revisit_passes: u64,
+    /// Scheduling operations spent before the failure.
+    pub schedule_ops: u64,
 }
 
 /// A row of `runs.jsonl`.
@@ -307,6 +391,9 @@ pub struct Versions {
     pub crate_version: String,
     /// neat-core tag.
     pub neat_core_tag: String,
+    /// Commit of the checkout that built the run; the library leaves it empty
+    /// and the example fills it in.
+    pub git_commit: Option<String>,
 }
 
 /// Chosen schedule parameters.
@@ -331,6 +418,102 @@ pub struct CalibrationEntry {
     pub n_pairs: usize,
     /// Mean of (easy - random) final training MSE; null when no pairs.
     pub mean_train_diff: Option<f64>,
+}
+
+/// Learning-rate sweep result for one rate.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningRateEntry {
+    /// Learning rate tried.
+    pub learning_rate: f64,
+    /// Completed runs at this rate.
+    pub n_runs: usize,
+    /// Mean final training MSE; null when no run completed.
+    pub mean_train_mse: Option<f64>,
+}
+
+/// Predeclared compute limit against planned and actual cost.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeBudget {
+    /// The manifest's `maxRecordPasses`.
+    pub limit_record_passes: u64,
+    /// Upper bound planned before any run: runs * epochs * training records.
+    /// `u64::MAX` when the bound overflowed and the run was refused.
+    pub planned_bound_record_passes: u64,
+    /// Record passes charged across every run, all phases, including the
+    /// passes a failed run spent before it failed.
+    pub actual_record_passes: u64,
+    /// Forward-only measurement passes across every run, all phases; not
+    /// governed by `maxRecordPasses`.
+    pub actual_audit_passes: u64,
+}
+
+/// Validation-phase summary of one arm (means over its runs).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArmSummary {
+    /// Arm label.
+    pub arm: String,
+    /// Completed validation runs.
+    pub n_runs: usize,
+    /// Mean record passes.
+    pub record_passes: Option<f64>,
+    /// Mean processed share.
+    pub processed_share: Option<f64>,
+    /// Mean final training MSE.
+    pub final_train_mse: Option<f64>,
+    /// Mean final validation MSE.
+    pub final_validation_mse: Option<f64>,
+    /// Mean rare-stratum validation MSE over runs that have one.
+    pub rare_stratum_validation_mse: Option<f64>,
+    /// Mean forgotten share.
+    pub forgotten_share: Option<f64>,
+    /// Mean revisit passes.
+    pub revisit_passes: Option<f64>,
+    /// Mean scheduling operations.
+    pub schedule_ops: Option<f64>,
+    /// Per-stratum mean validation MSE over runs where the stratum is present.
+    pub strata_validation_mse: Vec<Option<f64>>,
+}
+
+fn arm_summary(arm: String, runs: &[&RunOutcome]) -> ArmSummary {
+    let m = |f: &dyn Fn(&RunOutcome) -> f64| {
+        let v: Vec<f64> = runs.iter().map(|o| f(o)).collect();
+        opt(mean(&v))
+    };
+    let val: Vec<f64> = runs.iter().filter_map(|o| o.final_validation_mse).collect();
+    let rare: Vec<f64> = runs
+        .iter()
+        .filter_map(|o| o.rare_stratum_validation_mse)
+        .collect();
+    let bins = runs
+        .iter()
+        .map(|o| o.strata_validation_mse.len())
+        .max()
+        .unwrap_or(0);
+    let strata = (0..bins)
+        .map(|b| {
+            let v: Vec<f64> = runs
+                .iter()
+                .filter_map(|o| o.strata_validation_mse.get(b).copied().flatten())
+                .collect();
+            opt(mean(&v))
+        })
+        .collect();
+    ArmSummary {
+        arm,
+        n_runs: runs.len(),
+        record_passes: m(&|o| o.record_passes as f64),
+        processed_share: m(&|o| o.processed_share),
+        final_train_mse: m(&|o| o.final_train_mse),
+        final_validation_mse: opt(mean(&val)),
+        rare_stratum_validation_mse: opt(mean(&rare)),
+        forgotten_share: m(&|o| o.forgotten_share),
+        revisit_passes: m(&|o| o.revisit_passes as f64),
+        schedule_ops: m(&|o| o.schedule_ops as f64),
+        strata_validation_mse: strata,
+    }
 }
 
 /// Run coverage.
@@ -385,8 +568,8 @@ pub struct Comparison {
     pub verdict: Verdict,
 }
 
-/// Summed cost of one phase, counting every run (including failed ones in
-/// `runs` only through completed rows).
+/// Summed cost of one phase. The passes and operations include those spent by
+/// runs that failed; `runs` counts completed runs only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhaseCost {
@@ -394,6 +577,8 @@ pub struct PhaseCost {
     pub runs: usize,
     /// Forward and backward record passes.
     pub record_passes: u64,
+    /// Forward-only measurement passes.
+    pub audit_passes: u64,
     /// Passes spent on easy-pool revisits.
     pub revisit_passes: u64,
     /// Scheduling operations.
@@ -403,16 +588,44 @@ pub struct PhaseCost {
 fn phase_cost(rows: &[Row], phase: &str) -> PhaseCost {
     let mut c = PhaseCost::default();
     for row in rows {
-        if let Row::Ok(o) = row
-            && o.phase == phase
-        {
-            c.runs += 1;
-            c.record_passes += o.record_passes;
-            c.revisit_passes += o.revisit_passes;
-            c.schedule_ops += o.schedule_ops;
+        match row {
+            Row::Ok(o) if o.phase == phase => {
+                c.runs += 1;
+                c.record_passes += o.record_passes;
+                c.audit_passes += o.audit_passes;
+                c.revisit_passes += o.revisit_passes;
+                c.schedule_ops += o.schedule_ops;
+            }
+            Row::Failed(f) if f.phase == phase => {
+                c.record_passes += f.record_passes;
+                c.audit_passes += f.audit_passes;
+                c.revisit_passes += f.revisit_passes;
+                c.schedule_ops += f.schedule_ops;
+            }
+            _ => {}
         }
     }
     c
+}
+
+/// Record passes spent by every run, including those a failed run spent.
+fn total_record_passes(rows: &[Row]) -> u64 {
+    rows.iter()
+        .map(|r| match r {
+            Row::Ok(o) => o.record_passes,
+            Row::Failed(f) => f.record_passes,
+        })
+        .sum()
+}
+
+/// Measurement passes spent by every run, including those a failed run spent.
+fn total_audit_passes(rows: &[Row]) -> u64 {
+    rows.iter()
+        .map(|r| match r {
+            Row::Ok(o) => o.audit_passes,
+            Row::Failed(f) => f.audit_passes,
+        })
+        .sum()
 }
 
 /// Full report of a manifest run.
@@ -425,12 +638,22 @@ pub struct BenchReport {
     pub versions: Versions,
     /// Corpus source description.
     pub source: String,
+    /// Learning rate chosen by the preparation sweep (training MSE only).
+    pub chosen_learning_rate: f64,
+    /// Preparation sweep table.
+    pub learning_rate_sweep: Vec<LearningRateEntry>,
     /// Schedule chosen by calibration.
     pub chosen_schedule: ChosenSchedule,
     /// Calibration table.
     pub calibration: Vec<CalibrationEntry>,
     /// Coverage.
     pub coverage: Coverage,
+    /// Cost of the preparation phase (learning-rate sweep).
+    pub preparation_cost: PhaseCost,
+    /// Predeclared compute limit, planned bound and actual cost.
+    pub compute: ComputeBudget,
+    /// Per-arm validation summary.
+    pub arms: Vec<ArmSummary>,
     /// Cost of the calibration phase (schedule search).
     pub calibration_cost: PhaseCost,
     /// Cost of the validation phase.
@@ -444,12 +667,90 @@ pub struct BenchReport {
 impl BenchReport {
     /// Summary as pretty JSON, without the per-run rows.
     pub fn summary_json(&self) -> Result<String, String> {
-        let mut v = serde_json::to_value(self).map_err(|e| e.to_string())?;
-        if let Some(o) = v.as_object_mut() {
-            o.remove("rows");
-        }
-        serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
+        summary_without_rows(self)
     }
+}
+
+/// A manifest run that stopped before it could report, with what it spent.
+///
+/// A run can stop part-way (no learning rate completed every seed, or
+/// calibration has no matched pair). The runs already made still cost
+/// compute and still explain the stop, so they travel with the error and
+/// [`write_aborted_outputs`] writes them. A refusal made before any run
+/// (an invalid manifest, a compute bound over the limit) carries no rows.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbortedRun {
+    /// Manifest echo.
+    pub manifest: Manifest,
+    /// Versions.
+    pub versions: Versions,
+    /// Why the run stopped.
+    pub error: String,
+    /// Planned, completed and failed runs at the stop.
+    pub coverage: Coverage,
+    /// Cost of the preparation phase, failed runs included.
+    pub preparation_cost: PhaseCost,
+    /// Cost of the calibration phase, failed runs included.
+    pub calibration_cost: PhaseCost,
+    /// Predeclared compute limit, planned bound and the passes actually spent.
+    pub compute: ComputeBudget,
+    /// Every run made before the stop (goes to `runs.jsonl`, not the summary).
+    pub rows: Vec<Row>,
+}
+
+impl std::fmt::Display for AbortedRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.error)
+    }
+}
+
+impl std::error::Error for AbortedRun {}
+
+impl AbortedRun {
+    fn new(manifest: &Manifest, planned: usize, bound: u64, rows: Vec<Row>, error: String) -> Self {
+        let failed = rows.iter().filter(|r| matches!(r, Row::Failed(_))).count();
+        Self {
+            manifest: manifest.clone(),
+            versions: versions(),
+            error,
+            coverage: Coverage {
+                planned,
+                completed: rows.len() - failed,
+                failed,
+            },
+            preparation_cost: phase_cost(&rows, "preparation"),
+            calibration_cost: phase_cost(&rows, "calibration"),
+            compute: ComputeBudget {
+                limit_record_passes: manifest.max_record_passes,
+                planned_bound_record_passes: bound,
+                actual_record_passes: total_record_passes(&rows),
+                actual_audit_passes: total_audit_passes(&rows),
+            },
+            rows,
+        }
+    }
+
+    /// Summary as pretty JSON, without the per-run rows.
+    pub fn summary_json(&self) -> Result<String, String> {
+        summary_without_rows(self)
+    }
+}
+
+fn versions() -> Versions {
+    Versions {
+        crate_version: env!("CARGO_PKG_VERSION").to_string(),
+        neat_core_tag: neat_core_tag(),
+        git_commit: None,
+    }
+}
+
+fn summary_without_rows<T: Serialize>(report: &T) -> Result<String, String> {
+    let mut v = serde_json::to_value(report).map_err(|e| e.to_string())?;
+    if let Some(o) = v.as_object_mut() {
+        o.remove("rows");
+    }
+    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
 }
 
 fn opt(x: f64) -> Option<f64> {
@@ -469,6 +770,7 @@ impl Runner<'_> {
         seed: u64,
         policy: SkipPolicy,
         sched: &ScheduleConfig,
+        learning_rate: f64,
     ) -> Option<RunOutcome> {
         let (corpus, parent) = match self.source {
             CorpusSource::Synthetic => (
@@ -486,15 +788,32 @@ impl Runner<'_> {
             corpus_key: corpus.key.clone(),
             record_count: corpus.train.len(),
         };
-        match refine(
+        let mut spent = Spend::default();
+        let result = refine_inner(
             &parent,
             &corpus,
             &scope,
             &policy,
             sched,
             self.manifest,
+            learning_rate,
             seed,
-        ) {
+            &mut spent,
+            phase == "validation",
+        );
+        // Tests force a divergence after the epochs ran, as a real one does.
+        #[cfg(test)]
+        let result = result.and_then(|o| {
+            if test_support::DIVERGE
+                .get()
+                .is_some_and(|f| f(learning_rate, seed))
+            {
+                Err("refinement diverged: non-finite MSE (injected)".to_string())
+            } else {
+                Ok(o)
+            }
+        });
+        match result {
             Ok(mut o) => {
                 o.phase = phase.to_string();
                 self.rows.push(Row::Ok(Box::new(o.clone())));
@@ -506,6 +825,10 @@ impl Runner<'_> {
                     seed,
                     phase: phase.to_string(),
                     error,
+                    record_passes: spent.record_passes,
+                    audit_passes: spent.audit_passes,
+                    revisit_passes: spent.revisit_passes,
+                    schedule_ops: spent.schedule_ops,
                 }));
                 None
             }
@@ -522,23 +845,149 @@ fn schedule_for(m: &Manifest, g: &GridPoint) -> ScheduleConfig {
     }
 }
 
-/// Run calibration then validation per the manifest.
-pub fn run_manifest(manifest: &Manifest, source: &CorpusSource) -> Result<BenchReport, String> {
-    manifest.validate()?;
+/// Index of the rate with the lowest mean training MSE among the rates that
+/// completed every one of `seeds` runs. A rate scored on only the seeds that
+/// survived is not comparable with one scored on all of them (each synthetic
+/// seed is a different corpus), so it is never eligible.
+fn choose_learning_rate(sweep: &[LearningRateEntry], seeds: usize) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (i, e) in sweep.iter().enumerate() {
+        if e.n_runs != seeds {
+            continue;
+        }
+        if let Some(d) = e.mean_train_mse
+            && best.is_none_or(|b| d < sweep[b].mean_train_mse.unwrap_or(f64::INFINITY))
+        {
+            best = Some(i);
+        }
+    }
+    best
+}
+
+/// Run preparation, calibration then validation per the manifest.
+///
+/// An error carries every run made before the stop and what they spent; see
+/// [`AbortedRun`].
+pub fn run_manifest(
+    manifest: &Manifest,
+    source: &CorpusSource,
+) -> Result<BenchReport, Box<AbortedRun>> {
+    manifest
+        .validate()
+        .map_err(|e| Box::new(AbortedRun::new(manifest, 0, 0, Vec::new(), e)))?;
     run_validated(manifest, source)
+}
+
+/// Number of runs the manifest plans, or `None` when the count overflows.
+fn planned_runs(m: &Manifest) -> Option<usize> {
+    let nred = m.reductions.len();
+    let prep = m
+        .calibration_seeds
+        .len()
+        .checked_mul(m.learning_rate_grid.len())?;
+    let calibration = m
+        .calibration_seeds
+        .len()
+        .checked_mul(nred)?
+        .checked_mul(m.calibration_grid.len())?
+        .checked_mul(2)?;
+    let validation = m
+        .validation_seeds
+        .len()
+        .checked_mul(nred.checked_mul(2)?.checked_add(1)?)?;
+    prep.checked_add(calibration)?.checked_add(validation)
 }
 
 /// Run an already validated manifest. Split out so tests can drive the
 /// run-failure path with values `Manifest::validate` refuses up front.
-fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchReport, String> {
+fn run_validated(
+    manifest: &Manifest,
+    source: &CorpusSource,
+) -> Result<BenchReport, Box<AbortedRun>> {
+    let train_count = match source {
+        CorpusSource::Synthetic => manifest.train_records,
+        CorpusSource::Files { corpus, .. } => corpus.train.len(),
+    } as u64;
+    let planned_count = planned_runs(manifest);
+    let bound = planned_count.and_then(|p| {
+        (p as u64)
+            .checked_mul(u64::from(manifest.epochs))?
+            .checked_mul(train_count)
+    });
+    let planned = planned_count.unwrap_or(usize::MAX);
+    let Some(bound) = bound else {
+        return Err(Box::new(AbortedRun::new(
+            manifest,
+            planned,
+            u64::MAX,
+            Vec::new(),
+            format!(
+                "planned compute bound overflows u64 record passes; exceeds maxRecordPasses {}",
+                manifest.max_record_passes
+            ),
+        )));
+    };
+    if bound > manifest.max_record_passes {
+        return Err(Box::new(AbortedRun::new(
+            manifest,
+            planned,
+            bound,
+            Vec::new(),
+            format!(
+                "planned compute bound {bound} record passes exceeds maxRecordPasses {}",
+                manifest.max_record_passes
+            ),
+        )));
+    }
     let mut runner = Runner {
         manifest,
         source,
         rows: Vec::new(),
     };
-    let nred = manifest.reductions.len();
-    let planned = manifest.calibration_seeds.len() * nred * manifest.calibration_grid.len() * 2
-        + manifest.validation_seeds.len() * (1 + 2 * nred);
+    let first_failure = |rows: &[Row]| {
+        rows.iter()
+            .find_map(|r| match r {
+                Row::Failed(f) => Some(format!(
+                    "; first failure: {} seed {} {}: {}",
+                    f.arm, f.seed, f.phase, f.error
+                )),
+                Row::Ok(_) => None,
+            })
+            .unwrap_or_default()
+    };
+
+    // Phase 0: learning-rate preparation on training MSE only.
+    let prep_sched = schedule_for(manifest, &manifest.calibration_grid[0]);
+    let mut sweep = Vec::new();
+    for &lr in &manifest.learning_rate_grid {
+        let mut finals = Vec::new();
+        for &seed in &manifest.calibration_seeds {
+            if let Some(o) = runner.run_one("preparation", seed, SkipPolicy::Full, &prep_sched, lr)
+            {
+                finals.push(o.final_train_mse);
+            }
+        }
+        sweep.push(LearningRateEntry {
+            learning_rate: lr,
+            n_runs: finals.len(),
+            mean_train_mse: opt(mean(&finals)),
+        });
+    }
+    let Some(best_lr) = choose_learning_rate(&sweep, manifest.calibration_seeds.len()) else {
+        let error = format!(
+            "preparation: no learning rate completed all {} calibration seed(s); cannot choose a learning rate{}",
+            manifest.calibration_seeds.len(),
+            first_failure(&runner.rows)
+        );
+        return Err(Box::new(AbortedRun::new(
+            manifest,
+            planned,
+            bound,
+            runner.rows,
+            error,
+        )));
+    };
+    let learning_rate = sweep[best_lr].learning_rate;
 
     // Phase 1: calibration on training MSE only.
     let mut calibration = Vec::new();
@@ -552,12 +1001,14 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
                     seed,
                     SkipPolicy::RandomSkip { reduction: r },
                     &sched,
+                    learning_rate,
                 );
                 let easy = runner.run_one(
                     "calibration",
                     seed,
                     SkipPolicy::EasySkip { reduction: r },
                     &sched,
+                    learning_rate,
                 );
                 if let (Some(rnd), Some(easy)) = (rnd, easy) {
                     diffs.push(easy.final_train_mse - rnd.final_train_mse);
@@ -579,19 +1030,19 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
             best = Some(i);
         }
     }
-    let best = best.ok_or_else(|| {
-        let first = runner.rows.iter().find_map(|r| match r {
-            Row::Failed(f) => Some(format!(
-                "; first failure: {} seed {} {}: {}",
-                f.arm, f.seed, f.phase, f.error
-            )),
-            Row::Ok(_) => None,
-        });
-        format!(
+    let Some(best) = best else {
+        let error = format!(
             "calibration produced no matched pairs; cannot choose a schedule{}",
-            first.unwrap_or_default()
-        )
-    })?;
+            first_failure(&runner.rows)
+        );
+        return Err(Box::new(AbortedRun::new(
+            manifest,
+            planned,
+            bound,
+            runner.rows,
+            error,
+        )));
+    };
     let chosen = manifest.calibration_grid[best];
     let sched = schedule_for(manifest, &chosen);
 
@@ -604,11 +1055,24 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
             policies.push(SkipPolicy::EasySkip { reduction: r });
         }
         for p in policies {
-            if let Some(o) = runner.run_one("validation", seed, p, &sched) {
+            if let Some(o) = runner.run_one("validation", seed, p, &sched, learning_rate) {
                 done.push(o);
             }
         }
     }
+
+    let mut arm_labels = vec!["full".to_string()];
+    for &r in &manifest.reductions {
+        arm_labels.push(arm_label(&SkipPolicy::RandomSkip { reduction: r }));
+        arm_labels.push(arm_label(&SkipPolicy::EasySkip { reduction: r }));
+    }
+    let arms: Vec<ArmSummary> = arm_labels
+        .into_iter()
+        .map(|label| {
+            let runs: Vec<&RunOutcome> = done.iter().filter(|o| o.arm == label).collect();
+            arm_summary(label, &runs)
+        })
+        .collect();
 
     let mut comparisons = Vec::new();
     for &r in &manifest.reductions {
@@ -635,11 +1099,10 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
     };
     Ok(BenchReport {
         manifest: manifest.clone(),
-        versions: Versions {
-            crate_version: env!("CARGO_PKG_VERSION").to_string(),
-            neat_core_tag: neat_core_tag(),
-        },
+        versions: versions(),
         source: source_desc,
+        chosen_learning_rate: learning_rate,
+        learning_rate_sweep: sweep,
         chosen_schedule: ChosenSchedule {
             ewma_alpha: chosen.ewma_alpha,
             revisit_share: chosen.revisit_share,
@@ -651,6 +1114,14 @@ fn run_validated(manifest: &Manifest, source: &CorpusSource) -> Result<BenchRepo
             failed,
         },
         comparisons,
+        preparation_cost: phase_cost(&rows, "preparation"),
+        compute: ComputeBudget {
+            limit_record_passes: manifest.max_record_passes,
+            planned_bound_record_passes: bound,
+            actual_record_passes: total_record_passes(&rows),
+            actual_audit_passes: total_audit_passes(&rows),
+        },
+        arms,
         calibration_cost: phase_cost(&rows, "calibration"),
         validation_cost: phase_cost(&rows, "validation"),
         rows,
@@ -672,8 +1143,11 @@ fn compare(
         let (Some(t), Some(c)) = (find(treatment, seed), find(control, seed)) else {
             continue;
         };
+        let (Some(tv), Some(cv)) = (t.final_validation_mse, c.final_validation_mse) else {
+            continue;
+        };
         seeds.push(seed);
-        diffs.push(t.final_validation_mse - c.final_validation_mse);
+        diffs.push(tv - cv);
         train.push(t.final_train_mse - c.final_train_mse);
         if let (Some(a), Some(b)) = (t.rare_stratum_validation_mse, c.rare_stratum_validation_mse) {
             rare.push(a - b);
@@ -707,21 +1181,74 @@ fn compare(
 
 /// Write `manifest.json`, `runs.jsonl` and `summary.json` into `dir`.
 pub fn write_outputs(dir: &Path, report: &BenchReport) -> Result<(), String> {
+    write_files(dir, &report.manifest, &report.rows, report.summary_json()?)
+}
+
+/// Write the same three files for a run that stopped early. `summary.json`
+/// holds the error, the coverage and the cost of the runs that were made;
+/// `runs.jsonl` holds their rows, failed ones with the passes they spent.
+pub fn write_aborted_outputs(dir: &Path, aborted: &AbortedRun) -> Result<(), String> {
+    write_files(
+        dir,
+        &aborted.manifest,
+        &aborted.rows,
+        aborted.summary_json()?,
+    )
+}
+
+fn write_files(
+    dir: &Path,
+    manifest: &Manifest,
+    rows: &[Row],
+    summary: String,
+) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let write = |name: &str, body: String| {
         std::fs::write(dir.join(name), body).map_err(|e| format!("write {name}: {e}"))
     };
     write(
         "manifest.json",
-        serde_json::to_string_pretty(&report.manifest).map_err(|e| e.to_string())?,
+        serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?,
     )?;
     let mut lines = String::new();
-    for row in &report.rows {
+    for row in rows {
         lines.push_str(&serde_json::to_string(row).map_err(|e| e.to_string())?);
         lines.push('\n');
     }
     write("runs.jsonl", lines)?;
-    write("summary.json", report.summary_json()?)
+    write("summary.json", summary)
+}
+
+#[cfg(test)]
+mod test_support {
+    use std::cell::Cell;
+
+    /// Decides, from (learning rate, seed), whether a run diverges.
+    pub type DivergeRule = fn(f64, u64) -> bool;
+
+    thread_local! {
+        /// When set, a run at (learning rate, seed) for which it returns true
+        /// fails with a divergence after its epochs ran. No real rate or seed
+        /// diverges deterministically (the update clips), so a partly failed
+        /// sweep needs this seam. Per test thread.
+        pub static DIVERGE: Cell<Option<DivergeRule>> = const { Cell::new(None) };
+    }
+
+    /// Sets the hook; clears it on drop so a failed test cannot leak it.
+    pub struct Diverge;
+
+    impl Diverge {
+        pub fn when(f: DivergeRule) -> Self {
+            DIVERGE.set(Some(f));
+            Self
+        }
+    }
+
+    impl Drop for Diverge {
+        fn drop(&mut self) {
+            DIVERGE.set(None);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -751,13 +1278,14 @@ mod tests {
     #[test]
     fn refused_grid_point_is_reported_beside_a_valid_one() {
         let mut m = tiny();
+        // The valid point comes first: preparation runs the full arm on it.
         m.calibration_grid = vec![
             GridPoint {
-                ewma_alpha: 0.0,
+                ewma_alpha: 0.5,
                 revisit_share: 0.1,
             },
             GridPoint {
-                ewma_alpha: 0.5,
+                ewma_alpha: 0.0,
                 revisit_share: 0.1,
             },
         ];
@@ -765,10 +1293,10 @@ mod tests {
         assert!(m.validate().unwrap_err().contains("ewmaAlpha"));
 
         let report = run_validated(&m, &CorpusSource::Synthetic).unwrap();
-        // 1 seed * 1 reduction * 2 grid * 2 arms + 2 seeds * 3 arms.
-        assert_eq!(report.coverage.planned, 10);
+        // 4 rates * 1 seed + 1 seed * 1 reduction * 2 grid * 2 arms + 2 seeds * 3 arms.
+        assert_eq!(report.coverage.planned, 14);
         assert_eq!(report.coverage.failed, 2);
-        assert_eq!(report.coverage.completed, 8);
+        assert_eq!(report.coverage.completed, 12);
 
         let fails = failed(&report.rows);
         assert_eq!(fails.len(), 2);
@@ -779,32 +1307,463 @@ mod tests {
             assert!(f.error.contains("ewma_alpha"), "{}", f.error);
         }
 
-        assert_eq!(report.calibration[0].n_pairs, 0);
-        assert!(report.calibration[0].mean_train_diff.is_none());
-        assert_eq!(report.calibration[1].n_pairs, 1);
-        assert!(report.calibration[1].mean_train_diff.is_some());
+        assert_eq!(report.calibration[1].n_pairs, 0);
+        assert!(report.calibration[1].mean_train_diff.is_none());
+        assert_eq!(report.calibration[0].n_pairs, 1);
+        assert!(report.calibration[0].mean_train_diff.is_some());
         assert_eq!(report.chosen_schedule.ewma_alpha, 0.5);
 
         let dir = tempfile::tempdir().unwrap();
         write_outputs(dir.path(), &report).unwrap();
         let runs = std::fs::read_to_string(dir.path().join("runs.jsonl")).unwrap();
-        assert_eq!(runs.lines().count(), 10);
+        assert_eq!(runs.lines().count(), 14);
         let error_lines = runs.lines().filter(|l| l.contains("\"error\"")).count();
         assert_eq!(error_lines, 2);
     }
 
     #[test]
-    fn all_failed_calibration_names_the_first_failure() {
+    fn schedule_choice_skips_a_refused_point_and_takes_the_lowest_diff() {
+        let mut m = tiny();
+        // The refused point sits between two valid ones. The third point must
+        // win on calibration diff, so a selector that always takes index 0
+        // fails here.
+        m.calibration_grid = vec![
+            GridPoint {
+                ewma_alpha: 0.5,
+                revisit_share: 0.1,
+            },
+            GridPoint {
+                ewma_alpha: 0.0,
+                revisit_share: 0.1,
+            },
+            GridPoint {
+                ewma_alpha: 0.8,
+                revisit_share: 0.3,
+            },
+        ];
+
+        let report = run_validated(&m, &CorpusSource::Synthetic).unwrap();
+        assert!(report.calibration[1].mean_train_diff.is_none());
+        // Premise: the third point beats the first on calibration diff.
+        assert!(
+            report.calibration[2].mean_train_diff.unwrap()
+                < report.calibration[0].mean_train_diff.unwrap()
+        );
+        assert_eq!(report.chosen_schedule.ewma_alpha, 0.8);
+        assert_eq!(report.chosen_schedule.revisit_share, 0.3);
+    }
+
+    #[test]
+    fn all_failed_preparation_names_the_first_failure() {
         let mut m = tiny();
         m.warmup_epochs = 0;
         assert!(m.validate().unwrap_err().contains("warmupEpochs"));
 
-        let err = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
-        assert!(err.contains("no matched pairs"), "{err}");
+        let err = run_validated(&m, &CorpusSource::Synthetic)
+            .unwrap_err()
+            .error;
+        assert!(err.contains("no learning rate completed"), "{err}");
         assert!(
-            err.contains("first failure: random-50 seed 1 calibration"),
+            err.contains("first failure: full seed 1 preparation"),
             "{err}"
         );
         assert!(err.contains("warmup_epochs"), "{err}");
+    }
+
+    #[test]
+    fn all_failed_calibration_names_the_first_failure() {
+        let mut m = tiny();
+        // Full runs validate any reduction, so preparation passes; every
+        // random and easy calibration run refuses it in `select`.
+        m.reductions = vec![1.5];
+        assert!(m.validate().unwrap_err().contains("reduction"));
+
+        let aborted = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        let err = &aborted.error;
+        assert!(err.contains("no matched pairs"), "{err}");
+        assert!(
+            err.contains("first failure: random-150 seed 1 calibration"),
+            "{err}"
+        );
+        assert!(err.contains("invalid reduction"), "{err}");
+    }
+
+    fn entry(learning_rate: f64, n_runs: usize, mse: Option<f64>) -> LearningRateEntry {
+        LearningRateEntry {
+            learning_rate,
+            n_runs,
+            mean_train_mse: mse,
+        }
+    }
+
+    #[test]
+    fn a_rate_that_missed_a_seed_is_never_chosen() {
+        let sweep = [
+            entry(0.1, 2, Some(0.5)),
+            // Scored on one seed only: lower, but not comparable.
+            entry(0.4, 1, Some(0.1)),
+            entry(0.2, 2, Some(0.3)),
+            entry(0.8, 0, None),
+        ];
+        assert_eq!(choose_learning_rate(&sweep, 2), Some(2));
+        // Control: were the partial rate complete, it would win.
+        let complete = [entry(0.1, 2, Some(0.5)), entry(0.4, 2, Some(0.1))];
+        assert_eq!(choose_learning_rate(&complete, 2), Some(1));
+        // No rate completed every seed.
+        assert_eq!(choose_learning_rate(&sweep[1..2], 2), None);
+        assert_eq!(choose_learning_rate(&[], 2), None);
+    }
+
+    #[test]
+    fn failed_runs_charge_the_passes_they_spent() {
+        let m = tiny();
+        // A NaN training target makes every run diverge, but only in the
+        // audit after all epochs ran. (A NaN or infinite training input does
+        // not: the network sanitises inputs, so the error stays finite. The
+        // strata edges skip a NaN target, so they are unaffected.)
+        let mut corpus = synthetic_corpus(1, m.train_records, m.validation_records);
+        corpus.train[0].outputs[0] = f32::NAN;
+        let source = CorpusSource::Files {
+            corpus,
+            parent: synthetic_parent(m.parent_seed),
+        };
+        let mut runner = Runner {
+            manifest: &m,
+            source: &source,
+            rows: Vec::new(),
+        };
+        let sched = schedule_for(&m, &m.calibration_grid[0]);
+        assert!(
+            runner
+                .run_one("preparation", 1, SkipPolicy::Full, &sched, 0.2)
+                .is_none()
+        );
+        assert!(
+            runner
+                .run_one("preparation", 2, SkipPolicy::Full, &sched, 0.2)
+                .is_none()
+        );
+        let fails = failed(&runner.rows);
+        assert_eq!(fails.len(), 2);
+        let full_passes = u64::from(m.epochs) * m.train_records as u64;
+        for f in &fails {
+            assert!(f.error.contains("diverged"), "{}", f.error);
+            assert!(f.error.contains("training"), "{}", f.error);
+            assert_eq!(f.record_passes, full_passes);
+            assert_eq!(f.schedule_ops, 0);
+            // Initial and final training audits; no held-out read in preparation.
+            assert_eq!(f.audit_passes, 2 * m.train_records as u64);
+        }
+        let cost = phase_cost(&runner.rows, "preparation");
+        assert_eq!(cost.runs, 0);
+        assert_eq!(cost.audit_passes, 4 * m.train_records as u64);
+        assert_eq!(cost.record_passes, 2 * full_passes);
+        assert_eq!(total_record_passes(&runner.rows), 2 * full_passes);
+        // Control: the cost is per phase.
+        assert_eq!(
+            phase_cost(&runner.rows, "calibration"),
+            PhaseCost::default()
+        );
+
+        let json = serde_json::to_string(&runner.rows[0]).unwrap();
+        assert!(
+            json.contains(&format!("\"recordPasses\":{full_passes}")),
+            "{json}"
+        );
+        assert!(json.contains("\"auditPasses\":"), "{json}");
+    }
+
+    fn nan_training_source(m: &Manifest) -> CorpusSource {
+        // A NaN training target makes every run diverge, but only in the
+        // audit after all epochs ran. (A NaN or infinite training input does
+        // not: the network sanitises inputs, so the error stays finite. The
+        // strata edges skip a NaN target, so they are unaffected.)
+        let mut corpus = synthetic_corpus(1, m.train_records, m.validation_records);
+        corpus.train[0].outputs[0] = f32::NAN;
+        CorpusSource::Files {
+            corpus,
+            parent: synthetic_parent(m.parent_seed),
+        }
+    }
+
+    fn full_passes(m: &Manifest) -> u64 {
+        u64::from(m.epochs) * m.train_records as u64
+    }
+
+    #[test]
+    fn an_aborted_preparation_keeps_the_passes_it_spent() {
+        let m = tiny();
+        m.validate().unwrap();
+        let source = nan_training_source(&m);
+
+        // Through the public entry point: every rate diverges.
+        let aborted = run_manifest(&m, &source).unwrap_err();
+        assert!(
+            aborted.error.contains("no learning rate completed"),
+            "{aborted}"
+        );
+        assert!(aborted.error.contains("diverged"), "{aborted}");
+        assert!(aborted.error.contains("training"), "{aborted}");
+        let rates = m.learning_rate_grid.len() as u64 * m.calibration_seeds.len() as u64;
+        assert_eq!(aborted.rows.len() as u64, rates);
+        assert_eq!(aborted.coverage.planned, 14);
+        assert_eq!(
+            (aborted.coverage.completed, aborted.coverage.failed),
+            (0, rates as usize)
+        );
+        assert_eq!(aborted.preparation_cost.runs, 0);
+        assert_eq!(
+            aborted.preparation_cost.record_passes,
+            rates * full_passes(&m)
+        );
+        assert_eq!(aborted.calibration_cost, PhaseCost::default());
+        assert_eq!(
+            aborted.compute.actual_audit_passes,
+            rates * 2 * m.train_records as u64
+        );
+        assert_eq!(
+            aborted.compute.actual_record_passes,
+            rates * full_passes(&m)
+        );
+        assert_eq!(
+            aborted.compute.planned_bound_record_passes,
+            14 * full_passes(&m)
+        );
+
+        // The outputs carry the cost and the failed rows' passes.
+        let dir = tempfile::tempdir().unwrap();
+        write_aborted_outputs(dir.path(), &aborted).unwrap();
+        let summary: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            summary["compute"]["actualRecordPasses"],
+            rates * full_passes(&m)
+        );
+        assert_eq!(
+            summary["preparationCost"]["recordPasses"],
+            rates * full_passes(&m)
+        );
+        assert!(
+            summary["error"]
+                .as_str()
+                .unwrap()
+                .contains("no learning rate")
+        );
+        assert!(summary.get("rows").is_none());
+        assert!(dir.path().join("manifest.json").exists());
+        let runs = std::fs::read_to_string(dir.path().join("runs.jsonl")).unwrap();
+        assert_eq!(runs.lines().count() as u64, rates);
+        for line in runs.lines() {
+            assert!(
+                line.contains(&format!("\"recordPasses\":{}", full_passes(&m))),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_aborted_calibration_keeps_the_preparation_cost() {
+        let mut m = tiny();
+        m.reductions = vec![1.5];
+        let aborted = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        assert!(aborted.error.contains("no matched pairs"), "{aborted}");
+        // Preparation completed 4 runs; calibration failed 2 grid points x 2 arms.
+        assert_eq!(aborted.preparation_cost.runs, 4);
+        assert_eq!(aborted.preparation_cost.record_passes, 4 * full_passes(&m));
+        assert_eq!(aborted.calibration_cost.runs, 0);
+        assert_eq!(
+            (aborted.coverage.completed, aborted.coverage.failed),
+            (4, 4)
+        );
+        assert_eq!(aborted.compute.actual_record_passes, 4 * full_passes(&m));
+        assert_eq!(aborted.rows.len(), 8);
+    }
+
+    #[test]
+    fn a_rate_that_fails_on_one_seed_is_not_chosen_and_its_cost_is_counted() {
+        let mut m = tiny();
+        m.calibration_seeds = vec![1, 2];
+        m.learning_rate_grid = vec![0.01, 0.05, 0.2, 0.5];
+        let n_rates = m.learning_rate_grid.len();
+
+        // Control: with no failure the sweep picks the lowest training MSE.
+        let clean = run_validated(&m, &CorpusSource::Synthetic).unwrap();
+        assert_eq!(clean.coverage.failed, 0);
+        let favourite = clean.chosen_learning_rate;
+        assert!(clean.learning_rate_sweep.iter().all(|e| e.n_runs == 2));
+        let runner_up = clean
+            .learning_rate_sweep
+            .iter()
+            .filter(|e| e.learning_rate != favourite)
+            .min_by(|a, b| a.mean_train_mse.partial_cmp(&b.mean_train_mse).unwrap())
+            .unwrap()
+            .learning_rate;
+
+        // The favourite diverges on seed 2 only, after its epochs ran.
+        thread_local! { static FAV: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) }; }
+        FAV.set(favourite);
+        let _hook = test_support::Diverge::when(|lr, seed| lr == FAV.get() && seed == 2);
+        let report = run_validated(&m, &CorpusSource::Synthetic).unwrap();
+
+        let entry = |lr: f64| {
+            report
+                .learning_rate_sweep
+                .iter()
+                .find(|e| e.learning_rate == lr)
+                .unwrap()
+        };
+        // On the survivors alone the favourite would still score lowest...
+        assert_eq!(entry(favourite).n_runs, 1);
+        assert!(entry(favourite).mean_train_mse.is_some());
+        assert!(
+            entry(favourite).mean_train_mse.unwrap() < entry(runner_up).mean_train_mse.unwrap(),
+            "premise: scored on survivors only, the favourite would win"
+        );
+        // ...but it is passed over for the best rate that completed every seed.
+        assert_ne!(report.chosen_learning_rate, favourite);
+        assert_eq!(report.chosen_learning_rate, runner_up);
+        assert_eq!(entry(runner_up).n_runs, 2);
+
+        // The failed run is reported and charged.
+        let fails = failed(&report.rows);
+        assert_eq!(fails.len(), 1);
+        assert_eq!((fails[0].seed, fails[0].phase.as_str()), (2, "preparation"));
+        assert_eq!(fails[0].record_passes, full_passes(&m));
+        assert_eq!(report.coverage.failed, 1);
+        assert_eq!(report.preparation_cost.runs, 2 * n_rates - 1);
+        assert_eq!(
+            report.preparation_cost.record_passes,
+            2 * n_rates as u64 * full_passes(&m)
+        );
+        let ok_passes: u64 = report
+            .rows
+            .iter()
+            .map(|r| match r {
+                Row::Ok(o) => o.record_passes,
+                Row::Failed(_) => 0,
+            })
+            .sum();
+        assert_eq!(
+            report.compute.actual_record_passes,
+            ok_passes + full_passes(&m)
+        );
+        assert!(report.compute.actual_record_passes > ok_passes);
+
+        let dir = tempfile::tempdir().unwrap();
+        write_outputs(dir.path(), &report).unwrap();
+        let summary: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["chosenLearningRate"], runner_up);
+        assert_eq!(
+            summary["compute"]["actualRecordPasses"],
+            report.compute.actual_record_passes
+        );
+        let runs = std::fs::read_to_string(dir.path().join("runs.jsonl")).unwrap();
+        let failure = runs.lines().find(|l| l.contains("\"error\"")).unwrap();
+        assert!(
+            failure.contains(&format!("\"recordPasses\":{}", full_passes(&m))),
+            "{failure}"
+        );
+    }
+
+    #[test]
+    fn a_compute_bound_that_overflows_is_refused_before_any_run() {
+        let mut m = tiny();
+        m.epochs = 1 << 31;
+        m.train_records = 1 << 32;
+        assert!(m.validate().is_ok(), "premise: the manifest is accepted");
+
+        let aborted = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        assert!(aborted.error.contains("overflows"), "{}", aborted.error);
+        assert!(
+            aborted.error.contains("maxRecordPasses"),
+            "{}",
+            aborted.error
+        );
+        assert_eq!(aborted.compute.planned_bound_record_passes, u64::MAX);
+        assert!(aborted.rows.is_empty());
+    }
+
+    #[test]
+    fn a_representable_bound_over_the_limit_is_still_refused_exactly() {
+        let mut m = tiny();
+        m.max_record_passes = 1000;
+        let aborted = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        let bound = 14 * full_passes(&m);
+        assert!(
+            aborted.error.contains("exceeds maxRecordPasses"),
+            "{aborted}"
+        );
+        assert_eq!(aborted.compute.planned_bound_record_passes, bound);
+        assert!(aborted.error.contains(&bound.to_string()), "{aborted}");
+        assert!(aborted.rows.is_empty());
+    }
+
+    fn files_source(m: &Manifest, nan_held_out: bool) -> CorpusSource {
+        let mut corpus = synthetic_corpus(1, m.train_records, m.validation_records);
+        if nan_held_out {
+            corpus.validation[0].outputs[0] = f32::NAN;
+        }
+        CorpusSource::Files {
+            corpus,
+            parent: synthetic_parent(m.parent_seed),
+        }
+    }
+
+    #[test]
+    fn a_held_out_record_cannot_steer_preparation_or_calibration() {
+        let m = tiny();
+        let clean = run_manifest(&m, &files_source(&m, false)).unwrap();
+        let dirty = run_manifest(&m, &files_source(&m, true)).unwrap();
+
+        // Positive control: the clean run fails nothing.
+        assert!(failed(&clean.rows).is_empty());
+
+        assert_eq!(clean.chosen_learning_rate, dirty.chosen_learning_rate);
+        assert_eq!(
+            clean.chosen_schedule.ewma_alpha,
+            dirty.chosen_schedule.ewma_alpha
+        );
+        assert_eq!(
+            clean.chosen_schedule.revisit_share,
+            dirty.chosen_schedule.revisit_share
+        );
+        assert_eq!(
+            clean.learning_rate_sweep.len(),
+            dirty.learning_rate_sweep.len()
+        );
+        for (a, b) in clean
+            .learning_rate_sweep
+            .iter()
+            .zip(&dirty.learning_rate_sweep)
+        {
+            assert_eq!(a.learning_rate, b.learning_rate);
+            assert_eq!(a.n_runs, b.n_runs);
+            assert_eq!(a.mean_train_mse, b.mean_train_mse);
+        }
+        assert_eq!(clean.calibration.len(), dirty.calibration.len());
+        for (a, b) in clean.calibration.iter().zip(&dirty.calibration) {
+            assert_eq!(a.ewma_alpha, b.ewma_alpha);
+            assert_eq!(a.revisit_share, b.revisit_share);
+            assert_eq!(a.n_pairs, b.n_pairs);
+            assert_eq!(a.mean_train_diff, b.mean_train_diff);
+        }
+
+        let mut validation_rows = 0;
+        for row in &dirty.rows {
+            match row {
+                Row::Ok(o) => assert_ne!(o.phase, "validation", "{o:?}"),
+                Row::Failed(f) if f.phase == "validation" => {
+                    validation_rows += 1;
+                    assert!(f.error.contains("validation"), "{}", f.error);
+                }
+                Row::Failed(f) => panic!("{} run failed on a held-out NaN: {}", f.phase, f.error),
+            }
+        }
+        assert_eq!(validation_rows, m.validation_seeds.len() * 3);
     }
 }

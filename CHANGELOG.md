@@ -67,10 +67,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   protection and revisits, matched random-skip control, paired bootstrap
   verdicts), the `record_skip_bench` example and `lamarck/tests/record_skip.rs`.
   Nothing in the optimisation loop calls it and no default changes. The
-  synthetic suite (228 runs) found no easy-skip arm better than matched random
+  synthetic suite (252 runs) found no easy-skip arm better than matched random
   skipping under the rare-stratum guard, or better than full data; the
   representative corpus run is outstanding. Evidence is in
-  `docs/evidence/record-skip/`; see `docs/easy-record-skipping.md`.
+  `docs/evidence/record-skip/`; see `docs/easy-record-skipping.md`. The
+  harness chooses the learning rate in a counted preparation phase (training
+  MSE only), refuses any manifest whose planned record passes exceed the
+  predeclared `maxRecordPasses`, uses manifest version 2, and `summary.json`
+  now carries `versions.gitCommit` and per-arm means in `arms`. The sweep only
+  considers rates that completed every calibration seed, and a failed run still
+  charges the passes it spent before failing, and a run that stops early
+  (`run_manifest` returns an `AbortedRun`) keeps its rows and cost, which the
+  example writes. The
+  test-only `record_skip::schedule::output_strata` wrapper is removed; use
+  `StratumEdges::from_values` and `StratumEdges::assign`. The method pin in
+  the doc now also covers the authors' HyenaDNA (accuracy and perplexity)
+  and Nucleotide Transformer scripts. The planned compute bound now uses
+  checked arithmetic and a bound that overflows `u64` is refused before any
+  run. Held-out records are read only by validation-phase runs, so they can no
+  longer steer the learning rate or schedule, and `runs.jsonl` preparation and
+  calibration rows now carry null validation fields (`finalValidationMse`,
+  `rareStratumValidationMse`) and an empty `strataValidationMse`. Audit (measurement) passes are now counted in
+  `auditPasses` per run and phase and in `compute.actualAuditPasses`, apart
+  from the record passes `maxRecordPasses` governs. `versions.gitCommit` now
+  comes from the shared `weight_bench::provenance::git_state` probe, so
+  untracked files also mark it `-dirty`.
 - **Offline benchmark of budget-aware routing between local weight optimisers
   (Issue #266).** New `lamarck/src/weight_bench/` module and
   `weight_router_bench` example compare a simplified random-axis surrogate and
