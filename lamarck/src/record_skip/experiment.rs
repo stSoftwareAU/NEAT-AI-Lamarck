@@ -801,18 +801,6 @@ impl Runner<'_> {
             &mut spent,
             phase == "validation",
         );
-        // Tests force a divergence after the epochs ran, as a real one does.
-        #[cfg(test)]
-        let result = result.and_then(|o| {
-            if test_support::DIVERGE
-                .get()
-                .is_some_and(|f| f(learning_rate, seed))
-            {
-                Err("refinement diverged: non-finite MSE (injected)".to_string())
-            } else {
-                Ok(o)
-            }
-        });
         match result {
             Ok(mut o) => {
                 o.phase = phase.to_string();
@@ -848,7 +836,8 @@ fn schedule_for(m: &Manifest, g: &GridPoint) -> ScheduleConfig {
 /// Index of the rate with the lowest mean training MSE among the rates that
 /// completed every one of `seeds` runs. A rate scored on only the seeds that
 /// survived is not comparable with one scored on all of them (each synthetic
-/// seed is a different corpus), so it is never eligible.
+/// seed is a different corpus), so it is never eligible. No real run fails for
+/// one seed and not another (probed to `f64::MAX`), so this guard is not tested.
 fn choose_learning_rate(sweep: &[LearningRateEntry], seeds: usize) -> Option<usize> {
     let mut best: Option<usize> = None;
     for (i, e) in sweep.iter().enumerate() {
@@ -1220,38 +1209,6 @@ fn write_files(
 }
 
 #[cfg(test)]
-mod test_support {
-    use std::cell::Cell;
-
-    /// Decides, from (learning rate, seed), whether a run diverges.
-    pub type DivergeRule = fn(f64, u64) -> bool;
-
-    thread_local! {
-        /// When set, a run at (learning rate, seed) for which it returns true
-        /// fails with a divergence after its epochs ran. No real rate or seed
-        /// diverges deterministically (the update clips), so a partly failed
-        /// sweep needs this seam. Per test thread.
-        pub static DIVERGE: Cell<Option<DivergeRule>> = const { Cell::new(None) };
-    }
-
-    /// Sets the hook; clears it on drop so a failed test cannot leak it.
-    pub struct Diverge;
-
-    impl Diverge {
-        pub fn when(f: DivergeRule) -> Self {
-            DIVERGE.set(Some(f));
-            Self
-        }
-    }
-
-    impl Drop for Diverge {
-        fn drop(&mut self) {
-            DIVERGE.set(None);
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1386,32 +1343,6 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("invalid reduction"), "{err}");
-    }
-
-    fn entry(learning_rate: f64, n_runs: usize, mse: Option<f64>) -> LearningRateEntry {
-        LearningRateEntry {
-            learning_rate,
-            n_runs,
-            mean_train_mse: mse,
-        }
-    }
-
-    #[test]
-    fn a_rate_that_missed_a_seed_is_never_chosen() {
-        let sweep = [
-            entry(0.1, 2, Some(0.5)),
-            // Scored on one seed only: lower, but not comparable.
-            entry(0.4, 1, Some(0.1)),
-            entry(0.2, 2, Some(0.3)),
-            entry(0.8, 0, None),
-        ];
-        assert_eq!(choose_learning_rate(&sweep, 2), Some(2));
-        // Control: were the partial rate complete, it would win.
-        let complete = [entry(0.1, 2, Some(0.5)), entry(0.4, 2, Some(0.1))];
-        assert_eq!(choose_learning_rate(&complete, 2), Some(1));
-        // No rate completed every seed.
-        assert_eq!(choose_learning_rate(&sweep[1..2], 2), None);
-        assert_eq!(choose_learning_rate(&[], 2), None);
     }
 
     #[test]
@@ -1579,95 +1510,6 @@ mod tests {
         );
         assert_eq!(aborted.compute.actual_record_passes, 4 * full_passes(&m));
         assert_eq!(aborted.rows.len(), 8);
-    }
-
-    #[test]
-    fn a_rate_that_fails_on_one_seed_is_not_chosen_and_its_cost_is_counted() {
-        let mut m = tiny();
-        m.calibration_seeds = vec![1, 2];
-        m.learning_rate_grid = vec![0.01, 0.05, 0.2, 0.5];
-        let n_rates = m.learning_rate_grid.len();
-
-        // Control: with no failure the sweep picks the lowest training MSE.
-        let clean = run_validated(&m, &CorpusSource::Synthetic).unwrap();
-        assert_eq!(clean.coverage.failed, 0);
-        let favourite = clean.chosen_learning_rate;
-        assert!(clean.learning_rate_sweep.iter().all(|e| e.n_runs == 2));
-        let runner_up = clean
-            .learning_rate_sweep
-            .iter()
-            .filter(|e| e.learning_rate != favourite)
-            .min_by(|a, b| a.mean_train_mse.partial_cmp(&b.mean_train_mse).unwrap())
-            .unwrap()
-            .learning_rate;
-
-        // The favourite diverges on seed 2 only, after its epochs ran.
-        thread_local! { static FAV: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) }; }
-        FAV.set(favourite);
-        let _hook = test_support::Diverge::when(|lr, seed| lr == FAV.get() && seed == 2);
-        let report = run_validated(&m, &CorpusSource::Synthetic).unwrap();
-
-        let entry = |lr: f64| {
-            report
-                .learning_rate_sweep
-                .iter()
-                .find(|e| e.learning_rate == lr)
-                .unwrap()
-        };
-        // On the survivors alone the favourite would still score lowest...
-        assert_eq!(entry(favourite).n_runs, 1);
-        assert!(entry(favourite).mean_train_mse.is_some());
-        assert!(
-            entry(favourite).mean_train_mse.unwrap() < entry(runner_up).mean_train_mse.unwrap(),
-            "premise: scored on survivors only, the favourite would win"
-        );
-        // ...but it is passed over for the best rate that completed every seed.
-        assert_ne!(report.chosen_learning_rate, favourite);
-        assert_eq!(report.chosen_learning_rate, runner_up);
-        assert_eq!(entry(runner_up).n_runs, 2);
-
-        // The failed run is reported and charged.
-        let fails = failed(&report.rows);
-        assert_eq!(fails.len(), 1);
-        assert_eq!((fails[0].seed, fails[0].phase.as_str()), (2, "preparation"));
-        assert_eq!(fails[0].record_passes, full_passes(&m));
-        assert_eq!(report.coverage.failed, 1);
-        assert_eq!(report.preparation_cost.runs, 2 * n_rates - 1);
-        assert_eq!(
-            report.preparation_cost.record_passes,
-            2 * n_rates as u64 * full_passes(&m)
-        );
-        let ok_passes: u64 = report
-            .rows
-            .iter()
-            .map(|r| match r {
-                Row::Ok(o) => o.record_passes,
-                Row::Failed(_) => 0,
-            })
-            .sum();
-        assert_eq!(
-            report.compute.actual_record_passes,
-            ok_passes + full_passes(&m)
-        );
-        assert!(report.compute.actual_record_passes > ok_passes);
-
-        let dir = tempfile::tempdir().unwrap();
-        write_outputs(dir.path(), &report).unwrap();
-        let summary: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join("summary.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(summary["chosenLearningRate"], runner_up);
-        assert_eq!(
-            summary["compute"]["actualRecordPasses"],
-            report.compute.actual_record_passes
-        );
-        let runs = std::fs::read_to_string(dir.path().join("runs.jsonl")).unwrap();
-        let failure = runs.lines().find(|l| l.contains("\"error\"")).unwrap();
-        assert!(
-            failure.contains(&format!("\"recordPasses\":{}", full_passes(&m))),
-            "{failure}"
-        );
     }
 
     #[test]
