@@ -1504,6 +1504,10 @@ mod tests {
         // On the survivors alone the favourite would still score lowest...
         assert_eq!(entry(favourite).n_runs, 1);
         assert!(entry(favourite).mean_train_mse.is_some());
+        assert!(
+            entry(favourite).mean_train_mse.unwrap() < entry(runner_up).mean_train_mse.unwrap(),
+            "premise: scored on survivors only, the favourite would win"
+        );
         // ...but it is passed over for the best rate that completed every seed.
         assert_ne!(report.chosen_learning_rate, favourite);
         assert_eq!(report.chosen_learning_rate, runner_up);
