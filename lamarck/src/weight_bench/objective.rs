@@ -104,6 +104,24 @@ impl WeightObjective {
             .collect()
     }
 
+    /// Indices (into the creature's synapses) of the free weights, in axis order.
+    pub fn synapse_indices(&self) -> &[usize] {
+        &self.synapse_indices
+    }
+
+    /// The creature with `x` written into the chosen synapses; every other
+    /// parameter is unchanged. Callers pass [`Self::dimension`] weights
+    /// ([`Self::loss_on`] checks the length first). On a length mismatch the zip
+    /// stops at the shorter side: extra entries of `x` are unused and synapses
+    /// beyond `x` keep their current weights.
+    pub fn creature_at(&self, x: &[f64]) -> CreatureExport {
+        let mut creature = self.creature.clone();
+        for (&i, &w) in self.synapse_indices.iter().zip(x) {
+            creature.synapses[i].weight = w;
+        }
+        creature
+    }
+
     /// Mean squared error over the objective's own (screening) records.
     pub fn loss(&self, x: &[f64]) -> Result<f64, String> {
         self.loss_on(x, &self.records)
@@ -119,10 +137,7 @@ impl WeightObjective {
                 x.len()
             ));
         }
-        let mut creature = self.creature.clone();
-        for (&i, &w) in self.synapse_indices.iter().zip(x) {
-            creature.synapses[i].weight = w;
-        }
+        let creature = self.creature_at(x);
         let width = creature.input + creature.output;
         if records.is_empty() || !records.len().is_multiple_of(width) {
             return Err("records are empty or not a multiple of the record width".into());
@@ -168,6 +183,11 @@ impl<'a> BudgetedObjective<'a> {
             budget: Budget { limit, used: 0 },
             best: None,
         }
+    }
+
+    /// The underlying objective.
+    pub fn objective(&self) -> &'a WeightObjective {
+        self.objective
     }
 
     /// Number of free weights.
