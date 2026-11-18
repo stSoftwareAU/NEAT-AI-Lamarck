@@ -1,8 +1,8 @@
 //! Refinement driver and manifest runner for the record-skip experiment.
 //!
 //! Every arm refines a clone of the same immutable parent through the real
-//! refinement update path. Audit measurements are taken after the loop and are
-//! not charged to the arm. Full training MSE is audited in every phase; held-out
+//! refinement update path. Audit measurements are taken after the loop; they are
+//! not charged to the arm's `record_passes` but are counted in `audit_passes`. Full training MSE is audited in every phase; held-out
 //! (validation) records are read only by validation-phase runs, so preparation
 //! and calibration choices never depend on them.
 
@@ -111,6 +111,10 @@ pub struct RunOutcome {
     pub strata_validation_mse: Vec<Option<f64>>,
     /// Forward and backward record passes charged to the arm.
     pub record_passes: u64,
+    /// Forward-only measurement passes (initial and final training MSE, plus
+    /// held-out records on validation runs); a search cost counted apart from
+    /// `record_passes`.
+    pub audit_passes: u64,
     /// Record passes as a share of epochs times training records.
     pub processed_share: f64,
     /// Passes spent on easy-pool revisits.
@@ -173,6 +177,7 @@ fn squared_error(out: &[f32], expected: &[f32]) -> f64 {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Spend {
     record_passes: u64,
+    audit_passes: u64,
     revisit_passes: u64,
     schedule_ops: u64,
 }
@@ -238,6 +243,7 @@ fn refine_inner(
     };
 
     let initial = mean(&record_errors(parent, &corpus.train)?);
+    spent.audit_passes += corpus.train.len() as u64;
     let mut creature = parent.clone();
     let mut sched_rng = StdRng::seed_from_u64(rng_seed);
     let mut plan_rng = StdRng::seed_from_u64(rng_seed ^ 0x9E37_79B9_7F4A_7C15);
@@ -266,8 +272,10 @@ fn refine_inner(
         spent.schedule_ops += sel.schedule_ops;
     }
 
-    // Audit: measurement only, not charged to the arm.
+    // Audit: measurement only. Not charged to the arm's `record_passes`, but
+    // counted in `audit_passes` because selection depends on it.
     let train_errors = record_errors(&creature, &corpus.train)?;
+    spent.audit_passes += corpus.train.len() as u64;
     let final_train = mean(&train_errors);
     if !final_train.is_finite() {
         return Err("refinement diverged: non-finite training MSE".to_string());
@@ -275,6 +283,7 @@ fn refine_inner(
 
     let (final_val, rare_mse, strata_mse) = if audit_held_out {
         let val_errors = record_errors(&creature, &corpus.validation)?;
+        spent.audit_passes += corpus.validation.len() as u64;
         let final_val = mean(&val_errors);
         if !final_val.is_finite() {
             return Err("refinement diverged: non-finite validation MSE".to_string());
@@ -336,6 +345,7 @@ fn refine_inner(
         rare_stratum_validation_mse: rare_mse,
         strata_validation_mse: strata_mse,
         record_passes: spent.record_passes,
+        audit_passes: spent.audit_passes,
         processed_share: spent.record_passes as f64 / (f64::from(manifest.epochs) * n as f64),
         revisit_passes: spent.revisit_passes,
         schedule_ops: spent.schedule_ops,
@@ -374,6 +384,8 @@ pub struct FailureRow {
     pub error: String,
     /// Record passes spent before the failure; a diverged run spends them all.
     pub record_passes: u64,
+    /// Measurement passes spent before the failure.
+    pub audit_passes: u64,
     /// Easy-pool revisit passes spent before the failure.
     pub revisit_passes: u64,
     /// Scheduling operations spent before the failure.
@@ -452,6 +464,9 @@ pub struct ComputeBudget {
     /// Record passes charged across every run, all phases, including the
     /// passes a failed run spent before it failed.
     pub actual_record_passes: u64,
+    /// Forward-only measurement passes across every run, all phases; not
+    /// governed by `maxRecordPasses`.
+    pub actual_audit_passes: u64,
 }
 
 /// Validation-phase summary of one arm (means over its runs).
@@ -582,6 +597,8 @@ pub struct PhaseCost {
     pub runs: usize,
     /// Forward and backward record passes.
     pub record_passes: u64,
+    /// Forward-only measurement passes.
+    pub audit_passes: u64,
     /// Passes spent on easy-pool revisits.
     pub revisit_passes: u64,
     /// Scheduling operations.
@@ -595,11 +612,13 @@ fn phase_cost(rows: &[Row], phase: &str) -> PhaseCost {
             Row::Ok(o) if o.phase == phase => {
                 c.runs += 1;
                 c.record_passes += o.record_passes;
+                c.audit_passes += o.audit_passes;
                 c.revisit_passes += o.revisit_passes;
                 c.schedule_ops += o.schedule_ops;
             }
             Row::Failed(f) if f.phase == phase => {
                 c.record_passes += f.record_passes;
+                c.audit_passes += f.audit_passes;
                 c.revisit_passes += f.revisit_passes;
                 c.schedule_ops += f.schedule_ops;
             }
@@ -615,6 +634,16 @@ fn total_record_passes(rows: &[Row]) -> u64 {
         .map(|r| match r {
             Row::Ok(o) => o.record_passes,
             Row::Failed(f) => f.record_passes,
+        })
+        .sum()
+}
+
+/// Measurement passes spent by every run, including those a failed run spent.
+fn total_audit_passes(rows: &[Row]) -> u64 {
+    rows.iter()
+        .map(|r| match r {
+            Row::Ok(o) => o.audit_passes,
+            Row::Failed(f) => f.audit_passes,
         })
         .sum()
 }
@@ -716,6 +745,7 @@ impl AbortedRun {
                 limit_record_passes: manifest.max_record_passes,
                 planned_bound_record_passes: bound,
                 actual_record_passes: total_record_passes(&rows),
+                actual_audit_passes: total_audit_passes(&rows),
             },
             rows,
         }
@@ -816,6 +846,7 @@ impl Runner<'_> {
                     phase: phase.to_string(),
                     error,
                     record_passes: spent.record_passes,
+                    audit_passes: spent.audit_passes,
                     revisit_passes: spent.revisit_passes,
                     schedule_ops: spent.schedule_ops,
                 }));
@@ -1108,6 +1139,7 @@ fn run_validated(
             limit_record_passes: manifest.max_record_passes,
             planned_bound_record_passes: bound,
             actual_record_passes: total_record_passes(&rows),
+            actual_audit_passes: total_audit_passes(&rows),
         },
         arms,
         calibration_cost: phase_cost(&rows, "calibration"),
@@ -1439,9 +1471,12 @@ mod tests {
             assert!(f.error.contains("training"), "{}", f.error);
             assert_eq!(f.record_passes, full_passes);
             assert_eq!(f.schedule_ops, 0);
+            // Initial and final training audits; no held-out read in preparation.
+            assert_eq!(f.audit_passes, 2 * m.train_records as u64);
         }
         let cost = phase_cost(&runner.rows, "preparation");
         assert_eq!(cost.runs, 0);
+        assert_eq!(cost.audit_passes, 4 * m.train_records as u64);
         assert_eq!(cost.record_passes, 2 * full_passes);
         assert_eq!(total_record_passes(&runner.rows), 2 * full_passes);
         // Control: the cost is per phase.
@@ -1455,6 +1490,7 @@ mod tests {
             json.contains(&format!("\"recordPasses\":{full_passes}")),
             "{json}"
         );
+        assert!(json.contains("\"auditPasses\":"), "{json}");
     }
 
     fn nan_training_source(m: &Manifest) -> CorpusSource {
@@ -1501,6 +1537,10 @@ mod tests {
             rates * full_passes(&m)
         );
         assert_eq!(aborted.calibration_cost, PhaseCost::default());
+        assert_eq!(
+            aborted.compute.actual_audit_passes,
+            rates * 2 * m.train_records as u64
+        );
         assert_eq!(
             aborted.compute.actual_record_passes,
             rates * full_passes(&m)

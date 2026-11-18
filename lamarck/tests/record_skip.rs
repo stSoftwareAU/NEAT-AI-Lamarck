@@ -823,3 +823,30 @@ fn git_commit_names_the_commit_or_the_cause() {
     assert!(none.starts_with("unavailable: "), "{none}");
     assert!(none.contains("not a git repository"), "{none}");
 }
+
+#[test]
+fn audit_passes_are_counted_apart_from_record_passes() {
+    let m = tiny();
+    let r = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
+    // tiny(): 100 training records, 50 validation records.
+    let mut total = 0u64;
+    for row in &r.rows {
+        if let Row::Ok(o) = row {
+            let expected = if o.phase == "validation" {
+                2 * 100 + 50
+            } else {
+                2 * 100
+            };
+            assert_eq!(o.audit_passes, expected, "{} {}", o.phase, o.arm);
+            total += o.audit_passes;
+        }
+    }
+    assert!(total > 0);
+    assert_eq!(r.compute.actual_audit_passes, total);
+    assert_eq!(
+        r.compute.actual_audit_passes,
+        r.preparation_cost.audit_passes
+            + r.calibration_cost.audit_passes
+            + r.validation_cost.audit_passes
+    );
+}
