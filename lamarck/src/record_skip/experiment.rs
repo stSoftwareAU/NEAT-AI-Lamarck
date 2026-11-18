@@ -1255,6 +1255,38 @@ mod tests {
     }
 
     #[test]
+    fn schedule_choice_skips_a_refused_point_and_takes_the_lowest_diff() {
+        let mut m = tiny();
+        // The refused point sits between two valid ones. The third point must
+        // win on calibration diff, so a selector that always takes index 0
+        // fails here.
+        m.calibration_grid = vec![
+            GridPoint {
+                ewma_alpha: 0.5,
+                revisit_share: 0.1,
+            },
+            GridPoint {
+                ewma_alpha: 0.0,
+                revisit_share: 0.1,
+            },
+            GridPoint {
+                ewma_alpha: 0.8,
+                revisit_share: 0.3,
+            },
+        ];
+
+        let report = run_validated(&m, &CorpusSource::Synthetic).unwrap();
+        assert!(report.calibration[1].mean_train_diff.is_none());
+        // Premise: the third point beats the first on calibration diff.
+        assert!(
+            report.calibration[2].mean_train_diff.unwrap()
+                < report.calibration[0].mean_train_diff.unwrap()
+        );
+        assert_eq!(report.chosen_schedule.ewma_alpha, 0.8);
+        assert_eq!(report.chosen_schedule.revisit_share, 0.3);
+    }
+
+    #[test]
     fn all_failed_preparation_names_the_first_failure() {
         let mut m = tiny();
         m.warmup_epochs = 0;

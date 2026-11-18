@@ -154,7 +154,7 @@ value checked against a fixed bound, and its removal is permanent.
   `ensure_scope` refuses reuse for a different parent or corpus, and
   `refine` calls it before every epoch's selection.
 - Backpropagation ownership: the update math runs in neat-core's
-  `propagate_topological_loop` (stSoftwareAU/NEAT-AI-core, tag v0.23.4),
+  `propagate_topological_loop` (stSoftwareAU/NEAT-AI-core, tag v0.23.7),
   reached through Lamarck's existing `backprop.rs` and `propagate_layout.rs`
   port. Record skipping only chooses which records reach that loop, so neither
   neat-core nor NEAT-AI (the TypeScript trainer the README names as the current
@@ -218,7 +218,7 @@ Values come from `docs/evidence/record-skip/manifest.json`.
 | Compute limit | `maxRecordPasses` 16,000,000 |
 | Bootstrap | 2000 resamples, seed 267 |
 | Forgetting tolerance | 1e-4 |
-| Versions | crate 0.1.47, neat-core v0.23.4, and the git commit recorded in `versions.gitCommit` |
+| Versions | crate 0.1.50, neat-core v0.23.7, and the git commit recorded in `versions.gitCommit` |
 
 The data and the parent are identified by `source` in `summary.json`. For the
 synthetic suite it is `synthetic`, with the seeds in the manifest. In corpus
@@ -295,9 +295,11 @@ the manifest's `trainRecords`. It runs only when `--manifest FILE` supplies a
 
 252 of 252 planned runs completed, 0 failed. Wall time was 14 s in release on
 a shared, parallel container, so it is indicative only. Re-running the suite
-reproduces `summary.json` exactly apart from `versions.gitCommit`. The committed
-evidence is `docs/evidence/record-skip/manifest.json` and `summary.json`
-(`runs.jsonl` is not committed).
+reproduces every field of `summary.json` except `versions` (crate version,
+neat-core tag and git commit). The committed evidence was regenerated on commit
+`e13a19a`, whose results match the earlier run at `da4edff` in every other
+field. The committed evidence is `docs/evidence/record-skip/manifest.json` and
+`summary.json` (`runs.jsonl` is not committed).
 
 Per-arm means over the 12 validation seeds (initial train MSE 0.3875). The
 table comes from `arms` in `summary.json`, no longer hand-aggregated from
