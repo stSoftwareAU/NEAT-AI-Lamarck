@@ -89,7 +89,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   calibration rows now carry null validation fields (`finalValidationMse`,
   `rareStratumValidationMse`) and an empty `strataValidationMse`. Audit (measurement) passes are now counted in
   `auditPasses` per run and phase and in `compute.actualAuditPasses`, apart
-  from the record passes `maxRecordPasses` governs.
+  from the record passes `maxRecordPasses` governs. `versions.gitCommit` now
+  comes from the shared `weight_bench::provenance::git_state` probe, so
+  untracked files also mark it `-dirty`.
 - **Offline benchmark of budget-aware routing between local weight optimisers
   (Issue #266).** New `lamarck/src/weight_bench/` module and
   `weight_router_bench` example compare a simplified random-axis surrogate and

@@ -15,7 +15,9 @@ It carries the work from the closed PR #288, which was based on the current
 
 It also counts the measurement ("audit") passes that preparation and
 calibration select on as a search cost, and regenerates the synthetic
-evidence.
+evidence. Finally, it drops record-skip's own git probe:
+`record_skip::git_commit` now formats the result of the shared
+`weight_bench::provenance::git_state`.
 
 The harness and its outputs, as of this head:
 
@@ -57,6 +59,13 @@ Part of #267.
 - An overflowing bound is reported as `plannedBoundRecordPasses` =
   `u64::MAX`. `planned` is reported as `usize::MAX` only when the run count
   itself overflows.
+- `versions.gitCommit` comes from `weight_bench::provenance::git_state`, the
+  probe `weight_router_bench` already uses (merged at the base by #282).
+  `record_skip::git_commit` keeps only the string format: `<sha>`,
+  `<sha>-dirty` or `unavailable: <cause>`. Its own `git` helper is deleted.
+  The shared probe runs `git status --porcelain` without
+  `--untracked-files=no`, so an untracked file now also marks the commit
+  `-dirty`.
 - `.gitleaks.toml` is restored to `Develop`'s content. PR #288's change to it
   was comments and indentation only, and it was out of scope.
 
@@ -64,7 +73,9 @@ Part of #267.
 
 - arXiv is still unreachable from this host. On 2026-11-18,
   `curl https://arxiv.org/abs/2611.10386` failed with `CONNECT tunnel failed,
-  response 403`, so the method stays pinned from the authors' released code at
+  response 403`, and so did `export.arxiv.org`, the PDF, alphaXiv, Semantic
+  Scholar and Hugging Face. `gh search code 2611.10386` found only abstract
+  digests, not the full text. So the method stays pinned from the authors' released code at
   `804aedb`.
 - A NaN or infinite training *input* does not fail a run, because the network
   sanitises inputs. Only a non-finite training *target* does. The
@@ -108,16 +119,16 @@ flowchart LR
 - **met** — Record scheduling/refresh cost, forgetting, stratum error, full fitness and untouched validation outcomes — evidence: `lamarck/tests/record_skip.rs::arms_summarise_validation_runs` — reviewer: met
 - **met** — Do not prune fitness/validation records or share stale difficulty scores across incompatible parents/corpora — evidence: `lamarck/src/record_skip/experiment.rs` (`refine_inner` audits every training record, and every held-out record in validation runs), `lamarck/tests/record_skip.rs::easy_skip_record_passes_follow_the_rule` — reviewer: met
 - **met** — Integrate the update path with Backpropagation if it owns the actual refinement implementation — evidence: `docs/easy-record-skipping.md` ("What is refined") — reviewer: met
-- **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source") — reviewer: partial — reason: arXiv still returns 403 through this host's proxy, so the paper is not read; the method is pinned from the authors' released code at `804aedb`
+- **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source", which records the fourth retry on 18 November) — reviewer: partial — reason: arXiv still returns 403 through this host's proxy and no full-text copy exists on GitHub, so the paper is not read; the method is pinned from the authors' released code at `804aedb`
 - **met** — transfer to NEAT-AI remains experimental — evidence: `docs/easy-record-skipping.md` ("Status") — reviewer: met
-- **met** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms — evidence: `lamarck/tests/record_skip.rs::stratum_edges_bin_first_targets` (reuses `StratumEdges`, the duplicate `output_strata` wrapper is removed) — reviewer: met
+- **partial** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms — evidence: `lamarck/src/record_skip/experiment.rs::git_commit` (now formats `weight_bench::provenance::git_state`, and the duplicate `git` helper is deleted), `lamarck/tests/record_skip.rs::git_commit_names_the_commit_or_the_cause`, `lamarck/tests/record_skip.rs::stratum_edges_bin_first_targets` (the `output_strata` wrapper is removed); backprop and `creature_fingerprint` are reused — reviewer: partial — reason: the git probe duplication is fixed, but `record_skip/stats.rs` (`mean`, `bootstrap_mean_ci`, merged in #270) still duplicates `weight_bench/stats.rs` (`mean`, `bootstrap_ci_mean`). The two pick percentiles differently (floor/ceil against round), so switching would change the committed confidence bounds and needs the evidence regenerated. That is not done in this PR
 - **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change — evidence: only `record_skip/` and its example change, `lamarck/tests/record_skip.rs::refine_full_lowers_train_mse_and_keeps_parent` — reviewer: met
 - **met** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation — evidence: `lamarck/src/record_skip/experiment.rs::a_compute_bound_that_overflows_is_refused_before_any_run`, `lamarck/src/record_skip/experiment.rs::a_held_out_record_cannot_steer_preparation_or_calibration`, `lamarck/tests/record_skip.rs::learning_rate_sweep_is_counted_and_chooses_by_training_mse` — reviewer: met
 - **met** — count all preparation/search costs — evidence: `lamarck/tests/record_skip.rs::audit_passes_are_counted_apart_from_record_passes`, `lamarck/src/record_skip/experiment.rs::failed_runs_charge_the_passes_they_spent` — reviewer: partial — reason: the reviewer's only gap was the uncounted audit passes that preparation and calibration select on; commit `01ba3bd`, after the review, counts them in `auditPasses` and `compute.actualAuditPasses`
-- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `./quality.sh` passed on the code head `01ba3bd` (1007 tests, 0 failed) — reviewer: met
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `./quality.sh` passed on the code head with the git-probe change (1007 tests, 0 failed) — reviewer: met
 - **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage — evidence: `lamarck/examples/record_skip_bench.rs`, `docs/evidence/record-skip/manifest.json`, `docs/evidence/record-skip/summary.json` — reviewer: met
-- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost") — reviewer: partial — reason: the negative synthetic result is recorded, but the removal rule waits for the representative run, which is the only thing that can show whether the code earns its cost
-- **missing** — Do not claim success before representative runs — reviewer: met — reason: no success is claimed (the reviewer's `met`), but the representative run on the private corpus has not been made. It is an owner step on private data, so the criterion's precondition is still open
+- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost", which now lists the removed duplicate git probe) — reviewer: partial — reason: the negative synthetic result is recorded and dead code is removed, but the decision on the harness itself waits for the representative run, and the duplicate stats helpers above remain
+- **met** — Do not claim success before representative runs — evidence: `docs/easy-record-skipping.md` ("Status", "Findings"), `CHANGELOG.md` ("the representative corpus run is outstanding") — reviewer: met — reason: no success is claimed anywhere. The representative run on the owner's private corpus has still not been made (see "Not done")
 - **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private — evidence: only synthetic evidence is committed — reviewer: met
 - **unrequested** — `AbortedRun`, `write_aborted_outputs` and `run_manifest` returning `Box<AbortedRun>` — reviewer: unrequested — reason: a run that stops early must still report its failures, coverage and spent cost, which the issue requires; the old `String` error dropped them
 - **unrequested** — the `#[cfg(test)]` `test_support::DIVERGE` fault-injection seam in `Runner::run_one` — reviewer: unrequested — reason: test-only; it deterministically drives the "rate failed on one seed" path that the counted-cost tests need
@@ -163,12 +174,14 @@ flowchart LR
 - Removed from `lamarck/tests/record_skip.rs`: `assert_eq!(a.coverage.planned, 4 + 6);`, `assert_eq!(a.coverage.completed, 10);` and `assert_eq!(runs.lines().count(), 10);`
   - Obsolete: the preparation sweep adds 4 runs
   - Still covered by: `lamarck/tests/record_skip.rs::smoke_run_is_complete_and_deterministic` (now 14)
+- Changed `record_skip::git_commit` to format `weight_bench::provenance::git_state` and deleted its own `git` helper. The existing `lamarck/tests/record_skip.rs::git_commit_names_the_commit_or_the_cause` covers the format unchanged (clean `<sha>`, tracked-file change `<sha>-dirty`, non-repository `unavailable: …not a git repository`).
 - Results:
   - `cargo test --lib record_skip`: 12 passed.
   - `cargo test --test record_skip`: 24 passed.
   - `cargo clippy --all-targets -- -D warnings`: clean.
   - `cargo fmt --check`: clean.
-  - `./quality.sh < /dev/null` on `01ba3bd`: "All quality checks passed!" (1007 tests, 0 failed).
+  - `cargo test --lib provenance`: 7 passed.
+  - `./quality.sh < /dev/null` on the tree with the git-probe change: "All quality checks passed!" (1007 tests, 0 failed).
 
 ## Merge verification
 
@@ -179,4 +192,5 @@ flowchart LR
 - The representative experiment on the private creature and corpus. This is an owner step on a quiet machine, and its results stay private.
 - Reading the paper. arXiv returns 403 from this host.
 - The removal decision, which waits for the representative run.
+- Folding `record_skip/stats.rs` into `weight_bench/stats.rs`. Their percentile rounding differs, so this needs the evidence regenerated.
 - Not checked: CI on GitHub.

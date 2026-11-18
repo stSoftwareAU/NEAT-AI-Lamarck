@@ -32,7 +32,10 @@ alphaXiv, Hugging Face, `scholar.archive.org` and `r.jina.ai` all returned
 "CONNECT tunnel failed, response 403". The web-fetch tool gave "proxy refused
 the connection". Only `github.com`, `api.github.com` and
 `raw.githubusercontent.com` were reachable. A web search could quote short
-fragments of the PDF, and these agree with the code below:
+fragments of the PDF, and these agree with the code below. A fourth retry on
+18 November failed the same way (`curl https://arxiv.org/abs/2611.10386`:
+"CONNECT tunnel failed, response 403"), and `gh search code 2611.10386` found
+only abstract digests, no copy of the full text:
 
 - sequences are scored by accuracy from the training forward pass, with no
   separate scoring model and no extra pass over the corpus;
@@ -409,6 +412,12 @@ result was removed:
   validation records). The test now checks `StratumEdges` itself;
 - `Serialize` on `DifficultyScope` and `ScheduleConfig`, and `Deserialize` on
   `Verdict`, which were never used;
+- the record-skip copy of the git probe behind `versions.gitCommit`. It
+  duplicated `weight_bench::provenance::git_state`, which
+  `weight_router_bench` already uses; `record_skip::git_commit` now only
+  formats that probe's result (`<sha>`, `<sha>-dirty` or
+  `unavailable: <cause>`). Untracked files now count as dirty too, as they do
+  for the weight-router bench;
 - the `LEARNING_RATE` re-export from `experiment` (the constant itself has
   since been replaced by the manifest's `learningRateGrid`). `arm_label`,
   `stats::mean` and `stats::bootstrap_mean_ci` became private to the module.

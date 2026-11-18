@@ -50,36 +50,15 @@ pub fn neat_core_tag_from(manifest: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Identify the checkout in `dir`: the commit hash, with `-dirty` appended when
-/// tracked files have uncommitted changes, or `unavailable: <cause>` when git
-/// cannot say.
+/// Identify the checkout in `dir` for `versions.gitCommit`: the commit hash,
+/// with `-dirty` appended when `git status --porcelain` reports any change, or
+/// `unavailable: <cause>` when git cannot say. The probe itself is the shared
+/// [`crate::weight_bench::provenance::git_state`].
 pub fn git_commit(dir: &Path) -> String {
-    fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .map_err(|e| format!("unavailable: git: {e}"))?;
-        if out.status.success() {
-            return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
-        }
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let line = stderr
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or("git exited with an error");
-        Err(format!("unavailable: {line}"))
-    }
-    let sha = match git(dir, &["rev-parse", "HEAD"]) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    match git(dir, &["status", "--porcelain", "--untracked-files=no"]) {
-        Ok(status) if status.is_empty() => sha,
-        Ok(_) => format!("{sha}-dirty"),
-        Err(e) => e,
+    match crate::weight_bench::provenance::git_state(dir) {
+        Ok(state) if state.dirty => format!("{}-dirty", state.commit),
+        Ok(state) => state.commit,
+        Err(cause) => format!("unavailable: {cause}"),
     }
 }
 
