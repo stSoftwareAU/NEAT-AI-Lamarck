@@ -714,8 +714,8 @@
     "scheduleOps": 24876869
   },
   "versions": {
-    "crate": "0.1.50",
-    "gitCommit": "6cc10f6575e9b16359d9165521c42597ee532017",
+    "crate": "0.1.51",
+    "gitCommit": "9cdf29faae458122b3ba66320a44b6d61afdd56d",
     "neatCoreTag": "v0.23.7"
   }
 }
