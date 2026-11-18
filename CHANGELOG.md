@@ -82,7 +82,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   test-only `record_skip::schedule::output_strata` wrapper is removed; use
   `StratumEdges::from_values` and `StratumEdges::assign`. The method pin in
   the doc now also covers the authors' HyenaDNA (accuracy and perplexity)
-  and Nucleotide Transformer scripts.
+  and Nucleotide Transformer scripts. The planned compute bound now uses
+  checked arithmetic and a bound that overflows `u64` is refused before any
+  run. Held-out records are read only by validation-phase runs, so they can no
+  longer steer the learning rate or schedule, and `runs.jsonl` preparation and
+  calibration rows now carry null validation fields (`finalValidationMse`,
+  `rareStratumValidationMse`) and an empty `strataValidationMse`.
 - **Offline benchmark of budget-aware routing between local weight optimisers
   (Issue #266).** New `lamarck/src/weight_bench/` module and
   `weight_router_bench` example compare a simplified random-axis surrogate and

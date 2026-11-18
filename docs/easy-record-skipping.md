@@ -162,8 +162,9 @@ value checked against a fixed bound, and its removal is permanent.
   is wired into NEAT-AI; that would follow only a `better` representative
   verdict.
 - Fitness and validation records are never pruned. After refinement the full
-  training MSE and the untouched validation MSE are measured over every
-  record. This audit is not charged to the arm's record-pass count.
+  training MSE is measured over every training record in every run, and the
+  untouched validation MSE over every held-out record in validation-phase runs
+  only. This audit is not charged to the arm's record-pass count.
 
 ## Schedule rules
 
@@ -250,10 +251,23 @@ the same rate. Its cost is reported below.
 Before any run the harness computes the bound planned runs x epochs x training
 records and refuses the manifest when the bound exceeds `maxRecordPasses`
 (the error names `maxRecordPasses`). For the synthetic suite the bound is
-252 x 30 x 2000 = 15,120,000, under the limit of 16,000,000.
+252 x 30 x 2000 = 15,120,000, under the limit of 16,000,000. The bound uses
+checked arithmetic: if it cannot be represented in `u64`, the harness refuses
+before any run with `planned compute bound overflows u64 record passes; exceeds
+maxRecordPasses N`, reporting `compute.plannedBoundRecordPasses` as
+18446744073709551615 (`u64::MAX`) and no rows.
 
 Calibration uses the calibration seeds only and selects by training MSE,
 never validation. It chose alpha 0.7 and revisit share 0.25.
+
+Held-out (validation) records are read only by validation-phase runs.
+Preparation and calibration runs audit training MSE only, so their `runs.jsonl`
+rows carry `finalValidationMse: null`, `rareStratumValidationMse: null` and
+`strataValidationMse: []`, and a held-out record cannot change the chosen
+learning rate or schedule. A non-finite training MSE fails any run with
+`refinement diverged: non-finite training MSE`; a non-finite held-out MSE fails
+only a validation-phase run, with `refinement diverged: non-finite validation
+MSE`.
 
 Verdict rule (`verdict` in `stats.rs`): take the paired per-seed differences
 of final validation MSE (treatment minus control) and a 95% percentile
@@ -404,7 +418,8 @@ changes shape: each row loses its `meanForgettingIncrease` key.
 Kept on purpose:
 
 - the per-stratum validation MSE (`strataValidationMse` in each
-  `runs.jsonl` row), because the issue asks for stratum error;
+  `runs.jsonl` row; filled on validation-phase rows and empty on preparation
+  and calibration rows), because the issue asks for stratum error;
 - the per-epoch `ensure_scope` check in `refine` (the issue forbids sharing
   stale difficulty scores);
 - the `StrataLength` refusal (input validation on a public constructor,

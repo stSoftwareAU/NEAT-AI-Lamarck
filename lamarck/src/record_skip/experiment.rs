@@ -1,8 +1,10 @@
 //! Refinement driver and manifest runner for the record-skip experiment.
 //!
 //! Every arm refines a clone of the same immutable parent through the real
-//! refinement update path. Audit measurements (full training MSE, validation
-//! MSE) are taken after the loop and are not charged to the arm.
+//! refinement update path. Audit measurements are taken after the loop and are
+//! not charged to the arm. Full training MSE is audited in every phase; held-out
+//! (validation) records are read only by validation-phase runs, so preparation
+//! and calibration choices never depend on them.
 
 use std::path::Path;
 
@@ -98,11 +100,14 @@ pub struct RunOutcome {
     pub initial_train_mse: f64,
     /// Training MSE of the refined creature over all training records.
     pub final_train_mse: f64,
-    /// Held-out validation MSE.
-    pub final_validation_mse: f64,
-    /// Validation MSE over records in protected (rare) strata.
+    /// Held-out validation MSE (null on preparation and calibration runs,
+    /// which never read held-out records).
+    pub final_validation_mse: Option<f64>,
+    /// Validation MSE over records in protected (rare) strata (null on
+    /// preparation and calibration runs, which never read held-out records).
     pub rare_stratum_validation_mse: Option<f64>,
-    /// Validation MSE per stratum.
+    /// Validation MSE per stratum (empty on preparation and calibration runs,
+    /// which never read held-out records).
     pub strata_validation_mse: Vec<Option<f64>>,
     /// Forward and backward record passes charged to the arm.
     pub record_passes: u64,
@@ -195,10 +200,12 @@ pub fn refine(
         learning_rate,
         rng_seed,
         &mut Spend::default(),
+        true,
     )
 }
 
 /// [`refine`], recording what was spent in `spent` even when it returns an error.
+/// Held-out records are read only when `audit_held_out` is set.
 #[allow(clippy::too_many_arguments)]
 fn refine_inner(
     parent: &CreatureExport,
@@ -210,6 +217,7 @@ fn refine_inner(
     learning_rate: f64,
     rng_seed: u64,
     spent: &mut Spend,
+    audit_held_out: bool,
 ) -> Result<RunOutcome, String> {
     let n = corpus.train.len();
     let first: Vec<f32> = corpus.train.iter().map(|r| r.outputs[0]).collect();
@@ -260,36 +268,44 @@ fn refine_inner(
 
     // Audit: measurement only, not charged to the arm.
     let train_errors = record_errors(&creature, &corpus.train)?;
-    let val_errors = record_errors(&creature, &corpus.validation)?;
     let final_train = mean(&train_errors);
-    let final_val = mean(&val_errors);
-    if !final_train.is_finite() || !final_val.is_finite() {
-        return Err("refinement diverged: non-finite MSE".to_string());
+    if !final_train.is_finite() {
+        return Err("refinement diverged: non-finite training MSE".to_string());
     }
 
-    let val_strata: Vec<u16> = corpus
-        .validation
-        .iter()
-        .map(|r| edges.assign(r.outputs[0]))
-        .collect();
-    let mut sums = vec![(0.0f64, 0usize); manifest.strata_bins.max(1)];
-    for (s, e) in val_strata.iter().zip(&val_errors) {
-        let slot = &mut sums[usize::from(*s)];
-        slot.0 += e;
-        slot.1 += 1;
-    }
-    let strata_mse: Vec<Option<f64>> = sums
-        .iter()
-        .map(|&(s, c)| (c > 0).then(|| s / c as f64))
-        .collect();
-    let flags = rare_flags(&strata, schedule.rare_stratum_share);
-    let rare: Vec<f64> = val_strata
-        .iter()
-        .zip(&val_errors)
-        .filter(|(s, _)| flags.get(usize::from(**s)).copied().unwrap_or(false))
-        .map(|(_, e)| *e)
-        .collect();
-    let rare_mse = (!rare.is_empty()).then(|| mean(&rare));
+    let (final_val, rare_mse, strata_mse) = if audit_held_out {
+        let val_errors = record_errors(&creature, &corpus.validation)?;
+        let final_val = mean(&val_errors);
+        if !final_val.is_finite() {
+            return Err("refinement diverged: non-finite validation MSE".to_string());
+        }
+        let val_strata: Vec<u16> = corpus
+            .validation
+            .iter()
+            .map(|r| edges.assign(r.outputs[0]))
+            .collect();
+        let mut sums = vec![(0.0f64, 0usize); manifest.strata_bins.max(1)];
+        for (s, e) in val_strata.iter().zip(&val_errors) {
+            let slot = &mut sums[usize::from(*s)];
+            slot.0 += e;
+            slot.1 += 1;
+        }
+        let strata_mse: Vec<Option<f64>> = sums
+            .iter()
+            .map(|&(s, c)| (c > 0).then(|| s / c as f64))
+            .collect();
+        let flags = rare_flags(&strata, schedule.rare_stratum_share);
+        let rare: Vec<f64> = val_strata
+            .iter()
+            .zip(&val_errors)
+            .filter(|(s, _)| flags.get(usize::from(**s)).copied().unwrap_or(false))
+            .map(|(_, e)| *e)
+            .collect();
+        let rare_mse = (!rare.is_empty()).then(|| mean(&rare));
+        (Some(final_val), rare_mse, strata_mse)
+    } else {
+        (None, None, Vec::new())
+    };
 
     let (mut observed, mut forgotten) = (0usize, 0usize);
     for (i, final_err) in train_errors.iter().enumerate() {
@@ -431,6 +447,7 @@ pub struct ComputeBudget {
     /// The manifest's `maxRecordPasses`.
     pub limit_record_passes: u64,
     /// Upper bound planned before any run: runs * epochs * training records.
+    /// `u64::MAX` when the bound overflowed and the run was refused.
     pub planned_bound_record_passes: u64,
     /// Record passes charged across every run, all phases, including the
     /// passes a failed run spent before it failed.
@@ -470,6 +487,7 @@ fn arm_summary(arm: String, runs: &[&RunOutcome]) -> ArmSummary {
         let v: Vec<f64> = runs.iter().map(|o| f(o)).collect();
         opt(mean(&v))
     };
+    let val: Vec<f64> = runs.iter().filter_map(|o| o.final_validation_mse).collect();
     let rare: Vec<f64> = runs
         .iter()
         .filter_map(|o| o.rare_stratum_validation_mse)
@@ -494,7 +512,7 @@ fn arm_summary(arm: String, runs: &[&RunOutcome]) -> ArmSummary {
         record_passes: m(&|o| o.record_passes as f64),
         processed_share: m(&|o| o.processed_share),
         final_train_mse: m(&|o| o.final_train_mse),
-        final_validation_mse: m(&|o| o.final_validation_mse),
+        final_validation_mse: opt(mean(&val)),
         rare_stratum_validation_mse: opt(mean(&rare)),
         forgotten_share: m(&|o| o.forgotten_share),
         revisit_passes: m(&|o| o.revisit_passes as f64),
@@ -771,6 +789,7 @@ impl Runner<'_> {
             learning_rate,
             seed,
             &mut spent,
+            phase == "validation",
         );
         // Tests force a divergence after the epochs ran, as a real one does.
         #[cfg(test)]
@@ -848,27 +867,55 @@ pub fn run_manifest(
     run_validated(manifest, source)
 }
 
+/// Number of runs the manifest plans, or `None` when the count overflows.
+fn planned_runs(m: &Manifest) -> Option<usize> {
+    let nred = m.reductions.len();
+    let prep = m
+        .calibration_seeds
+        .len()
+        .checked_mul(m.learning_rate_grid.len())?;
+    let calibration = m
+        .calibration_seeds
+        .len()
+        .checked_mul(nred)?
+        .checked_mul(m.calibration_grid.len())?
+        .checked_mul(2)?;
+    let validation = m
+        .validation_seeds
+        .len()
+        .checked_mul(nred.checked_mul(2)?.checked_add(1)?)?;
+    prep.checked_add(calibration)?.checked_add(validation)
+}
+
 /// Run an already validated manifest. Split out so tests can drive the
 /// run-failure path with values `Manifest::validate` refuses up front.
 fn run_validated(
     manifest: &Manifest,
     source: &CorpusSource,
 ) -> Result<BenchReport, Box<AbortedRun>> {
-    let mut runner = Runner {
-        manifest,
-        source,
-        rows: Vec::new(),
-    };
-    let nred = manifest.reductions.len();
-    let prep_runs = manifest.calibration_seeds.len() * manifest.learning_rate_grid.len();
-    let planned = prep_runs
-        + manifest.calibration_seeds.len() * nred * manifest.calibration_grid.len() * 2
-        + manifest.validation_seeds.len() * (1 + 2 * nred);
     let train_count = match source {
         CorpusSource::Synthetic => manifest.train_records,
         CorpusSource::Files { corpus, .. } => corpus.train.len(),
     } as u64;
-    let bound = planned as u64 * u64::from(manifest.epochs) * train_count;
+    let planned_count = planned_runs(manifest);
+    let bound = planned_count.and_then(|p| {
+        (p as u64)
+            .checked_mul(u64::from(manifest.epochs))?
+            .checked_mul(train_count)
+    });
+    let planned = planned_count.unwrap_or(usize::MAX);
+    let Some(bound) = bound else {
+        return Err(Box::new(AbortedRun::new(
+            manifest,
+            planned,
+            u64::MAX,
+            Vec::new(),
+            format!(
+                "planned compute bound overflows u64 record passes; exceeds maxRecordPasses {}",
+                manifest.max_record_passes
+            ),
+        )));
+    };
     if bound > manifest.max_record_passes {
         return Err(Box::new(AbortedRun::new(
             manifest,
@@ -881,6 +928,11 @@ fn run_validated(
             ),
         )));
     }
+    let mut runner = Runner {
+        manifest,
+        source,
+        rows: Vec::new(),
+    };
     let first_failure = |rows: &[Row]| {
         rows.iter()
             .find_map(|r| match r {
@@ -1079,8 +1131,11 @@ fn compare(
         let (Some(t), Some(c)) = (find(treatment, seed), find(control, seed)) else {
             continue;
         };
+        let (Some(tv), Some(cv)) = (t.final_validation_mse, c.final_validation_mse) else {
+            continue;
+        };
         seeds.push(seed);
-        diffs.push(t.final_validation_mse - c.final_validation_mse);
+        diffs.push(tv - cv);
         train.push(t.final_train_mse - c.final_train_mse);
         if let (Some(a), Some(b)) = (t.rare_stratum_validation_mse, c.rare_stratum_validation_mse) {
             rare.push(a - b);
@@ -1350,10 +1405,12 @@ mod tests {
     #[test]
     fn failed_runs_charge_the_passes_they_spent() {
         let m = tiny();
-        // A NaN validation target makes every run diverge, but only in the
-        // audit after all epochs ran.
+        // A NaN training target makes every run diverge, but only in the
+        // audit after all epochs ran. (A NaN or infinite training input does
+        // not: the network sanitises inputs, so the error stays finite. The
+        // strata edges skip a NaN target, so they are unaffected.)
         let mut corpus = synthetic_corpus(1, m.train_records, m.validation_records);
-        corpus.validation[0].outputs[0] = f32::NAN;
+        corpus.train[0].outputs[0] = f32::NAN;
         let source = CorpusSource::Files {
             corpus,
             parent: synthetic_parent(m.parent_seed),
@@ -1379,6 +1436,7 @@ mod tests {
         let full_passes = u64::from(m.epochs) * m.train_records as u64;
         for f in &fails {
             assert!(f.error.contains("diverged"), "{}", f.error);
+            assert!(f.error.contains("training"), "{}", f.error);
             assert_eq!(f.record_passes, full_passes);
             assert_eq!(f.schedule_ops, 0);
         }
@@ -1399,11 +1457,13 @@ mod tests {
         );
     }
 
-    fn nan_validation_source(m: &Manifest) -> CorpusSource {
-        // A NaN validation target makes every run diverge, but only in the
-        // audit after all epochs ran.
+    fn nan_training_source(m: &Manifest) -> CorpusSource {
+        // A NaN training target makes every run diverge, but only in the
+        // audit after all epochs ran. (A NaN or infinite training input does
+        // not: the network sanitises inputs, so the error stays finite. The
+        // strata edges skip a NaN target, so they are unaffected.)
         let mut corpus = synthetic_corpus(1, m.train_records, m.validation_records);
-        corpus.validation[0].outputs[0] = f32::NAN;
+        corpus.train[0].outputs[0] = f32::NAN;
         CorpusSource::Files {
             corpus,
             parent: synthetic_parent(m.parent_seed),
@@ -1418,7 +1478,7 @@ mod tests {
     fn an_aborted_preparation_keeps_the_passes_it_spent() {
         let m = tiny();
         m.validate().unwrap();
-        let source = nan_validation_source(&m);
+        let source = nan_training_source(&m);
 
         // Through the public entry point: every rate diverges.
         let aborted = run_manifest(&m, &source).unwrap_err();
@@ -1427,6 +1487,7 @@ mod tests {
             "{aborted}"
         );
         assert!(aborted.error.contains("diverged"), "{aborted}");
+        assert!(aborted.error.contains("training"), "{aborted}");
         let rates = m.learning_rate_grid.len() as u64 * m.calibration_seeds.len() as u64;
         assert_eq!(aborted.rows.len() as u64, rates);
         assert_eq!(aborted.coverage.planned, 14);
@@ -1587,5 +1648,102 @@ mod tests {
             failure.contains(&format!("\"recordPasses\":{}", full_passes(&m))),
             "{failure}"
         );
+    }
+
+    #[test]
+    fn a_compute_bound_that_overflows_is_refused_before_any_run() {
+        let mut m = tiny();
+        m.epochs = 1 << 31;
+        m.train_records = 1 << 32;
+        assert!(m.validate().is_ok(), "premise: the manifest is accepted");
+
+        let aborted = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        assert!(aborted.error.contains("overflows"), "{}", aborted.error);
+        assert!(
+            aborted.error.contains("maxRecordPasses"),
+            "{}",
+            aborted.error
+        );
+        assert_eq!(aborted.compute.planned_bound_record_passes, u64::MAX);
+        assert!(aborted.rows.is_empty());
+    }
+
+    #[test]
+    fn a_representable_bound_over_the_limit_is_still_refused_exactly() {
+        let mut m = tiny();
+        m.max_record_passes = 1000;
+        let aborted = run_validated(&m, &CorpusSource::Synthetic).unwrap_err();
+        let bound = 14 * full_passes(&m);
+        assert!(
+            aborted.error.contains("exceeds maxRecordPasses"),
+            "{aborted}"
+        );
+        assert_eq!(aborted.compute.planned_bound_record_passes, bound);
+        assert!(aborted.error.contains(&bound.to_string()), "{aborted}");
+        assert!(aborted.rows.is_empty());
+    }
+
+    fn files_source(m: &Manifest, nan_held_out: bool) -> CorpusSource {
+        let mut corpus = synthetic_corpus(1, m.train_records, m.validation_records);
+        if nan_held_out {
+            corpus.validation[0].outputs[0] = f32::NAN;
+        }
+        CorpusSource::Files {
+            corpus,
+            parent: synthetic_parent(m.parent_seed),
+        }
+    }
+
+    #[test]
+    fn a_held_out_record_cannot_steer_preparation_or_calibration() {
+        let m = tiny();
+        let clean = run_manifest(&m, &files_source(&m, false)).unwrap();
+        let dirty = run_manifest(&m, &files_source(&m, true)).unwrap();
+
+        // Positive control: the clean run fails nothing.
+        assert!(failed(&clean.rows).is_empty());
+
+        assert_eq!(clean.chosen_learning_rate, dirty.chosen_learning_rate);
+        assert_eq!(
+            clean.chosen_schedule.ewma_alpha,
+            dirty.chosen_schedule.ewma_alpha
+        );
+        assert_eq!(
+            clean.chosen_schedule.revisit_share,
+            dirty.chosen_schedule.revisit_share
+        );
+        assert_eq!(
+            clean.learning_rate_sweep.len(),
+            dirty.learning_rate_sweep.len()
+        );
+        for (a, b) in clean
+            .learning_rate_sweep
+            .iter()
+            .zip(&dirty.learning_rate_sweep)
+        {
+            assert_eq!(a.learning_rate, b.learning_rate);
+            assert_eq!(a.n_runs, b.n_runs);
+            assert_eq!(a.mean_train_mse, b.mean_train_mse);
+        }
+        assert_eq!(clean.calibration.len(), dirty.calibration.len());
+        for (a, b) in clean.calibration.iter().zip(&dirty.calibration) {
+            assert_eq!(a.ewma_alpha, b.ewma_alpha);
+            assert_eq!(a.revisit_share, b.revisit_share);
+            assert_eq!(a.n_pairs, b.n_pairs);
+            assert_eq!(a.mean_train_diff, b.mean_train_diff);
+        }
+
+        let mut validation_rows = 0;
+        for row in &dirty.rows {
+            match row {
+                Row::Ok(o) => assert_ne!(o.phase, "validation", "{o:?}"),
+                Row::Failed(f) if f.phase == "validation" => {
+                    validation_rows += 1;
+                    assert!(f.error.contains("validation"), "{}", f.error);
+                }
+                Row::Failed(f) => panic!("{} run failed on a held-out NaN: {}", f.phase, f.error),
+            }
+        }
+        assert_eq!(validation_rows, m.validation_seeds.len() * 3);
     }
 }

@@ -727,7 +727,7 @@ fn learning_rate_sweep_is_counted_and_chooses_by_training_mse() {
         assert_eq!(e.n_runs, m.calibration_seeds.len());
     }
     // The sweep reads training MSE: with one calibration seed each entry is
-    // that seed's preparation row, and validation MSE would differ from it.
+    // that seed's preparation row.
     let prep: Vec<_> = report
         .rows
         .iter()
@@ -739,7 +739,10 @@ fn learning_rate_sweep_is_counted_and_chooses_by_training_mse() {
     assert_eq!(prep.len(), report.learning_rate_sweep.len());
     for (e, o) in report.learning_rate_sweep.iter().zip(&prep) {
         assert_eq!(e.mean_train_mse, Some(o.final_train_mse));
-        assert_ne!(e.mean_train_mse, Some(o.final_validation_mse));
+        // Preparation rows never read held-out records.
+        assert_eq!(o.final_validation_mse, None);
+        assert!(o.strata_validation_mse.is_empty());
+        assert!(o.rare_stratum_validation_mse.is_none());
     }
     // 2 prep + 4 calibration + 6 validation.
     assert_eq!(report.coverage.planned, 2 + 4 + 6);
@@ -760,6 +763,17 @@ fn arms_summarise_validation_runs() {
         assert_eq!(a.n_runs, m.validation_seeds.len());
         assert_eq!(a.strata_validation_mse.len(), m.strata_bins);
     }
+    // Validation-phase rows read the held-out records.
+    let mut validation_rows = 0;
+    for r in &report.rows {
+        if let Row::Ok(o) = r
+            && o.phase == "validation"
+        {
+            validation_rows += 1;
+            assert!(o.final_validation_mse.is_some());
+        }
+    }
+    assert_eq!(validation_rows, m.validation_seeds.len() * 3);
     let rows: Vec<f64> = report
         .rows
         .iter()
