@@ -45,17 +45,6 @@ fn ramp(n: usize) -> Vec<f64> {
 }
 
 #[test]
-fn ewma_blends_observations() {
-    let mut t = DifficultyTracker::new(scope(1), vec![0], config(0.25, 0.0, 0.0)).unwrap();
-    assert_eq!(t.ewma(0), None);
-    t.observe(0, 4.0);
-    assert_eq!(t.ewma(0), Some(4.0));
-    t.observe(0, 2.0);
-    assert_eq!(t.ewma(0), Some(3.5));
-    assert_eq!(t.last_seen(0), Some(2.0));
-}
-
-#[test]
 fn full_and_warmup_keep_everything() {
     let t = observed(vec![0; 10], &ramp(10), config(0.5, 0.0, 0.0));
     let mut rng = StdRng::seed_from_u64(1);

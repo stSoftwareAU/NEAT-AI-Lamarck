@@ -14,6 +14,9 @@ fixes the finding its review blocked on: a test-only fault-injection seam.
 - `record_skip::stats::mean` and `bootstrap_mean_ci` now call the shared
   `weight_bench::stats` helpers instead of duplicating them. The regenerated
   evidence is unchanged.
+- `DifficultyTracker::ewma`, a public accessor that only a test called, is
+  removed. Its test is now a unit test in `schedule.rs` that reads the field.
+  A sweep found no other public item in `record_skip/` used only by tests.
 
 Carried from PR #289, on top of PR #270:
 
@@ -64,9 +67,11 @@ Part of #267.
 
 ### Undiscoverable Facts
 
-- arXiv is still unreachable from this host. On 2026-11-18,
-  `curl https://arxiv.org/abs/2611.10386` failed again with
-  `CONNECT tunnel failed, response 403`. The method stays pinned from the
+- arXiv is still unreachable from this host. On 2026-11-18 at 21:00Z,
+  `curl` to the abstract, the PDF, `export.arxiv.org`, alphaXiv, Hugging Face,
+  the Wayback Machine, Semantic Scholar and `r.jina.ai` failed with
+  `CONNECT tunnel failed, response 403`, and the web-fetch tool's proxy refused
+  the PDF. The authors' repository is still at `804aedb`, with no paper copy. The method stays pinned from the
   authors' released code at `804aedb`.
 - A NaN or infinite training *input* does not fail a run, because the network
   sanitises inputs. Only a non-finite training *target* does, so the
@@ -108,7 +113,7 @@ flowchart LR
 - **met** — Record scheduling/refresh cost, forgetting, stratum error, full fitness and untouched validation outcomes — evidence: `lamarck/tests/record_skip.rs::arms_summarise_validation_runs` — reviewer: met
 - **met** — Do not prune fitness/validation records or share stale difficulty scores across incompatible parents/corpora — evidence: `lamarck/src/record_skip/experiment.rs` (`refine_inner` audits every training record, and every held-out record in validation runs), `lamarck/tests/record_skip.rs::easy_skip_record_passes_follow_the_rule` — reviewer: met
 - **met** — Integrate the update path with Backpropagation if it owns the actual refinement implementation — evidence: `docs/easy-record-skipping.md` ("Backpropagation ownership") — reviewer: met
-- **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source") — reviewer: partial — reason: arXiv still returns 403 through this host's proxy, so the paper is not read; the method is pinned from the authors' released code at `804aedb`
+- **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source") — reviewer: partial — reason: arXiv still returns 403 through this host's proxy (fifth retry, 2026-11-18 21:00Z), so the paper is not read; the method is pinned from the authors' released code at `804aedb`, and someone with arXiv access must read the paper and confirm or correct that pin
 - **met** — transfer to NEAT-AI remains experimental — evidence: `docs/easy-record-skipping.md` ("Status") — reviewer: met
 - **met** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms — evidence: `lamarck/src/record_skip/stats.rs` (calls `weight_bench::stats`), `lamarck/src/record_skip/experiment.rs::git_commit` (formats `weight_bench::provenance::git_state`), `lamarck/tests/record_skip.rs::git_commit_names_the_commit_or_the_cause`, `lamarck/tests/record_skip.rs::stratum_edges_bin_first_targets` — reviewer: met
 - **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change — evidence: only `record_skip/`, its example, tests and docs change; `lamarck/tests/record_skip.rs::refine_full_lowers_train_mse_and_keeps_parent` — reviewer: met
@@ -120,7 +125,7 @@ flowchart LR
 - **met** — Research runs are separate from routine feature CI — evidence: `lamarck/examples/record_skip_bench.rs`; tests use the `tiny()` and `smoke()` manifests — reviewer: met
 - **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage — evidence: `lamarck/examples/record_skip_bench.rs`, `docs/evidence/record-skip/manifest.json`, `docs/evidence/record-skip/summary.json` — reviewer: met
 - **met** — Fixtures alone do not demonstrate an optimisation benefit — evidence: `docs/easy-record-skipping.md` ("Findings"), which claims no benefit — reviewer: met
-- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost") — reviewer: partial — reason: the negative synthetic result is recorded and dead or duplicate code is removed, but whether to keep or delete the harness waits for the representative run
+- **met** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost", removal rule), `lamarck/src/record_skip/schedule.rs::tests::ewma_blends_observations` (the test-only `DifficultyTracker::ewma` accessor is removed; no other public item lacks a non-test caller) — reviewer: met
 - **met** — Do not claim success before representative runs — evidence: `docs/easy-record-skipping.md` ("Status"), `CHANGELOG.md` — reviewer: met
 - **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private — evidence: only synthetic evidence is committed — reviewer: met
 - **unrequested** — `AbortedRun`, `write_aborted_outputs` and `run_manifest` returning `Box<AbortedRun>` — reviewer: unrequested — reason: a run that stops early must still report failures, coverage and spent cost, which the issue requires; a bare `String` error dropped them
@@ -177,7 +182,13 @@ flowchart LR
 - Removed from `lamarck/tests/record_skip.rs`: `assert_eq!(a.coverage.planned, 4 + 6);`, `assert_eq!(a.coverage.completed, 10);` and `assert_eq!(runs.lines().count(), 10);`
   - Obsolete: the preparation sweep adds 4 runs
   - Still covered by: `lamarck/tests/record_skip.rs::smoke_run_is_complete_and_deterministic` (now 14)
-- Results on the final code head `d37cfaf`:
+- Moved from `lamarck/tests/record_skip.rs`: `ewma_blends_observations` (its `t.ewma(0)` assertions)
+  - Removed functionality: the test-only `DifficultyTracker::ewma` accessor. `select` reads the field directly.
+  - Still covered by: `lamarck/src/record_skip/schedule.rs::tests::ewma_blends_observations` (same values, read from the private field)
+- After the `ewma` removal: `cargo test --lib record_skip` 10 passed,
+  `cargo test --test record_skip` 23 passed, `cargo clippy --all-targets -- -D warnings`
+  clean, `cargo fmt --check` clean. The full `./quality.sh` is re-run by the worker.
+- Results on the earlier code head `d37cfaf`:
   - `cargo test --lib record_skip`: 9 passed.
   - `cargo test --test record_skip`: 24 passed.
   - `cargo clippy --all-targets -- -D warnings`: clean.
@@ -191,6 +202,6 @@ flowchart LR
 
 - The representative experiment on the private creature and corpus. This is an owner step on a quiet machine, and its results stay private.
 - Reading the paper. arXiv returns 403 from this host.
-- The keep-or-delete decision on the harness, which waits for the representative run.
+- The keep-or-delete decision on the harness, which the predeclared removal rule makes once the representative run is in (or at the next release).
 - No test reaches the partly-completed-rate guard in `choose_learning_rate`; no real input reaches it today.
 - Not checked: CI on GitHub.

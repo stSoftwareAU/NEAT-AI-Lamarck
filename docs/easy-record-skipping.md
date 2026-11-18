@@ -35,7 +35,13 @@ the connection". Only `github.com`, `api.github.com` and
 fragments of the PDF, and these agree with the code below. A fourth retry on
 18 November failed the same way (`curl https://arxiv.org/abs/2611.10386`:
 "CONNECT tunnel failed, response 403"), and `gh search code 2611.10386` found
-only abstract digests, no copy of the full text:
+only abstract digests, no copy of the full text. A fifth retry on 18 November
+(21:00Z) failed the same way: `curl` to the abstract, the PDF,
+`export.arxiv.org`, alphaXiv, Hugging Face, the Wayback Machine, Semantic
+Scholar and `r.jina.ai` all failed ("CONNECT tunnel failed, response 403"), and
+the web-fetch tool gave "proxy refused the connection" for the PDF. The
+authors' repository was still at `804aedb`, with no copy of the paper in its
+tree. The search fragments are:
 
 - sequences are scored by accuracy from the training forward pass, with no
   separate scoring model and no extra pass over the corpus;
@@ -410,6 +416,7 @@ result was removed:
 - `DifficultyTracker::is_protected`, `DifficultyTracker::strata` and
   `StratumEdges::bins`, which had no callers;
 - the unused first argument of `stats::verdict`;
+- `DifficultyTracker::ewma`, an accessor that only a test called;
 - `schedule::output_strata`, a wrapper over `StratumEdges::from_values` and
   `StratumEdges::assign` that only a test called (the experiment builds its
   strata from `StratumEdges` directly, because it reuses the edges for the
@@ -431,6 +438,13 @@ result was removed:
 - the `LEARNING_RATE` re-export from `experiment` (the constant itself has
   since been replaced by the manifest's `learningRateGrid`). `arm_label`,
   `stats::mean` and `stats::bootstrap_mean_ci` became private to the module.
+
+A sweep on 18 November of every public item in `record_skip/` found one more:
+`DifficultyTracker::ewma`, an accessor that only a test called (`select`
+reads the EWMA directly). It is removed, and its test is now a unit test in
+`schedule.rs` that reads the field. Every other public item is used by the
+experiment itself. `neat_core_tag_from` is public only so that the tests can
+feed it manifest text; the experiment calls it through `neat_core_tag`.
 
 None of this changes the experiment. Re-running the synthetic suite after that
 earlier removal reproduced the committed `summary.json` and `manifest.json`

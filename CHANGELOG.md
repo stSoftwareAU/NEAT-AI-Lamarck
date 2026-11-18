@@ -79,7 +79,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   charges the passes it spent before failing, and a run that stops early
   (`run_manifest` returns an `AbortedRun`) keeps its rows and cost, which the
   example writes. The
-  test-only `record_skip::schedule::output_strata` wrapper is removed; use
+  test-only `record_skip::schedule::output_strata` wrapper and
+  `DifficultyTracker::ewma` accessor are removed; use
   `StratumEdges::from_values` and `StratumEdges::assign`. The method pin in
   the doc now also covers the authors' HyenaDNA (accuracy and perplexity)
   and Nucleotide Transformer scripts. The planned compute bound now uses

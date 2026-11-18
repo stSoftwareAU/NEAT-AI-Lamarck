@@ -286,11 +286,6 @@ impl DifficultyTracker {
         self.last_seen[record] = Some(error);
     }
 
-    /// Smoothed difficulty of record `i`, if observed.
-    pub fn ewma(&self, i: usize) -> Option<f64> {
-        self.ewma[i]
-    }
-
     /// Last observed squared error of record `i`.
     pub fn last_seen(&self, i: usize) -> Option<f64> {
         self.last_seen[i]
@@ -373,5 +368,32 @@ impl DifficultyTracker {
             revisits,
             schedule_ops: ops,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ewma_blends_observations() {
+        let scope = DifficultyScope {
+            parent_fingerprint: 7,
+            corpus_key: "k".to_string(),
+            record_count: 1,
+        };
+        let config = ScheduleConfig {
+            ewma_alpha: 0.25,
+            warmup_epochs: 1,
+            revisit_share: 0.0,
+            rare_stratum_share: 0.0,
+        };
+        let mut t = DifficultyTracker::new(scope, vec![0], config).unwrap();
+        assert_eq!(t.ewma[0], None);
+        t.observe(0, 4.0);
+        assert_eq!(t.ewma[0], Some(4.0));
+        t.observe(0, 2.0);
+        assert_eq!(t.ewma[0], Some(3.5));
+        assert_eq!(t.last_seen(0), Some(2.0));
     }
 }
