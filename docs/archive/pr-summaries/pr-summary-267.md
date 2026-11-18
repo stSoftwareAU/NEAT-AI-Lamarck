@@ -173,7 +173,7 @@ results private. That run decides whether `record_skip/` stays.
   - `a_rate_that_missed_a_seed_is_never_chosen`, `an_aborted_preparation_keeps_the_passes_it_spent`, `an_aborted_calibration_keeps_the_preparation_cost`, `failed_runs_charge_the_passes_they_spent`.
 - `stratum_edges_bin_first_targets` replaces `output_strata_bins`, with the same inputs and bins, through `StratumEdges::from_values` and `StratumEdges::assign`.
 - `cargo test --lib record_skip` on `f391a22`: 9 passed. `cargo fmt --check` and `cargo clippy --lib --tests -- -D warnings`: clean.
-- `timeout 1500 ./quality.sh < /dev/null` passed on `e13a19a` (exit 0, "All quality checks passed!"), including clippy `-D warnings`, the full test suite (with the 23 tests in `lamarck/tests/record_skip.rs`), rustdoc, codespell and markdownlint. Its re-run on the final head is recorded below.
+- `timeout 1500 ./quality.sh < /dev/null` passed on `e13a19a` (exit 0, "All quality checks passed!"), including clippy `-D warnings`, the full test suite (with the 23 tests in `lamarck/tests/record_skip.rs`), rustdoc, codespell and markdownlint. It passed again on `65b7b97`, which holds every code, test and evidence change in this PR (exit 0, "All quality checks passed!").
 - Removed from `lamarck/src/record_skip/experiment.rs`: `assert_eq!(report.coverage.planned, 10);`
   - Obsolete: the plan had no preparation phase. Still covered by: `lamarck/src/record_skip/experiment.rs::refused_grid_point_is_reported_beside_a_valid_one`. Replaced by: `assert_eq!(report.coverage.planned, 14);`
 - Removed from `lamarck/src/record_skip/experiment.rs`: `assert_eq!(report.coverage.completed, 8);`
