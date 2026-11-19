@@ -24,8 +24,40 @@ behind every result in the paper", but it does not cite the arXiv ID ("Paper:
 coming soon on arXiv"). The link comes the other way: `gh search code
 2611.10386` found third-party copies of the arXiv abstract, and that text names this
 repository as the paper's code. The arXiv listing (seen through a web search)
-gives the title, the authors and the v1 date. The method is therefore pinned from the
-authors' released code,
+gives the title, the authors and the v1 date.
+
+A third retry on 15 November (00:03Z) failed the same way. `curl` to the
+abstract, the PDF, the HTML view, `export.arxiv.org`, Semantic Scholar,
+alphaXiv, Hugging Face, `scholar.archive.org` and `r.jina.ai` all returned
+"CONNECT tunnel failed, response 403". The web-fetch tool gave "proxy refused
+the connection". Only `github.com`, `api.github.com` and
+`raw.githubusercontent.com` were reachable. A web search could quote short
+fragments of the PDF, and these agree with the code below. A fourth retry on
+18 November failed the same way (`curl https://arxiv.org/abs/2611.10386`:
+"CONNECT tunnel failed, response 403"), and `gh search code 2611.10386` found
+only abstract digests, no copy of the full text. A fifth retry on 18 November
+(21:00Z) failed the same way: `curl` to the abstract, the PDF,
+`export.arxiv.org`, alphaXiv, Hugging Face, the Wayback Machine, Semantic
+Scholar and `r.jina.ai` all failed ("CONNECT tunnel failed, response 403"), and
+the web-fetch tool gave "proxy refused the connection" for the PDF. The
+authors' repository was still at `804aedb`, with no copy of the paper in its
+tree. The search fragments are:
+
+- sequences are scored by accuracy from the training forward pass, with no
+  separate scoring model and no extra pass over the corpus;
+- `A_i` is the active set entering epoch i. At each epoch boundary, every
+  sequence in `A_i` with a valid accuracy is compared against the pruning
+  criterion;
+- a sequence with no scored tokens in an epoch is left out of that epoch's
+  decision and reconsidered later;
+- one variant averages each sequence's accuracy over a window of consecutive
+  epochs, which makes the decision more stable but prunes less;
+- a perplexity-scored variant fixes the lower bound at 1 and varies the upper
+  one;
+- `RP` has no threshold parameters.
+
+These are fragments, not the full text. The paper is **not read**, so the
+method is pinned from the authors' released code,
 <https://github.com/FaiasPromit/pruning-dna-sequence> at commit
 `804aedb94fda8c531f1e6406f62de769d045ebad` (`dnabert2/pretraining/run_mlm.py`,
 `run_epoch_end_pruning`, and the `SP_*` / `RP_20%` configs):
@@ -71,6 +103,35 @@ authors' released code,
     by at most `delta_s * exp(alpha * i)` between epochs.
   - **EL2N** (`run_mlm_el2n.py`). This is SP with EL2N in place of accuracy,
     removing sequences whose EL2N lies in `[lower, upper]`.
+- **The other model families**, at the same commit. The rule above is from
+  DNABERT-2, but the paper's five settings also cover HyenaDNA (CLM) and the
+  Nucleotide Transformer (MLM).
+  - **Nucleotide Transformer**
+    (`nucleotide_transformer/pretraining/train_nt.py`,
+    `run_epoch_end_pruning`, `NT-HRG_SP_*` configs). The rule is the same as
+    DNABERT-2's: masked-token accuracy averaged over `pruning_window` epochs,
+    in `[lower, upper]`, removed for good. `SP_20%` is `[0.2, 1.0]`, window 1.
+  - **HyenaDNA, accuracy** (`hyenadna/pretraining/run_clm.py`,
+    `run_epoch_end_pruning`, `HY-HRG_SP_*` and `HY16k-HRG_SP_*` configs). The
+    signal is next-token accuracy: the share of positions where the most
+    likely next token is the true one. At the end of each epoch, an active
+    sequence whose accuracy for that epoch is in `[lower, upper]` is removed
+    for the rest of the run. There is no window. `SP_20%` is `[0.2, 1.0]`.
+    The cosine learning-rate schedule stays tied to `max_steps`, and the run
+    stops at `max_steps` or at `graceful_exit_epoch`, whichever comes first.
+    These are 50,000 and 28 in the `HY-HRG` configs, and 3,866 and 2 in
+    `HY16k-HRG_SP_20%`.
+  - **HyenaDNA, perplexity** (`hyenadna/pretraining/run_clm_perplexity.py`,
+    `HY-HRG_Perp_1` to `Perp_4`). This is the paper's perplexity ablation. The
+    score is exp(mean negative log-likelihood) over a sequence's predicted
+    positions, from the training forward pass. An active, scored sequence
+    with perplexity at or below `pruning_perplexity_threshold` is removed for
+    good. The thresholds are 1.13, 2.19, 3.0 and 12.0, so the lower bound is
+    always 1. The number removed each epoch is not fixed. Unscored sequences
+    (not drawn, or no predicted tokens) are never pruned.
+  - **HyenaDNA random control** (`HY-HRG_RP_20%`). Pruning is off, and
+    `random_subset_fraction` 0.0358 keeps a random 3.58% of the corpus,
+    chosen before training.
 
 Of these, InfoBatch is the closest to the issue's scheme, which skips records
 temporarily and on a per-epoch basis. Unlike InfoBatch, the tested scheme does
@@ -85,7 +146,10 @@ reduction per arm (25/50/75%) instead of a threshold, **temporary** omission
 with periodic revisits instead of permanent removal, and rare-stratum
 protection, which SP does not have. The matched random arm plays the role of
 `RP`, but it is re-drawn each epoch at the same processed count rather than
-fixed before training. SP itself is not reproduced as an arm.
+fixed before training. SP itself is not reproduced as an arm. The closest
+of the authors' signals to the per-record error used here is the HyenaDNA
+perplexity score, which is also a continuous loss. It too is a single-epoch
+value checked against a fixed bound, and its removal is permanent.
 
 ## What is refined
 
@@ -98,9 +162,19 @@ fixed before training. SP itself is not reproduced as an arm.
   `DifficultyScope` (parent fingerprint, corpus key and record count).
   `ensure_scope` refuses reuse for a different parent or corpus, and
   `refine` calls it before every epoch's selection.
+- Backpropagation ownership: the update math runs in neat-core's
+  `propagate_topological_loop` (stSoftwareAU/NEAT-AI-core, tag v0.23.7),
+  reached through Lamarck's existing `backprop.rs` and `propagate_layout.rs`
+  port. Record skipping only chooses which records reach that loop, so neither
+  neat-core nor NEAT-AI (the TypeScript trainer the README names as the current
+  backpropagation implementation) needs a change for this experiment. Nothing
+  is wired into NEAT-AI; that would follow only a `better` representative
+  verdict.
 - Fitness and validation records are never pruned. After refinement the full
-  training MSE and the untouched validation MSE are measured over every
-  record. This audit is not charged to the arm's record-pass count.
+  training MSE is measured over every training record in every run, and the
+  untouched validation MSE over every held-out record in validation-phase runs
+  only. This audit is not charged to the arm's record passes but is counted
+  in `auditPasses` (per run, per phase and in `compute.actualAuditPasses`).
 
 ## Schedule rules
 
@@ -150,17 +224,62 @@ Values come from `docs/evidence/record-skip/manifest.json`.
 | Rare stratum share | 0.10 |
 | Warm-up epochs | 1 |
 | Calibration grid | EWMA alpha in {0.3, 0.7} x revisit share in {0.1, 0.25} |
-| Learning rate | 0.2 |
+| Learning-rate grid | {0.01, 0.05, 0.2, 0.5}, chosen by the counted preparation sweep (training MSE only) |
+| Manifest version | 2 (`validate` refuses any other version) |
+| Compute limit | `maxRecordPasses` 16,000,000 |
 | Bootstrap | 2000 resamples, seed 267 |
 | Forgetting tolerance | 1e-4 |
-| Versions | crate 0.1.46, neat-core v0.23.4 |
+| Versions | crate 0.1.51, neat-core v0.23.7, and the git commit recorded in `versions.gitCommit` |
 
-The learning rate 0.2 was chosen before the run from a full-arm sweep on two
-seeds (final train MSE from 0.3816: 0.01 gave 0.2328, 0.05 gave 0.0958, 0.2
-gave 0.0685, 0.5 gave 0.0771). It is fixed in `manifest.rs`.
+The data and the parent are identified by `source` in `summary.json`. For the
+synthetic suite it is `synthetic`, with the seeds in the manifest. In corpus
+mode it is `files: corpus corpus:<training_data_key>:<maxRecords>:<validationRecords>
+parent <creature fingerprint>`. The training-data key is a hash of the
+directory path and each `*.bin` file's name, length and modification time, so
+any change to the corpus changes it. Both the key and the fingerprint are
+16-digit hex.
+
+The learning rate is chosen by a counted **preparation** phase. It runs the
+full arm at each rate in `learningRateGrid` on the calibration seeds (1-6) and
+picks the lowest mean final **training** MSE among the rates that completed
+every calibration seed; a rate that failed on any seed is not eligible, because
+its mean would cover different corpora. No input reaches that case today: the
+update clips, so no tested rate diverges on the synthetic corpus, and a file
+corpus is the same for every seed, so the rule is a defensive guard. If no rate
+completed them all, the run stops and names the first failure. That rate is
+used for calibration and validation. The sweep (`learningRateSweep` in
+`summary.json`, 6 runs per rate) chose 0.2:
+
+| Learning rate | Mean final train MSE |
+|--------------:|---------------------:|
+| 0.01 | 0.2393 |
+| 0.05 | 0.1055 |
+| 0.2 | 0.0805 |
+| 0.5 | 0.0906 |
+
+This counted phase replaces the earlier hand sweep on two seeds, and it chose
+the same rate. Its cost is reported below.
+
+Before any run the harness computes the bound planned runs x epochs x training
+records and refuses the manifest when the bound exceeds `maxRecordPasses`
+(the error names `maxRecordPasses`). For the synthetic suite the bound is
+252 x 30 x 2000 = 15,120,000, under the limit of 16,000,000. The bound uses
+checked arithmetic: if it cannot be represented in `u64`, the harness refuses
+before any run with `planned compute bound overflows u64 record passes; exceeds
+maxRecordPasses N`, reporting `compute.plannedBoundRecordPasses` as
+18446744073709551615 (`u64::MAX`) and no rows.
 
 Calibration uses the calibration seeds only and selects by training MSE,
 never validation. It chose alpha 0.7 and revisit share 0.25.
+
+Held-out (validation) records are read only by validation-phase runs.
+Preparation and calibration runs audit training MSE only, so their `runs.jsonl`
+rows carry `finalValidationMse: null`, `rareStratumValidationMse: null` and
+`strataValidationMse: []`, and a held-out record cannot change the chosen
+learning rate or schedule. A non-finite training MSE fails any run with
+`refinement diverged: non-finite training MSE`; a non-finite held-out MSE fails
+only a validation-phase run, with `refinement diverged: non-finite validation
+MSE`.
 
 Verdict rule (`verdict` in `stats.rs`): take the paired per-seed differences
 of final validation MSE (treatment minus control) and a 95% percentile
@@ -192,14 +311,27 @@ In corpus mode `--validation-records` defaults to 2000 and `--max-records` to
 20000. The validation set is the last N records of the loaded window.
 Corpus-mode results stay private.
 
+With those defaults the predeclared manifest's bound is
+252 x 30 x 18,000 = 136,080,000 record passes, over the 16,000,000 limit, so
+the corpus run is refused. The bound uses the loaded training record count, not
+the manifest's `trainRecords`. It runs only when `--manifest FILE` supplies a
+`maxRecordPasses` predeclared for that corpus.
+
 ## Results (synthetic)
 
-228 of 228 planned runs completed, 0 failed. Wall time was 15 s in release on
-a shared, parallel container, so it is indicative only. The committed
-evidence is `docs/evidence/record-skip/manifest.json` and `summary.json`
-(`runs.jsonl` is not committed).
+252 of 252 planned runs completed, 0 failed. Wall time was 14 s in release on
+a shared, parallel container, so it is indicative only. Re-running the suite
+reproduces every field of `summary.json` except `versions` (crate version,
+neat-core tag and git commit). The committed evidence was regenerated on commit
+`9cdf29f` (crate 0.1.51), after the mean and bootstrap moved to the shared
+`weight_bench::stats`; its results are identical to the run at `327f8e8`, which
+matched the run at `e13a19a` except for the new audit-pass counts. The
+committed evidence is `docs/evidence/record-skip/manifest.json` and
+`summary.json` (`runs.jsonl` is not committed).
 
-Per-arm means over the 12 validation seeds (initial train MSE 0.3875):
+Per-arm means over the 12 validation seeds (initial train MSE 0.3875). The
+table comes from `arms` in `summary.json`, no longer hand-aggregated from
+`runs.jsonl`:
 
 | Arm | Record passes | Processed share | Final train MSE | Validation MSE | Rare-stratum validation MSE | Forgotten share | Schedule ops | Revisit passes |
 |-----|--------------:|----------------:|----------------:|---------------:|----------------------------:|----------------:|-------------:|---------------:|
@@ -228,10 +360,25 @@ treatment minus control, 12 pairs each):
 
 Costs:
 
-| Phase | Runs | Record passes | Revisit passes | Schedule ops |
-|-------|-----:|--------------:|---------------:|-------------:|
-| Calibration | 144 | 4,464,000 | 322,944 | 49,790,789 |
-| Validation | 84 | 2,952,000 | 230,811 | 24,876,869 |
+| Phase | Runs | Record passes | Revisit passes | Schedule ops | Audit passes |
+|-------|-----:|--------------:|---------------:|-------------:|-------------:|
+| Preparation | 24 | 1,440,000 | 0 | 0 | 96,000 |
+| Calibration | 144 | 4,464,000 | 322,944 | 49,790,789 | 576,000 |
+| Validation | 84 | 2,952,000 | 230,811 | 24,876,869 | 420,000 |
+| Total | 252 | 8,856,000 | 553,755 | 74,667,658 | 1,092,000 |
+
+Compute (`compute` in `summary.json`): limit 16,000,000 record passes, planned
+bound 15,120,000, actual 8,856,000, plus 1,092,000 actual audit passes
+(`actualAuditPasses`), which the limit does not govern. A run that fails still charges the passes
+it spent before failing (a diverged run spends all of them), in its
+`runs.jsonl` row and in its phase's cost and `actualRecordPasses`; `Runs`
+counts completed runs only. A run that stops early (no learning rate completed
+every seed, or calibration had no matched pair) is not lost: `run_manifest`
+returns an `AbortedRun` with the rows and costs so far, and the example writes
+`manifest.json`, `runs.jsonl` and a `summary.json` holding the `error`,
+`coverage`, `preparationCost`, `calibrationCost` and `compute`. A refusal
+before any run (invalid manifest, bound over the limit) has no rows and writes
+nothing. This suite had no failures.
 
 ## Findings
 
@@ -248,9 +395,11 @@ These are findings on this synthetic suite only.
    52% of the record passes, and easy-75 is worse.
 4. The forgotten share rises when records are skipped: 0.381 for full against
    0.46 to 0.57 for the skipped arms.
-5. Calibration cost 4,464,000 record passes. That is more than the whole
-   validation phase (2,952,000) and about 100 times the 43,500 passes easy-75
-   saves per run, so at this scale the search does not pay for itself.
+5. Preparation plus calibration cost 5,904,000 record passes. That is twice
+   the validation phase (2,952,000) and about 136 times the 43,500 passes
+   easy-75 saves per run (60,000 - 16,500), so at this scale the search does
+   not pay for itself. Preparation and calibration also spent 672,000 audit
+   passes.
 
 This is a negative and inconclusive result. Nothing is ported, and no success
 is claimed.
@@ -267,27 +416,55 @@ result was removed:
 - `DifficultyTracker::is_protected`, `DifficultyTracker::strata` and
   `StratumEdges::bins`, which had no callers;
 - the unused first argument of `stats::verdict`;
+- `DifficultyTracker::ewma`, an accessor that only a test called;
+- `schedule::output_strata`, a wrapper over `StratumEdges::from_values` and
+  `StratumEdges::assign` that only a test called (the experiment builds its
+  strata from `StratumEdges` directly, because it reuses the edges for the
+  validation records). The test now checks `StratumEdges` itself;
 - `Serialize` on `DifficultyScope` and `ScheduleConfig`, and `Deserialize` on
   `Verdict`, which were never used;
-- the `LEARNING_RATE` re-export from `experiment`. `arm_label`, `stats::mean`
-  and `stats::bootstrap_mean_ci` became private to the module.
+- the record-skip copy of the git probe behind `versions.gitCommit`. It
+  duplicated `weight_bench::provenance::git_state`, which
+  `weight_router_bench` already uses; `record_skip::git_commit` now only
+  formats that probe's result (`<sha>`, `<sha>-dirty` or
+  `unavailable: <cause>`). Untracked files now count as dirty too, as they do
+  for the weight-router bench;
+- the record-skip copies of the mean and the percentile bootstrap.
+  `stats::mean` and `stats::bootstrap_mean_ci` now call
+  `weight_bench::stats::mean` and `weight_bench::stats::bootstrap_ci_mean`.
+  The two bootstraps draw the same resamples and differ only in how they pick
+  the percentile; at the manifest's 2000 resamples both pick the same order
+  statistics (indices 50 and 1949), so the committed intervals are unchanged;
+- the `LEARNING_RATE` re-export from `experiment` (the constant itself has
+  since been replaced by the manifest's `learningRateGrid`). `arm_label`,
+  `stats::mean` and `stats::bootstrap_mean_ci` became private to the module.
 
-None of this changes the experiment. Re-running the synthetic suite after the
-removal reproduces the committed `summary.json` and `manifest.json` byte for
-byte. Only the uncommitted `runs.jsonl` changes shape: each row loses its
-`meanForgettingIncrease` key.
+A sweep on 18 November of every public item in `record_skip/` found one more:
+`DifficultyTracker::ewma`, an accessor that only a test called (`select`
+reads the EWMA directly). It is removed, and its integration test checks which record
+`select` keeps after repeated observations. Every other public item is used by the
+experiment itself. `neat_core_tag_from` is public only so that the tests can
+feed it manifest text; the experiment calls it through `neat_core_tag`.
+
+None of this changes the experiment. Re-running the synthetic suite after that
+earlier removal reproduced the committed `summary.json` and `manifest.json`
+byte for byte (before the version 2 change). Only the uncommitted `runs.jsonl`
+changes shape: each row loses its `meanForgettingIncrease` key.
 
 Kept on purpose:
 
 - the per-stratum validation MSE (`strataValidationMse` in each
-  `runs.jsonl` row), because the issue asks for stratum error;
+  `runs.jsonl` row; filled on validation-phase rows and empty on preparation
+  and calibration rows), because the issue asks for stratum error;
 - the per-epoch `ensure_scope` check in `refine` (the issue forbids sharing
   stale difficulty scores);
 - the `StrataLength` refusal (input validation on a public constructor,
   covered by a test);
 - corpus mode (the representative run needs it);
-- every field of `summary.json` (changing them would break the committed
-  evidence).
+- every other field of `summary.json`; the version 2 change adds
+  `chosenLearningRate`, `learningRateSweep`, `preparationCost`, `compute`,
+  `arms` and `versions.gitCommit`, and in the manifest echo replaces
+  `learningRate` with `learningRateGrid` and adds `maxRecordPasses`.
 
 **Removal rule.** Delete `lamarck/src/record_skip/`,
 `lamarck/examples/record_skip_bench.rs`, `lamarck/tests/record_skip.rs`,
@@ -304,5 +481,8 @@ pointer back to it.
 ## Outstanding
 
 - Run the representative experiment on the private creature and corpus, on a
-  quiet machine. This is an owner step, and the results stay private.
+  quiet machine. This is an owner step, and the results stay private. The
+  owner writes the corpus manifest, with a `maxRecordPasses` limit predeclared
+  for that corpus, before running; the default manifest is refused there (see
+  "How to run").
 - Apply the removal rule above.

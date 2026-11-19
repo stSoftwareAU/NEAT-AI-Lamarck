@@ -3,11 +3,11 @@
 use std::io::Write;
 
 use neat_ai_lamarck::record_skip::experiment::{
-    BenchRecord, CorpusSource, GridPoint, Manifest, Row, load_corpus, neat_core_tag,
+    BenchRecord, CorpusSource, GridPoint, Manifest, Row, git_commit, load_corpus, neat_core_tag,
     neat_core_tag_from, refine, run_manifest, synthetic_corpus, synthetic_parent, write_outputs,
 };
 use neat_ai_lamarck::record_skip::schedule::{
-    DifficultyScope, DifficultyTracker, ScheduleConfig, ScheduleError, SkipPolicy, output_strata,
+    DifficultyScope, DifficultyTracker, ScheduleConfig, ScheduleError, SkipPolicy, StratumEdges,
 };
 use neat_ai_lamarck::record_skip::stats::{Verdict, verdict};
 use neat_core::parse_creature_json;
@@ -45,17 +45,6 @@ fn ramp(n: usize) -> Vec<f64> {
 }
 
 #[test]
-fn ewma_blends_observations() {
-    let mut t = DifficultyTracker::new(scope(1), vec![0], config(0.25, 0.0, 0.0)).unwrap();
-    assert_eq!(t.ewma(0), None);
-    t.observe(0, 4.0);
-    assert_eq!(t.ewma(0), Some(4.0));
-    t.observe(0, 2.0);
-    assert_eq!(t.ewma(0), Some(3.5));
-    assert_eq!(t.last_seen(0), Some(2.0));
-}
-
-#[test]
 fn full_and_warmup_keep_everything() {
     let t = observed(vec![0; 10], &ramp(10), config(0.5, 0.0, 0.0));
     let mut rng = StdRng::seed_from_u64(1);
@@ -77,6 +66,29 @@ fn full_and_warmup_keep_everything() {
         .select(3, &SkipPolicy::EasySkip { reduction: 0.5 }, &mut rng)
         .unwrap();
     assert_eq!(sel.processed, 10);
+}
+
+#[test]
+fn easy_skip_ranks_records_by_smoothed_error() {
+    let mut tracker = observed(vec![0; 2], &[3.0, 4.0], config(0.25, 0.0, 0.0));
+    let policy = SkipPolicy::EasySkip { reduction: 0.5 };
+    let mut rng = StdRng::seed_from_u64(1);
+
+    // The latest error is lower, but the smoothed error is still 3.5.
+    tracker.observe(1, 2.0);
+    assert_eq!(tracker.last_seen(1), Some(2.0));
+    assert_eq!(
+        tracker.select(1, &policy, &mut rng).unwrap().keep,
+        [false, true]
+    );
+
+    // Two more observations lower the smoothed error below 3.0.
+    tracker.observe(1, 2.0);
+    tracker.observe(1, 2.0);
+    assert_eq!(
+        tracker.select(2, &policy, &mut rng).unwrap().keep,
+        [true, false]
+    );
 }
 
 #[test]
@@ -230,12 +242,16 @@ fn config_and_reduction_refusals() {
 }
 
 #[test]
-fn output_strata_bins() {
-    assert_eq!(
-        output_strata(&[0.0, 1.0, 2.0, 3.0, 4.0], 4),
-        vec![0, 1, 2, 3, 3]
-    );
-    assert_eq!(output_strata(&[2.5, 2.5, 2.5], 4), vec![0, 0, 0]);
+fn stratum_edges_bin_first_targets() {
+    let bin = |values: &[f32]| {
+        let edges = StratumEdges::from_values(values, 4);
+        values
+            .iter()
+            .map(|&v| edges.assign(v))
+            .collect::<Vec<u16>>()
+    };
+    assert_eq!(bin(&[0.0, 1.0, 2.0, 3.0, 4.0]), vec![0, 1, 2, 3, 3]);
+    assert_eq!(bin(&[2.5, 2.5, 2.5]), vec![0, 0, 0]);
 }
 
 fn smoke_setup(
@@ -276,6 +292,7 @@ fn refine_full_lowers_train_mse_and_keeps_parent() {
         &SkipPolicy::Full,
         &sched(&m, 0.1),
         &m,
+        0.2,
         1,
     )
     .unwrap();
@@ -294,7 +311,17 @@ fn easy_skip_record_passes_follow_the_rule() {
     let m = Manifest::smoke();
     let (parent, corpus, scope) = smoke_setup(&m);
     let cfg = sched(&m, 0.0);
-    let full = refine(&parent, &corpus, &scope, &SkipPolicy::Full, &cfg, &m, 1).unwrap();
+    let full = refine(
+        &parent,
+        &corpus,
+        &scope,
+        &SkipPolicy::Full,
+        &cfg,
+        &m,
+        0.2,
+        1,
+    )
+    .unwrap();
     let easy = refine(
         &parent,
         &corpus,
@@ -302,6 +329,7 @@ fn easy_skip_record_passes_follow_the_rule() {
         &SkipPolicy::EasySkip { reduction: 0.5 },
         &cfg,
         &m,
+        0.2,
         1,
     )
     .unwrap();
@@ -313,7 +341,17 @@ fn easy_skip_record_passes_follow_the_rule() {
     // Control: a mismatched scope is refused.
     let mut wrong = scope.clone();
     wrong.corpus_key = "other".to_string();
-    let err = refine(&parent, &corpus, &wrong, &SkipPolicy::Full, &cfg, &m, 1).unwrap_err();
+    let err = refine(
+        &parent,
+        &corpus,
+        &wrong,
+        &SkipPolicy::Full,
+        &cfg,
+        &m,
+        0.2,
+        1,
+    )
+    .unwrap_err();
     assert!(err.contains("scope mismatch"), "{err}");
 }
 
@@ -321,6 +359,24 @@ fn easy_skip_record_passes_follow_the_rule() {
 fn manifest_refusals() {
     assert!(Manifest::predeclared().validate().is_ok());
     assert!(Manifest::smoke().validate().is_ok());
+
+    let mut m = Manifest::smoke();
+    m.version = 1;
+    assert!(m.validate().unwrap_err().contains("version"));
+
+    let mut m = Manifest::smoke();
+    m.learning_rate_grid.clear();
+    assert!(m.validate().unwrap_err().contains("learningRateGrid"));
+
+    for bad in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+        let mut m = Manifest::smoke();
+        m.learning_rate_grid = vec![0.1, bad];
+        assert!(m.validate().unwrap_err().contains("learningRateGrid"));
+    }
+
+    let mut m = Manifest::smoke();
+    m.max_record_passes = 0;
+    assert!(m.validate().unwrap_err().contains("maxRecordPasses"));
 
     let mut m = Manifest::smoke();
     m.validation_seeds = vec![1, 5];
@@ -393,8 +449,9 @@ fn smoke_run_is_complete_and_deterministic() {
     let a = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
     let b = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
     // 1 seed * 1 reduction * 2 grid * 2 arms + 2 seeds * 3 arms.
-    assert_eq!(a.coverage.planned, 4 + 6);
-    assert_eq!(a.coverage.completed, 10);
+    // Plus 4 preparation runs (1 seed * 4 rates).
+    assert_eq!(a.coverage.planned, 4 + 6 + 4);
+    assert_eq!(a.coverage.completed, 14);
     assert_eq!(a.coverage.failed, 0);
     assert_eq!(a.rows.len(), a.coverage.planned);
     let calib_passes: u64 = a
@@ -413,7 +470,7 @@ fn smoke_run_is_complete_and_deterministic() {
     let dir = tempfile::tempdir().unwrap();
     write_outputs(dir.path(), &a).unwrap();
     let runs = std::fs::read_to_string(dir.path().join("runs.jsonl")).unwrap();
-    assert_eq!(runs.lines().count(), 10);
+    assert_eq!(runs.lines().count(), 14);
     assert!(dir.path().join("manifest.json").exists());
     assert!(dir.path().join("summary.json").exists());
 }
@@ -506,4 +563,302 @@ fn reported_neat_core_tag_follows_the_cargo_toml_pin() {
         "[dependencies]\nother = { tag = \"v9\" }\nneat-core = { git = \"u\", tag = \"v9.9.9\" }\n";
     assert_eq!(neat_core_tag_from(moved), "v9.9.9");
     assert_eq!(neat_core_tag_from("[dependencies]\n"), "unknown");
+}
+
+/// The committed version-1 manifest, before the learning-rate grid and compute
+/// limit were added.
+const VERSION_1_MANIFEST: &str = r#"{
+  "version": 1,
+  "epochs": 30,
+  "trainRecords": 2000,
+  "validationRecords": 1000,
+  "parentSeed": 267,
+  "calibrationSeeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "validationSeeds": [
+    1001,
+    1002,
+    1003,
+    1004,
+    1005,
+    1006,
+    1007,
+    1008,
+    1009,
+    1010,
+    1011,
+    1012
+  ],
+  "reductions": [
+    0.25,
+    0.5,
+    0.75
+  ],
+  "strataBins": 8,
+  "rareStratumShare": 0.1,
+  "warmupEpochs": 1,
+  "calibrationGrid": [
+    {
+      "ewmaAlpha": 0.3,
+      "revisitShare": 0.1
+    },
+    {
+      "ewmaAlpha": 0.3,
+      "revisitShare": 0.25
+    },
+    {
+      "ewmaAlpha": 0.7,
+      "revisitShare": 0.1
+    },
+    {
+      "ewmaAlpha": 0.7,
+      "revisitShare": 0.25
+    }
+  ],
+  "learningRate": 0.2,
+  "bootstrapResamples": 2000,
+  "bootstrapSeed": 267,
+  "forgettingTolerance": 0.0001
+}"#;
+
+#[test]
+fn version_1_manifest_file_fails_loudly() {
+    let err = serde_json::from_str::<Manifest>(VERSION_1_MANIFEST).unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("learningRateGrid") || text.contains("maxRecordPasses"),
+        "{text}"
+    );
+    // Control: the current predeclared manifest round-trips.
+    let current = serde_json::to_string(&Manifest::predeclared()).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Manifest>(&current).unwrap(),
+        Manifest::predeclared()
+    );
+}
+
+#[test]
+fn compute_limit_refuses_a_manifest_over_budget() {
+    let mut m = tiny();
+    // runs: 1 seed * 4 rates + 1 seed * 1 reduction * 2 grid * 2 arms + 2 seeds * 3 arms.
+    let bound = ((4 + 4 + 6) * 4 * 100) as u64;
+    m.max_record_passes = bound - 1;
+    assert!(m.validate().is_ok());
+    let err = run_manifest(&m, &CorpusSource::Synthetic).unwrap_err();
+    assert!(err.error.contains("maxRecordPasses"), "{err}");
+    assert!(err.error.contains(&bound.to_string()), "{err}");
+    // A refusal happens before any run, so it spent nothing.
+    assert!(err.rows.is_empty());
+    assert_eq!(err.compute.actual_record_passes, 0);
+    assert_eq!(err.compute.planned_bound_record_passes, bound);
+    assert_eq!(err.compute.limit_record_passes, bound - 1);
+
+    m.max_record_passes = bound;
+    let report = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
+    assert_eq!(report.compute.planned_bound_record_passes, bound);
+    assert_eq!(report.compute.limit_record_passes, bound);
+    assert!(report.compute.actual_record_passes <= bound);
+    assert_eq!(
+        report.compute.actual_record_passes,
+        report.preparation_cost.record_passes
+            + report.calibration_cost.record_passes
+            + report.validation_cost.record_passes
+    );
+    assert!(report.compute.actual_record_passes > 0);
+
+    // The limit and the planned bound are different figures: with the
+    // predeclared limit the bound is the smaller one.
+    let roomy = tiny();
+    assert_eq!(roomy.max_record_passes, 16_000_000);
+    let report = run_manifest(&roomy, &CorpusSource::Synthetic).unwrap();
+    assert_eq!(report.compute.planned_bound_record_passes, bound);
+    assert_eq!(report.compute.limit_record_passes, 16_000_000);
+    let summary: serde_json::Value = serde_json::from_str(&report.summary_json().unwrap()).unwrap();
+    assert_eq!(summary["compute"]["plannedBoundRecordPasses"], bound);
+    assert_eq!(summary["compute"]["limitRecordPasses"], 16_000_000);
+}
+
+#[test]
+fn files_mode_compute_bound_uses_the_loaded_training_count() {
+    let dir = tempfile::tempdir().unwrap();
+    // 170 records less 50 validation: 120 training, not tiny()'s 100.
+    let creature = write_files(dir.path(), 170);
+    let corpus = load_corpus(dir.path(), &creature, 50, 1000).unwrap();
+    assert_eq!(corpus.train.len(), 120);
+    let source = CorpusSource::Files {
+        corpus,
+        parent: creature,
+    };
+
+    let mut m = tiny();
+    assert_eq!(m.train_records, 100);
+    // 4 rates + 4 calibration + 6 validation runs.
+    let bound = 14 * u64::from(m.epochs) * 120;
+    m.max_record_passes = bound - 1;
+    let err = run_manifest(&m, &source).unwrap_err();
+    assert!(err.error.contains("maxRecordPasses"), "{err}");
+    assert!(err.error.contains(&bound.to_string()), "{err}");
+    // A refusal happens before any run, so it spent nothing.
+    assert!(err.rows.is_empty());
+    assert_eq!(err.compute.actual_record_passes, 0);
+    assert_eq!(err.compute.planned_bound_record_passes, bound);
+    assert_eq!(err.compute.limit_record_passes, bound - 1);
+
+    m.max_record_passes = bound;
+    let report = run_manifest(&m, &source).unwrap();
+    assert_eq!(report.compute.planned_bound_record_passes, bound);
+    assert!(report.compute.actual_record_passes <= bound);
+}
+
+#[test]
+fn learning_rate_sweep_is_counted_and_chooses_by_training_mse() {
+    let mut m = tiny();
+    m.learning_rate_grid = vec![1e-6, 0.2];
+    let report = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
+    assert_eq!(report.chosen_learning_rate, 0.2);
+    assert_eq!(
+        report.preparation_cost.runs,
+        m.calibration_seeds.len() * m.learning_rate_grid.len()
+    );
+    let rates: Vec<f64> = report
+        .learning_rate_sweep
+        .iter()
+        .map(|e| e.learning_rate)
+        .collect();
+    assert_eq!(rates, [1e-6, 0.2]);
+    let tiny_rate = report.learning_rate_sweep[0].mean_train_mse.unwrap();
+    let normal = report.learning_rate_sweep[1].mean_train_mse.unwrap();
+    assert!(normal < tiny_rate, "{normal} !< {tiny_rate}");
+    for e in &report.learning_rate_sweep {
+        assert_eq!(e.n_runs, m.calibration_seeds.len());
+    }
+    // The sweep reads training MSE: with one calibration seed each entry is
+    // that seed's preparation row.
+    let prep: Vec<_> = report
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Ok(o) if o.phase == "preparation" => Some(o),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prep.len(), report.learning_rate_sweep.len());
+    for (e, o) in report.learning_rate_sweep.iter().zip(&prep) {
+        assert_eq!(e.mean_train_mse, Some(o.final_train_mse));
+        // Preparation rows never read held-out records.
+        assert_eq!(o.final_validation_mse, None);
+        assert!(o.strata_validation_mse.is_empty());
+        assert!(o.rare_stratum_validation_mse.is_none());
+    }
+    // 2 prep + 4 calibration + 6 validation.
+    assert_eq!(report.coverage.planned, 2 + 4 + 6);
+    assert_eq!(report.coverage.completed, report.coverage.planned);
+    // Control: reversing the grid order still picks the normal rate.
+    m.learning_rate_grid.reverse();
+    let again = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
+    assert_eq!(again.chosen_learning_rate, 0.2);
+}
+
+#[test]
+fn arms_summarise_validation_runs() {
+    let m = tiny();
+    let report = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
+    let names: Vec<&str> = report.arms.iter().map(|a| a.arm.as_str()).collect();
+    assert_eq!(names, ["full", "random-50", "easy-50"]);
+    for a in &report.arms {
+        assert_eq!(a.n_runs, m.validation_seeds.len());
+        assert_eq!(a.strata_validation_mse.len(), m.strata_bins);
+    }
+    // Validation-phase rows read the held-out records.
+    let mut validation_rows = 0;
+    for r in &report.rows {
+        if let Row::Ok(o) = r
+            && o.phase == "validation"
+        {
+            validation_rows += 1;
+            assert!(o.final_validation_mse.is_some());
+        }
+    }
+    assert_eq!(validation_rows, m.validation_seeds.len() * 3);
+    let rows: Vec<f64> = report
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Ok(o) if o.phase == "validation" && o.arm == "easy-50" => Some(o.forgotten_share),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 2);
+    let expected = rows.iter().sum::<f64>() / rows.len() as f64;
+    let easy = &report.arms[2];
+    assert!((easy.forgotten_share.unwrap() - expected).abs() < 1e-12);
+    assert!(easy.record_passes.unwrap() < report.arms[0].record_passes.unwrap());
+    let json = report.summary_json().unwrap();
+    assert!(json.contains("\"arms\""));
+}
+
+#[test]
+fn git_commit_names_the_commit_or_the_cause() {
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    let file = dir.path().join("f.txt");
+    std::fs::write(&file, "one").unwrap();
+    git(dir.path(), &["add", "f.txt"]);
+    git(dir.path(), &["commit", "-q", "-m", "x"]);
+    let clean = git_commit(dir.path());
+    assert_eq!(clean.len(), 40, "{clean}");
+    assert!(clean.chars().all(|c| c.is_ascii_hexdigit()), "{clean}");
+
+    std::fs::write(&file, "two").unwrap();
+    let dirty = git_commit(dir.path());
+    assert_eq!(dirty, format!("{clean}-dirty"));
+
+    let empty = tempfile::tempdir().unwrap();
+    let none = git_commit(empty.path());
+    assert!(none.starts_with("unavailable: "), "{none}");
+    assert!(none.contains("not a git repository"), "{none}");
+}
+
+#[test]
+fn audit_passes_are_counted_apart_from_record_passes() {
+    let m = tiny();
+    let r = run_manifest(&m, &CorpusSource::Synthetic).unwrap();
+    // tiny(): 100 training records, 50 validation records.
+    let mut total = 0u64;
+    for row in &r.rows {
+        if let Row::Ok(o) = row {
+            let expected = if o.phase == "validation" {
+                2 * 100 + 50
+            } else {
+                2 * 100
+            };
+            assert_eq!(o.audit_passes, expected, "{} {}", o.phase, o.arm);
+            total += o.audit_passes;
+        }
+    }
+    assert!(total > 0);
+    assert_eq!(r.compute.actual_audit_passes, total);
+    assert_eq!(
+        r.compute.actual_audit_passes,
+        r.preparation_cost.audit_passes
+            + r.calibration_cost.audit_passes
+            + r.validation_cost.audit_passes
+    );
 }
