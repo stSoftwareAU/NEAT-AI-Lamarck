@@ -370,30 +370,3 @@ impl DifficultyTracker {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ewma_blends_observations() {
-        let scope = DifficultyScope {
-            parent_fingerprint: 7,
-            corpus_key: "k".to_string(),
-            record_count: 1,
-        };
-        let config = ScheduleConfig {
-            ewma_alpha: 0.25,
-            warmup_epochs: 1,
-            revisit_share: 0.0,
-            rare_stratum_share: 0.0,
-        };
-        let mut t = DifficultyTracker::new(scope, vec![0], config).unwrap();
-        assert_eq!(t.ewma[0], None);
-        t.observe(0, 4.0);
-        assert_eq!(t.ewma[0], Some(4.0));
-        t.observe(0, 2.0);
-        assert_eq!(t.ewma[0], Some(3.5));
-        assert_eq!(t.last_seen(0), Some(2.0));
-    }
-}

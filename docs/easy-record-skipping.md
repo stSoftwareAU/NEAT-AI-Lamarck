@@ -441,8 +441,8 @@ result was removed:
 
 A sweep on 18 November of every public item in `record_skip/` found one more:
 `DifficultyTracker::ewma`, an accessor that only a test called (`select`
-reads the EWMA directly). It is removed, and its test is now a unit test in
-`schedule.rs` that reads the field. Every other public item is used by the
+reads the EWMA directly). It is removed, and its integration test checks which record
+`select` keeps after repeated observations. Every other public item is used by the
 experiment itself. `neat_core_tag_from` is public only so that the tests can
 feed it manifest text; the experiment calls it through `neat_core_tag`.
 

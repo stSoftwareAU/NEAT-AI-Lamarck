@@ -69,6 +69,29 @@ fn full_and_warmup_keep_everything() {
 }
 
 #[test]
+fn easy_skip_ranks_records_by_smoothed_error() {
+    let mut tracker = observed(vec![0; 2], &[3.0, 4.0], config(0.25, 0.0, 0.0));
+    let policy = SkipPolicy::EasySkip { reduction: 0.5 };
+    let mut rng = StdRng::seed_from_u64(1);
+
+    // The latest error is lower, but the smoothed error is still 3.5.
+    tracker.observe(1, 2.0);
+    assert_eq!(tracker.last_seen(1), Some(2.0));
+    assert_eq!(
+        tracker.select(1, &policy, &mut rng).unwrap().keep,
+        [false, true]
+    );
+
+    // Two more observations lower the smoothed error below 3.0.
+    tracker.observe(1, 2.0);
+    tracker.observe(1, 2.0);
+    assert_eq!(
+        tracker.select(2, &policy, &mut rng).unwrap().keep,
+        [true, false]
+    );
+}
+
+#[test]
 fn easy_skip_keeps_the_hardest() {
     let t = observed(vec![0; 10], &ramp(10), config(0.5, 0.0, 0.0));
     let mut rng = StdRng::seed_from_u64(1);

@@ -15,7 +15,7 @@ fixes the finding its review blocked on: a test-only fault-injection seam.
   `weight_bench::stats` helpers instead of duplicating them. The regenerated
   evidence is unchanged.
 - `DifficultyTracker::ewma`, a public accessor that only a test called, is
-  removed. Its test is now a unit test in `schedule.rs` that reads the field.
+  removed. The integration test checks which record easy-skip keeps.
   A sweep found no other public item in `record_skip/` used only by tests.
 
 Carried from PR #289, on top of PR #270:
@@ -121,11 +121,11 @@ flowchart LR
 - **met** — Identify code/model/data versions — evidence: `versions` in `docs/evidence/record-skip/summary.json`, `lamarck/tests/record_skip.rs::git_commit_names_the_commit_or_the_cause` — reviewer: met
 - **met** — separate calibration from untouched validation — evidence: `lamarck/src/record_skip/experiment.rs::a_held_out_record_cannot_steer_preparation_or_calibration` — reviewer: met
 - **met** — count all preparation/search costs — evidence: `lamarck/tests/record_skip.rs::audit_passes_are_counted_apart_from_record_passes`, `lamarck/tests/record_skip.rs::learning_rate_sweep_is_counted_and_chooses_by_training_mse`, `lamarck/src/record_skip/experiment.rs::an_aborted_preparation_keeps_the_passes_it_spent` — reviewer: met
-- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `./quality.sh` on `d37cfaf` exited 0 (1004 tests passed, 0 failed); the failed-run tests go through `run_manifest` with no injected failure — reviewer: met
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `./quality.sh` on `d37cfaf` exited 0 (1004 tests passed, 0 failed); `lamarck/tests/record_skip.rs::easy_skip_ranks_records_by_smoothed_error` checks the selected record before and after repeated observations reverse its smoothed ranking; the failed-run tests go through `run_manifest` with no injected failure — reviewer: met
 - **met** — Research runs are separate from routine feature CI — evidence: `lamarck/examples/record_skip_bench.rs`; tests use the `tiny()` and `smoke()` manifests — reviewer: met
 - **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage — evidence: `lamarck/examples/record_skip_bench.rs`, `docs/evidence/record-skip/manifest.json`, `docs/evidence/record-skip/summary.json` — reviewer: met
 - **met** — Fixtures alone do not demonstrate an optimisation benefit — evidence: `docs/easy-record-skipping.md` ("Findings"), which claims no benefit — reviewer: met
-- **met** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost", removal rule), `lamarck/src/record_skip/schedule.rs::tests::ewma_blends_observations` (the test-only `DifficultyTracker::ewma` accessor is removed; no other public item lacks a non-test caller) — reviewer: met
+- **met** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost", removal rule), `lamarck/tests/record_skip.rs::easy_skip_ranks_records_by_smoothed_error` (the test-only `DifficultyTracker::ewma` accessor is removed; no other public item lacks a non-test caller) — reviewer: met
 - **met** — Do not claim success before representative runs — evidence: `docs/easy-record-skipping.md` ("Status"), `CHANGELOG.md` — reviewer: met
 - **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private — evidence: only synthetic evidence is committed — reviewer: met
 - **unrequested** — `AbortedRun`, `write_aborted_outputs` and `run_manifest` returning `Box<AbortedRun>` — reviewer: unrequested — reason: a run that stops early must still report failures, coverage and spent cost, which the issue requires; a bare `String` error dropped them
@@ -182,9 +182,9 @@ flowchart LR
 - Removed from `lamarck/tests/record_skip.rs`: `assert_eq!(a.coverage.planned, 4 + 6);`, `assert_eq!(a.coverage.completed, 10);` and `assert_eq!(runs.lines().count(), 10);`
   - Obsolete: the preparation sweep adds 4 runs
   - Still covered by: `lamarck/tests/record_skip.rs::smoke_run_is_complete_and_deterministic` (now 14)
-- Moved from `lamarck/tests/record_skip.rs`: `ewma_blends_observations` (its `t.ewma(0)` assertions)
+- Replaced in `lamarck/tests/record_skip.rs`: `ewma_blends_observations` (its `t.ewma(0)` assertions)
   - Removed functionality: the test-only `DifficultyTracker::ewma` accessor. `select` reads the field directly.
-  - Still covered by: `lamarck/src/record_skip/schedule.rs::tests::ewma_blends_observations` (same values, read from the private field)
+  - Still covered by: `lamarck/tests/record_skip.rs::easy_skip_ranks_records_by_smoothed_error` (selection follows the smoothed ranking and `last_seen` returns the latest error)
 - After the `ewma` removal: `cargo test --lib record_skip` 10 passed,
   `cargo test --test record_skip` 23 passed, `cargo clippy --all-targets -- -D warnings`
   clean, `cargo fmt --check` clean. The full `./quality.sh` is re-run by the worker.
