@@ -40,8 +40,11 @@ pub struct Manifest {
     pub warmup_epochs: u32,
     /// Calibration grid.
     pub calibration_grid: Vec<GridPoint>,
-    /// Fixed learning rate.
-    pub learning_rate: f64,
+    /// Learning rates tried in the preparation phase (training MSE only).
+    pub learning_rate_grid: Vec<f64>,
+    /// Predeclared compute limit: the most record passes the whole run may
+    /// plan (preparation, calibration and validation together).
+    pub max_record_passes: u64,
     /// Bootstrap resamples.
     pub bootstrap_resamples: usize,
     /// Bootstrap seed.
@@ -67,7 +70,7 @@ impl Manifest {
     /// The predeclared full experiment.
     pub fn predeclared() -> Self {
         Self {
-            version: 1,
+            version: 2,
             epochs: 30,
             train_records: 2000,
             validation_records: 1000,
@@ -79,7 +82,8 @@ impl Manifest {
             rare_stratum_share: 0.10,
             warmup_epochs: 1,
             calibration_grid: grid(),
-            learning_rate: LEARNING_RATE,
+            learning_rate_grid: vec![0.01, 0.05, 0.2, 0.5],
+            max_record_passes: 16_000_000,
             bootstrap_resamples: 2000,
             bootstrap_seed: 267,
             forgetting_tolerance: 1e-4,
@@ -104,6 +108,15 @@ impl Manifest {
 
     /// Refuse an inconsistent manifest, naming the field.
     pub fn validate(&self) -> Result<(), String> {
+        if self.version != 2 {
+            return Err(format!(
+                "version {} is not supported: this build reads version 2",
+                self.version
+            ));
+        }
+        if self.max_record_passes == 0 {
+            return Err("maxRecordPasses must be at least 1".to_string());
+        }
         if self.epochs == 0 {
             return Err("epochs must be at least 1".to_string());
         }
@@ -143,8 +156,17 @@ impl Manifest {
         if self.bootstrap_resamples == 0 {
             return Err("bootstrapResamples must be at least 1".to_string());
         }
-        if !(self.learning_rate > 0.0 && self.learning_rate.is_finite()) {
-            return Err("learningRate must be positive and finite".to_string());
+        if self.learning_rate_grid.is_empty() {
+            return Err("learningRateGrid must not be empty".to_string());
+        }
+        if let Some(r) = self
+            .learning_rate_grid
+            .iter()
+            .find(|r| !(**r > 0.0 && r.is_finite()))
+        {
+            return Err(format!(
+                "learningRateGrid contains {r}: must be positive and finite"
+            ));
         }
         if self.warmup_epochs == 0 {
             return Err("warmupEpochs must be at least 1".to_string());
@@ -172,8 +194,3 @@ impl Manifest {
         Ok(())
     }
 }
-
-/// Learning rate fixed before the predeclared run: on the synthetic suite the
-/// full arm takes training MSE from 0.382 to 0.068 over 30 epochs (0.05 reaches
-/// 0.096, 0.5 degrades to 0.077), so 0.2 is clearly converging without diverging.
-pub const LEARNING_RATE: f64 = 0.2;

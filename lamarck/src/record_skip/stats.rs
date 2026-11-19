@@ -1,39 +1,26 @@
 //! Paired-difference statistics for the record-skip experiment.
 
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{RngExt, SeedableRng};
 use serde::Serialize;
 
-/// Mean of `xs`; NaN when empty.
+/// Mean of `xs` via the shared `weight_bench::stats::mean`; NaN when empty.
 pub(super) fn mean(xs: &[f64]) -> f64 {
-    if xs.is_empty() {
-        return f64::NAN;
-    }
-    xs.iter().sum::<f64>() / xs.len() as f64
+    crate::weight_bench::stats::mean(xs).unwrap_or(f64::NAN)
 }
 
 /// 95% percentile bootstrap interval of the mean of `diffs`.
 ///
-/// Deterministic for a given `seed`. Returns `(NaN, NaN)` for empty input.
+/// Seeds the shared `weight_bench::stats::bootstrap_ci_mean`, so it is
+/// deterministic for a given `seed`. Returns `(NaN, NaN)` for empty input or
+/// zero resamples.
 pub(super) fn bootstrap_mean_ci(diffs: &[f64], resamples: usize, seed: u64) -> (f64, f64) {
-    if diffs.is_empty() || resamples == 0 {
-        return (f64::NAN, f64::NAN);
-    }
-    let mut rng = StdRng::seed_from_u64(seed);
-    let n = diffs.len();
-    let mut means: Vec<f64> = (0..resamples)
-        .map(|_| {
-            let mut sum = 0.0;
-            for _ in 0..n {
-                sum += diffs[rng.random_range(0..n)];
-            }
-            sum / n as f64
-        })
-        .collect();
-    means.sort_by(f64::total_cmp);
-    let lo = ((resamples as f64) * 0.025).floor() as usize;
-    let hi = (((resamples as f64) * 0.975).ceil() as usize).clamp(1, resamples) - 1;
-    (means[lo.min(resamples - 1)], means[hi])
+    crate::weight_bench::stats::bootstrap_ci_mean(
+        diffs,
+        resamples,
+        &mut StdRng::seed_from_u64(seed),
+    )
+    .unwrap_or((f64::NAN, f64::NAN))
 }
 
 /// Outcome of a paired comparison (lower error is better).
