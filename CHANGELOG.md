@@ -266,6 +266,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Follow-up probes and mirror axes identify a synapse by source, target and
+  role (Issue #285).** An `IF` neuron fed twice by one source is now probed on
+  the synapse that actually moved, and retiring one role's axis no longer
+  retires the other's. Untyped synapses keep the `weight:<from>-><to>` axis
+  name; typed ones read `weight:<from>-><to>[<type>]`.
 - **A PR whose base caught up to its earlier version bump is bumped again
   (Issue #286).** `scripts/bump-lamarck-version.sh` skipped whenever the branch
   held an earlier `chore: auto-increment versions for changed projects` commit.
