@@ -144,6 +144,47 @@ assert_bump "moved pin, no src change → bump" 0 "$PIN" --base-ref Develop
 assert_eq "a moved pin bumps the manifest patch" "0.5.2" "$(manifest_version "$PIN")"
 assert_eq "a moved pin syncs Cargo.lock" "0.5.2" "$(lock_version "$PIN")"
 
+# --- base caught up to an earlier bump → bump again (Issue #286) ----------
+# This PR bumped X -> X+1 and its auto-increment commit is still on the branch.
+# Another PR then took Develop to X+1, and this PR merged Develop, so its
+# version now equals base. The old bot commit must not cause a skip: only a
+# version ahead of base is "already bumped".
+BUMPAGAIN="$TMP_ROOT/bump-again"
+make_repo "$BUMPAGAIN" "Develop" "0.1.50"
+git_q "$BUMPAGAIN" checkout --quiet -b issue-286
+echo 'fn helper() {}' >>"$BUMPAGAIN/lamarck/src/main.rs"
+git_q "$BUMPAGAIN" commit --quiet -am "src change"
+set_version "$BUMPAGAIN" "0.1.51"
+sed -i.bak 's/^version = ".*"/version = "0.1.51"/' "$BUMPAGAIN/Cargo.lock"
+rm -f "$BUMPAGAIN/Cargo.lock.bak"
+git_q "$BUMPAGAIN" commit --quiet -am "chore: auto-increment versions for changed projects"
+
+git_q "$BUMPAGAIN" checkout --quiet Develop
+set_version "$BUMPAGAIN" "0.1.51"
+sed -i.bak 's/^version = ".*"/version = "0.1.51"/' "$BUMPAGAIN/Cargo.lock"
+rm -f "$BUMPAGAIN/Cargo.lock.bak"
+echo 'fn other() {}' >"$BUMPAGAIN/lamarck/src/other.rs"
+git_q "$BUMPAGAIN" add -A
+git_q "$BUMPAGAIN" commit --quiet -m "another PR merged first"
+
+git_q "$BUMPAGAIN" checkout --quiet issue-286
+git_q "$BUMPAGAIN" merge --quiet --no-edit Develop
+
+assert_eq "precondition: base caught up to the bot bump" "0.1.51" \
+  "$(manifest_version "$BUMPAGAIN")"
+assert_eq "precondition: old bot commit is still on the branch" "1" \
+  "$(git_q "$BUMPAGAIN" log --format=%H Develop..HEAD \
+    --grep="chore: auto-increment versions for changed projects" | wc -l | tr -d ' ')"
+
+assert_bump "base caught up to an earlier bump → bump again" 0 "$BUMPAGAIN" \
+  --base-ref Develop
+assert_eq "catch-up bump writes the manifest" "0.1.52" "$(manifest_version "$BUMPAGAIN")"
+assert_eq "catch-up bump syncs Cargo.lock" "0.1.52" "$(lock_version "$BUMPAGAIN")"
+
+# Re-running is a no-op: the version is now ahead of base.
+assert_bump "re-run after catch-up bump → skip" 1 "$BUMPAGAIN" --base-ref Develop
+assert_eq "re-run leaves the version alone" "0.1.52" "$(manifest_version "$BUMPAGAIN")"
+
 # --- version behind base → loud failure, never a silent bump -------------
 DOWNGRADE="$TMP_ROOT/downgrade"
 make_repo "$DOWNGRADE" "Develop" "0.3.5"
@@ -157,6 +198,28 @@ assert_eq "downgrade is not papered over" "0.3.4" "$(manifest_version "$DOWNGRAD
 
 # --- unknown base ref → error, not a silent skip -------------------------
 assert_bump "missing base ref → error" 2 "$DOWNGRADE" --base-ref no/such/branch
+
+# --- base with no readable version → error, never a guessed bump (Issue #286) -
+# With no base version the "ahead of base" check cannot tell whether the branch
+# is already bumped, so a re-run would bump again. Refuse instead of guessing.
+NOBASE="$TMP_ROOT/nobase"
+make_repo "$NOBASE" "Develop" "0.4.0"
+sed -i.bak '/^version =/d' "$NOBASE/lamarck/Cargo.toml"
+rm -f "$NOBASE/lamarck/Cargo.toml.bak"
+git_q "$NOBASE" commit --quiet -am "base without a version"
+git_q "$NOBASE" checkout --quiet -b issue-286-nobase
+cat >"$NOBASE/lamarck/Cargo.toml" <<'EOF'
+[package]
+name = "neat_ai_lamarck"
+version = "0.4.0"
+edition = "2024"
+EOF
+echo 'fn helper() {}' >>"$NOBASE/lamarck/src/main.rs"
+git_q "$NOBASE" commit --quiet -am "src change"
+
+assert_bump "unreadable base version → error" 2 "$NOBASE" --base-ref Develop
+assert_eq "unreadable base version leaves the manifest alone" "0.4.0" \
+  "$(manifest_version "$NOBASE")"
 
 if [[ "$FAILS" -ne 0 ]]; then
   echo "FAIL: $FAILS assertion(s) failed" >&2

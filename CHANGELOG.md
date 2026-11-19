@@ -271,6 +271,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the synapse that actually moved, and retiring one role's axis no longer
   retires the other's. Untyped synapses keep the `weight:<from>-><to>` axis
   name; typed ones read `weight:<from>-><to>[<type>]`.
+- **A PR whose base caught up to its earlier version bump is bumped again
+  (Issue #286).** `scripts/bump-lamarck-version.sh` skipped whenever the branch
+  held an earlier `chore: auto-increment versions for changed projects` commit.
+  A PR that merged a base another PR had bumped to the same version then
+  shipped changed crate sources under an unchanged version. The script now
+  skips only when the version is ahead of base, and a base whose manifest
+  version cannot be read fails with exit 2 rather than bumping on every run.
+  The new cases in `scripts/test-bump-lamarck-version.sh` cover both.
 
 - **The Rust jobs install their toolchain through a local action, so the Vibe
   Coder pre-push gate can replay their cargo checks (Issue #268).** The
