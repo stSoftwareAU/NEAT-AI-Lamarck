@@ -1037,9 +1037,10 @@ only comparison [Phase 5](#phase-5--authoritative-candidate-scoring) permits. A
 twin the hard bias/weight limit would clamp is not emitted at all: a clamped
 `−δ` is no longer the antithesis of `+δ`, and a pair that is not exactly
 opposite cannot cancel the noise it exists to cancel. Both halves carry a
-`mirror` provenance entry naming the `axis` (`bias:<uuid>` or
-`weight:<from>-><to>`), the signed `delta` and the `role` (`original` /
-`mirror`), which is what lets `report` re-pair them from a journal alone.
+`mirror` provenance entry naming the `axis` (`bias:<uuid>`,
+`weight:<from>-><to>`, or `weight:<from>-><to>[<type>]` for a typed synapse
+such as an `IF` neuron's `condition` input), the signed `delta` and the `role`
+(`original` / `mirror`), which is what lets `report` re-pair them from a journal alone.
 
 ```mermaid
 flowchart TD

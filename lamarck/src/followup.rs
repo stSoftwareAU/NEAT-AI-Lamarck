@@ -27,7 +27,7 @@
 use crate::backprop::BackpropConfig;
 use crate::candidates::{Candidate, CandidateProvenance, CandidateStrategy, candidate_fingerprint};
 use crate::structural::NEURON_GROWTH_SQUASHES;
-use neat_core::CreatureExport;
+use neat_core::{CreatureExport, SynapseExport};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 
@@ -80,12 +80,15 @@ pub enum ProbeTarget {
         /// Neuron uuid.
         uuid: String,
     },
-    /// Weight of the synapse between these uuids.
+    /// Weight of the synapse between these uuids in this role.
     Weight {
         /// Source neuron uuid.
         from_uuid: String,
         /// Destination neuron uuid.
         to_uuid: String,
+        /// Role of the synapse; `None` for an ordinary synapse. Two synapses
+        /// may share endpoints into an `IF` neuron and differ only in role.
+        synapse_type: Option<String>,
     },
 }
 
@@ -94,9 +97,11 @@ impl ProbeTarget {
     pub fn axis(&self) -> String {
         match self {
             ProbeTarget::Bias { uuid } => format!("bias:{uuid}"),
-            ProbeTarget::Weight { from_uuid, to_uuid } => {
-                format!("weight:{from_uuid}->{to_uuid}")
-            }
+            ProbeTarget::Weight {
+                from_uuid,
+                to_uuid,
+                synapse_type,
+            } => crate::mirror::weight_axis(from_uuid, to_uuid, synapse_type.as_deref()),
         }
     }
 }
@@ -355,11 +360,16 @@ pub fn plan_probes(previous: &CreatureExport, winner: &CreatureExport) -> Vec<Fo
         let target = ProbeTarget::Weight {
             from_uuid: synapse.from_uuid.clone(),
             to_uuid: synapse.to_uuid.clone(),
+            synapse_type: synapse.synapse_type.clone(),
         };
-        let before = previous
-            .synapses
-            .iter()
-            .find(|s| s.from_uuid == synapse.from_uuid && s.to_uuid == synapse.to_uuid);
+        let before = previous.synapses.iter().find(|s| {
+            same_synapse(
+                s,
+                &synapse.from_uuid,
+                &synapse.to_uuid,
+                synapse.synapse_type.as_deref(),
+            )
+        });
         match before {
             // A synapse the winner added: the whole weight is the winning move,
             // so the probes scale around it.
@@ -372,6 +382,16 @@ pub fn plan_probes(previous: &CreatureExport, winner: &CreatureExport) -> Vec<Fo
     }
 
     interleave(vec![weights, squashes, biases])
+}
+
+/// True when `synapse` has this source, target and role.
+///
+/// The role matters: one source may feed an `IF` neuron twice, so the endpoints
+/// alone do not identify a synapse.
+fn same_synapse(synapse: &SynapseExport, from_uuid: &str, to_uuid: &str, ty: Option<&str>) -> bool {
+    synapse.from_uuid == from_uuid
+        && synapse.to_uuid == to_uuid
+        && synapse.synapse_type.as_deref() == ty
 }
 
 /// Round-robin the family lists into one proposal order.
@@ -441,11 +461,15 @@ pub fn probe_candidate(
                     let neuron = creature.neurons.iter().find(|n| &n.uuid == uuid)?;
                     (neuron.bias, backprop.limit_bias_scale)
                 }
-                ProbeTarget::Weight { from_uuid, to_uuid } => {
+                ProbeTarget::Weight {
+                    from_uuid,
+                    to_uuid,
+                    synapse_type,
+                } => {
                     let synapse = creature
                         .synapses
                         .iter()
-                        .find(|s| &s.from_uuid == from_uuid && &s.to_uuid == to_uuid)?;
+                        .find(|s| same_synapse(s, from_uuid, to_uuid, synapse_type.as_deref()))?;
                     (synapse.weight, backprop.limit_weight_scale)
                 }
             };
@@ -462,11 +486,15 @@ pub fn probe_candidate(
                 ProbeTarget::Bias { uuid } => {
                     creature.neurons.iter_mut().find(|n| &n.uuid == uuid)?.bias = new;
                 }
-                ProbeTarget::Weight { from_uuid, to_uuid } => {
+                ProbeTarget::Weight {
+                    from_uuid,
+                    to_uuid,
+                    synapse_type,
+                } => {
                     creature
                         .synapses
                         .iter_mut()
-                        .find(|s| &s.from_uuid == from_uuid && &s.to_uuid == to_uuid)?
+                        .find(|s| same_synapse(s, from_uuid, to_uuid, synapse_type.as_deref()))?
                         .weight = new;
                 }
             }
@@ -512,7 +540,7 @@ pub fn probe_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neat_core::{NeuronExport, SynapseExport, parse_creature_json};
+    use neat_core::{NeuronExport, parse_creature_json};
 
     const TINY: &str = r#"{
       "semanticVersion": "4.0.0",
@@ -600,6 +628,99 @@ mod tests {
             candidates,
             experiments,
         }
+    }
+
+    /// An `IF` neuron fed twice by one source, in two roles.
+    const IF_TWICE: &str = r#"{
+      "semanticVersion": "4.0.0",
+      "forwardOnly": true,
+      "input": 1,
+      "output": 1,
+      "neurons": [
+        {"type":"output","uuid":"if1","bias":0.0,"squash":"IF"}
+      ],
+      "synapses": [
+        {"fromUUID":"input-0","toUUID":"if1","weight":0.5,"type":"condition"},
+        {"fromUUID":"input-0","toUUID":"if1","weight":1.5,"type":"positive"}
+      ]
+    }"#;
+
+    fn if_twice_pair() -> (CreatureExport, CreatureExport) {
+        let previous = parse_creature_json(IF_TWICE).expect("the IF creature parses");
+        let mut winner = previous.clone();
+        winner.synapses[1].weight = 1.7;
+        (previous, winner)
+    }
+
+    /// A moved role synapse is probed on that role only, sized by its own move.
+    #[test]
+    fn a_moved_role_synapse_is_probed_on_that_role_only() {
+        let (previous, winner) = if_twice_pair();
+        let probes = plan_probes(&previous, &winner);
+        assert_eq!(probes.len(), 3);
+        let expected = [0.1, -0.1, 0.2];
+        for (probe, want) in probes.iter().zip(expected) {
+            match probe {
+                FollowUpProbe::Scalar { target, step } => {
+                    assert_eq!(
+                        target,
+                        &ProbeTarget::Weight {
+                            from_uuid: "input-0".to_string(),
+                            to_uuid: "if1".to_string(),
+                            synapse_type: Some("positive".to_string()),
+                        }
+                    );
+                    assert!((step - want).abs() < 1e-12, "step {step} vs {want}");
+                }
+                other => panic!("expected a scalar probe, got {other:?}"),
+            }
+        }
+    }
+
+    /// Nothing moved, so nothing is probed, whatever the shared endpoints.
+    #[test]
+    fn unmoved_role_synapses_plan_no_probes() {
+        let (previous, _) = if_twice_pair();
+        let winner = previous.clone();
+        assert!(plan_probes(&previous, &winner).is_empty());
+        assert!(
+            FollowUpPlan::from_accept(&previous, &winner, parent(), budget(3, 1)).is_none(),
+            "an empty probe list yields no plan"
+        );
+    }
+
+    /// The follow-up candidates step the role synapse that moved.
+    #[test]
+    fn follow_up_probes_step_the_role_synapse_that_moved() {
+        let (previous, winner) = if_twice_pair();
+        let mut plan = FollowUpPlan::from_accept(&previous, &winner, parent(), budget(3, 1))
+            .expect("a moved synapse plans probes");
+        let out = emit_into(&mut plan, &winner, &mut HashSet::new(), &[]);
+        assert_eq!(out.len(), 3);
+        let expected = [1.8, 1.6, 1.9];
+        for (candidate, want) in out.iter().zip(expected) {
+            assert_eq!(candidate.creature.synapses[0].weight, 0.5);
+            let got = candidate.creature.synapses[1].weight;
+            assert!((got - want).abs() < 1e-12, "weight {got} vs {want}");
+        }
+    }
+
+    /// Retiring one role's axis leaves the other role's probes alive.
+    #[test]
+    fn retiring_one_role_axis_leaves_the_other_role_live() {
+        let (previous, winner) = if_twice_pair();
+        let dead = vec!["weight:input-0->if1[condition]".to_string()];
+        let mut plan = FollowUpPlan::from_accept(&previous, &winner, parent(), budget(3, 1))
+            .expect("a moved synapse plans probes");
+        let out = emit_into(&mut plan, &winner, &mut HashSet::new(), &dead);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|c| c.creature.synapses[0].weight == 0.5));
+
+        let dead = vec!["weight:input-0->if1[positive]".to_string()];
+        let mut plan = FollowUpPlan::from_accept(&previous, &winner, parent(), budget(3, 1))
+            .expect("a moved synapse plans probes");
+        let out = emit_into(&mut plan, &winner, &mut HashSet::new(), &dead);
+        assert!(out.is_empty());
     }
 
     /// A winner that added a synapse is probed at nearby weight scales.
