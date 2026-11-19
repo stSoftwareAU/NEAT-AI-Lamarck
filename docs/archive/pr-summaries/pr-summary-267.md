@@ -1,266 +1,207 @@
+# PR summary — Issue #267 follow-up: record-skip harness hardening
+
 ## Summary
 
-Adds an **opt-in, offline** experiment on temporarily skipping easy records
-during refinement. Each epoch it drives Lamarck's own refinement path over the
-records a schedule keeps, and compares seven arms:
+This PR follows up the easy-record skipping experiment that PR #270 merged.
+It carries the work of the closed PR #289 onto the current `Develop` tip and
+fixes the finding its review blocked on: a test-only fault-injection seam.
 
-- full data;
-- matched random skipping at 25%, 50% and 75% processing reductions;
-- per-record error-EWMA easy skipping at 25%, 50% and 75%, with rare-stratum
-  protection and periodic revisits of omitted records.
+- The `#[cfg(test)]` divergence hook in `Runner::run_one` is removed, along
+  with the two tests that used it or called the private learning-rate
+  selector. No real learning rate diverges on one calibration seed but not
+  another, so that scenario was manufactured. The failed-run cost assertions
+  now run through the public `run_manifest`.
+- `record_skip::stats::mean` and `bootstrap_mean_ci` now call the shared
+  `weight_bench::stats` helpers instead of duplicating them. The regenerated
+  evidence is unchanged.
+- `DifficultyTracker::ewma`, a public accessor that only a test called, is
+  removed. The integration test checks which record easy-skip keeps.
+  A sweep found no other public item in `record_skip/` used only by tests.
 
-The predeclared synthetic suite was run, and its machine-readable results are
-committed. A corpus mode runs the same protocol on a real creature and its
-records. Nothing in the optimisation loop calls this code, no default changed
-and nothing was ported.
+Carried from PR #289, on top of PR #270:
 
-The source paper's text (arXiv 2611.10386) was still unreachable from the
-sandbox. Its method, Sequence Pruning, is pinned from the authors' released
-code at a fixed commit, along with its DSI-targeted variant and the
-InfoBatch, B-PAS and EL2N baselines. `docs/easy-record-skipping.md` says how
-the tested scheme differs from them. After the negative synthetic result,
-optional harness code that fed no reported result was removed. The
-representative (private) run is outstanding, and the doc now carries an explicit
-removal rule for the whole harness. Part of #267.
+- a counted learning-rate preparation sweep (training MSE only);
+- a predeclared `maxRecordPasses` compute limit, with the planned bound
+  checked (overflow-safe) before any run;
+- held-out records read only by validation-phase runs;
+- audit passes counted apart from record passes;
+- code, crate and neat-core versions plus the git commit in `summary.json`,
+  with the git probe shared with `weight_bench::provenance::git_state`;
+- per-arm means;
+- failed runs charged with the passes they spent;
+- runs that stop early (`AbortedRun`) keep their rows and costs;
+- the method pinned to the authors' released code.
 
-The branch also carries two CI-plumbing commits, cherry-picked unchanged from
-the #268 branch (`98e7b28`, `5614dd8`). Without them the worker could not push
-this branch at all:
-
-- `ci.yml`'s `quality` job, `cargo-quality.yml` and `family-sync.yml` now
-  install Rust through `.github/actions/rust-toolchain`. That composite action
-  wraps the same pinned `dtolnay/rust-toolchain` SHA with `rustfmt, clippy`.
-- The family-sync "Gate the refreshed scripts" step falls back to the job's
-  `CANONICAL_PATHS` list when the variable is unset.
-  `scripts/check-family-sync-workflow.sh` gains a rule that fails when the
-  fallback is missing or differs from the job's list.
+No success is claimed. The representative corpus run is an owner step and is
+still outstanding, and the paper itself could not be read from this host.
+Part of #267.
 
 ## Spec
 
 ### Intent and Rationale
 
-- The issue owns a controlled comparison, not a production change. The
-  harness lives in `lamarck/src/record_skip/` and only the
-  `record_skip_bench` example and `lamarck/tests/record_skip.rs` call it.
-- "Integrate the update path with Backpropagation": in this repository the
-  refinement path is `propagate_layout.rs` plus `backprop.rs`, over neat-core's
-  `propagate_topological_loop`. `refine` reuses that path:
-  `LearningPlan`/`LearningScan`, the same code `accumulate_creature_learning`
-  uses, then `apply_learnings` with `calculate_learning_rate`. It is not a
-  second implementation.
-- Matched random skipping keeps the same protected set and the same processed
-  count as easy skipping. The only difference between the two arms is the
-  difficulty signal.
+- The review of PR #289 rejected a `cfg(test)` branch that turned a successful
+  refinement into an error. Running the real code showed that no rate from
+  1e2 to 1e300 diverges on the synthetic corpus, and a file corpus is the same
+  for every seed. The scenario cannot occur, so it is removed rather than
+  re-staged.
+- Preparation and calibration choices depend on training data only. This is
+  the issue's "separate calibration from untouched validation".
 
 ### Essential Design Decisions
 
-- Difficulty scores are bound to a `DifficultyScope` (parent fingerprint,
-  corpus key, record count). `ensure_scope` refuses a different parent or
-  corpus before every epoch's selection, so stale scores are never shared.
-- Fitness and validation records are never pruned. The full training MSE and
-  the untouched validation MSE are measured over every record after
-  refinement. That audit is not charged to the arm. Calibration picks the
-  schedule (EWMA α, revisit share) on calibration seeds by **training** MSE
-  only.
-- Strata are application-agnostic: equal-width bins of the first target value.
-  Strata under `rareStratumShare` are protected.
-- The verdict rule is predeclared in `stats.rs::verdict`. `better` needs the
-  95% bootstrap CI of the paired validation-MSE difference wholly below zero
-  **and** no mean rare-stratum regression. `worse` needs the CI wholly above
-  zero. Anything else is `inconclusive`. The learning rate 0.2 was fixed in
-  `manifest.rs` from a full-arm sweep on two seeds before the predeclared run.
+- `choose_learning_rate` keeps its rule that a rate must complete every
+  calibration seed. It is a defensive guard that no input reaches today; its
+  doc comment and `docs/easy-record-skipping.md` say so. No test reaches that
+  case, because the only way to stage one was the removed seam.
+- `record_skip::stats::{mean, bootstrap_mean_ci}` stay as thin adapters, so
+  their NaN-for-empty contract and the ~20 call sites are unchanged. At 2000
+  resamples the old and shared bootstraps pick the same order statistics
+  (50 and 1949) from the same draws.
+- Tests use the private `run_validated` only for values `Manifest::validate`
+  refuses (`ewmaAlpha` 0, `warmupEpochs` 0, reduction 1.5), which no public
+  path can reach.
+- `RunOutcome.finalValidationMse` is `null` on preparation and calibration
+  rows. `runs.jsonl` is written, never read by code, and not committed; the
+  manifest stays at version 2.
 
 ### Undiscoverable Facts
 
-- arXiv 2611.10386 is "Pruning DNA Sequence" (Satter, Islam and Islam). On
-  14 November, `curl` to `arxiv.org`, `export.arxiv.org`, Semantic Scholar,
-  alphaXiv and Hugging Face all failed with "CONNECT tunnel failed, response
-  403", while `pypi.org` returned 200. `gh search code 2611.10386` found the
-  abstract, which names <https://github.com/FaiasPromit/pruning-dna-sequence>.
-  The method is pinned from `dnabert2/pretraining/run_mlm.py` at `804aedb`
-  (`run_epoch_end_pruning`). At each epoch end it **permanently** removes
-  sequences whose windowed accuracy lies in `[lower, 1.0]`. It has no revisits
-  and no strata, and its `RP` control is a random subset fixed before
-  training. The same commit also pins:
-  - DSI-targeted SP (`run_mlm_dsi_targeted.py`): a geometric or linear
-    schedule of active counts, filled by removing the highest-accuracy
-    sequences;
-  - the DSI formula (`analysis/compute_dsi.py`);
-  - InfoBatch (`infobatch.py`, r 0.5, delta 0.875): below-mean-loss sequences
-    are skipped by a per-epoch coin flip, with 1/(1 - r) rescaling and a
-    full-data tail;
-  - B-PAS and EL2N.
-
-  InfoBatch is the closest to the issue's temporary skipping. The scheme
-  tested here is the issue's own (temporary EWMA skipping at fixed
-  reductions), so SP and InfoBatch are documented but not run as arms. On a
-  retry on 14 November, the web-fetch tool's proxy also refused the arXiv
-  abstract and PDF, alphaXiv and Hugging Face.
-- No `stSoftwareAU` repository named Backpropagation exists (`gh repo list
-  stSoftwareAU`). Lamarck's refinement lives in this repository.
-- The synthetic run took 15 s wall in release, on a shared, parallel
-  container. The timing is indicative only.
-- All five earlier attempts on this issue died at the worker's pre-push gate
-  with "`cargo +29eef336d9b2848a0b548edc03f92a220660cdb8 --version` exited
-  101: error: no such command: `+…`". The gate takes the `dtolnay/rust-toolchain`
-  ref as a toolchain name, and this host has no rustup. A local action has no
-  such ref, so the gate runs plain `cargo`. The gate also re-runs a changed
-  workflow's ShellCheck step without the job's `env:`, which is why the
-  `CANONICAL_PATHS` fallback is needed. That defect is in VibeCoder, which this
-  repository does not depend on. The other workflows (`ci.yml`'s `validation`
-  job, `auto-format`, `cargo-audit`, `sbom`, `security`) keep the inline step.
-- The CHANGELOG "Fixed" entry carried over from #268 still names Issue #268.
-  It was kept word for word so both branches merge cleanly.
+- arXiv is still unreachable from this host. On 2026-11-18 at 21:00Z,
+  `curl` to the abstract, the PDF, `export.arxiv.org`, alphaXiv, Hugging Face,
+  the Wayback Machine, Semantic Scholar and `r.jina.ai` failed with
+  `CONNECT tunnel failed, response 403`, and the web-fetch tool's proxy refused
+  the PDF. The authors' repository is still at `804aedb`, with no paper copy. The method stays pinned from the
+  authors' released code at `804aedb`.
+- A NaN or infinite training *input* does not fail a run, because the network
+  sanitises inputs. Only a non-finite training *target* does, so the
+  training-side failure fixtures use `train[0].outputs[0] = NaN`.
+- `scripts/bump-lamarck-version.sh --base-ref origin/Develop` skipped the bump
+  because an older auto-increment commit (`a6bcc83`) is on the branch, while
+  the version still equalled the base. The bump to 0.1.51 was made by hand.
 
 ## Evidence
 
-Backend/CLI only, so there is no UI. The predeclared synthetic suite was run
-with `cargo run --release --example record_skip_bench -- /tmp/rsb-final`. Its
-outputs are
-[`docs/evidence/record-skip/summary.json`](../../evidence/record-skip/summary.json)
-and [`manifest.json`](../../evidence/record-skip/manifest.json). The write-up
-is [`docs/easy-record-skipping.md`](../../easy-record-skipping.md).
-
-- Coverage: 228 of 228 runs completed, 0 failed. Versions: crate 0.1.46,
-  neat-core v0.23.4.
-- Calibration chose α 0.7 and revisit share 0.25. Calibration cost 4,464,000
-  record passes, which is more than the whole validation phase (2,952,000).
-
-| comparison | mean Δ validation MSE | 95% CI | rare-stratum Δ | verdict |
-|---|---|---|---|---|
-| easy-25 vs random-25 | +0.0015 | [+0.0008, +0.0023] | +0.094 | worse |
-| easy-50 vs random-50 | −0.0028 | [−0.0049, −0.0010] | +0.198 | inconclusive |
-| easy-75 vs random-75 | −0.0368 | [−0.0427, −0.0312] | +0.344 | inconclusive |
-| easy-25 vs full | +0.0007 | [+0.0003, +0.0012] | −0.013 | worse |
-| easy-50 vs full | +0.0002 | [−0.0006, +0.0011] | −0.095 | inconclusive |
-| easy-75 vs full | +0.0062 | [+0.0029, +0.0098] | −0.341 | worse |
-
-- **Negative finding:**
-  - At 50% and 75%, easy skipping lowers overall validation MSE against
-    matched random skipping, but it raises rare-stratum error, so the
-    predeclared guard makes both `inconclusive`.
-  - No easy-skip arm beats full data.
-  - The forgotten share rises when records are skipped: 0.381 for full data
-    against 0.46 to 0.57 for the skipped arms.
-- These are synthetic fixtures only. They do not show a NEAT-AI benefit.
-
 ```mermaid
 flowchart LR
-    M[predeclared manifest] --> C[calibration seeds<br/>grid by training MSE]
-    C --> S[chosen schedule]
-    M --> V[untouched validation seeds]
-    S --> V
-    V --> A[full / random-R / easy-R<br/>same parent, same corpus, paired]
-    A --> R[uncounted audit: full train MSE,<br/>validation, strata, forgetting]
-    R --> J[summary.json + runs.jsonl]
+    G{bound representable<br/>and within maxRecordPasses?} -- no --> R[AbortedRun: refused, no rows]
+    G -- yes --> P[Preparation: LR sweep<br/>training audit only]
+    P --> C[Calibration: grid<br/>training audit only]
+    C --> V[Validation: full / random / easy<br/>training + held-out audit]
+    P & C & V --> K[cost: recordPasses + auditPasses<br/>per run, phase, compute]
 ```
 
-Owner step: run the corpus mode (see `docs/easy-record-skipping.md`) on the
-private production creature and corpus, on a quiet machine, and keep the
-results private. That run decides whether `record_skip/` stays or is removed.
+- Divergence probe: a scratch example (deleted) ran `run_manifest` with
+  `learningRateGrid` `[0.05, X]` for X in 1e2, 1e4, 1e8, 1e15, 1e30, 1e100 and
+  1e300, on 8 calibration seeds. Every rate completed all 8 seeds
+  (`sweep [(0.05, 8), (X, 8)]`).
+- Synthetic suite re-run with
+  `cargo run --release --example record_skip_bench -- OUT_DIR`:
+  - at clean commit `6cc10f6` (shared stats): `manifest.json` was
+    byte-identical, and `summary.json` matched the committed file in every
+    field except `versions.gitCommit`;
+  - at clean commit `9cdf29f` (crate 0.1.51): the same, with
+    `versions.crate` 0.1.51. This is the committed evidence.
+- This is a backend/CLI change; there is no UI surface.
 
 ## Acceptance Criteria
 
 <!-- vibe-spec-review inputs="diff+issue-body" -->
 
-- **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source": SP, DSI-targeted SP, DSI, InfoBatch, B-PAS and EL2N pinned from the authors' code at `804aedb`, with how the repository is tied to the arXiv ID) — reviewer: partial — reason: the paper text was never readable from the sandbox (the proxy refused it again this run), and the pin was committed after the synthetic run, not before it.
-- **met** — Do not claim success before representative runs — evidence: `docs/easy-record-skipping.md` (Status, Findings), the README #267 row, the CHANGELOG entry and `lamarck/src/record_skip/mod.rs` all say synthetic-only, negative or inconclusive, with the representative run outstanding — reviewer: met
-- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost": what was removed, what was kept and why, and a removal rule); `lamarck/src/record_skip/{experiment,schedule,stats}.rs`; `lamarck/tests/record_skip.rs::tracker_refuses_strata_that_do_not_match_record_count`; a re-run reproduces `summary.json` byte for byte — reviewer: partial — reason: optional code inside the harness was removed, but the harness itself (about 2,050 lines, `pub mod record_skip`) still ships, with its removal deferred to the owner's representative run or the next release.
-- **met** — Opt-in only; parents immutable; no default change — evidence: `lamarck/tests/record_skip.rs::refine_full_lowers_train_mse_and_keeps_parent` — reviewer: met
-- **met** — Reuse the existing refinement mechanism — evidence: `lamarck/src/record_skip/experiment.rs` (`LearningPlan`, `LearningScan`, `apply_learnings`, `calculate_learning_rate`) — reviewer: met
-- **partial** — Predeclare controls, seeds, sample size, compute limits and criteria; identify versions; count all preparation costs — evidence: `docs/evidence/record-skip/manifest.json`, `stats.rs::verdict` — reviewer: partial — reason: no compute limit is declared, versions carry no git SHA, and the learning-rate sweep is not counted in the cost table.
-- **met** — Deterministic positive and negative tests; normal quality checks pass — evidence: `lamarck/tests/record_skip.rs` (17 tests) and `lamarck/src/record_skip/experiment.rs` (2 unit tests for the run-failure path: `refused_grid_point_is_reported_beside_a_valid_one`, `all_failed_calibration_names_the_first_failure`); `neat_core_tag` is read from `lamarck/Cargo.toml`, so a moved pin cannot fail a test (`reported_neat_core_tag_follows_the_cargo_toml_pin`) — reviewer: met
-- **met** — Reproducible command and manifest, machine-readable results with paired distributions, uncertainty, failures and coverage — evidence: `docs/evidence/record-skip/summary.json` (228/228) — reviewer: met
-- **partial** — Record stratum error and forgetting — evidence: `strataValidationMse`, `rareStratumValidationMse` and `forgottenShare` in each `runs.jsonl` row — reviewer: partial — reason: `summary.json` aggregates only the rare-stratum error, and `runs.jsonl` is not committed.
-- **partial** — Integrate the update path with Backpropagation if it owns refinement — evidence: `lamarck/src/record_skip/experiment.rs` uses Lamarck's port of the update path — reviewer: partial — reason: the README names NEAT-AI (TypeScript) as the current backpropagation implementation, and the doc does not say whether that repository owns refinement.
-- **met** — Application-agnostic public code; private results stay private — evidence: `lamarck/src/record_skip/corpus.rs` (synthetic fixtures only); corpus-mode results are marked private — reviewer: met
-- **unrequested** — the `.github/actions/rust-toolchain` action, its use in `ci.yml`, `cargo-quality.yml` and `family-sync.yml`, the `CANONICAL_PATHS` fallback with its check rule and tests, and the #268 CHANGELOG entry — reviewer: unrequested — reason: cherry-picked unchanged from the #268 branch; without them the worker's pre-push gate refuses every Rust change on this branch.
+- **met** — Maintain per-record error EWMA during refinement; temporarily omit consistently easy examples while preserving rare strata and periodically sampling omitted records — evidence: `lamarck/src/record_skip/schedule.rs` (merged in #270), `lamarck/tests/record_skip.rs::easy_skip_record_passes_follow_the_rule` — reviewer: met
+- **met** — Compare full data, matched random skipping and 25/50/75% processing reductions — evidence: `docs/evidence/record-skip/summary.json` (`arms`, `comparisons`) — reviewer: met
+- **met** — Record scheduling/refresh cost, forgetting, stratum error, full fitness and untouched validation outcomes — evidence: `lamarck/tests/record_skip.rs::arms_summarise_validation_runs` — reviewer: met
+- **met** — Do not prune fitness/validation records or share stale difficulty scores across incompatible parents/corpora — evidence: `lamarck/src/record_skip/experiment.rs` (`refine_inner` audits every training record, and every held-out record in validation runs), `lamarck/tests/record_skip.rs::easy_skip_record_passes_follow_the_rule` — reviewer: met
+- **met** — Integrate the update path with Backpropagation if it owns the actual refinement implementation — evidence: `docs/easy-record-skipping.md` ("Backpropagation ownership") — reviewer: met
+- **partial** — Read and pin the full method before reproducing it — evidence: `docs/easy-record-skipping.md` ("Source") — reviewer: partial — reason: arXiv still returns 403 through this host's proxy (fifth retry, 2026-11-18 21:00Z), so the paper is not read; the method is pinned from the authors' released code at `804aedb`, and someone with arXiv access must read the paper and confirm or correct that pin
+- **met** — transfer to NEAT-AI remains experimental — evidence: `docs/easy-record-skipping.md` ("Status") — reviewer: met
+- **met** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms — evidence: `lamarck/src/record_skip/stats.rs` (calls `weight_bench::stats`), `lamarck/src/record_skip/experiment.rs::git_commit` (formats `weight_bench::provenance::git_state`), `lamarck/tests/record_skip.rs::git_commit_names_the_commit_or_the_cause`, `lamarck/tests/record_skip.rs::stratum_edges_bin_first_targets` — reviewer: met
+- **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change — evidence: only `record_skip/`, its example, tests and docs change; `lamarck/tests/record_skip.rs::refine_full_lowers_train_mse_and_keeps_parent` — reviewer: met
+- **met** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria — evidence: `docs/evidence/record-skip/manifest.json`, `lamarck/tests/record_skip.rs::compute_limit_refuses_a_manifest_over_budget`, `lamarck/src/record_skip/experiment.rs::a_compute_bound_that_overflows_is_refused_before_any_run` — reviewer: met
+- **met** — Identify code/model/data versions — evidence: `versions` in `docs/evidence/record-skip/summary.json`, `lamarck/tests/record_skip.rs::git_commit_names_the_commit_or_the_cause` — reviewer: met
+- **met** — separate calibration from untouched validation — evidence: `lamarck/src/record_skip/experiment.rs::a_held_out_record_cannot_steer_preparation_or_calibration` — reviewer: met
+- **met** — count all preparation/search costs — evidence: `lamarck/tests/record_skip.rs::audit_passes_are_counted_apart_from_record_passes`, `lamarck/tests/record_skip.rs::learning_rate_sweep_is_counted_and_chooses_by_training_mse`, `lamarck/src/record_skip/experiment.rs::an_aborted_preparation_keeps_the_passes_it_spent` — reviewer: met
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks — evidence: `./quality.sh` on `d37cfaf` exited 0 (1004 tests passed, 0 failed); `lamarck/tests/record_skip.rs::easy_skip_ranks_records_by_smoothed_error` checks the selected record before and after repeated observations reverse its smoothed ranking; the failed-run tests go through `run_manifest` with no injected failure — reviewer: met
+- **met** — Research runs are separate from routine feature CI — evidence: `lamarck/examples/record_skip_bench.rs`; tests use the `tiny()` and `smoke()` manifests — reviewer: met
+- **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage — evidence: `lamarck/examples/record_skip_bench.rs`, `docs/evidence/record-skip/manifest.json`, `docs/evidence/record-skip/summary.json` — reviewer: met
+- **met** — Fixtures alone do not demonstrate an optimisation benefit — evidence: `docs/easy-record-skipping.md` ("Findings"), which claims no benefit — reviewer: met
+- **met** — Record negative findings and remove optional code that does not earn its maintenance cost — evidence: `docs/easy-record-skipping.md` ("Findings", "Maintenance cost", removal rule), `lamarck/tests/record_skip.rs::easy_skip_ranks_records_by_smoothed_error` (the test-only `DifficultyTracker::ewma` accessor is removed; no other public item lacks a non-test caller) — reviewer: met
+- **met** — Do not claim success before representative runs — evidence: `docs/easy-record-skipping.md` ("Status"), `CHANGELOG.md` — reviewer: met
+- **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private — evidence: only synthetic evidence is committed — reviewer: met
+- **unrequested** — `AbortedRun`, `write_aborted_outputs` and `run_manifest` returning `Box<AbortedRun>` — reviewer: unrequested — reason: a run that stops early must still report failures, coverage and spent cost, which the issue requires; a bare `String` error dropped them
+- **unrequested** — refusal of manifest `version != 2` and `maxRecordPasses == 0`, with `version_1_manifest_file_fails_loudly` — reviewer: unrequested — reason: the manifest shape changed, so a version-1 file fails loudly instead of being misread
+- **unrequested** — `schedule_choice_skips_a_refused_point_and_takes_the_lowest_diff` — reviewer: unrequested — reason: pins the calibration choice after the preparation phase changed the grid order in the existing refused-grid test
+- **unrequested** — the network-retry log and search fragments in `docs/easy-record-skipping.md` ("Source") — reviewer: unrequested — reason: it records why the paper is not read, which the "read and pin" criterion needs
 
 ## Standards Review
 
 <!-- vibe-standards-review inputs="diff+CODING-STANDARDS.md" -->
 
-- **violation** — CONTRIBUTING.md "Version bumping" (bump the patch version when `lamarck/src/` changes) — evidence: `lamarck/Cargo.toml:3` — reason: not fixed in this diff. The committed evidence records crate `0.1.46`, and the PR bot's auto-increment bumps the version on the PR.
-- **clean** — there is no CODING-STANDARDS.md, so the review used CONTRIBUTING.md. Clean: the CHANGELOG `[Unreleased]` entry; every removed item is confirmed gone by grep; every kept item is present; the doc's removed/kept lists match the code; the test changes include allowed controls; the removal-rule targets exist.
+- **violation** — a test named as evidence did not exist (`failed_runs_charge_the_passes_they_spent`) — evidence: `docs/archive/pr-summaries/pr-summary-267.md:322` — reason: fixed in this diff; the summary was rewritten and now cites `an_aborted_preparation_keeps_the_passes_it_spent`
+- **violation** — crate version not bumped for changes under `lamarck/src/` (CONTRIBUTING.md "Version bumping") — evidence: `lamarck/Cargo.toml:3` — reason: fixed in this diff; bumped to 0.1.51 in `9cdf29f`, with `Cargo.lock` in sync and the evidence regenerated at that commit
+- **violation** — the PR summary still described duplicated stats helpers and the removed `test_support::DIVERGE` seam — evidence: `docs/archive/pr-summaries/pr-summary-267.md:319` — reason: fixed in this diff; the summary was rewritten against the head
+- **clean** — The repository has no `CODING-STANDARDS.md`, so the reviewer used `CONTRIBUTING.md` and `README.md`; neither has a review-only rule. It checked: the changelog entry, no stubs of external binaries (the `git_commit` test runs real git), no workflow changes, docs against code (version-2 refusal, overflow message, `phase == "validation"` gating, failed-run charging, `AbortedRun` outputs, the bootstrap order-statistics claim), no test-only production seams (`audit_held_out` is set by production code), private `run_validated` used only for values `validate` refuses, and that each changed test expectation still fails without its code.
 
 ## Test Plan
 
-- Added `lamarck/tests/record_skip.rs` with 17 tests and two unit tests in
-  `lamarck/src/record_skip/experiment.rs`, all passing:
-  - `ewma_blends_observations`: literal EWMA value.
-  - `full_and_warmup_keep_everything`.
-  - `easy_skip_keeps_the_hardest`.
-  - `rare_stratum_is_protected`: the easiest record is kept when it sits in a
-    rare stratum.
-  - `revisits_come_from_the_easy_pool`.
-  - `random_skip_matches_easy_count_and_varies_with_seed`.
-  - `ensure_scope_refuses_other_parent_or_corpus`: refusals with an allowed
-    control.
-  - `config_and_reduction_refusals`: each refusal names its field, with an
-    allowed control.
-  - `output_strata_bins`.
-  - `refine_full_lowers_train_mse_and_keeps_parent`: the parent stays
-    immutable.
-  - `easy_skip_record_passes_follow_the_rule`: literal pass count.
-  - `manifest_refusals`: overlapping seeds, empty validation seeds, reduction
-    1.0 and epochs 0, with the predeclared manifest as the allowed control.
-  - `smoke_run_is_complete_and_deterministic`: full coverage, an identical
-    summary across two runs, and calibration cost equal to the sum of the
-    calibration rows.
-  - `files_mode_runs_and_load_corpus_checks_counts`: too few records are
-    rejected, next to a positive control on the same files.
-  - `verdict_rules`: includes a case with an empty rare-stratum guard, which
-    can never be `better`.
-  - `tracker_refuses_strata_that_do_not_match_record_count`: the refusal,
-    next to an allowed control.
-  - `reported_neat_core_tag_follows_the_cargo_toml_pin`: the reported tag is
-    parsed from `lamarck/Cargo.toml` (`include_str!`), not typed in, so the
-    automated pin refresh in Family Sync cannot turn it red. The test reads the
-    tag from the manifest at test time, compares it with
-    `BenchReport.versions.neat_core_tag`, and checks the parser on a moved tag.
-  - Unit `refused_grid_point_is_reported_beside_a_valid_one`: a grid point
-    with `ewmaAlpha: 0.0` beside a valid one. It asserts the failed rows (arm,
-    seed, phase, error text), `coverage.failed` 2 and `completed` 8, the
-    `nPairs` 0 and null `meanTrainDiff` entry, the valid point chosen, and the
-    two error lines in `runs.jsonl`.
-  - Unit `all_failed_calibration_names_the_first_failure`: with every
-    calibration run refused, the returned error names the first failure.
-  - `manifest_refusals` now also covers `warmupEpochs` 0, `rareStratumShare`
-    out of range, and grid `ewmaAlpha` and `revisitShare` out of range, each
-    with an allowed control. `Manifest::validate` refuses them up front, so
-    the unit tests reach the run-failure path through the private
-    `run_validated`.
-- `timeout 1500 ./quality.sh < /dev/null` passed (exit 0, "All quality
-  checks passed!") on this run's tree, before `strataValidationMse` was
-  restored. After the restore, `cargo fmt`, clippy `-D warnings`, the 17
-  `record_skip` tests (plus the 2 unit tests after the review fix) and the byte-for-byte evidence re-run all passed again. That includes clippy
-  `-D warnings`, the full test suite (`readme_contract`, `docs_link_targets`),
-  rustdoc and codespell.
-- `scripts/test-check-family-sync-workflow.sh` gains two negative cases (no
-  `CANONICAL_PATHS` fallback; a stale fallback), each expecting exit 1, and the
-  real workflow is the passing control. The script passed, and so did
-  `scripts/check-family-sync-workflow.sh`, `check-bot-push-action.sh`,
-  `check-cargo-quality-overlap.sh` and `actionlint`. The gate step's
-  ShellCheck, run under `env -i` with no `CANONICAL_PATHS`, came back clean.
-- Optional-code removal (criterion 3): the unread `meanForgettingIncrease`
-  field,
-  three dead accessors, the unused `verdict` argument, three unused serde
-  derives and one re-export were removed, and three helpers became private.
-  After that, `cargo run --release --example record_skip_bench --
-  /tmp/rsb-recheck` reproduced the committed `summary.json` and
-  `manifest.json` byte for byte (`cmp` exit 0). Running `cargo test
-  --release < /dev/null` passed in full, and so did `cargo clippy --release
-  --all-targets -- -D warnings`.
-- The only assertions edited are the four `verdict_rules` calls, which drop
-  the removed unused argument and keep the expected verdicts. No assertion
-  was removed. Outside `record_skip/` and its
-  tests, the source changes are `pub mod record_skip;` in `lamarck/src/lib.rs`
-  and the rule added to `scripts/check-family-sync-workflow.sh`.
+- Removed from this branch (never on `Develop`): the `#[cfg(test)]`
+  divergence hook and the tests
+  `a_rate_that_fails_on_one_seed_is_not_chosen_and_its_cost_is_counted`,
+  `a_rate_that_missed_a_seed_is_never_chosen` and
+  `failed_runs_charge_the_passes_they_spent`. The last one's per-row checks
+  (error names "diverged" and "training", record, audit and schedule passes,
+  phase, `"auditPasses"` in `runs.jsonl`) now sit in
+  `lamarck/src/record_skip/experiment.rs::an_aborted_preparation_keeps_the_passes_it_spent`,
+  which runs through `run_manifest`.
+- `a_compute_bound_that_overflows_is_refused_before_any_run` and
+  `a_representable_bound_over_the_limit_is_still_refused_exactly` now call
+  `run_manifest`, with a premise that the manifest validates.
+- Other tests in `lamarck/src/record_skip/experiment.rs`:
+  `a_held_out_record_cannot_steer_preparation_or_calibration`,
+  `an_aborted_calibration_keeps_the_preparation_cost`,
+  `all_failed_preparation_names_the_first_failure`,
+  `schedule_choice_skips_a_refused_point_and_takes_the_lowest_diff`. In
+  `lamarck/tests/record_skip.rs`:
+  `audit_passes_are_counted_apart_from_record_passes`,
+  `learning_rate_sweep_is_counted_and_chooses_by_training_mse`,
+  `compute_limit_refuses_a_manifest_over_budget`,
+  `files_mode_compute_bound_uses_the_loaded_training_count`,
+  `version_1_manifest_file_fails_loudly`.
+- Removed from `lamarck/src/record_skip/experiment.rs`: `assert_eq!(report.coverage.planned, 10);`, `assert_eq!(report.coverage.completed, 8);` and `assert_eq!(runs.lines().count(), 10);`
+  - Obsolete: before the counted preparation sweep, the plan had no preparation runs
+  - Still covered by: `lamarck/src/record_skip/experiment.rs::refused_grid_point_is_reported_beside_a_valid_one` (now 14, 12 and 14)
+- Removed from `lamarck/src/record_skip/experiment.rs`: `assert_eq!(report.calibration[0].n_pairs, 0);`, `assert!(report.calibration[0].mean_train_diff.is_none());`, `assert_eq!(report.calibration[1].n_pairs, 1);` and `assert!(report.calibration[1].mean_train_diff.is_some());`
+  - Obsolete: the grid order was swapped so that preparation runs on a valid point
+  - Still covered by: `lamarck/src/record_skip/experiment.rs::refused_grid_point_is_reported_beside_a_valid_one` (same assertions on the swapped indices)
+- Removed from `lamarck/src/record_skip/experiment.rs`: `assert!(err.contains("no matched pairs"), "{err}");` in the warmup-zero case
+  - Obsolete: with the preparation sweep, an all-failing manifest now stops in preparation
+  - Still covered by: `lamarck/src/record_skip/experiment.rs::all_failed_calibration_names_the_first_failure` (reductions `[1.5]`)
+- Removed from `lamarck/tests/record_skip.rs`: `assert_eq!(output_strata(&[2.5, 2.5, 2.5], 4), vec![0, 0, 0]);` and the `output_strata(&[0.0, 1.0, 2.0, 3.0, 4.0], 4)` assertion
+  - Removed functionality: the test-only `output_strata` wrapper. No production code called it.
+  - Still covered by: `lamarck/tests/record_skip.rs::stratum_edges_bin_first_targets`
+- Removed from `lamarck/tests/record_skip.rs`: `assert_eq!(a.coverage.planned, 4 + 6);`, `assert_eq!(a.coverage.completed, 10);` and `assert_eq!(runs.lines().count(), 10);`
+  - Obsolete: the preparation sweep adds 4 runs
+  - Still covered by: `lamarck/tests/record_skip.rs::smoke_run_is_complete_and_deterministic` (now 14)
+- Replaced in `lamarck/tests/record_skip.rs`: `ewma_blends_observations` (its `t.ewma(0)` assertions)
+  - Removed functionality: the test-only `DifficultyTracker::ewma` accessor. `select` reads the field directly.
+  - Still covered by: `lamarck/tests/record_skip.rs::easy_skip_ranks_records_by_smoothed_error` (selection follows the smoothed ranking and `last_seen` returns the latest error)
+- After the `ewma` removal: `cargo test --lib record_skip` 10 passed,
+  `cargo test --test record_skip` 23 passed, `cargo clippy --all-targets -- -D warnings`
+  clean, `cargo fmt --check` clean. The full `./quality.sh` is re-run by the worker.
+- Results on the earlier code head `d37cfaf`:
+  - `cargo test --lib record_skip`: 9 passed.
+  - `cargo test --test record_skip`: 24 passed.
+  - `cargo clippy --all-targets -- -D warnings`: clean.
+  - `./quality.sh < /dev/null`: exit 0, "All quality checks passed!" (1004 tests passed, 0 failed).
 
-Not done: reading the paper text (the method is pinned from its code), running
-SP or InfoBatch as an arm, the representative corpus run, and deleting the
-harness itself (the removal rule in `docs/easy-record-skipping.md` decides
-that). Remaining risk: the synthetic outcome may not carry over
-to real creatures and corpora.
+## Merge verification
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+- GitHub CI on the pushed head is not yet verified.
+
+## Not done
+
+- The representative experiment on the private creature and corpus. This is an owner step on a quiet machine, and its results stay private.
+- Reading the paper. arXiv returns 403 from this host.
+- The keep-or-delete decision on the harness, which the predeclared removal rule makes once the representative run is in (or at the next release).
+- No test reaches the partly-completed-rate guard in `choose_learning_rate`; no real input reaches it today.
+- Not checked: CI on GitHub.
