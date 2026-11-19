@@ -116,7 +116,7 @@ else
 fi
 
 if grep -qE 'chore: auto-increment versions for changed projects' "$WORKFLOW"; then
-  ok "auto-increment commit subject present (idempotency grep target)"
+  ok "auto-increment commit subject present (bot commit message)"
 else
   fail "missing auto-increment commit subject"
 fi

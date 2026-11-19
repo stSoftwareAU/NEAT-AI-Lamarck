@@ -2478,8 +2478,10 @@ than a hardcoded `origin/Develop` — otherwise the second and later sub-issue
 PRs on a milestone branch read "already ahead of base" and merge under an
 unchanged version, leaving remotes on the stale binary (Issue #190). A version
 *behind* the base is a downgrade and fails the job (Issue #152), and re-running
-after a bump is a no-op. `scripts/check-version-increment-workflow.sh` validates
-the workflow from `quality.sh`; its own behaviour is exercised by
+after a bump is a no-op. The skip decides on versions, not on an earlier bot
+commit, so a PR whose base caught up to its earlier bump is bumped again
+(Issue #286). `scripts/check-version-increment-workflow.sh` validates the
+workflow from `quality.sh`; its own behaviour is exercised by
 `scripts/test-check-version-increment-workflow.sh`, and
 `scripts/test-bump-lamarck-version.sh` runs
 `scripts/bump-lamarck-version.sh` against throwaway repositories to prove the

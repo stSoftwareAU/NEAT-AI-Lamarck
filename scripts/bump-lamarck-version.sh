@@ -10,8 +10,10 @@
 # version. These are the same paths `version-increment.yml` triggers on.
 #
 # Mirrors GRQ-taxation's version-increment job / runlib.sh contract: remotes
-# rebuild when Cargo.toml version changes. Idempotent — skips when the PR
-# branch is already ahead of base or an auto-increment commit exists.
+# rebuild when Cargo.toml version changes. Idempotent — skips when the version
+# is already ahead of base. It decides on versions, not on an earlier bot
+# commit, so a PR whose base caught up to its earlier bump is bumped again
+# (Issue #286).
 #
 # A working-tree version *behind* the base is never treated as "already
 # bumped": that is a downgrade (merge-conflict failure mode) and fails with
@@ -20,7 +22,7 @@
 # Exit codes:
 #   0  version bumped (or --check would bump)
 #   1  no bump needed
-#   2  usage / parse error / version downgrade vs base
+#   2  usage / parse error / unreadable base version / version downgrade vs base
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +33,6 @@ LOCKFILE="$REPO_ROOT/Cargo.lock"
 TRIGGER_PATHS=("lamarck/src" "lamarck/Cargo.toml" "Cargo.lock")
 BASE_REF="origin/Develop"
 CHECK_ONLY=0
-COMMIT_SUBJECT="chore: auto-increment versions for changed projects"
 
 usage() {
   cat <<'EOF'
@@ -93,27 +94,26 @@ if [[ -z "$CURRENT_VERSION" ]]; then
   exit 2
 fi
 
+# Without a base version the "ahead of base" check cannot run, so a re-run
+# would bump again. Refuse rather than guess (Issue #286).
+if [[ -z "$BASE_VERSION" ]]; then
+  echo "FAIL: cannot read version from ${BASE_REF}:lamarck/Cargo.toml — refusing to guess whether this branch is already bumped" >&2
+  exit 2
+fi
+
 # Refuse downgrades before any "already bumped" skip (Issue #152).
-if [[ -n "$BASE_VERSION" ]]; then
-  set +e
-  "$SCRIPT_DIR/check-lamarck-version-order.sh" "$BASE_VERSION" "$CURRENT_VERSION"
-  status=$?
-  set -e
-  if [[ "$status" -eq 1 ]]; then
-    echo "FAIL: neat_ai_lamarck version $CURRENT_VERSION is behind base $BASE_VERSION; package versions must never go backwards" >&2
-    exit 2
-  elif [[ "$status" -ne 0 ]]; then
-    exit "$status"
-  fi
+set +e
+"$SCRIPT_DIR/check-lamarck-version-order.sh" "$BASE_VERSION" "$CURRENT_VERSION"
+status=$?
+set -e
+if [[ "$status" -eq 1 ]]; then
+  echo "FAIL: neat_ai_lamarck version $CURRENT_VERSION is behind base $BASE_VERSION; package versions must never go backwards" >&2
+  exit 2
+elif [[ "$status" -ne 0 ]]; then
+  exit "$status"
 fi
 
-# Skip when an auto-increment commit is already on this branch.
-if git log --oneline "${BASE_REF}..HEAD" --grep="$COMMIT_SUBJECT" | grep -q .; then
-  echo "OK   auto-increment commit already present vs $BASE_REF — skip"
-  exit 1
-fi
-
-if [[ -n "$BASE_VERSION" && "$CURRENT_VERSION" != "$BASE_VERSION" ]]; then
+if [[ "$CURRENT_VERSION" != "$BASE_VERSION" ]]; then
   echo "OK   version already ahead of base ($BASE_VERSION -> $CURRENT_VERSION) — skip"
   exit 1
 fi
