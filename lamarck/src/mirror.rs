@@ -118,8 +118,18 @@ fn bias_axis(uuid: &str) -> String {
 }
 
 /// Axis name for a synapse weight.
-fn weight_axis(from_uuid: &str, to_uuid: &str) -> String {
-    format!("weight:{from_uuid}->{to_uuid}")
+///
+/// An untyped synapse is `weight:<from>-><to>`, the spelling journals already
+/// carry. A typed synapse (the role it plays into an `IF` neuron: `condition`,
+/// `positive` or `negative`) appends its role as `weight:<from>-><to>[<type>]`,
+/// because two synapses may share their endpoints and differ only in role.
+/// The follow-up probes name their axes through this function too, so the two
+/// spellings cannot drift apart.
+pub(crate) fn weight_axis(from_uuid: &str, to_uuid: &str, synapse_type: Option<&str>) -> String {
+    match synapse_type {
+        None => format!("weight:{from_uuid}->{to_uuid}"),
+        Some(role) => format!("weight:{from_uuid}->{to_uuid}[{role}]"),
+    }
 }
 
 /// The signed perturbation a candidate applies, when it applies exactly one.
@@ -177,7 +187,11 @@ pub fn signed_perturbation(
             }
             found = Some(SignedPerturbation {
                 scalar: PerturbedScalar::Weight { synapse: index },
-                axis: weight_axis(&before.from_uuid, &before.to_uuid),
+                axis: weight_axis(
+                    &before.from_uuid,
+                    &before.to_uuid,
+                    before.synapse_type.as_deref(),
+                ),
                 old_value: before.weight,
                 new_value: after.weight,
             });
@@ -489,6 +503,31 @@ mod tests {
         assert_eq!(perturbation.axis, "weight:h1->o1");
         assert_eq!(perturbation.scalar, PerturbedScalar::Weight { synapse: 1 });
         assert!((perturbation.delta() + 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_typed_synapse_axis_names_its_role() {
+        let incumbent = parse_creature_json(
+            r#"{
+              "semanticVersion": "4.0.0",
+              "forwardOnly": true,
+              "input": 1,
+              "output": 1,
+              "neurons": [
+                {"type":"output","uuid":"if1","bias":0.0,"squash":"IF"}
+              ],
+              "synapses": [
+                {"fromUUID":"input-0","toUUID":"if1","weight":0.5,"type":"condition"},
+                {"fromUUID":"input-0","toUUID":"if1","weight":1.5,"type":"positive"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let mut moved = incumbent.clone();
+        moved.synapses[1].weight = 1.7;
+        let perturbation = signed_perturbation(&incumbent, &moved).expect("one scalar moved");
+        assert_eq!(perturbation.axis, "weight:input-0->if1[positive]");
+        assert_eq!(perturbation.scalar, PerturbedScalar::Weight { synapse: 1 });
     }
 
     #[test]
