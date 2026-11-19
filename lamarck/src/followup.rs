@@ -41,7 +41,8 @@ const SQUASH_ALTERNATIVES: usize = 3;
 /// step. All three are relative to the winning move, so a tiny accepted nudge
 /// produces tiny probes and a large one produces large probes.
 ///
-/// The weight bench's refinement arm (`weight_bench::refine`) replays these too.
+/// The weight bench's refinement arm (`weight_bench::refine`) gets these through
+/// [`plan_probes`] and [`probe_candidate`].
 pub const STEP_FRACTIONS: [f64; 3] = [0.5, -0.5, 1.0];
 
 /// The accepted winner a follow-up burst is exploring around.
