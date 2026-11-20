@@ -12,8 +12,8 @@ corpus_fingerprint }`, and `weight_router_bench --landscape` accepts
 landscape evidence still reproduces.
 
 No representative run has been made, and the refinement arm is still a
-random-axis surrogate rather than the production candidate pipeline. Part of
-#266.
+random-axis surrogate rather than the production candidate pipeline.
+Part of #266.
 
 ## Spec
 
