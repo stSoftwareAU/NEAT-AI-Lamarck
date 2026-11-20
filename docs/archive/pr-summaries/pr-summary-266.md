@@ -81,11 +81,14 @@ flowchart LR
 
 ## Acceptance Criteria
 
-- **missing** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — reason: the production generator is now an arm (`production-refine`) and is compared with CMA-ES. The committed AMM reference summary was not re-run against it: `reference.rs` still pairs AMM with `lamarck-refine` and `cma-es` only.
-- **missing** — Test plateaus/kinks and activation families, then full/held-out confirmation. — reason: the full and held-out windows are reported for every arm, including the new one. Full authoritative confirmation and a plateau diagnosis on a representative problem need the private production creature and corpus.
-- **missing** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — reason: no representative manifest or model/data version is frozen, and no overall wall-clock ceiling is declared. The earlier development runs remain uncounted; this run's smoke and campaign runs are counted.
-- **missing** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — reason: the synthetic results, including the new arm, are reproducible and committed. Representative coverage is still 0 runs.
-- **missing** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — reason: Finding 6 records the negative result. Whether to keep or remove `production-refine` and the landscape diagnosis waits on the representative run, as the Outstanding list states.
+<!-- vibe-spec-review inputs="diff+issue-body" -->
+
+- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `docs/evidence/weight-router-production/reference-summary.json`, `lamarck/tests/weight_bench_reference.rs::production_refine_manifest_pairs_amm_with_the_production_arm` — reviewer: partial — reason: AMM is now paired with `production-refine` (worse in 23 of 27 cells, inconclusive in 4) and with CMA-ES, but only on synthetic records, and the production arm is weight-only (no learning signal, no ranked sources, no structural or bias proposals).
+- **partial** — Test plateaus/kinks and activation families, then full/held-out confirmation. — evidence: `docs/evidence/weight-router-production/summary.json` (held-out and full windows per arm) — reviewer: partial — reason: plateaus, kinks and families were tested on synthetic problems only, with no full authoritative confirmation on a representative model or corpus.
+- **partial** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `docs/weight-optimiser-routing.md` (Compute ledger, Controls) — reviewer: partial — reason: `production-refine` was added after the predeclared run, with no success criteria of its own. Its statistics passes are now documented as uncounted, not counted. There is no calibration/validation split without a representative run.
+- **partial** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — evidence: `docs/evidence/weight-router-production/{manifest.json,runs.jsonl,summary.json,reference-summary.json}` — reviewer: partial — reason: the synthetic results are reproducible and complete. Representative coverage is 0 runs, so no optimisation benefit is shown.
+- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/weight-optimiser-routing.md` Finding 6 and "AMM against `production-refine`" — reviewer: partial — reason: the negative findings are recorded and no success is claimed. `production-refine` lost to CMA-ES in every cell and is still kept as opt-in code, pending a representative run that has not been made.
+- **unrequested** — README #266 row corrected from "19 of 27" to "18 of 27" cells — reviewer: unrequested — reason: the reviewer found the row this PR edits contradicted `summary.json`, so it was fixed in place.
 
 ## Test Plan
 
@@ -116,6 +119,7 @@ flowchart LR
 
 - **Representative runs:** none on a production creature and corpus, for any arm. No optimisation benefit is claimed.
 - **Arm scope:** `production-refine` excludes the generator's structural and bias proposals and runs without a learning signal or ranked sources, so it measures the weight proposals only.
-- **Review:** the independent Spec and Standards reviewers were not dispatched, because the issue has no acceptance-criteria heading.
+- **Review:** the Spec reviewer was dispatched over the diff (verdicts above). The Standards reviewer was not dispatched in this session.
+- **Uncounted statistics passes:** the production arm's focus, incoming and observation passes over the screening records are documented in the ledger but not counted.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

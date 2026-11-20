@@ -787,6 +787,13 @@ the committed suite (apart from wall clock), so its evaluations include a second
 run of those arms; the committed total counts them as spent compute.
 `weight-router-production/reference-summary.json` re-uses the committed AMM
 and production rows and made no loss evaluation, so it has no ledger row.
+The `production-refine` arm also makes forward passes that are not loss
+evaluations and are **not counted** in `evaluationsUsed` or this ledger.
+`generate_statistics` passes over the screening records once per run, and
+`collect_focus_stats` and `collect_incoming_source_stats` pass over them every
+round, to build the generator's statistics. That is uncounted search cost, and it favours the
+production arm. The arm lost anyway (Finding 6), so the omission cannot have
+produced its result. A representative comparison should count these passes.
 
 The router-era campaign (crate 0.1.46), whose code was removed, and its
 calibration are in neither total; their counts are in the router-era sections
