@@ -135,7 +135,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is now committed. The format 3 synthetic run (648 of 648 runs, 0 failed) gives
   CMA-ES better in 18 of 27 cells, worse in none and inconclusive in 9. The AMM
   campaign (324 of 324 runs, 0 failed) and the AMM method check were regenerated
-  at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). AMM remains worse in all 54 comparisons, and the
+  at commit `f0a7b4c` (crate 0.1.49); later commits add the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command, and crate 0.1.53 (commit `5c9ba38`) changes the refine arm's twin and probe construction, with both committed suites re-run with identical rows (648 of 648 and 216 of 216); the predeclared families, the CMA-ES arm and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). AMM remains worse in all 54 comparisons, and the
   method check's v0.3.0 and v0.7.0 runs (27 rows each) are identical.
 
 - **`neat-core` is pinned to a released git tag, and the pin is refreshed on
@@ -205,6 +205,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The weight bench's refinement arm now calls the production mirror and
+  follow-up helpers (Issue #266).** `lamarck-refine` (`weight_bench/refine.rs`,
+  crate 0.1.53, commit `5c9ba38`) builds its `-delta` twin with
+  `mirror::signed_perturbation` and `mirror::mirror_candidate`, and its
+  follow-up probes with `followup::plan_probes` and `followup::probe_candidate`,
+  instead of hand-written copies. It inherits their refusals: a twin or probe
+  the hard weight limit (`limit_weight_scale`, 100000 by default) would clamp,
+  or whose step is below `plank_constant` (1e-7), is not evaluated, and a round
+  whose twin is refused spends one evaluation instead of two
+  (`the_refine_arm_skips_a_refused_twin` and
+  `the_refine_arm_skips_a_refused_follow_up_probe` in
+  `lamarck/tests/weight_bench.rs`). The twin is also skipped when
+  `signed_perturbation` finds no single-weight change. There is no
+  repeated-pair guard: since issue #285 the follow-up helpers identify a synapse
+  by source, target and role (`synapse_type`) and the mirror pairs synapses by
+  index, so a creature in which one source feeds an `IF` neuron in two roles is
+  refined on the right synapse
+  (`follow_up_steps_only_the_role_synapse_that_moved`, a unit test in
+  `lamarck/src/weight_bench/refine.rs`), and
+  `lamarck_refine` returns only errors from `obj.eval`. At `5c9ba38` (clean
+  tree), `cargo run --release --example weight_router_bench -- /tmp/wrb-266/main`
+  finished 648/648 runs, 0 failed, 1,631,615 evaluations, and its `runs.jsonl`
+  equals the committed `docs/evidence/weight-router/runs.jsonl` row by row as
+  parsed JSON (648 of 648); `--manifest
+  docs/evidence/weight-router-landscape/saturated/manifest.json` finished
+  216/216, 0 failed, 543,852 evaluations, with 216 of 216 rows equal to
+  `docs/evidence/weight-router-landscape/saturated/runs.jsonl`. No committed
+  evidence file or reported number changes
+  (`the_refine_arm_reproduces_its_committed_rows` pins 8 of the 324 committed
+  refine rows; the full 648/216 reproduction was a manual re-run). The arm
+  remains a simplified random-axis surrogate, not `generate_candidate_batch`
+  nor the focus, statistics and backprop pipeline; the CMA-ES arm, the
+  predeclared families and the dependencies pinned in `Cargo.lock` are
+  unchanged.
 - **The landscape diagnosis now draws its probes from the tightest arm budget
   (Issue #266).** `diagnose` and `axis_shapes` take a budget and
   `diagnose_specs` a budget multiple (times each problem's dimension), and the

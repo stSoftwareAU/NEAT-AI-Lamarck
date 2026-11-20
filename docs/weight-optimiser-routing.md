@@ -9,7 +9,10 @@ made**. AMM (arXiv 2611.06879) is **not ported and not reimplemented**. It was
 run as an offline reference arm through its authors' implementation and lost in
 all 27 cells (see [AMM reference results](#amm-reference-results)). The full method has now been read and pinned to
 [arXiv:2611.06879v1](https://arxiv.org/pdf/2611.06879v1). The refinement control
-is a simplified surrogate, **not the production candidate pipeline**; the
+is a simplified surrogate, **not the production candidate pipeline**, though
+its mirror twin and follow-up probes call the production `mirror.rs` and
+`followup.rs` helpers (crate 0.1.53, rows identical to the committed ones, re-run
+at `5c9ba38`); the
 reported margins do not establish superiority over current Lamarck refinement.
 
 **The router and its landscape probes have been removed.** They never beat
@@ -21,7 +24,11 @@ validation seeds with no calibration phase. The committed `manifest.json`,
 [`docs/evidence/weight-router/`](evidence/weight-router/summary.json) are
 produced by crate 0.1.49 (`formatVersion` 3) and are still reproduced by the
 commands in [How to run](#how-to-run), because crate 0.1.50 changes only the
-landscape diagnosis, which writes its own `weight-router-landscape/` files. The router, probe and calibration
+landscape diagnosis, which writes its own `weight-router-landscape/` files, and
+crate 0.1.53 routes the refinement arm through the production mirror and
+follow-up helpers with identical rows (648 of 648 `runs.jsonl` rows, and 216 of
+216 for `weight-router-landscape/saturated/runs.jsonl`, re-run at `5c9ba38`).
+The router, probe and calibration
 sections below describe an **earlier router-era run** (crate 0.1.46). Its
 numbers are kept as a recorded negative finding; they cannot be reproduced from
 the current code, because that code was removed.
@@ -49,7 +56,7 @@ alone.
 
 | Arm | What it is |
 |-----|------------|
-| `lamarck-refine` | A simplified random-axis surrogate on a fixed weight set, not a call to `generate_candidate_batch`. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), tries the mirrored pair `x ± delta` as `mirror.rs` does, and accepts the better one only if it strictly improves. After an accept it probes the #219 follow-up `STEP_FRACTIONS` (`[0.5, -0.5, 1.0]`, from `followup.rs`) along the winning move and takes the best strict improvement. |
+| `lamarck-refine` | A simplified random-axis surrogate on a fixed weight set, not a call to `generate_candidate_batch`. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), builds the `-delta` twin of `x + delta` with `mirror::signed_perturbation` and `mirror::mirror_candidate` (the twin is skipped when `mirror_candidate` refuses it or when `signed_perturbation` finds no single-weight change), and accepts the better one only if it strictly improves. After an accept it plans the #219 follow-up probes with `followup::plan_probes` (`STEP_FRACTIONS` `[0.5, -0.5, 1.0]` of the winning move), evaluates each through `followup::probe_candidate` (a refused probe is skipped) and takes the best strict improvement. A twin or probe that the hard weight limit (`limit_weight_scale`, 100000 by default) would clamp, or whose step is below `plank_constant` (1e-7), is refused, and a round whose twin is refused spends one evaluation instead of two. Since issue #285 the follow-up helpers identify a synapse by source, target and role (`synapse_type`), and the mirror pairs synapses by index, so a creature in which one source feeds an `IF` neuron in two roles is refined on the right synapse; `lamarck_refine` returns only errors from `obj.eval`. |
 | `cma-es` | Full-covariance (mu/mu_w, lambda)-CMA-ES, written in-repo with no third-party dependency. Strategy parameters are Hansen's tutorial defaults (arXiv:1604.00772); the eigendecomposition is a cyclic Jacobi method. Initial per-coordinate standard deviation `CMA_SIGMA0 = 0.05`. This equals the surrogate's uniform half-width numerically, but CMA-ES moves all coordinates and the search radii are not matched. |
 | `router` (removed; router-era run only) | Spent `2 * probe_axes + 1` evaluations probing the landscape, then ran `lamarck-refine` or `cma-es` on the remaining budget. The probe was charged to the **same** budget. The chosen arm re-evaluated the start, one further counted evaluation. |
 | AMM (reference only) | Adaptive Multi Mode, run offline through its authors' reference implementation, not reimplemented here and not ported. It needs a known budget and a finite box, spends a counted part of the budget on online probes and routes the rest among several engines. See [AMM reference](#amm-reference). |
@@ -174,7 +181,7 @@ evaluation trace or every AMM route. The source/dependency pins and observed
 result are recorded in
 [`method-check.json`](evidence/weight-router/method-check.json). It was
 regenerated at commit `f0a7b4c` (crate 0.1.49) after the router was removed;
-later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The v0.7.0 package
+later commits add the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command, and crate 0.1.53 (commit `5c9ba38`) changes the refine arm's twin and probe construction, with both committed suites re-run with identical rows (648 of 648 and 216 of 216); the predeclared families, the CMA-ES arm and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The v0.7.0 package
 completed 27 rows, identical to the v0.3.0 tree's, with no failures. The check
 takes the committed manifest and keeps only its first validation seed, so the
 `manifest` it records has `validationSeeds` [1001] and no `calibrationSeeds`. A
@@ -274,7 +281,7 @@ provenance fields listed above. The committed
 synthetic run's per-run rows, and the committed
 [`summary.json`](evidence/weight-router/summary.json) carries the per-cell
 paired distributions. The AMM campaign was regenerated at commit `f0a7b4c`
-(crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The committed `amm-runs.jsonl` (324 rows) no longer
+(crate 0.1.49); later commits add the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command, and crate 0.1.53 (commit `5c9ba38`) changes the refine arm's twin and probe construction, with both committed suites re-run with identical rows (648 of 648 and 216 of 216); the predeclared families, the CMA-ES arm and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). The committed `amm-runs.jsonl` (324 rows) no longer
 carries `routedTo` or `probeEvaluations`; its rows carry `plateauFreeAxes`. The
 AMM reference adds three committed files:
 
@@ -549,7 +556,7 @@ columns are the router-era run's router verdicts.
 
 Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 855,000
 evaluations (budgeted, preparation per AMM run and 5 confirmation evaluations
-per run). The campaign was regenerated at commit `f0a7b4c` (crate 0.1.49); later commits change the benchmark code only by adding the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command; the predeclared families, the arms and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). It ran with
+per run). The campaign was regenerated at commit `f0a7b4c` (crate 0.1.49); later commits add the `saturated-hard-tanh` family (`suite.rs`), the landscape diagnosis (`landscape.rs`) and the `--landscape` command, and crate 0.1.53 (commit `5c9ba38`) changes the refine arm's twin and probe construction, with both committed suites re-run with identical rows (648 of 648 and 216 of 216); the predeclared families, the CMA-ES arm and the dependencies pinned in `Cargo.lock` are unchanged (only the crate's own version moves). It ran with
 `--jobs 8`: 133.038 s wall on a shared host, so the time is indicative only. Its
 normalised screening losses are identical to the previously committed router-era
 rows.
@@ -658,7 +665,8 @@ representative run on the private corpus remains unperformed.
 
 ## Compute ledger
 
-Every committed campaign, in loss evaluations. Each total includes the
+Every committed campaign, then the logged reproduction re-runs, in loss
+evaluations. Each row's count includes the
 145-evaluation selection scan (preparation) once per problem built, and the
 confirmation evaluations. No calibration was run by the current code.
 
@@ -670,10 +678,18 @@ confirmation evaluations. No calibration was run by the current code.
 | AMM reference, `saturated-hard-tanh` | `weight-router-landscape/saturated/reference-summary.json` | 108 runs | 0 | 285,000 | `84096bb` |
 | Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `8e79db7` |
 | **Committed total** | | | 0 | 3,367,211 | |
+| Reproduction re-run, predeclared suite (refine, CMA-ES; crate 0.1.53) | not committed; rows equal `weight-router/runs.jsonl` | 648 runs | 0 | 1,631,615 | `5c9ba38` |
+| Reproduction re-run, `saturated-hard-tanh` (refine, CMA-ES; crate 0.1.53) | not committed; rows equal `weight-router-landscape/saturated/runs.jsonl` | 216 runs | 0 | 543,852 | `5c9ba38` |
+| **Total including reproduction re-runs** | | | 0 | 5,542,678 | |
+
+The two reproduction re-runs checked that routing the refine arm through the
+production mirror and follow-up helpers left every committed row unchanged. They
+produced no new evidence, so they are outside the committed total, but their
+evaluations are spent compute and are counted in the second total.
 
 The router-era campaign (crate 0.1.46), whose code was removed, and its
-calibration are not in this total; their counts are in the router-era sections
-above. Also outside it are the method check (27 rows per AMM version), the
+calibration are in neither total; their counts are in the router-era sections
+above. Also outside both totals are the method check (27 rows per AMM version), the
 `cargo test` fixtures and the development and smoke runs made while building
 the bench. Those were not logged, so their cost is **not counted**. All
 campaigns use validation seeds 1001 to 1012, and none tunes a parameter on
@@ -682,10 +698,13 @@ not changed afterwards (Finding 5).
 
 ## Controls and remaining experiment
 
-Inspection found that `refine.rs` reuses two production constants, but manually
-recreates mirrors and follow-up steps. It does not call `generate_candidate_batch`,
-`mirror_candidate` or `FollowUpPlan`, nor use the production focus/statistics/
-learning pipeline. Its uniform half-width and CMA-ES's coordinate standard
+Inspection found that `refine.rs` reused two production constants but
+hand-wrote its mirrors and follow-up steps. Since crate 0.1.53 (commit
+`5c9ba38`) it builds the twin with `mirror::mirror_candidate` and its probes with
+`followup::plan_probes` and `followup::probe_candidate`, with identical committed
+rows. It still does not call `generate_candidate_batch`, nor use the production
+focus/statistics/learning pipeline or its statistical and backprop proposals.
+Since issue #285 the follow-up helpers identify a synapse by source, target and role, so a creature that feeds one `IF` neuron from the same source in two roles is refined on the right synapse. Its uniform half-width and CMA-ES's coordinate standard
 deviation also define different search radii. The archived comparison therefore
 has a **surrogate baseline**, not baseline equivalence. Correcting that baseline
 changes the protocol and needs fresh validation data; the archived results must
@@ -731,7 +750,8 @@ env PYTHONPATH=... python3 scripts/test-amm-reference.py --bench BIN
 ```
 
 `Manifest::validate` refuses duplicate cells/seeds; `WeightObjective::new`
-requires positive input/output counts and distinct synapse indices. The tests
+requires positive input/output counts and distinct synapse indices;
+`lamarck_refine` returns only errors from `obj.eval`. The tests
 also check fixed starting weights, immutable parents, disjoint corpus halves
 and budget refusal. Successful confirmation uses five calls; failures retain
 the attempts already spent. Failed rows are excluded from paired distributions

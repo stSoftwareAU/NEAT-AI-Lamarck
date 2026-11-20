@@ -9,8 +9,8 @@ use neat_ai_lamarck::weight_bench::suite::{
 };
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, CMA_SIGMA0, Manifest, RunRow, WeightObjective,
-    build_problem, cma_es, is_extrapolation, lamarck_refine, run_arm, run_manifest,
-    select_influential,
+    build_problem, cma_es, is_extrapolation, lamarck_refine, predeclared_manifest, run_arm,
+    run_manifest, select_influential,
 };
 
 fn problem(family: Family, seed: u64) -> (Problem, WeightObjective) {
@@ -765,4 +765,124 @@ fn rows_without_the_plateau_field_load_as_none() {
     value.as_object_mut().unwrap().remove("plateauFreeAxes");
     let older: RunRow = serde_json::from_value(value).unwrap();
     assert_eq!(older.plateau_free_axes, None);
+}
+
+/// The refine arm routes its twin and follow-up probes through
+/// `mirror_candidate` and `probe_candidate`; that must not move a single
+/// committed row. This is a pin, expected green before and after the helper
+/// change. It covers 8 of the 324 committed refine rows (tanh and hard-tanh,
+/// D=20, 10D and 30D, two seeds); the full 648/216 reproduction was a manual
+/// re-run.
+#[test]
+fn the_refine_arm_reproduces_its_committed_rows() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/evidence/weight-router");
+    let text = std::fs::read_to_string(dir.join("runs.jsonl")).unwrap();
+    let committed: Vec<RunRow> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    let full = predeclared_manifest();
+    let m = Manifest {
+        families: vec![Family::Tanh, Family::HardTanh],
+        dimensions: vec![20],
+        budget_multiples: vec![10, 30],
+        validation_seeds: full.validation_seeds.iter().take(2).copied().collect(),
+        ..full
+    };
+    assert!(m.validate().is_ok());
+
+    let results = run_manifest(&m).unwrap();
+    let mut compared = 0;
+    for row in results.runs.iter().filter(|r| r.arm == Arm::LamarckRefine) {
+        let expected = committed
+            .iter()
+            .find(|c| {
+                c.arm == row.arm
+                    && c.family == row.family
+                    && c.dimension == row.dimension
+                    && c.budget_multiple == row.budget_multiple
+                    && c.seed == row.seed
+            })
+            .expect("a committed row for every refine run");
+        assert_eq!(row, expected);
+        compared += 1;
+    }
+    assert!(compared > 0);
+    assert_eq!(
+        compared,
+        m.families.len() * m.dimensions.len() * m.budget_multiples.len() * m.validation_seeds.len()
+    );
+}
+
+/// One IDENTITY output fed by one synapse `input-0 -> o1` at `weight`, scored
+/// on a single record (input 1, target 200000): the loss falls as the weight
+/// rises, so a step towards the hard weight limit (100000) always improves.
+fn one_weight(weight: f64) -> WeightObjective {
+    let json = format!(
+        r#"{{
+          "semanticVersion": "4.0.0",
+          "forwardOnly": true,
+          "input": 1,
+          "output": 1,
+          "neurons": [{{"type":"output","uuid":"o1","bias":0.0,"squash":"IDENTITY"}}],
+          "synapses": [{{"fromUUID":"input-0","toUUID":"o1","weight":{weight:?}}}]
+        }}"#
+    );
+    let creature = neat_core::parse_creature_json(&json).unwrap();
+    WeightObjective::new(creature, vec![0], &[1.0, 200_000.0]).unwrap()
+}
+
+/// A twin `mirror_candidate` refuses is not evaluated: the round spends one
+/// evaluation instead of two. At the hard weight limit (100000), seed 4 draws a
+/// negative delta, so `+delta` lowers the weight (worse) and the twin would
+/// land past the limit. Had the twin been evaluated it would have won (the loss
+/// falls as the weight rises) and the budget of 3 would be spent.
+#[test]
+fn the_refine_arm_skips_a_refused_twin() {
+    let o = one_weight(100_000.0);
+    let mut b = BudgetedObjective::new(&o, 3);
+    lamarck_refine(&mut b, 4).unwrap();
+    assert_eq!(
+        b.used(),
+        2,
+        "seed 4 must draw a negative delta, so the twin lands past the limit"
+    );
+    assert_eq!(b.best().unwrap().1, &[100_000.0]);
+
+    // Control: away from the limit the same seed evaluates both twins and
+    // accepts the upward one.
+    let o = one_weight(5.0);
+    let mut b = BudgetedObjective::new(&o, 3);
+    lamarck_refine(&mut b, 4).unwrap();
+    assert_eq!(b.used(), 3);
+    assert!(b.best().unwrap().1[0] > 5.0);
+}
+
+/// A follow-up probe `probe_candidate` refuses is not evaluated. A budget of 6
+/// covers the start plus one round: plus, twin and three probes (+0.5, -0.5
+/// and +1.0 of the accepted move `m`). The delta draw does not depend on the
+/// weight, so both runs below make the same move `m`. Seed 1 accepts an upward move; from
+/// 99999.9 every probe stays inside the limit and the best is `w + 2m`, but
+/// from 99999.95 the `+1.0` probe would pass 100000, so it is dropped, one
+/// evaluation is left unspent and the best is the `+0.5` probe, `w + 1.5m`.
+#[test]
+fn the_refine_arm_skips_a_refused_follow_up_probe() {
+    let control_w = 99_999.9;
+    let o = one_weight(control_w);
+    let mut b = BudgetedObjective::new(&o, 6);
+    lamarck_refine(&mut b, 1).unwrap();
+    assert_eq!(b.used(), 6);
+    let m = (b.best().unwrap().1[0] - control_w) / 2.0;
+    assert!(m > 0.0);
+
+    let w = 99_999.95;
+    assert!(w + 1.5 * m <= 100_000.0 && w + 2.0 * m > 100_000.0);
+    let o = one_weight(w);
+    let mut b = BudgetedObjective::new(&o, 6);
+    lamarck_refine(&mut b, 1).unwrap();
+    assert_eq!(b.used(), 5);
+    let best = b.best().unwrap().1[0];
+    assert!((best - (w + 1.5 * m)).abs() < 1e-6, "best {best}");
 }
