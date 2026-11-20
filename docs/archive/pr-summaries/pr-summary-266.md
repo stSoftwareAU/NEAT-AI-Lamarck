@@ -26,7 +26,7 @@ Part of #266.
 
 - `diagnose_manifest` still runs `validate()` and the budget-multiple check before any file I/O. A corpus that cannot be loaded is a hard error, as in `run_manifest`. A problem that fails to build (for example, D larger than the creature's synapse count) is recorded on its row, as before.
 - `corpusFingerprint` is written only for a corpus manifest. `formatVersion` stays 4, so synthetic summaries are byte-for-byte the old shape.
-- The return type changed from `Vec<LandscapeRow>` to `LandscapeDiagnosis` so that the fingerprint comes from the same load as the rows, not from a second read of the files.
+- The return type changed from `Vec<LandscapeRow>` to `LandscapeDiagnosis` so that the corpus fingerprint is returned with the rows. It is computed by the same `fingerprint` that `run_manifest` uses. `recordsFnv1a64` hashes the records already loaded for the rows. `creatureFnv1a64` hashes the creature file read a second time, so a creature file changed between the two reads would not be detected. `run_manifest` has the same gap.
 
 ### Undiscoverable Facts
 
@@ -74,7 +74,7 @@ flowchart LR
 - **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/weight-optimiser-routing.md` Outstanding — reviewer: partial — reason: the keep-or-remove decision on the landscape diagnosis still waits on a representative run. This diff adds a small public type to it so that run can use it.
 - **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private. — evidence: the corpus test writes a generic fixture to a temporary directory — reviewer: met
 - **met** — Leave unassigned until an implementer actively starts. `work-on` authorises the investigation, not skipping prerequisite verification. — evidence: this run inspected merged #293 and the Outstanding list before changing code — reviewer: missing — reason: the reviewer said "not assessable from the diff"; it is a process rule, and the run followed it.
-- **unrequested** — `diagnose_manifest` now returns `LandscapeDiagnosis` (newly exported) instead of `Vec<LandscapeRow>` — reviewer: unrequested — reason: the bench-only API change is needed to return the corpus fingerprint from the same load as the rows.
+- **unrequested** — `diagnose_manifest` now returns `LandscapeDiagnosis` (newly exported) instead of `Vec<LandscapeRow>` — reviewer: unrequested — reason: the bench-only API change is needed to return the corpus fingerprint together with the rows.
 - **unrequested** — crate version 0.1.53 → 0.1.54 (`lamarck/Cargo.toml`, `Cargo.lock`) and the CHANGELOG entry — reviewer: unrequested — reason: `CONTRIBUTING.md` requires a patch bump and a changelog entry for changes under `lamarck/src/`.
 
 ## Standards Review
