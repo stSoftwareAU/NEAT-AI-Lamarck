@@ -961,6 +961,75 @@ fn production_refine_manifest_adds_arm_rows_and_pairs() {
 }
 
 #[test]
+fn production_refine_reports_its_statistics_passes_apart_from_evaluations() {
+    let mut m = tiny_manifest();
+    let plain = run_manifest(&m).unwrap();
+    // No default arm scans the records for statistics, so the cost is left out
+    // of every row and of the totals, and the default output is unchanged.
+    assert!(plain.statistics_cost.is_zero());
+    for row in &plain.runs {
+        assert!(row.statistics_cost.is_zero());
+        let json = serde_json::to_value(row).unwrap();
+        assert!(json.get("statisticsCost").is_none(), "{json}");
+    }
+    assert!(
+        serde_json::to_value(&plain)
+            .unwrap()
+            .get("statisticsCost")
+            .is_none()
+    );
+
+    m.production_refine = true;
+    let with = run_manifest(&m).unwrap();
+    let production = with
+        .runs
+        .iter()
+        .find(|r| r.arm == Arm::ProductionRefine)
+        .unwrap();
+    let cost = production.statistics_cost;
+    // One generate_statistics pass (no network) and then at least one round's
+    // focus-stats pass, which does run the network on every record.
+    assert_eq!(cost.record_passes - cost.network_passes, 1);
+    assert!(cost.network_passes >= 1, "{cost:?}");
+    // The standing arms report none, and the total is the production row's.
+    for row in with.runs.iter().filter(|r| r.arm != Arm::ProductionRefine) {
+        assert!(row.statistics_cost.is_zero(), "{:?}", row.arm);
+    }
+    assert_eq!(with.statistics_cost, cost);
+    // The passes are not loss evaluations: the totals count only those.
+    let evaluations: usize = with
+        .runs
+        .iter()
+        .map(|r| r.evaluations_used + r.confirmation_evaluations)
+        .sum();
+    assert_eq!(
+        with.total_evaluations,
+        evaluations + production.preparation_evaluations
+    );
+    // The cost survives the row's JSON round trip under its camelCase names.
+    let json = serde_json::to_value(production).unwrap();
+    assert_eq!(
+        json["statisticsCost"]["recordPasses"],
+        serde_json::json!(cost.record_passes)
+    );
+    assert_eq!(
+        json["statisticsCost"]["networkPasses"],
+        serde_json::json!(cost.network_passes)
+    );
+    let back: RunRow = serde_json::from_value(json).unwrap();
+    assert_eq!(&back, production);
+}
+
+#[test]
+fn rows_written_before_the_statistics_cost_read_as_zero() {
+    // A row as the committed `weight-router/runs.jsonl` carries it, without the field.
+    let line = r#"{"family":"tanh","dimension":20,"budgetMultiple":10,"budget":200,"seed":1001,"phase":"validation","arm":"production-refine","startScreeningLoss":0.4,"finalScreeningLoss":0.3,"normalisedScreeningLoss":0.75,"evaluationsUsed":200,"preparationEvaluations":145,"fullLossStart":0.4,"fullLossFinal":0.3,"heldOutLossStart":0.4,"heldOutLossFinal":0.3,"normalisedHeldOutLoss":0.75,"confirmationEvaluations":5,"extrapolation":false,"plateauFreeAxes":0,"error":null}"#;
+    let row: RunRow = serde_json::from_str(line).unwrap();
+    assert!(row.statistics_cost.is_zero());
+    assert_eq!(row.arm, Arm::ProductionRefine);
+}
+
+#[test]
 fn production_refine_flag_serialisation_is_backward_compatible() {
     let json = serde_json::to_value(tiny_manifest()).unwrap();
     assert!(json.get("productionRefine").is_none());

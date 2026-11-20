@@ -56,7 +56,9 @@ pub use landscape::{
     LandscapeDiagnosis, LandscapeRow, ShapeCounts, classify_axis, diagnose, diagnose_manifest,
     diagnose_specs, landscape_coverage, landscape_total_evaluations, summarise_landscape,
 };
-pub use objective::{BenchError, Budget, BudgetedObjective, WeightObjective, select_influential};
+pub use objective::{
+    BenchError, Budget, BudgetedObjective, StatisticsCost, WeightObjective, select_influential,
+};
 pub use reference::{
     REFERENCE_BOX_HALF_WIDTH, ReferenceRequest, ReferenceResults, serve_reference,
     summarise_reference,

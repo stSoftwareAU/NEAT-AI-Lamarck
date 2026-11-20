@@ -2,6 +2,7 @@
 
 use std::io::Cursor;
 
+use neat_ai_lamarck::weight_bench::StatisticsCost;
 use neat_ai_lamarck::weight_bench::suite::Family;
 use neat_ai_lamarck::weight_bench::suite::ProblemSpec;
 use neat_ai_lamarck::weight_bench::{
@@ -236,6 +237,7 @@ fn fixture(arm: Arm, seed: u64, screening: f64, held_out: f64) -> RunRow {
         held_out_loss_final: Some(START_LOSS * held_out),
         normalised_held_out_loss: Some(held_out),
         confirmation_evaluations: 5,
+        statistics_cost: StatisticsCost::default(),
         extrapolation: false,
         plateau_free_axes: None,
         error: None,

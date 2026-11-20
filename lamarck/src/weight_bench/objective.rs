@@ -4,6 +4,8 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use neat_core::{CreatureExport, compile_creature, mse_sum_batch_packed};
 
 use crate::candidates::RANDOM_DELTA_HALF_WIDTH;
@@ -172,12 +174,45 @@ pub struct Budget {
     pub used: usize,
 }
 
+/// Passes over the screening records made to prepare or drive a search, apart
+/// from loss evaluations.
+///
+/// The units differ from [`Budget`]'s: one loss evaluation is one forward pass
+/// of every screening record, whereas a record pass here is one scan of the
+/// whole record set by a statistics helper, and a network pass is a record pass
+/// that also runs the network on every record (`activate_and_trace`). A network
+/// pass is therefore also a record pass. Neither count is drawn from the
+/// evaluation budget, so this is where an arm's statistics work is reported.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatisticsCost {
+    /// Scans of the whole screening record set.
+    pub record_passes: usize,
+    /// Of those scans, the ones that also ran the network on every record.
+    pub network_passes: usize,
+}
+
+impl StatisticsCost {
+    /// Whether no pass was made (a default arm's cost, left out of its rows).
+    pub fn is_zero(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl std::ops::AddAssign for StatisticsCost {
+    fn add_assign(&mut self, other: Self) {
+        self.record_passes += other.record_passes;
+        self.network_passes += other.network_passes;
+    }
+}
+
 /// A [`WeightObjective`] behind an evaluation budget, tracking the best point.
 #[derive(Debug)]
 pub struct BudgetedObjective<'a> {
     objective: &'a WeightObjective,
     budget: Budget,
     best: Option<(f64, Vec<f64>)>,
+    statistics: StatisticsCost,
 }
 
 impl<'a> BudgetedObjective<'a> {
@@ -187,7 +222,20 @@ impl<'a> BudgetedObjective<'a> {
             objective,
             budget: Budget { limit, used: 0 },
             best: None,
+            statistics: StatisticsCost::default(),
         }
+    }
+
+    /// Statistics passes charged so far (not part of [`Self::used`]).
+    pub fn statistics(&self) -> StatisticsCost {
+        self.statistics
+    }
+
+    /// Record one scan of the screening records; `network` when it also ran
+    /// the network on every record. Never touches the evaluation budget.
+    pub(super) fn charge_record_pass(&mut self, network: bool) {
+        self.statistics.record_passes += 1;
+        self.statistics.network_passes += usize::from(network);
     }
 
     /// The underlying objective.

@@ -17,6 +17,12 @@
 //! every focus neuron yields nothing admissible the arm stops and leaves the
 //! rest of its budget unused; the row's `evaluationsUsed` records that.
 //!
+//! Every scan of the screening records the statistics helpers make is charged
+//! to the arm through [`BudgetedObjective::charge_record_pass`] and reported on
+//! its row as `statisticsCost`, whether or not the round produced an admissible
+//! candidate. Those scans are not loss evaluations and are not drawn from the
+//! evaluation budget; see [`super::objective::StatisticsCost`].
+//!
 //! The screening records are written once to a fresh temporary directory as
 //! `0.bin` (little-endian `f32`, inputs then outputs per record), which the
 //! production helpers scan. A drop guard removes exactly that directory.
@@ -31,7 +37,7 @@ use rand::rngs::StdRng;
 use super::objective::{BenchError, BudgetedObjective, WeightObjective};
 use crate::backprop::BackpropConfig;
 use crate::candidates::{CandidateBudget, CandidateGenContext, generate_candidate_batch};
-use crate::focus::{collect_focus_stats, collect_incoming_source_stats};
+use crate::focus::{collect_focus_stats, collect_incoming_source_stats_reporting_scan};
 use crate::mirror::MirrorPolicy;
 use crate::observations::{StatsMode, generate_statistics};
 
@@ -189,6 +195,9 @@ fn run(
     let dir: &Path = &corpus.path;
 
     let base = objective.creature_at(&objective.start());
+    // One scan of the records with no network run; charged before it runs so a
+    // scan that fails is still counted, like a failed evaluation.
+    obj.charge_record_pass(false);
     let observations = generate_statistics(
         dir,
         &TrainingDataConfig::new(base.input, base.output),
@@ -210,9 +219,12 @@ fn run(
         let incumbent = objective.creature_at(&x);
         let mut net = compile_creature(&incumbent)
             .map_err(|e| BenchError::Evaluation(format!("production compile: {e}")))?;
+        // A network pass over every record, charged even if the round later
+        // finds nothing admissible.
+        obj.charge_record_pass(true);
         let focus_stats = collect_focus_stats(&incumbent, &mut net, dir, focus_uuid, None)
             .map_err(|e| BenchError::Evaluation(format!("production focus stats: {e}")))?;
-        let incoming = collect_incoming_source_stats(
+        let (incoming, scanned) = collect_incoming_source_stats_reporting_scan(
             &incumbent,
             &mut net,
             dir,
@@ -221,6 +233,10 @@ fn run(
             Some(&observations),
         )
         .map_err(|e| BenchError::Evaluation(format!("production incoming stats: {e}")))?;
+        // The helper skips its scan when nothing it reports needs one.
+        if scanned {
+            obj.charge_record_pass(true);
+        }
         let ctx = CandidateGenContext {
             incumbent: &incumbent,
             focus_uuid,
@@ -275,6 +291,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weight_bench::objective::StatisticsCost;
     use crate::weight_bench::suite::{Family, ProblemSpec, build_problem};
     use neat_core::parse_creature_json;
 
@@ -364,5 +381,65 @@ mod tests {
         assert!(!dir_a.exists(), "temp dir {} left behind", dir_a.display());
         assert_ne!(dir_a, dir_b);
         assert!(!dir_b.exists());
+    }
+
+    #[test]
+    fn a_round_with_no_admissible_candidate_still_costs_its_statistics_passes() {
+        // Selecting only h1 -> o1 on these records leaves the generator with
+        // nothing admissible for the one focus neuron (o1), so the arm makes
+        // the start evaluation, one round and stops. That round is one
+        // focus-stats pass plus one incoming pass (o1 is an output, so the
+        // incoming helper scans); generate_statistics adds one non-network pass.
+        let (_, creature) = objective();
+        let o = WeightObjective::new(creature, vec![1], &[1.0, 2.0, 2.0, 3.0]).unwrap();
+        let mut b = BudgetedObjective::new(&o, 50);
+        run(&mut b, 7, &mut None).unwrap();
+        assert_eq!(b.used(), 1, "the idle round evaluates nothing");
+        assert_eq!(
+            b.statistics(),
+            StatisticsCost {
+                record_passes: 3,
+                network_passes: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_hidden_neuron_fed_by_inputs_costs_one_network_pass_per_round() {
+        // Selecting only input-0 -> h1: the focus neuron h1 is hidden and fed by
+        // a raw input, so the incoming helper skips its scan and a round costs
+        // the focus-stats pass alone.
+        let (_, creature) = objective();
+        let o = WeightObjective::new(creature, vec![0], &[1.0, 2.0, 2.0, 3.0]).unwrap();
+        let mut b = BudgetedObjective::new(&o, 50);
+        run(&mut b, 7, &mut None).unwrap();
+        let cost = b.statistics();
+        assert_eq!(b.used(), 50);
+        // Seed 7 runs five rounds here (a figure that moves only if the
+        // generator's output does), each one focus-stats pass; charging the
+        // skipped incoming scan too would make it ten. One further pass is
+        // generate_statistics, which runs no network.
+        assert_eq!(
+            cost,
+            StatisticsCost {
+                record_passes: 6,
+                network_passes: 5
+            }
+        );
+    }
+
+    #[test]
+    fn the_statistics_cost_is_not_drawn_from_the_evaluation_budget() {
+        let o = synthetic();
+        let mut b = BudgetedObjective::new(&o, 200);
+        run(&mut b, 7, &mut None).unwrap();
+        assert_eq!(b.used(), 200);
+        let cost = b.statistics();
+        assert_eq!(cost.record_passes - cost.network_passes, 1);
+        assert!(cost.network_passes >= 2, "{cost:?}");
+        // The same seed charges the same passes.
+        let mut again = BudgetedObjective::new(&o, 200);
+        run(&mut again, 7, &mut None).unwrap();
+        assert_eq!(again.statistics(), cost);
     }
 }

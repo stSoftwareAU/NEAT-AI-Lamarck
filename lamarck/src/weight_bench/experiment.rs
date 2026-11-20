@@ -12,7 +12,7 @@ use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use super::arms::{Arm, run_arm};
-use super::objective::{BenchError, BudgetedObjective, WeightObjective};
+use super::objective::{BenchError, BudgetedObjective, StatisticsCost, WeightObjective};
 use super::stats::{bootstrap_ci_mean, mean, median};
 use super::suite::{
     CorpusSpec, Family, MAX_DIMENSION, MIN_DIMENSION, Problem, ProblemSpec, build_problem,
@@ -178,6 +178,12 @@ pub struct RunRow {
     pub normalised_held_out_loss: Option<f64>,
     /// Unbudgeted confirmation attempts, including any failed call (reported separately).
     pub confirmation_evaluations: usize,
+    /// Scans of the screening records the arm made to build statistics, in
+    /// record and network passes rather than loss evaluations (see
+    /// [`StatisticsCost`]). Zero, and left out of the row, for arms that make
+    /// none; absent rows read as zero.
+    #[serde(default, skip_serializing_if = "StatisticsCost::is_zero")]
+    pub statistics_cost: StatisticsCost,
     /// Whether the dimension is beyond the calibrated range.
     pub extrapolation: bool,
     /// Flat chosen axes of the row's problem (see `PLATEAU_REL_TOL`). Absent
@@ -275,6 +281,11 @@ pub struct ExperimentResults {
     /// Budgeted + confirmation evaluations of every row, plus preparation
     /// counted once per problem built (not once per row).
     pub total_evaluations: usize,
+    /// Statistics passes of every row, summed (see [`RunRow::statistics_cost`]).
+    /// These are not loss evaluations and are not in `total_evaluations`.
+    /// Zero, and left out of the output, when no arm made any.
+    #[serde(default, skip_serializing_if = "StatisticsCost::is_zero")]
+    pub statistics_cost: StatisticsCost,
     /// Planned versus completed runs.
     pub coverage: Coverage,
     /// Every run, failures included.
@@ -350,6 +361,7 @@ fn blank_row(problem: &Problem, multiple: usize, phase: &str, arm: Arm) -> RunRo
         held_out_loss_final: None,
         normalised_held_out_loss: None,
         confirmation_evaluations: 0,
+        statistics_cost: StatisticsCost::default(),
         extrapolation: is_extrapolation(dimension),
         plateau_free_axes: Some(problem.plateau_free_axes),
         error: None,
@@ -389,6 +401,7 @@ pub(super) fn finish_row(
     let confirmations = std::cell::Cell::new(0usize);
     let outcome = optimise(&mut budgeted);
     row.evaluations_used = budgeted.used();
+    row.statistics_cost = budgeted.statistics();
     let result = outcome.and_then(|()| {
         let (best_loss, best_x) = budgeted
             .best()
@@ -725,11 +738,16 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
             .iter()
             .map(|r| r.evaluations_used + r.confirmation_evaluations)
             .sum::<usize>();
+    let mut statistics_cost = StatisticsCost::default();
+    for row in &runs {
+        statistics_cost += row.statistics_cost;
+    }
     let cells = summarise_runs(m, &runs);
     Ok(ExperimentResults {
         format_version: 3,
         manifest: m.clone(),
         total_evaluations,
+        statistics_cost,
         coverage: Coverage {
             planned_runs: planned,
             completed_runs: runs.len() - failed,

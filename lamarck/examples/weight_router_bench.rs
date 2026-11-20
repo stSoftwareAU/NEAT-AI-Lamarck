@@ -458,6 +458,10 @@ fn run() -> Result<(), String> {
     });
     if let Some(object) = summary.as_object_mut() {
         provenance.insert_into(object);
+        // Statistics passes are not loss evaluations; reported only when an arm made any.
+        if !results.statistics_cost.is_zero() {
+            object.insert("statisticsCost".into(), json!(results.statistics_cost));
+        }
     }
     // Corpus runs name the exact model and records; the synthetic suite is
     // fixed by the crate version and the manifest seeds.
@@ -475,6 +479,12 @@ fn run() -> Result<(), String> {
         results.total_evaluations,
         out_dir.display()
     );
+    if !results.statistics_cost.is_zero() {
+        println!(
+            "statistics passes over the screening records (not loss evaluations): {} record passes, {} of them network passes",
+            results.statistics_cost.record_passes, results.statistics_cost.network_passes
+        );
+    }
     Ok(())
 }
 
