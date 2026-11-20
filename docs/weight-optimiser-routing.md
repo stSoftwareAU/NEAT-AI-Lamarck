@@ -785,7 +785,7 @@ production-refine smoke run is likewise uncommitted and counted only in the
 second total. The production-refine campaign's 648 refine and CMA-ES rows repeat
 the committed suite (apart from wall clock), so its evaluations include a second
 run of those arms; the committed total counts them as spent compute.
-`weight-router-production/reference-summary.json` re-uses the committed AMM
+`weight-router-production/reference-summary.json` reuses the committed AMM
 and production rows and made no loss evaluation, so it has no ledger row.
 The `production-refine` arm also makes forward passes that are not loss
 evaluations and are **not counted** in `evaluationsUsed` or this ledger.
