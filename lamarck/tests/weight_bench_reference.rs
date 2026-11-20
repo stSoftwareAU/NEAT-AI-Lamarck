@@ -819,3 +819,59 @@ fn committed_saturated_amm_evidence_is_reproduced_and_amm_loses_every_cell() {
         "{verdicts:?}"
     );
 }
+
+#[test]
+fn production_refine_manifest_pairs_amm_with_the_production_arm() {
+    let mut m = many_seeds();
+    let mut runs = in_process_rows();
+    // Production rows at 1.3 on both columns; AMM at refine - 0.3 on
+    // screening (0.5) and refine - 0.2 held out (0.7), so AMM is 0.8 and 0.6
+    // below production.
+    for (i, &seed) in SEEDS.iter().enumerate() {
+        runs.push(fixture(
+            Arm::ProductionRefine,
+            seed,
+            1.3 + 0.01 * i as f64,
+            1.3 + 0.01 * i as f64,
+        ));
+    }
+    let reference = reference_rows_split(-0.3, -0.2);
+
+    // Control: without the flag the production rows are ignored.
+    let off = summarise_reference(&m, &runs, &reference).unwrap();
+    let off_pairs: Vec<(Arm, Arm)> = off.cells[0]
+        .comparisons
+        .iter()
+        .map(|c| (c.first, c.second))
+        .collect();
+    assert_eq!(
+        off_pairs,
+        vec![
+            (Arm::AmmReference, Arm::LamarckRefine),
+            (Arm::AmmReference, Arm::CmaEs),
+        ]
+    );
+
+    m.production_refine = true;
+    let on = summarise_reference(&m, &runs, &reference).unwrap();
+    let comparisons = &on.cells[0].comparisons;
+    let pairs: Vec<(Arm, Arm)> = comparisons.iter().map(|c| (c.first, c.second)).collect();
+    assert_eq!(
+        pairs,
+        vec![
+            (Arm::AmmReference, Arm::LamarckRefine),
+            (Arm::AmmReference, Arm::CmaEs),
+            (Arm::AmmReference, Arm::ProductionRefine),
+        ]
+    );
+    // The first two comparisons are unchanged by the flag.
+    for (a, b) in off.cells[0].comparisons.iter().zip(comparisons) {
+        assert_eq!(a.screening.mean, b.screening.mean);
+        assert_eq!(a.held_out.mean, b.held_out.mean);
+    }
+    let vs_production = &comparisons[2];
+    assert_eq!(vs_production.verdict, "amm-reference-better");
+    assert_eq!(vs_production.screening.wins, 6);
+    assert!((vs_production.screening.mean.unwrap() + 0.8).abs() < 1e-9);
+    assert!((vs_production.held_out.mean.unwrap() + 0.6).abs() < 1e-9);
+}

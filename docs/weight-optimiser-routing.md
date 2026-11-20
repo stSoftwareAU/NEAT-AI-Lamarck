@@ -589,8 +589,9 @@ is committed in
    * Against `lamarck-refine`: `production-refine-worse` in 26 of 27 cells and
      inconclusive in 1 (tanh, D=100, 100D, screening mean +0.00012). Pairs
      (wins / losses): screening 12 / 312, held-out 24 / 300, full window
-     23 / 301. Mean screening differences ran from +0.002 to +0.27, largest at
-     10D (+0.17 to +0.26).
+     23 / 301. Mean screening differences ran from +0.0001 to +0.26 across all
+     27 cells (+0.002 to +0.26 across the 26 `production-refine-worse`
+     cells), largest at 10D (+0.17 to +0.26).
    * Against `cma-es`: `production-refine-worse` in all 27 cells. Pairs
      (wins / losses): screening 3 / 321, held-out 15 / 309, full window
      10 / 314.

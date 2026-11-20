@@ -355,10 +355,12 @@ mod tests {
         };
         let (loss_a, used_a, dir_a) = go();
         let (loss_b, used_b, dir_b) = go();
-        assert!(used_a <= 200);
-        assert!(used_a >= 1);
+        // The start point is the only evaluation the arm makes before its
+        // candidates, and `best()` includes it, so these fail when no
+        // generated candidate is evaluated or none is accepted.
+        assert_eq!(used_a, 200, "the arm should spend the whole budget here");
+        assert!(loss_a < start, "no strict improvement: {loss_a} vs {start}");
         assert_eq!((loss_a, used_a), (loss_b, used_b));
-        assert!(loss_a <= start);
         assert!(!dir_a.exists(), "temp dir {} left behind", dir_a.display());
         assert_ne!(dir_a, dir_b);
         assert!(!dir_b.exists());
