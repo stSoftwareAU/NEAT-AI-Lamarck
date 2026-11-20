@@ -371,8 +371,9 @@ pub struct LandscapeDiagnosis {
 /// manifest's smallest budget multiple times the dimension. Each problem is
 /// built as the arm run builds it: with
 /// [`build_problem`](super::suite::build_problem) for a synthetic manifest, or
-/// from the manifest's creature and records for a corpus manifest. Only an invalid manifest or a corpus that cannot be loaded is an
-/// error; a problem that fails to build or diagnose is recorded on its row.
+/// from the manifest's creature and records for a corpus manifest. Only an
+/// invalid manifest or a corpus that cannot be loaded is an error; a problem
+/// that fails to build or diagnose is recorded on its row.
 pub fn diagnose_manifest(m: &Manifest) -> Result<LandscapeDiagnosis, BenchError> {
     m.validate()?;
     let tightest =
