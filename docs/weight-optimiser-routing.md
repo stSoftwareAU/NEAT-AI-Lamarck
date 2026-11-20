@@ -809,11 +809,21 @@ failed evaluation, except the incoming pass, which is charged once it succeeds.
 | Campaign | Evidence | Record passes | Of which network passes | Commit |
 |---|---|---:|---:|---|
 | Production-refine, predeclared suite (324 production runs) | `weight-router-production/summary.json` `statisticsCost` | 348,611 | 348,287 | `128436a` |
-| Smoke run, `--smoke --production-refine` (1 production run; not committed) | printed by the example | 123 | 122 | `128436a` |
-| **Total** | | 348,734 | 348,409 | |
+| **Committed total** | | 348,611 | 348,287 | |
+| Smoke re-run, `--smoke --production-refine` (1 production run; not committed) | printed by the example | 123 | 122 | `128436a` |
+| Superseded production campaign (324 production runs; not committed) | not measured; taken from the `128436a` run above | 348,611 | 348,287 | `11b7953` |
+| Smoke run, `--smoke --production-refine` (1 production run; not committed) | not measured; taken from the `128436a` smoke re-run | 123 | 122 | `11b7953` |
+| **Total including superseded and re-run compute** | | 697,591 | 696,940 | |
 
-The other campaigns' arms make no statistics pass. The two units are not
-interchangeable, and this PR does not convert them: a loss evaluation is one
+The `11b7953` counts were not measured, because that code did not yet count its
+passes. They are inferred. The arm is deterministic, and the superseded rows
+equal the committed ones. The commit that added the counting (`128436a`) changed
+no scan: it only charged the calls the arm already made. So the same rounds made
+the same passes.
+
+The other campaigns' arms (refine, CMA-ES, the AMM reference and the landscape
+diagnosis) make no statistics pass; only the production-refine runs in the table
+above do. The two units are not interchangeable, and this PR does not convert them: a loss evaluation is one
 forward pass of every screening record, and a network pass runs the network on
 every record too, with tracing. The scale is still not negligible: the 324
 production runs spent 798,503 budgeted loss evaluations and 348,287 network passes.
