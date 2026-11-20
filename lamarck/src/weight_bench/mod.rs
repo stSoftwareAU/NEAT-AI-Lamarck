@@ -49,8 +49,8 @@ pub use experiment::{
 };
 pub use landscape::{
     AxisShape, CURVATURE_REL_TOL, KINK_RATIO_REL_TOL, LandscapeCell, LandscapeCoverage,
-    LandscapeRow, ShapeCounts, classify_axis, diagnose, diagnose_manifest, diagnose_specs,
-    landscape_coverage, landscape_total_evaluations, summarise_landscape,
+    LandscapeDiagnosis, LandscapeRow, ShapeCounts, classify_axis, diagnose, diagnose_manifest,
+    diagnose_specs, landscape_coverage, landscape_total_evaluations, summarise_landscape,
 };
 pub use objective::{BenchError, Budget, BudgetedObjective, WeightObjective, select_influential};
 pub use reference::{
