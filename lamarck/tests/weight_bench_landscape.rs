@@ -33,6 +33,7 @@ fn manifest(families: Vec<Family>, dimensions: Vec<usize>, seeds: Vec<u64>) -> M
         bootstrap_resamples: 200,
         bootstrap_seed: 266,
         corpus: None,
+        production_refine: false,
     }
 }
 

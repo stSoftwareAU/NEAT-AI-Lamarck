@@ -1,37 +1,57 @@
 ## Summary
 
-Most of #266's weight benchmark is already on Develop (#282, #283, #293). This
-PR removes the one thing that stopped the plateau and kink check from running
-on a real model: `weight_bench::landscape::diagnose_manifest` refused any
-manifest that declares a `corpus`. It now builds each corpus problem exactly as
-the arm run does, through a new shared `build_manifest_problem` that
-`build_one` also calls. It returns `LandscapeDiagnosis { rows,
-corpus_fingerprint }`, and `weight_router_bench --landscape` accepts
-`--creature`/`--training-data` and writes `corpusFingerprint` into
-`landscape-summary.json`. Synthetic output is unchanged, so the committed
-landscape evidence still reproduces.
+The #266 weight benchmark compared CMA-ES and AMM only against a random-axis
+surrogate, not against the current refinement method. This PR adds an opt-in
+third arm, `production-refine`. It drives the real production generator,
+`generate_candidate_batch`, using production focus, incoming and observations
+statistics over the bench's screening records. It evaluates only the
+candidates that change the selected weights.
 
-No representative run has been made, and the refinement arm is still a
-random-axis surrogate rather than the production candidate pipeline.
+The arm was run on the predeclared synthetic suite (972 of 972 runs, 0 failed).
+It was the weakest arm:
+
+- **Against the surrogate:** worse in 26 of 27 cells and inconclusive in 1.
+- **Against CMA-ES:** worse in all 27 cells.
+
+The committed AMM rows were then paired with the new arm. AMM was worse than
+`production-refine` in 23 of 27 cells and inconclusive in 4. The 4 are tanh
+D=20 10D, relu D=20 30D, relu D=40 30D and hard-tanh D=20 10D.
+
+The arm's statistics scans over the screening records are counted, apart from loss
+evaluations, as `statisticsCost` (record and network passes) on each of its rows
+and in the summary total, including rounds that yield no admissible candidate.
+The campaign was re-run to record them (348,611 record passes, 348,287 of them
+network passes, over the 324 production runs). Every loss figure and verdict is
+unchanged.
+
+This is a negative synthetic finding (Finding 6) with no default change. Default
+output is unchanged: the run's 648 surrogate and CMA-ES rows equal the committed
+`weight-router/runs.jsonl` apart from wall clock, and the new field is omitted
+from any row or summary that has none.
+
+Representative runs on a production creature and corpus are still not made.
 Part of #266.
 
 ## Spec
 
 ### Intent and Rationale
 
-- The routing doc's Outstanding list said the landscape diagnosis "refuses corpus manifests, so it cannot yet diagnose a representative problem", and that it should be removed if the representative run does not use it. Neither plateau axes on a representative problem nor the keep-or-remove decision can be settled while the tool refuses the corpus. This change makes both decidable at the owner's representative run.
-- Problems are built by the same function the arm run uses, so a diagnosis describes the very weights the arms optimise.
+- The merged summary (#294) and the routing doc's Outstanding list named the missing comparison against "the actual production refinement pipeline". The `reference` arm compares against `lamarck-refine`, which is a surrogate. This arm calls the production generator itself, so "the current refinement method" is measured, not approximated.
+- The arm reuses the production helpers (`generate_statistics`, `collect_focus_stats`, `collect_incoming_source_stats`, `generate_candidate_batch`) and does not reimplement them, as the issue's "reuse existing mechanisms" asks.
 
 ### Essential Design Decisions
 
-- `diagnose_manifest` still runs `validate()` and the budget-multiple check before any file I/O. A corpus that cannot be loaded is a hard error, as in `run_manifest`. A problem that fails to build (for example, D larger than the creature's synapse count) is recorded on its row, as before.
-- `corpusFingerprint` is written only for a corpus manifest. `formatVersion` stays 4, so synthetic summaries are byte-for-byte the old shape.
-- The return type changed from `Vec<LandscapeRow>` to `LandscapeDiagnosis` so that the corpus fingerprint is returned with the rows. It is computed by the same `fingerprint` that `run_manifest` uses. `recordsFnv1a64` hashes the records already loaded for the rows. `creatureFnv1a64` hashes the creature file read a second time, so a creature file changed between the two reads would not be detected. `run_manifest` has the same gap.
+- **Selected weights only.** The bench optimises exactly the D selected weights, so a candidate is evaluated only when `admissible_point` accepts it: the same neurons (uuid, type, squash, bias), the same synapse list, and only selected weights changed. Structural, bias and out-of-set proposals are skipped. This keeps the "no topology optimisation" boundary, but it means the arm measures the generator's weight proposals only.
+- **Opt-in.** The arm runs only when `Manifest.productionRefine` is true (`#[serde(default)]`, omitted when false) or the example's `--production-refine` flag is passed. Older manifests read as false, and default manifests serialise byte-for-byte as before. The arm's seed constant is pinned in `arm_seeds_are_pinned`.
+- **Fixed batch, no learning signal.** `PRODUCTION_BATCH` is 16, `scale_quotas: false`, `learning: None`, `ranked_sources: None` and the mirror policy is the default. Focus neurons are taken round-robin over the distinct targets of the selected synapses. The arm stops, with budget unused, when a whole focus cycle yields nothing admissible (8 of 324 rows did).
+- **AMM paired with the new arm.** `summarise_reference` adds an AMM vs `production-refine` pair only when the manifest sets `productionRefine`. Without the flag the output is unchanged. With it, the first two pairs keep their means, medians, paired differences, win/loss counts and verdicts. Only their bootstrap interval bounds move, because the extra pair draws from the same bootstrap random stream.
+- **Statistics passes counted, in their own unit.** `BudgetedObjective::charge_record_pass` records each scan the arm's statistics helpers make: one `generate_statistics` record pass per run and, per round, a `collect_focus_stats` network pass and a `collect_incoming_source_stats` network pass. The incoming helper is charged only when it scanned: `collect_incoming_source_stats_reporting_scan` returns that flag, and `collect_incoming_source_stats` is now a thin wrapper that drops it, so its behaviour and every other caller are unchanged. The counts are not drawn from the evaluation budget and are not added into `totalEvaluations`, because a record or network pass is not a loss evaluation. They are reported separately as `statisticsCost`. A scan is charged before it runs, except the incoming one, which is charged when it succeeds.
+- **Kept, with a removal condition.** The code is kept, opt-in and bench-only, as the harness for the representative comparison. The routing doc's Outstanding list says to remove it if that run does not use it or confirms the synthetic negative result.
 
 ### Undiscoverable Facts
 
-- No production creature/corpus pair is available on this host. Private inputs stay out of this checkout, so the representative diagnosis is an owner step.
-- The worker's periodic checkpoint committed this change as `c055cfd` ("WIP checkpoint"), not under a hand-written message.
+- No production creature/corpus pair is available on this host, and private inputs stay out of the checkout, so the representative campaign is an owner step.
+- The arm campaign was produced at commit `11b7953` and re-run at `128436a` to record the statistics passes; the evidence now committed is the `128436a` run. The AMM pairing (`reference-summary.json`) was produced at `5006cf6`, which re-reads committed rows and makes no evaluation. Its inputs are unchanged by the re-run (every loss figure is identical), so it was not regenerated and carries no cost field.
 
 ## Evidence
 
@@ -39,81 +59,74 @@ Backend/CLI only; no UI file touched.
 
 ```mermaid
 flowchart LR
-    M[manifest] --> V[validate + tightest multiple]
-    V --> L[load_manifest_corpus]
-    L --> F[fingerprint]
-    L --> B["build_manifest_problem<br/>(shared with build_one)"]
-    B --> D[diagnose_specs → rows]
-    F --> S[LandscapeDiagnosis]
-    D --> S
-    S --> J["landscape-summary.json<br/>(+ corpusFingerprint for a corpus)"]
+    M["manifest<br/>(productionRefine)"] --> P[build problem]
+    P --> R[lamarck-refine]
+    P --> C[cma-es]
+    P --> X[production-refine]
+    X --> T["temp 0.bin<br/>screening records"]
+    T --> O[generate_statistics]
+    X --> F["focus round-robin:<br/>collect_focus_stats +<br/>collect_incoming_source_stats"]
+    O --> G[generate_candidate_batch]
+    F --> G
+    G --> A[admissible_point filter]
+    A --> E[budgeted eval, strict accept]
+    R --> S["summary: 3 paired comparisons"]
+    C --> S
+    E --> S
 ```
 
-- **End-to-end CLI run.** The command was `cargo run --release --example weight_router_bench -- /tmp/s266/out --creature creature.json --training-data data --screening-records 128 --held-out-records 96 --max-records 600 --landscape`, run on a scratch copy of the test fixture corpus (8 inputs, 36 synapses, 600 records), outside the repo.
-  - It exited 0 and printed `Corpus D=20 (12 problems, 0 failed): ... smooth 240 ...` and `problems 12/36 completed (24 failed)`.
-  - The D=40 and D=100 rows recorded `"error":"invalid configuration: dimension 40 exceeds the creature's 36 synapses"`.
-  - The summary carried `corpusFingerprint` `{creatureFnv1a64: b00aff5a27adcce9, recordsFnv1a64: bba066ccf65b5309, records: 600}` with `formatVersion` 4.
-- **CLI refusal.** `--smoke --landscape` exited 1 with `--landscape takes the default or --manifest manifest, or a corpus (--creature and --training-data), and no --smoke or reference flags`.
-- **Red before the fix.** Against the unchanged code, `landscape_diagnoses_a_corpus_manifest` failed with `InvalidConfig("the landscape diagnosis needs a synthetic manifest, not a corpus")`.
+- **Campaign.** The command was `cargo run --release --example weight_router_bench -- docs/evidence/weight-router-production --production-refine`, run at `128436a` (crate 0.1.55, `gitDirty` false). It exited 0: `runs 972/972 completed (0 failed); 2431738 evaluations`, then `statistics passes over the screening records (not loss evaluations): 348611 record passes, 348287 of them network passes`. Wall clock was 406 s on a shared, parallel host (indicative only). A Python comparison against the earlier `11b7953` evidence found all 972 rows identical once `statisticsCost` was removed from the 324 production rows, and `summary.json` differing only in `gitCommit`, `wallClockSeconds` and the new `statisticsCost`. Results are in `docs/evidence/weight-router-production/{manifest.json,runs.jsonl,summary.json}`.
+- **Paired results** (324 pairs per comparison, production minus the other arm):
+
+  | Comparison | Screening (wins / losses) | Held-out | Full window |
+  |---|---|---|---|
+  | vs `lamarck-refine` | 12 / 312 | 24 / 300 | 23 / 301 |
+  | vs `cma-es` | 3 / 321 | 15 / 309 | 10 / 314 |
+
+  Per-cell bootstrap intervals and paired differences are in `summary.json`. Against the surrogate, the mean screening differences run from +0.0001 to +0.26 across all 27 cells (+0.002 to +0.26 across the 26 production-worse cells), and are largest at 10D.
+- **AMM against production-refine.** The command was `cargo run --release --example weight_router_bench -- docs/evidence/weight-router-production --compare-reference docs/evidence/weight-router/amm-runs.jsonl`, run at `5006cf6` (crate 0.1.55, `gitDirty` false). It reported `reference runs 324/324 completed (0 failed)` and wrote `docs/evidence/weight-router-production/reference-summary.json`. AMM was worse in 23 of 27 cells and inconclusive in 4. Pairs (wins / losses) were: screening 35 / 289, held-out 39 / 285 and full window 34 / 290. A Python check against `weight-router/reference-summary.json` found all 54 AMM-vs-refine and AMM-vs-CMA-ES verdicts identical. Only the `ciLow`/`ciHigh` fields differed.
+- **Default output unchanged.** A Python comparison of the `11b7953` campaign's `lamarck-refine` and `cma-es` rows against the committed `docs/evidence/weight-router/runs.jsonl`, keyed on (arm, family, dimension, seed, budget) with `wallClockSeconds` dropped, found 648 of 648 identical. The re-run left those 648 rows byte-identical to the `11b7953` evidence (above).
+- **Smoke run.** `--smoke --production-refine` ran 3 runs with 760 evaluations at `11b7953`, and again at `128436a`, where it printed `123 record passes, 122 of them network passes` (neither run is committed; both are counted in the compute ledger). The compute ledger's statistics-pass table counts the superseded `11b7953` campaign and its smoke run too, taking the superseded campaign's passes (348,611 / 348,287) from the row-identical `128436a` campaign and the superseded smoke run's passes (123 / 122) from the `128436a` smoke re-run, because that code did not count them: a committed total of 348,611 record / 348,287 network passes and 697,468 / 696,818 including superseded and re-run compute.
 
 ## Acceptance Criteria
 
 <!-- vibe-spec-review inputs="diff+issue-body" -->
 
-- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `docs/evidence/weight-router/reference-summary.json`, `lamarck/src/weight_bench/refine.rs` — reviewer: partial — reason: the refinement arm is a random-axis surrogate that does not call `generate_candidate_batch`, so "the current refinement method" is only approximated.
-- **met** — Optimise 20–100 influential weights with budgets 10D, 30D, 100D; mark D>40 as extrapolation requiring validation. — evidence: `predeclared_manifest`, `is_extrapolation`, `docs/evidence/weight-router/manifest.json` — reviewer: met
-- **met** — Count landscape probes within the budget. — evidence: `lamarck/tests/weight_bench_landscape.rs::diagnosis_draws_its_probes_from_the_tightest_budget`, `lamarck/tests/weight_bench.rs::landscape_diagnoses_a_corpus_manifest` (81 probes of a 200 budget) — reviewer: met
-- **partial** — Test plateaus/kinks and activation families, then full/held-out confirmation. — evidence: `lamarck/tests/weight_bench.rs::landscape_diagnoses_a_corpus_manifest`, `docs/evidence/weight-router-landscape/` — reviewer: partial — reason: the diagnosis can now run on a corpus, but no representative diagnosis or full authoritative confirmation has been made.
-- **met** — Port only winning probes/router to Rust after measurement; no topology optimisation or unverified third-party dependency added by default. — evidence: router removed in #282; the only `Cargo.lock` change is the crate's own version — reviewer: met
-- **met** — Read and pin the full method before reproducing it — evidence: `docs/evidence/weight-router/method-check.json`, `scripts/check-amm-method.py` — reviewer: met
-- **partial** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms; if functionality already exists, this issue still owns the missing controlled comparison rather than a second implementation. — evidence: `lamarck/src/weight_bench/experiment.rs` (`build_manifest_problem` shared by `build_one` and `diagnose_manifest`; `load_manifest_corpus` and `fingerprint` reused) — reviewer: met — reason: the reviewer rated this diff's reuse met but noted that the refine control still does not reuse `generate_candidate_batch`. I keep it partial because this criterion also owns that missing controlled comparison.
-- **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change. — evidence: changes are confined to `weight_bench` and its example; `run.rs` and the production pipeline are untouched — reviewer: met
-- **partial** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `docs/weight-optimiser-routing.md` (Predeclared protocol; Compute ledger); `corpusFingerprint` now identifies the model and records of a landscape run — reviewer: partial — reason: no representative manifest is frozen, no model/data versions are selected, no overall wall-clock ceiling is set, and the earlier development and smoke runs are not counted.
-- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks. Research runs are separate from routine feature CI. — evidence: `lamarck/tests/weight_bench.rs::landscape_diagnoses_a_corpus_manifest`, `lamarck/tests/weight_bench_landscape.rs::landscape_refuses_an_unloadable_corpus_and_invalid_manifests`, `./quality.sh` (see Test Plan) — reviewer: met — reason: the reviewer could not run the gate and noted that the CLI refusal has no automated test. The gate was run here and passed, and the CLI refusal was exercised by hand (see Evidence).
-- **partial** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — evidence: How to run in `docs/weight-optimiser-routing.md` (now including the corpus `--landscape` command) — reviewer: partial — reason: the synthetic results are reproducible, but representative coverage is 0 runs.
-- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/weight-optimiser-routing.md` Outstanding — reviewer: partial — reason: the keep-or-remove decision on the landscape diagnosis still waits on a representative run. This diff adds a small public type to it so that run can use it.
-- **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private. — evidence: the corpus test writes a generic fixture to a temporary directory — reviewer: met
-- **met** — Leave unassigned until an implementer actively starts. `work-on` authorises the investigation, not skipping prerequisite verification. — evidence: this run inspected merged #293 and the Outstanding list before changing code — reviewer: missing — reason: the reviewer said "not assessable from the diff"; it is a process rule, and the run followed it.
-- **unrequested** — `diagnose_manifest` now returns `LandscapeDiagnosis` (newly exported) instead of `Vec<LandscapeRow>` — reviewer: unrequested — reason: the bench-only API change is needed to return the corpus fingerprint together with the rows.
-- **unrequested** — crate version 0.1.53 → 0.1.54 (`lamarck/Cargo.toml`, `Cargo.lock`) and the CHANGELOG entry — reviewer: unrequested — reason: `CONTRIBUTING.md` requires a patch bump and a changelog entry for changes under `lamarck/src/`.
-
-## Standards Review
-
-<!-- vibe-standards-review inputs="diff+CODING-STANDARDS.md" -->
-
-- **clean** — No violations. The repository has no `CODING-STANDARDS.md`; the review used `CONTRIBUTING.md` and `README.md`, which document no review-only rules. Checked:
-  - The version bump and `Cargo.lock` agree (0.1.54, not behind Develop), and the CHANGELOG entry is under Unreleased/Changed.
-  - The docs no longer say the diagnosis is synthetic-only.
-  - The CLI wiring builds the corpus manifest before `landscape()`.
-  - The renamed refusal test's new `corpus creature missing.json` expectation fails if the old refusal returns.
-  - The new corpus test fails if the synthetic builder or the refusal is restored.
-  - No cited test is missing and no workflow changed.
-
-  Optional notes: the one long rustdoc line on `diagnose_manifest` was re-wrapped in a follow-up comment-only commit. Not acted on: a CHANGELOG phrase that does not say corpus output is also format 4, and the generic name `fingerprint` for a `pub(super)` function.
+- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `docs/evidence/weight-router-production/reference-summary.json`, `lamarck/tests/weight_bench_reference.rs::production_refine_manifest_pairs_amm_with_the_production_arm` — reviewer: partial — reason: AMM is now paired with `production-refine` (worse in 23 of 27 cells, inconclusive in 4) and with CMA-ES, but only on synthetic records, and the production arm is weight-only (no learning signal, no ranked sources, no structural or bias proposals).
+- **partial** — Test plateaus/kinks and activation families, then full/held-out confirmation. — evidence: `docs/evidence/weight-router-production/summary.json` (held-out and full windows per arm) — reviewer: partial — reason: plateaus, kinks and families were tested on synthetic problems only, with no full authoritative confirmation on a representative model or corpus.
+- **partial** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `docs/weight-optimiser-routing.md` (Compute ledger, Controls) — reviewer: partial — reason: `production-refine` was added after the predeclared run, with no success criteria of its own. Its statistics passes over the screening records are now counted (`statisticsCost`, in record and network passes, kept apart from loss evaluations because the units differ) in the committed campaign and in the compute ledger. There is no calibration/validation split without a representative run.
+- **partial** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — evidence: `docs/evidence/weight-router-production/{manifest.json,runs.jsonl,summary.json,reference-summary.json}` — reviewer: partial — reason: the synthetic results are reproducible and complete. Representative coverage is 0 runs, so no optimisation benefit is shown.
+- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/weight-optimiser-routing.md` Finding 6 and "AMM against `production-refine`" — reviewer: partial — reason: the negative findings are recorded and no success is claimed. `production-refine` lost to CMA-ES in every cell and is still kept as opt-in code, pending a representative run that has not been made.
+- **unrequested** — README #266 row corrected from "19 of 27" to "18 of 27" cells — reviewer: unrequested — reason: the reviewer found the row this PR edits contradicted `summary.json`, so it was fixed in place.
 
 ## Test Plan
 
-- Added `lamarck/tests/weight_bench.rs::landscape_diagnoses_a_corpus_manifest`. Its fixture is the existing generic corpus (`corpus_fixture`). It asserts:
-  - one `Corpus` row at D=20, seed 1001, with no error, 20 classified axes, 81 evaluations and a budget of 200;
-  - that the row equals `diagnose` of the `problem_from_corpus` problem, with matching `preparation_evaluations`;
-  - a fingerprint with `records` 600 that equals `run_manifest`'s.
-
-  It failed before the fix (see Evidence) and passes after it.
-- Edited `lamarck/tests/weight_bench_landscape.rs`:
-  - The old `landscape_refuses_corpus_and_invalid_manifests` asserted that a corpus manifest is refused. The issue's plateau/kink criterion on a representative problem makes that refusal obsolete. It is renamed `landscape_refuses_an_unloadable_corpus_and_invalid_manifests` and now asserts that the specific `corpus creature missing.json` error is returned for a missing creature file. The empty-seeds refusal is kept unchanged.
-  - `landscape_command_total_counts_preparation_once_per_problem` additionally asserts `corpus_fingerprint == None` for a synthetic manifest.
-  - Every other edit only appends `.rows`, so no assertion was removed. `committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau` still checks that the synthetic rows equal the committed evidence.
-- On the final code (`c055cfd`; the later commit re-wraps one doc comment, after which `cargo fmt --check` and `cargo doc --no-deps` passed):
-  - `cargo test --test weight_bench --test weight_bench_landscape`: 30 passed and 1 ignored (already ignored), and 18 passed.
-  - `cargo test --lib weight_bench`: 14 passed.
-  - `cargo clippy --all-targets -- -D warnings`: clean.
-  - `./quality.sh < /dev/null`: exited 0 with "All quality checks passed!" (1019 tests passed, 0 failed).
-  - markdownlint: 0 issues on `CHANGELOG.md` and `docs/weight-optimiser-routing.md`; `scripts/spell-check.sh` found no typos.
+- Added `lamarck/src/weight_bench/production.rs` unit tests:
+  - `accepts_a_selected_weight_change_and_returns_x` checks that a change to a selected weight returns the new weight vector.
+  - `rejects_bias_out_of_set_added_synapse_and_identical` checks four refusals. The bias case also changes a selected weight, so only the bias can refuse it. The out-of-set case is tested with and without a selected change. The other two cases are an added synapse and an identical creature.
+  - `production_refine_is_bounded_deterministic_and_cleans_up` runs a tanh D=20 problem with a 200-evaluation budget. It asserts that the run uses all 200 evaluations and ends strictly below the start loss. It also asserts identical loss and evaluation count for two runs with one seed, and that both temporary directories are distinct and removed. Red-checked: a copy of `run` that drops every admissible candidate fails at the full-budget assert.
+- Added statistics-cost tests (PR #295 review). Each one asserts exact counts or exact absence, so it fails when a pass is not charged or is charged twice:
+  - `lamarck/src/weight_bench/production.rs::a_round_with_no_admissible_candidate_still_costs_its_statistics_passes` selects only the `h1 -> o1` synapse, on records where the generator proposes nothing admissible. It asserts one evaluation used and 3 record passes (2 network): the observations pass plus the idle round's focus and incoming passes.
+  - `lamarck/src/weight_bench/production.rs::a_hidden_neuron_fed_by_inputs_costs_one_network_pass_per_round` selects only `input-0 -> h1`, where the incoming helper skips its scan. It asserts 6 record passes (5 network), which would be 11 if the skipped scan were charged. The figure is pinned to seed 7 and moves only if the generator's output does.
+  - `lamarck/src/weight_bench/production.rs::the_statistics_cost_is_not_drawn_from_the_evaluation_budget` asserts the full 200-evaluation budget is still spent, that exactly one record pass has no network run, and that a second run with the same seed charges the same passes.
+  - `lamarck/src/focus.rs::incoming_scan_is_reported_only_when_the_records_were_read` covers the no-scan path directly: a hidden neuron fed only by an input reports `false`, and an output neuron, a direct input-to-output neuron and a hidden neuron fed by a neuron report `true`, each with stats equal to `collect_incoming_source_stats`.
+  - `lamarck/tests/weight_bench.rs::production_refine_reports_its_statistics_passes_apart_from_evaluations` asserts that default arms and results carry no `statisticsCost` key, that with two budget multiples each production row's cost is one non-network pass plus network passes, that the two rows' costs differ, that the total equals the sum of both rows' (not either row's alone), that `totalEvaluations` still counts loss evaluations only, and that the camelCase fields round-trip.
+  - `lamarck/tests/weight_bench.rs::rows_written_before_the_statistics_cost_read_as_zero` is the old-shape test: a row without the field, as the committed rows were written, reads as zero.
+- `lamarck/tests/weight_bench_reference.rs` gains `statistics_cost: StatisticsCost::default()` in its `RunRow` fixture literal; no assertion changed.
+- Added `lamarck/tests/weight_bench.rs` tests:
+  - `production_refine_manifest_adds_arm_rows_and_pairs` checks that the flag adds a `production-refine` row per problem and budget and the two new comparison pairs. The flag-off control has no such row and only the original pair.
+  - `production_refine_flag_serialisation_is_backward_compatible` checks that a manifest without `productionRefine` reads as false and that a default manifest serialises without the key.
+- Added `lamarck/tests/weight_bench_reference.rs::production_refine_manifest_pairs_amm_with_the_production_arm`. Without the flag it checks that production rows are ignored and only two pairs appear. With the flag it checks for the third pair, unchanged first-two means, and the expected AMM-minus-production means (−0.8 screening, −0.6 held out) and verdict.
+- Extended `lamarck/src/weight_bench/arms.rs::arm_seeds_are_pinned` with the new arm's seed. The existing asserts are kept.
+- `lamarck/tests/weight_bench_landscape.rs` and the existing `lamarck/tests/weight_bench_reference.rs` tests only gain `production_refine: false` in `Manifest` literals, and the `RunRow` fixture in `weight_bench_reference.rs` also gains `statistics_cost: StatisticsCost::default()`. No assertion was removed from any existing test, and the committed-evidence reproduction tests pass unchanged.
+- Results on the final head: `./quality.sh < /dev/null` exited 0 with "All quality checks passed!" (1031 tests passed, 0 failed), covering `cargo fmt --check`, `cargo clippy --all-targets` and the committed-evidence reproduction tests. The evidence was generated at `128436a`; the commits after it change only documentation, doc comments, this summary and one test (`lamarck/tests/weight_bench.rs`, the two-row statistics-cost total). This push (the statistics-pass ledger correction) edits documentation and this summary only; the gate result above is from before it, and the targeted checks run after it are named in the PR reply.
+- Results on the earlier head:
+  - `./quality.sh < /dev/null` exited 0 with "All quality checks passed!" (1024 tests passed, 0 failed).
+  - The first gate run failed `readme_contract::readme_mentions_no_unknown_lamarck_flags`, because the README named the example-only `--production-refine` flag. The flag was removed from README, and `cargo test --test readme_contract` passed 40 tests.
 - Docs read and updated:
-  - `docs/weight-optimiser-routing.md`: How to run gains the corpus `--landscape` command, Finding 5 gains a corpus paragraph, and the Outstanding bullet is rewritten.
-  - The `weight_router_bench.rs` module doc and the `diagnose_manifest` rustdoc are updated.
-  - `CHANGELOG.md` is updated.
-  - After editing, a grep for `refus\w* corpus`, `synthetic.only` and `synthetic manifest` found no stale claim. `README.md` does not mention the landscape diagnosis.
+  - `docs/weight-optimiser-routing.md`: Arms table, How to run (including the compare command), the Results pointer, Finding 6 (range corrected), the new "AMM against `production-refine`" section, Compute ledger (committed total 5,798,949; total including re-runs 10,407,674; the new statistics-pass table) and the Arms table row, the Controls section and Outstanding. Its opening sentences no longer say the bench has no production-pipeline comparison.
+  - The README #266 row and `CHANGELOG.md` (a statistics-cost paragraph on the production-refine entry).
+  - The `weight_bench/mod.rs` and example module docs.
 
 ## Merge verification
 
@@ -121,10 +134,9 @@ flowchart LR
 
 ## Not done
 
-- **Representative runs:** none on a production creature and corpus, for either the arms or the landscape diagnosis. No optimisation benefit is claimed.
-- **Production pipeline:** there is no refinement arm on the production candidate pipeline (`generate_candidate_batch` with focus/statistics/backprop). That changes the protocol and needs fresh validation data.
-- **Landscape diagnosis:** the keep-or-remove decision waits on the representative run.
-- **Compute and costing:** no overall wall-clock ceiling is predeclared, and the earlier development and smoke runs are not costed.
-- **Untested:** the CLI flag refusal has no automated test; it was checked by hand only.
+- **Representative runs:** none on a production creature and corpus, for any arm. No optimisation benefit is claimed.
+- **Arm scope:** `production-refine` excludes the generator's structural and bias proposals and runs without a learning signal or ranked sources, so it measures the weight proposals only.
+- **Review:** the Spec reviewer was dispatched over the diff (verdicts above). The Standards reviewer was not dispatched in this session.
+- **Pass-to-evaluation conversion:** the statistics passes are counted but not converted into loss-evaluation equivalents; the ledger gives both figures in their own units.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

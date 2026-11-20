@@ -1151,9 +1151,33 @@ pub fn collect_incoming_source_stats(
     max_records: Option<u64>,
     observations: Option<&crate::observations::ObservationsStatistics>,
 ) -> Result<Vec<IncomingSourceStats>, String> {
+    collect_incoming_source_stats_reporting_scan(
+        creature,
+        network,
+        training_data,
+        focus_uuid,
+        max_records,
+        observations,
+    )
+    .map(|(stats, _scanned)| stats)
+}
+
+/// [`collect_incoming_source_stats`], also reporting whether it scanned the
+/// training records. It does not when the focus neuron has no incoming
+/// synapses, or only raw inputs feeding a neuron that is not an output (see
+/// [`IncomingSourceScan::needs_scan`]); the weight bench uses this to charge a
+/// pass only when one was made.
+pub(crate) fn collect_incoming_source_stats_reporting_scan(
+    creature: &CreatureExport,
+    network: &mut CompiledNetwork,
+    training_data: &std::path::Path,
+    focus_uuid: &str,
+    max_records: Option<u64>,
+    observations: Option<&crate::observations::ObservationsStatistics>,
+) -> Result<(Vec<IncomingSourceStats>, bool), String> {
     let mut scan = IncomingSourceScan::new(creature, focus_uuid, observations)?;
     if !scan.needs_scan() {
-        return Ok(scan.finish());
+        return Ok((scan.finish(), false));
     }
 
     let config = TrainingDataConfig::new(creature.input, creature.output);
@@ -1168,7 +1192,7 @@ pub fn collect_incoming_source_stats(
         scan.observe(&record.inputs, &record.outputs, &traced);
     }
 
-    Ok(scan.finish())
+    Ok((scan.finish(), true))
 }
 
 /// Attach backprop bias blame for the focus neuron onto focus stats.
@@ -1300,6 +1324,44 @@ mod tests {
         for &(inp, out) in pairs {
             f.write_all(&inp.to_le_bytes()).unwrap();
             f.write_all(&out.to_le_bytes()).unwrap();
+        }
+    }
+
+    #[test]
+    fn incoming_scan_is_reported_only_when_the_records_were_read() {
+        let dir = tempdir().unwrap();
+        write_records(dir.path(), &[(0.5, 0.0), (1.0, 1.0), (-0.5, 0.0)]);
+        // (creature, focus, expects a scan): a hidden neuron fed only by a raw
+        // input needs none; an output neuron does even then; a hidden neuron
+        // fed by another neuron does.
+        for (json, focus, scans) in [
+            (TINY, "h1", false),
+            (TINY, "o1", true),
+            (DIRECT, "output-0", true),
+            (DEEP, "h2", true),
+        ] {
+            let creature = parse_creature_json(json).unwrap();
+            let mut network = compile_creature(&creature).unwrap();
+            let (stats, scanned) = collect_incoming_source_stats_reporting_scan(
+                &creature,
+                &mut network,
+                dir.path(),
+                focus,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(scanned, scans, "{focus}");
+            let plain = collect_incoming_source_stats(
+                &creature,
+                &mut network,
+                dir.path(),
+                focus,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(format!("{stats:?}"), format!("{plain:?}"), "{focus}");
         }
     }
 

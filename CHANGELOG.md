@@ -8,6 +8,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Opt-in production-refine arm for the #266 weight bench (Issue #266).**
+  `Arm::ProductionRefine` (`lamarck/src/weight_bench/production.rs`) drives the
+  real `generate_candidate_batch` pipeline, with statistics from the production
+  focus and observation helpers over the objective's screening records, instead
+  of the random-axis surrogate. Only candidates that change the selected weights
+  alone are evaluated (`PRODUCTION_BATCH` = 16 per round, round-robin over the
+  focus neurons); a full cycle with none admissible ends the run with budget
+  unused. It runs only when `Manifest::production_refine` is set
+  (`weight_router_bench --production-refine`), adding production-vs-refine and
+  production-vs-CMA-ES comparisons. The field is omitted when false, so default
+  manifests, rows and the committed evidence are unchanged. Crate 0.1.55. On the
+  synthetic suite the arm was the weakest of the three (worse than
+  lamarck-refine in 26 of 27 cells and than CMA-ES in all 27); evidence in
+  `docs/evidence/weight-router-production/`. With `productionRefine` set,
+  `summarise_reference` (`--compare-reference`) also pairs AMM with the
+  production arm; on the committed AMM rows AMM was worse in 23 of 27 cells and
+  inconclusive in 4 (`weight-router-production/reference-summary.json`).
+  The arm's scans of the screening records are counted apart from loss
+  evaluations: each run row of the arm carries `statisticsCost`
+  (`recordPasses`, `networkPasses`) and `summary.json` the total (348,611 record
+  passes, 348,287 of them network passes, over the 324 production runs); the
+  field is omitted when zero, so default rows and summaries are unchanged, and
+  rounds with no admissible candidate are charged too. The campaign was re-run at
+  `128436a` to record it, with every loss figure unchanged.
+
 - **Plateau and kink diagnosis for the #266 weight bench, plus a saturated
   hard-tanh family (Issue #266).** `lamarck/src/weight_bench/landscape.rs`
   classifies each chosen free axis from `f(x±h)` and `f(x±h/2)` (`h` = 0.05) as

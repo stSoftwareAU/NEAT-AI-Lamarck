@@ -4,11 +4,16 @@
 //! loop calls it: it only runs when the `weight_router_bench` example (or a
 //! test) drives it, so ordinary behaviour is unchanged.
 //!
-//! It compares two in-process arms on fixed, deterministic screening records:
+//! It compares in-process arms on fixed, deterministic screening records:
 //!
 //! - **lamarck-refine** — a simplified random-axis control (antithetic pairs
 //!   and follow-up fractions), not the production candidate pipeline;
-//! - **cma-es** — a full-covariance (mu/mu_w, lambda)-CMA-ES.
+//! - **cma-es** — a full-covariance (mu/mu_w, lambda)-CMA-ES;
+//! - **production-refine** — opt-in (`Manifest::production_refine`): drives the
+//!   real `generate_candidate_batch` pipeline and evaluates only the candidates
+//!   that change the selected weights (see `production.rs`). Its scans of the
+//!   screening records are reported as `statisticsCost`, apart from loss
+//!   evaluations.
 //!
 //! A budget-aware router and its landscape probes were measured in an earlier
 //! run (crate 0.1.46) and removed: the router never beat CMA-ES alone, so it
@@ -35,6 +40,7 @@ pub mod cmaes;
 pub mod experiment;
 pub mod landscape;
 pub mod objective;
+mod production;
 pub mod provenance;
 pub mod reference;
 pub mod refine;
@@ -52,7 +58,9 @@ pub use landscape::{
     LandscapeDiagnosis, LandscapeRow, ShapeCounts, classify_axis, diagnose, diagnose_manifest,
     diagnose_specs, landscape_coverage, landscape_total_evaluations, summarise_landscape,
 };
-pub use objective::{BenchError, Budget, BudgetedObjective, WeightObjective, select_influential};
+pub use objective::{
+    BenchError, Budget, BudgetedObjective, StatisticsCost, WeightObjective, select_influential,
+};
 pub use reference::{
     REFERENCE_BOX_HALF_WIDTH, ReferenceRequest, ReferenceResults, serve_reference,
     summarise_reference,

@@ -162,12 +162,14 @@ pub struct ReferenceResults {
     /// Planned versus finished reference runs; a planned run with no row is
     /// counted as neither completed nor failed.
     pub coverage: Coverage,
-    /// Per-cell comparisons: AMM vs refine, AMM vs CMA-ES.
+    /// Per-cell comparisons: AMM vs refine, AMM vs CMA-ES and, when the
+    /// manifest sets `productionRefine`, AMM vs production-refine.
     pub cells: Vec<CellSummary>,
 }
 
 /// Compare the AMM reference rows with the in-process `runs` using the same
-/// paired bootstrap and verdict rule as the main experiment.
+/// paired bootstrap and verdict rule as the main experiment. When the manifest
+/// sets `productionRefine`, AMM is also paired with the production-refine rows.
 pub fn summarise_reference(
     m: &Manifest,
     runs: &[RunRow],
@@ -216,10 +218,13 @@ pub fn summarise_reference(
         .sum();
     let mut all = runs.to_vec();
     all.extend_from_slice(reference);
-    let pairs = [
+    let mut pairs = vec![
         (Arm::AmmReference, Arm::LamarckRefine),
         (Arm::AmmReference, Arm::CmaEs),
     ];
+    if m.production_refine {
+        pairs.push((Arm::AmmReference, Arm::ProductionRefine));
+    }
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
     let cells = summarise_cells(m, &all, &pairs, &mut rng);
     Ok(ReferenceResults {

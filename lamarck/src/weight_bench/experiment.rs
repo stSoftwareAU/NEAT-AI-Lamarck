@@ -12,7 +12,7 @@ use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use super::arms::{Arm, run_arm};
-use super::objective::{BenchError, BudgetedObjective, WeightObjective};
+use super::objective::{BenchError, BudgetedObjective, StatisticsCost, WeightObjective};
 use super::stats::{bootstrap_ci_mean, mean, median};
 use super::suite::{
     CorpusSpec, Family, MAX_DIMENSION, MIN_DIMENSION, Problem, ProblemSpec, build_problem,
@@ -50,6 +50,12 @@ pub struct Manifest {
     /// A real creature and records; when set, `families` must be `[Corpus]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corpus: Option<CorpusSpec>,
+    /// Also run [`Arm::ProductionRefine`] (the real candidate generator) after
+    /// the two standing arms, and compare it with each. Absent in older
+    /// manifests (read as false) and omitted when false, so default manifests
+    /// serialise as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub production_refine: bool,
 }
 
 impl Manifest {
@@ -123,6 +129,7 @@ pub fn predeclared_manifest() -> Manifest {
         bootstrap_resamples: 2000,
         bootstrap_seed: 266,
         corpus: None,
+        production_refine: false,
     }
 }
 
@@ -171,6 +178,12 @@ pub struct RunRow {
     pub normalised_held_out_loss: Option<f64>,
     /// Unbudgeted confirmation attempts, including any failed call (reported separately).
     pub confirmation_evaluations: usize,
+    /// Scans of the screening records the arm made to build statistics, in
+    /// record and network passes rather than loss evaluations (see
+    /// [`StatisticsCost`]). Zero, and left out of the row, for arms that make
+    /// none; absent rows read as zero.
+    #[serde(default, skip_serializing_if = "StatisticsCost::is_zero")]
+    pub statistics_cost: StatisticsCost,
     /// Whether the dimension is beyond the calibrated range.
     pub extrapolation: bool,
     /// Flat chosen axes of the row's problem (see `PLATEAU_REL_TOL`). Absent
@@ -268,6 +281,11 @@ pub struct ExperimentResults {
     /// Budgeted + confirmation evaluations of every row, plus preparation
     /// counted once per problem built (not once per row).
     pub total_evaluations: usize,
+    /// Statistics passes of every row, summed (see [`RunRow::statistics_cost`]).
+    /// These are not loss evaluations and are not in `total_evaluations`.
+    /// Zero, and left out of the output, when no arm made any.
+    #[serde(default, skip_serializing_if = "StatisticsCost::is_zero")]
+    pub statistics_cost: StatisticsCost,
     /// Planned versus completed runs.
     pub coverage: Coverage,
     /// Every run, failures included.
@@ -343,6 +361,7 @@ fn blank_row(problem: &Problem, multiple: usize, phase: &str, arm: Arm) -> RunRo
         held_out_loss_final: None,
         normalised_held_out_loss: None,
         confirmation_evaluations: 0,
+        statistics_cost: StatisticsCost::default(),
         extrapolation: is_extrapolation(dimension),
         plateau_free_axes: Some(problem.plateau_free_axes),
         error: None,
@@ -382,6 +401,7 @@ pub(super) fn finish_row(
     let confirmations = std::cell::Cell::new(0usize);
     let outcome = optimise(&mut budgeted);
     row.evaluations_used = budgeted.used();
+    row.statistics_cost = budgeted.statistics();
     let result = outcome.and_then(|()| {
         let (best_loss, best_x) = budgeted
             .best()
@@ -478,13 +498,17 @@ fn validation_phase(
     let fingerprint = fingerprint(&corpus)?;
     let mut rows = Vec::new();
     let mut preparation = 0;
+    let mut arms = vec![Arm::LamarckRefine, Arm::CmaEs];
+    if m.production_refine {
+        arms.push(Arm::ProductionRefine);
+    }
     for &family in &m.families {
         for &dimension in &m.dimensions {
             for &seed in &m.validation_seeds {
                 let (problem, objective) = build_one(&corpus, family, dimension, seed)?;
                 preparation += problem.preparation_evaluations;
                 for &multiple in &m.budget_multiples {
-                    for arm in [Arm::LamarckRefine, Arm::CmaEs] {
+                    for &arm in &arms {
                         rows.push(run_row(&problem, &objective, multiple, "validation", arm));
                     }
                 }
@@ -526,6 +550,7 @@ fn arm_name(arm: Arm) -> &'static str {
     match arm {
         Arm::LamarckRefine => "lamarck-refine",
         Arm::CmaEs => "cma-es",
+        Arm::ProductionRefine => "production-refine",
         Arm::AmmReference => "amm-reference",
     }
 }
@@ -681,10 +706,16 @@ pub(super) fn summarise_cells(
 }
 
 /// Summarise the validation `runs` of `m` as CMA-ES vs lamarck-refine, with the
-/// bootstrap RNG seeded from the manifest.
+/// bootstrap RNG seeded from the manifest. When `m.production_refine` is set,
+/// production-refine vs lamarck-refine and vs CMA-ES follow, in that order.
 pub fn summarise_runs(m: &Manifest, runs: &[RunRow]) -> Vec<CellSummary> {
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
-    summarise_cells(m, runs, &[(Arm::CmaEs, Arm::LamarckRefine)], &mut rng)
+    let mut pairs = vec![(Arm::CmaEs, Arm::LamarckRefine)];
+    if m.production_refine {
+        pairs.push((Arm::ProductionRefine, Arm::LamarckRefine));
+        pairs.push((Arm::ProductionRefine, Arm::CmaEs));
+    }
+    summarise_cells(m, runs, &pairs, &mut rng)
 }
 
 /// Run the whole manifest: validate, then summarise the paired comparisons.
@@ -698,7 +729,7 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
         * m.dimensions.len()
         * m.budget_multiples.len()
         * m.validation_seeds.len()
-        * 2;
+        * if m.production_refine { 3 } else { 2 };
     let failed = runs.iter().filter(|r| r.error.is_some()).count();
     // Preparation is a per-problem cost repeated on each of the problem's
     // rows, so it is counted once per problem built, not summed over rows.
@@ -707,11 +738,16 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
             .iter()
             .map(|r| r.evaluations_used + r.confirmation_evaluations)
             .sum::<usize>();
+    let mut statistics_cost = StatisticsCost::default();
+    for row in &runs {
+        statistics_cost += row.statistics_cost;
+    }
     let cells = summarise_runs(m, &runs);
     Ok(ExperimentResults {
         format_version: 3,
         manifest: m.clone(),
         total_evaluations,
+        statistics_cost,
         coverage: Coverage {
             planned_runs: planned,
             completed_runs: runs.len() - failed,
