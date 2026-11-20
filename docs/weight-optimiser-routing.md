@@ -284,7 +284,7 @@ The run writes `manifest.json`, `runs.jsonl` and `summary.json` to `OUT_DIR`
 | File | Contents |
 |------|----------|
 | `manifest.json` | The manifest that was run. |
-| [`runs.jsonl`](evidence/weight-router/runs.jsonl) | One line per run (648 for the synthetic suite), failures included: arm, start and final screening, full and held-out losses, normalised screening and held-out losses, evaluations used, preparation and confirmation evaluations, flat-axis count (`plateauFreeAxes`), error. |
+| [`runs.jsonl`](evidence/weight-router/runs.jsonl) | One line per run (648 for the synthetic suite), failures included: arm, start and final screening, full and held-out losses, normalised screening and held-out losses, evaluations used, preparation and confirmation evaluations, flat-axis count (`plateauFreeAxes`), statistics passes (`statisticsCost`, production-refine rows only; left out when zero, so absent from this suite's rows), error. |
 | `summary.json` | Format version (`formatVersion`, 3), crate version (`crateVersion`, 0.1.49), `gitCommit`, `gitDirty`, `neatCoreSource` (the neat-core source pinned in `Cargo.lock`), `wallClockSeconds`, total evaluations, coverage (planned, completed, failed runs), `plateauFreeAxes` per validation seed, and per-cell comparisons: paired differences, mean, median, 95% interval, wins, losses, ties, failures, for screening, held-out and full-window loss, plus the verdict. A corpus run also carries `corpusFingerprint`: FNV-1a 64-bit hashes of the creature file (`creatureFnv1a64`) and of the records actually loaded (`recordsFnv1a64`), and the record count. The synthetic suite omits it, since the crate version and manifest seeds fix its problems. |
 
 Output format version 2 dropped the router-era fields: `calibratedRule` from
@@ -783,8 +783,8 @@ The two reproduction re-runs checked that routing the refine arm through the
 production mirror and follow-up helpers left every committed row unchanged. They
 produced no new evidence, so they are outside the committed total, but their
 evaluations are spent compute and are counted in the second total. The
-production-refine smoke run is likewise uncommitted and counted only in the
-second total. The production-refine campaign's 648 refine and CMA-ES rows repeat
+two production-refine smoke runs (at `11b7953` and `128436a`) are likewise
+uncommitted and counted only in the second total. The production-refine campaign's 648 refine and CMA-ES rows repeat
 the committed suite (apart from wall clock), so its evaluations include a second
 run of those arms; the committed total counts them as spent compute.
 `weight-router-production/reference-summary.json` reuses the committed AMM
