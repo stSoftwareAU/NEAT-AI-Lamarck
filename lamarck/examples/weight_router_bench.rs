@@ -8,6 +8,7 @@
 //! ```text
 //! cargo run --release --example weight_router_bench -- [OUT_DIR] [--manifest FILE] [--smoke]
 //!     [--creature FILE --training-data DIR [--screening-records N] [--held-out-records N] [--max-records N]]
+//!     [--production-refine]
 //! ```
 //!
 //! Writes `OUT_DIR/manifest.json`, `OUT_DIR/runs.jsonl` (one run per line) and
@@ -26,6 +27,14 @@
 //! hashes of the creature file and of the records loaded, and the record count.
 //! `OUT_DIR` defaults to `weight-router-bench`. The default manifest is the predeclared one; `--manifest` reads a JSON manifest;
 //! `--smoke` runs one tiny cell.
+//!
+//! `--production-refine` adds an opt-in third arm that drives the real
+//! production candidate generator (`generate_candidate_batch`), evaluating only
+//! candidates that change the selected weights, and adds its comparisons with
+//! lamarck-refine and CMA-ES to the summary. It sets `productionRefine` in the
+//! manifest and is refused with `--landscape` and the reference flags
+//! (`--serve-reference`, `--compare-reference`); without it the output is
+//! unchanged.
 //!
 //! Corpus mode: `--creature` and `--training-data` (both required together)
 //! run the same protocol on a real creature and its records instead of the
@@ -147,6 +156,7 @@ fn smoke_manifest() -> Manifest {
         bootstrap_resamples: 200,
         bootstrap_seed: 266,
         corpus: None,
+        production_refine: false,
     }
 }
 
@@ -315,11 +325,13 @@ fn run() -> Result<(), String> {
     let mut budget_multiple: Option<usize> = None;
     let mut compare: Option<PathBuf> = None;
     let mut landscape_only = false;
+    let mut production_refine = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--smoke" => smoke = true,
             "--landscape" => landscape_only = true,
+            "--production-refine" => production_refine = true,
             "--serve-reference" => serve = true,
             "--family" => {
                 let text = args.next().ok_or("--family needs a name")?;
@@ -362,12 +374,18 @@ fn run() -> Result<(), String> {
     if landscape_only && (smoke || serve || compare.is_some()) {
         return Err("--landscape takes the default or --manifest manifest, or a corpus (--creature and --training-data), and no --smoke or reference flags".into());
     }
+    if production_refine && (landscape_only || serve || compare.is_some()) {
+        return Err("--production-refine adds an arm to the arm run; it cannot be combined with --landscape, --serve-reference or --compare-reference".into());
+    }
     let mut manifest = match (manifest, smoke) {
         (Some(_), true) => return Err("--manifest and --smoke are mutually exclusive".into()),
         (Some(m), false) => m,
         (None, true) => smoke_manifest(),
         (None, false) => predeclared_manifest(),
     };
+    if production_refine {
+        manifest.production_refine = true;
+    }
     match (creature, training_data) {
         (Some(creature), Some(training_data)) => {
             manifest.families = vec![Family::Corpus];

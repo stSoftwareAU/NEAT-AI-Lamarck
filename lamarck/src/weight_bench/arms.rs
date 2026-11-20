@@ -1,5 +1,7 @@
 //! The in-process optimiser arms and their seeds.
 //!
+//! The production-refine arm is opt-in and drives the real candidate generator.
+//!
 //! The budget-aware router and its landscape probes were removed after an
 //! earlier synthetic run (crate 0.1.46): the router never beat CMA-ES alone and
 //! the probes did not separate the activation families, so they did not earn
@@ -9,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::cmaes::{CMA_SIGMA0, cma_es};
 use super::objective::{BenchError, BudgetedObjective};
+use super::production::production_refine;
 use super::refine::lamarck_refine;
 
 /// An optimiser arm.
@@ -19,9 +22,16 @@ pub enum Arm {
     LamarckRefine,
     /// Full-covariance CMA-ES.
     CmaEs,
+    /// The real production candidate generator (`generate_candidate_batch`),
+    /// restricted to candidates that change only the selected weights. Opt-in
+    /// through `Manifest::production_refine`.
+    ProductionRefine,
     /// The published AMM optimiser, run offline through `scripts/amm-reference.py`; never run in-process.
     AmmReference,
 }
+
+/// Seed constant of the opt-in production-refine arm.
+const PRODUCTION_REFINE_SEED: u64 = 0x5052_4f44_5246;
 
 /// Per-arm seed: the problem seed XOR a fixed constant for the arm. The
 /// constants are unchanged from the router-era run, so its refine and CMA-ES
@@ -32,6 +42,7 @@ pub fn arm_seed(arm: Arm, problem_seed: u64) -> u64 {
             Arm::LamarckRefine => 0x5245_4649_4e45,
             Arm::CmaEs => 0x434d_4145_5300,
             Arm::AmmReference => 0x414d_4d52_4546,
+            Arm::ProductionRefine => PRODUCTION_REFINE_SEED,
         }
 }
 
@@ -44,6 +55,7 @@ pub fn run_arm(
     match arm {
         Arm::LamarckRefine => lamarck_refine(obj, arm_seed(arm, problem_seed)),
         Arm::CmaEs => cma_es(obj, arm_seed(arm, problem_seed), CMA_SIGMA0),
+        Arm::ProductionRefine => production_refine(obj, arm_seed(arm, problem_seed)),
         Arm::AmmReference => Err(BenchError::InvalidConfig(
             "the AMM reference arm runs offline via the serve mode (--serve-reference), not in-process"
                 .into(),
@@ -61,6 +73,11 @@ mod tests {
         assert_eq!(arm_seed(Arm::LamarckRefine, 0), 0x5245_4649_4e45);
         assert_eq!(arm_seed(Arm::CmaEs, 1001), 0x434d_4145_5300 ^ 1001);
         assert_eq!(arm_seed(Arm::AmmReference, 1012), 0x414d_4d52_4546 ^ 1012);
+        assert_eq!(arm_seed(Arm::ProductionRefine, 0), 0x5052_4f44_5246);
+        assert_eq!(
+            arm_seed(Arm::ProductionRefine, 1001),
+            0x5052_4f44_5246 ^ 1001
+        );
         assert_eq!(arm_seed(Arm::LamarckRefine, 1001), 90_457_485_430_188);
         assert_eq!(arm_seed(Arm::CmaEs, 1001), 73_999_086_604_521);
     }

@@ -20,6 +20,7 @@ fn manifest() -> Manifest {
         bootstrap_resamples: 200,
         bootstrap_seed: 266,
         corpus: None,
+        production_refine: false,
     }
 }
 

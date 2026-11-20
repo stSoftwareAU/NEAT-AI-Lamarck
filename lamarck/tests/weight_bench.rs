@@ -34,6 +34,7 @@ fn tiny_manifest() -> Manifest {
         bootstrap_resamples: 200,
         bootstrap_seed: 266,
         corpus: None,
+        production_refine: false,
     }
 }
 
@@ -913,4 +914,65 @@ fn the_refine_arm_skips_a_refused_follow_up_probe() {
     assert_eq!(b.used(), 5);
     let best = b.best().unwrap().1[0];
     assert!((best - (w + 1.5 * m)).abs() < 1e-6, "best {best}");
+}
+
+#[test]
+fn production_refine_manifest_adds_arm_rows_and_pairs() {
+    let mut m = tiny_manifest();
+    let plain = run_manifest(&m).unwrap();
+    assert!(plain.runs.iter().all(|r| r.arm != Arm::ProductionRefine));
+    assert_eq!(plain.runs.len(), 2);
+    assert_eq!(plain.cells[0].comparisons.len(), 1);
+
+    m.production_refine = true;
+    let with = run_manifest(&m).unwrap();
+    assert_eq!(with.runs.len(), 3);
+    assert_eq!(with.coverage.planned_runs, 3);
+    assert_eq!(
+        with.runs
+            .iter()
+            .filter(|r| r.arm == Arm::ProductionRefine)
+            .count(),
+        1
+    );
+    let row = with
+        .runs
+        .iter()
+        .find(|r| r.arm == Arm::ProductionRefine)
+        .unwrap();
+    assert_eq!(row.error, None);
+    assert!(row.evaluations_used >= 1 && row.evaluations_used <= row.budget);
+    let pairs: Vec<(Arm, Arm)> = with.cells[0]
+        .comparisons
+        .iter()
+        .map(|c| (c.first, c.second))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            (Arm::CmaEs, Arm::LamarckRefine),
+            (Arm::ProductionRefine, Arm::LamarckRefine),
+            (Arm::ProductionRefine, Arm::CmaEs),
+        ]
+    );
+    // The two standing arms' rows are unchanged by the flag.
+    assert_eq!(&with.runs[..2], &plain.runs[..]);
+    assert_eq!(with.cells[0].comparisons[0], plain.cells[0].comparisons[0]);
+}
+
+#[test]
+fn production_refine_flag_serialisation_is_backward_compatible() {
+    let json = serde_json::to_value(tiny_manifest()).unwrap();
+    assert!(json.get("productionRefine").is_none());
+    let parsed: Manifest = serde_json::from_value(json).unwrap();
+    assert!(!parsed.production_refine);
+    let mut on = tiny_manifest();
+    on.production_refine = true;
+    let json = serde_json::to_value(&on).unwrap();
+    assert_eq!(json["productionRefine"], serde_json::json!(true));
+    assert!(
+        serde_json::from_value::<Manifest>(json)
+            .unwrap()
+            .production_refine
+    );
 }

@@ -109,6 +109,11 @@ impl WeightObjective {
         &self.synapse_indices
     }
 
+    /// The packed screening records (per record: inputs then outputs).
+    pub(crate) fn records(&self) -> &[f32] {
+        &self.records
+    }
+
     /// The creature with `x` written into the chosen synapses; every other
     /// parameter is unchanged. Callers pass [`Self::dimension`] weights
     /// ([`Self::loss_on`] checks the length first). On a length mismatch the zip

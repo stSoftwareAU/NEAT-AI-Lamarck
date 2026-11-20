@@ -50,6 +50,12 @@ pub struct Manifest {
     /// A real creature and records; when set, `families` must be `[Corpus]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corpus: Option<CorpusSpec>,
+    /// Also run [`Arm::ProductionRefine`] (the real candidate generator) after
+    /// the two standing arms, and compare it with each. Absent in older
+    /// manifests (read as false) and omitted when false, so default manifests
+    /// serialise as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub production_refine: bool,
 }
 
 impl Manifest {
@@ -123,6 +129,7 @@ pub fn predeclared_manifest() -> Manifest {
         bootstrap_resamples: 2000,
         bootstrap_seed: 266,
         corpus: None,
+        production_refine: false,
     }
 }
 
@@ -478,13 +485,17 @@ fn validation_phase(
     let fingerprint = fingerprint(&corpus)?;
     let mut rows = Vec::new();
     let mut preparation = 0;
+    let mut arms = vec![Arm::LamarckRefine, Arm::CmaEs];
+    if m.production_refine {
+        arms.push(Arm::ProductionRefine);
+    }
     for &family in &m.families {
         for &dimension in &m.dimensions {
             for &seed in &m.validation_seeds {
                 let (problem, objective) = build_one(&corpus, family, dimension, seed)?;
                 preparation += problem.preparation_evaluations;
                 for &multiple in &m.budget_multiples {
-                    for arm in [Arm::LamarckRefine, Arm::CmaEs] {
+                    for &arm in &arms {
                         rows.push(run_row(&problem, &objective, multiple, "validation", arm));
                     }
                 }
@@ -526,6 +537,7 @@ fn arm_name(arm: Arm) -> &'static str {
     match arm {
         Arm::LamarckRefine => "lamarck-refine",
         Arm::CmaEs => "cma-es",
+        Arm::ProductionRefine => "production-refine",
         Arm::AmmReference => "amm-reference",
     }
 }
@@ -681,10 +693,16 @@ pub(super) fn summarise_cells(
 }
 
 /// Summarise the validation `runs` of `m` as CMA-ES vs lamarck-refine, with the
-/// bootstrap RNG seeded from the manifest.
+/// bootstrap RNG seeded from the manifest. When `m.production_refine` is set,
+/// production-refine vs lamarck-refine and vs CMA-ES follow, in that order.
 pub fn summarise_runs(m: &Manifest, runs: &[RunRow]) -> Vec<CellSummary> {
     let mut rng = StdRng::seed_from_u64(m.bootstrap_seed);
-    summarise_cells(m, runs, &[(Arm::CmaEs, Arm::LamarckRefine)], &mut rng)
+    let mut pairs = vec![(Arm::CmaEs, Arm::LamarckRefine)];
+    if m.production_refine {
+        pairs.push((Arm::ProductionRefine, Arm::LamarckRefine));
+        pairs.push((Arm::ProductionRefine, Arm::CmaEs));
+    }
+    summarise_cells(m, runs, &pairs, &mut rng)
 }
 
 /// Run the whole manifest: validate, then summarise the paired comparisons.
@@ -698,7 +716,7 @@ pub fn run_manifest(m: &Manifest) -> Result<ExperimentResults, BenchError> {
         * m.dimensions.len()
         * m.budget_multiples.len()
         * m.validation_seeds.len()
-        * 2;
+        * if m.production_refine { 3 } else { 2 };
     let failed = runs.iter().filter(|r| r.error.is_some()).count();
     // Preparation is a per-problem cost repeated on each of the problem's
     // rows, so it is counted once per problem built, not summed over rows.
