@@ -665,7 +665,8 @@ representative run on the private corpus remains unperformed.
 
 ## Compute ledger
 
-Every committed campaign, in loss evaluations. Each total includes the
+Every committed campaign, then the logged reproduction re-runs, in loss
+evaluations. Each row's count includes the
 145-evaluation selection scan (preparation) once per problem built, and the
 confirmation evaluations. No calibration was run by the current code.
 
@@ -677,10 +678,18 @@ confirmation evaluations. No calibration was run by the current code.
 | AMM reference, `saturated-hard-tanh` | `weight-router-landscape/saturated/reference-summary.json` | 108 runs | 0 | 285,000 | `84096bb` |
 | Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `8e79db7` |
 | **Committed total** | | | 0 | 3,367,211 | |
+| Reproduction re-run, predeclared suite (refine, CMA-ES; crate 0.1.53) | not committed; rows equal `weight-router/runs.jsonl` | 648 runs | 0 | 1,631,615 | `5c9ba38` |
+| Reproduction re-run, `saturated-hard-tanh` (refine, CMA-ES; crate 0.1.53) | not committed; rows equal `weight-router-landscape/saturated/runs.jsonl` | 216 runs | 0 | 543,852 | `5c9ba38` |
+| **Total including reproduction re-runs** | | | 0 | 5,542,678 | |
+
+The two reproduction re-runs checked that routing the refine arm through the
+production mirror and follow-up helpers left every committed row unchanged. They
+produced no new evidence, so they are outside the committed total, but their
+evaluations are spent compute and are counted in the second total.
 
 The router-era campaign (crate 0.1.46), whose code was removed, and its
-calibration are not in this total; their counts are in the router-era sections
-above. Also outside it are the method check (27 rows per AMM version), the
+calibration are in neither total; their counts are in the router-era sections
+above. Also outside both totals are the method check (27 rows per AMM version), the
 `cargo test` fixtures and the development and smoke runs made while building
 the bench. Those were not logged, so their cost is **not counted**. All
 campaigns use validation seeds 1001 to 1012, and none tunes a parameter on
