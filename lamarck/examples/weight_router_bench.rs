@@ -34,7 +34,9 @@
 //! lamarck-refine and CMA-ES to the summary. It sets `productionRefine` in the
 //! manifest and is refused with `--landscape` and the reference flags
 //! (`--serve-reference`, `--compare-reference`); without it the output is
-//! unchanged.
+//! unchanged. The arm's scans of the screening records are not loss evaluations;
+//! each row carries them as `statisticsCost` (record and network passes),
+//! `summary.json` carries the total, and the example prints it.
 //!
 //! Corpus mode: `--creature` and `--training-data` (both required together)
 //! run the same protocol on a real creature and its records instead of the

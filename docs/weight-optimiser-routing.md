@@ -60,7 +60,7 @@ alone.
 |-----|------------|
 | `lamarck-refine` | A simplified random-axis surrogate on a fixed weight set, not a call to `generate_candidate_batch`. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), builds the `-delta` twin of `x + delta` with `mirror::signed_perturbation` and `mirror::mirror_candidate` (the twin is skipped when `mirror_candidate` refuses it or when `signed_perturbation` finds no single-weight change), and accepts the better one only if it strictly improves. After an accept it plans the #219 follow-up probes with `followup::plan_probes` (`STEP_FRACTIONS` `[0.5, -0.5, 1.0]` of the winning move), evaluates each through `followup::probe_candidate` (a refused probe is skipped) and takes the best strict improvement. A twin or probe that the hard weight limit (`limit_weight_scale`, 100000 by default) would clamp, or whose step is below `plank_constant` (1e-7), is refused, and a round whose twin is refused spends one evaluation instead of two. Since issue #285 the follow-up helpers identify a synapse by source, target and role (`synapse_type`), and the mirror pairs synapses by index, so a creature in which one source feeds an `IF` neuron in two roles is refined on the right synapse; `lamarck_refine` returns only errors from `obj.eval`. |
 | `cma-es` | Full-covariance (mu/mu_w, lambda)-CMA-ES, written in-repo with no third-party dependency. Strategy parameters are Hansen's tutorial defaults (arXiv:1604.00772); the eigendecomposition is a cyclic Jacobi method. Initial per-coordinate standard deviation `CMA_SIGMA0 = 0.05`. This equals the surrogate's uniform half-width numerically, but CMA-ES moves all coordinates and the search radii are not matched. |
-| `production-refine` (opt-in) | Drives the real production generator `generate_candidate_batch` (`PRODUCTION_BATCH` = 16 candidates per round, `scale_quotas: false`, no learning signal, no ranked sources, default mirror policy) on one focus neuron per round, in round-robin order over the distinct targets of the selected synapses. Focus and incoming statistics come from `collect_focus_stats` and `collect_incoming_source_stats`, and observations from `generate_statistics` over the screening records (written to a temporary `0.bin`). It evaluates only admissible candidates (changes to the selected weights only; structural, bias and out-of-set weight proposals are skipped), accepts the best strict improvement, and stops early with budget unused when a whole focus cycle yields nothing admissible. Enabled by manifest `productionRefine: true` or the example flag `--production-refine`; code in `lamarck/src/weight_bench/production.rs`. |
+| `production-refine` (opt-in) | Drives the real production generator `generate_candidate_batch` (`PRODUCTION_BATCH` = 16 candidates per round, `scale_quotas: false`, no learning signal, no ranked sources, default mirror policy) on one focus neuron per round, in round-robin order over the distinct targets of the selected synapses. Focus and incoming statistics come from `collect_focus_stats` and `collect_incoming_source_stats`, and observations from `generate_statistics` over the screening records (written to a temporary `0.bin`). It evaluates only admissible candidates (changes to the selected weights only; structural, bias and out-of-set weight proposals are skipped), accepts the best strict improvement, and stops early with budget unused when a whole focus cycle yields nothing admissible. Its statistics scans are reported as `statisticsCost` (see the Compute ledger). Enabled by manifest `productionRefine: true` or the example flag `--production-refine`; code in `lamarck/src/weight_bench/production.rs`. |
 | `router` (removed; router-era run only) | Spent `2 * probe_axes + 1` evaluations probing the landscape, then ran `lamarck-refine` or `cma-es` on the remaining budget. The probe was charged to the **same** budget. The chosen arm re-evaluated the start, one further counted evaluation. |
 | AMM (reference only) | Adaptive Multi Mode, run offline through its authors' reference implementation, not reimplemented here and not ported. It needs a known budget and a finite box, spends a counted part of the budget on online probes and routes the rest among several engines. See [AMM reference](#amm-reference). |
 
@@ -420,7 +420,7 @@ columns are the router-era run's router verdicts.
 **Production-refine arm (opt-in).** The run that adds the production generator
 is committed in
 [`docs/evidence/weight-router-production/summary.json`](evidence/weight-router-production/summary.json)
-(972 of 972 runs, 0 failed, 2,431,738 evaluations, commit `11b7953`); see
+(972 of 972 runs, 0 failed, 2,431,738 evaluations, commit `128436a`); see
 [Finding 6](#findings).
 
 ## Findings
@@ -581,9 +581,9 @@ is committed in
 
 6. **Negative finding: the production generator, restricted to the selected
    weights, was the weakest arm.** The opt-in `production-refine` arm was run
-   on the predeclared suite with `--production-refine` at commit `11b7953`
+   on the predeclared suite with `--production-refine` at commit `128436a`
    (crate 0.1.55, clean tree): 972 of 972 runs, 0 failed, 2,431,738
-   evaluations, 503 s wall on a shared host (indicative only); evidence in
+   evaluations, 406 s wall on a shared host (indicative only); evidence in
    `docs/evidence/weight-router-production/`. The 648 `lamarck-refine` and
    `cma-es` rows equal the committed `weight-router/runs.jsonl` apart from wall
    clock. Each comparison is paired (12 validation seeds x 27 cells = 324
@@ -770,12 +770,14 @@ confirmation evaluations. No calibration was run by the current code.
 | `saturated-hard-tanh` arms (refine, CMA-ES) | `weight-router-landscape/saturated/summary.json` | 216 runs | 0 | 543,852 | `8badaf5` |
 | AMM reference, `saturated-hard-tanh` | `weight-router-landscape/saturated/reference-summary.json` | 108 runs | 0 | 285,000 | `84096bb` |
 | Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `8e79db7` |
-| Predeclared synthetic suite (refine, CMA-ES, production-refine) | `weight-router-production/summary.json` | 972 runs | 0 | 2,431,738 | `11b7953` |
+| Predeclared synthetic suite (refine, CMA-ES, production-refine) | `weight-router-production/summary.json` | 972 runs | 0 | 2,431,738 | `128436a` |
 | **Committed total** | | | 0 | 5,798,949 | |
 | Reproduction re-run, predeclared suite (refine, CMA-ES; crate 0.1.53) | not committed; rows equal `weight-router/runs.jsonl` | 648 runs | 0 | 1,631,615 | `5c9ba38` |
 | Reproduction re-run, `saturated-hard-tanh` (refine, CMA-ES; crate 0.1.53) | not committed; rows equal `weight-router-landscape/saturated/runs.jsonl` | 216 runs | 0 | 543,852 | `5c9ba38` |
+| Superseded production campaign (before its statistics passes were counted; rows equal the committed ones) | not committed; replaced by the `128436a` run above | 972 runs | 0 | 2,431,738 | `11b7953` |
 | Smoke run, `--smoke --production-refine` | not committed | 3 runs | 0 | 760 | `11b7953` |
-| **Total including reproduction re-runs** | | | 0 | 7,975,176 | |
+| Smoke re-run, `--smoke --production-refine` (to measure its statistics passes) | not committed | 3 runs | 0 | 760 | `128436a` |
+| **Total including reproduction re-runs** | | | 0 | 10,407,674 | |
 
 The two reproduction re-runs checked that routing the refine arm through the
 production mirror and follow-up helpers left every committed row unchanged. They
@@ -787,13 +789,42 @@ the committed suite (apart from wall clock), so its evaluations include a second
 run of those arms; the committed total counts them as spent compute.
 `weight-router-production/reference-summary.json` reuses the committed AMM
 and production rows and made no loss evaluation, so it has no ledger row.
-The `production-refine` arm also makes forward passes that are not loss
-evaluations and are **not counted** in `evaluationsUsed` or this ledger.
-`generate_statistics` passes over the screening records once per run, and
-`collect_focus_stats` and `collect_incoming_source_stats` pass over them every
-round, to build the generator's statistics. That is uncounted search cost, and it favours the
-production arm. The arm lost anyway (Finding 6), so the omission cannot have
-produced its result. A representative comparison should count these passes.
+The `production-refine` arm also scans the screening records to build the
+generator's statistics, and those scans are not loss evaluations, so they are
+counted apart from `evaluationsUsed` and the table above, in their own units.
+A **record pass** is one scan of the whole screening record set; a **network
+pass** is a record pass that also runs the network on every record
+(`activate_and_trace`). Each `production-refine` run makes one
+`generate_statistics` record pass (no network), and each round makes a
+`collect_focus_stats` network pass and a `collect_incoming_source_stats` network
+pass; the incoming helper skips its scan, and so charges nothing, when the focus
+neuron has no incoming synapse or is a non-output neuron fed only by raw inputs
+(`collect_incoming_source_stats_reporting_scan` reports which). A round is
+charged even when it yields no admissible candidate. Each run row carries the
+count as `statisticsCost` (`recordPasses`, `networkPasses`) and `summary.json`
+carries the total; both are left out when zero, so rows and summaries of the
+default arms are unchanged. A failed pass is charged before it runs, like a
+failed evaluation, except the incoming pass, which is charged once it succeeds.
+
+| Campaign | Evidence | Record passes | Of which network passes | Commit |
+|---|---|---:|---:|---|
+| Production-refine, predeclared suite (324 production runs) | `weight-router-production/summary.json` `statisticsCost` | 348,611 | 348,287 | `128436a` |
+| Smoke run, `--smoke --production-refine` (1 production run; not committed) | printed by the example | 123 | 122 | `128436a` |
+| **Total** | | 348,734 | 348,409 | |
+
+The other campaigns' arms make no statistics pass. The two units are not
+interchangeable, and this PR does not convert them: a loss evaluation is one
+forward pass of every screening record, and a network pass runs the network on
+every record too, with tracing. The scale is still not negligible: the 324
+production runs spent 798,503 budgeted loss evaluations and 348,287 network passes.
+That search cost is outside the evaluation budget, so it favours the production
+arm against the other arms at the same budget. The arm lost anyway
+(Finding 6), so leaving these passes out of the budget cannot have produced its
+result, and counting them only widens its deficit. `weight-router-production/reference-summary.json`
+reuses the committed AMM and production rows, made no loss evaluation or
+statistics pass, and carries no cost field. The campaign was re-run at
+`128436a` to record these counts; every loss figure in its rows and summary is
+unchanged and only the production rows gained `statisticsCost`.
 
 The router-era campaign (crate 0.1.46), whose code was removed, and its
 calibration are in neither total; their counts are in the router-era sections

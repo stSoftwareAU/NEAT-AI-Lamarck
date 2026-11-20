@@ -11,7 +11,9 @@
 //! - **cma-es** — a full-covariance (mu/mu_w, lambda)-CMA-ES;
 //! - **production-refine** — opt-in (`Manifest::production_refine`): drives the
 //!   real `generate_candidate_batch` pipeline and evaluates only the candidates
-//!   that change the selected weights (see `production.rs`).
+//!   that change the selected weights (see `production.rs`). Its scans of the
+//!   screening records are reported as `statisticsCost`, apart from loss
+//!   evaluations.
 //!
 //! A budget-aware router and its landscape probes were measured in an earlier
 //! run (crate 0.1.46) and removed: the router never beat CMA-ES alone, so it
