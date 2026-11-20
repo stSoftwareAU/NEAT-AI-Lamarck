@@ -813,7 +813,7 @@ failed evaluation, except the incoming pass, which is charged once it succeeds.
 | Smoke re-run, `--smoke --production-refine` (1 production run; not committed) | printed by the example | 123 | 122 | `128436a` |
 | Superseded production campaign (324 production runs; not committed) | not measured; taken from the `128436a` run above | 348,611 | 348,287 | `11b7953` |
 | Smoke run, `--smoke --production-refine` (1 production run; not committed) | not measured; taken from the `128436a` smoke re-run | 123 | 122 | `11b7953` |
-| **Total including superseded and re-run compute** | | 697,591 | 696,940 | |
+| **Total including superseded and re-run compute** | | 697,468 | 696,818 | |
 
 The `11b7953` counts were not measured, because that code did not yet count its
 passes. They are inferred. The arm is deterministic, and the superseded rows
