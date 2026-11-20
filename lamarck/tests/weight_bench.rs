@@ -963,6 +963,8 @@ fn production_refine_manifest_adds_arm_rows_and_pairs() {
 #[test]
 fn production_refine_reports_its_statistics_passes_apart_from_evaluations() {
     let mut m = tiny_manifest();
+    // Two budget multiples give two production rows, so the total is a sum.
+    m.budget_multiples = vec![10, 30];
     let plain = run_manifest(&m).unwrap();
     // No default arm scans the records for statistics, so the cost is left out
     // of every row and of the totals, and the default output is unchanged.
@@ -981,32 +983,47 @@ fn production_refine_reports_its_statistics_passes_apart_from_evaluations() {
 
     m.production_refine = true;
     let with = run_manifest(&m).unwrap();
-    let production = with
+    let production_rows: Vec<&RunRow> = with
         .runs
         .iter()
-        .find(|r| r.arm == Arm::ProductionRefine)
-        .unwrap();
-    let cost = production.statistics_cost;
-    // One generate_statistics pass (no network) and then at least one round's
-    // focus-stats pass, which does run the network on every record.
-    assert_eq!(cost.record_passes - cost.network_passes, 1);
-    assert!(cost.network_passes >= 1, "{cost:?}");
-    // The standing arms report none, and the total is the production row's.
+        .filter(|r| r.arm == Arm::ProductionRefine)
+        .collect();
+    assert_eq!(production_rows.len(), 2);
+    let (mut record_total, mut network_total) = (0usize, 0usize);
+    for row in &production_rows {
+        let cost = row.statistics_cost;
+        // One generate_statistics pass (no network) and then at least one round's
+        // focus-stats pass, which does run the network on every record.
+        assert_eq!(cost.record_passes - cost.network_passes, 1, "{cost:?}");
+        assert!(cost.network_passes >= 1, "{cost:?}");
+        record_total += cost.record_passes;
+        network_total += cost.network_passes;
+    }
+    // The two rows differ, so a total that copied one row would not match.
+    assert_ne!(
+        production_rows[0].statistics_cost,
+        production_rows[1].statistics_cost
+    );
+    // The standing arms report none, and the total is the sum of the production rows'.
     for row in with.runs.iter().filter(|r| r.arm != Arm::ProductionRefine) {
         assert!(row.statistics_cost.is_zero(), "{:?}", row.arm);
     }
-    assert_eq!(with.statistics_cost, cost);
+    assert_eq!(with.statistics_cost.record_passes, record_total);
+    assert_eq!(with.statistics_cost.network_passes, network_total);
     // The passes are not loss evaluations: the totals count only those.
     let evaluations: usize = with
         .runs
         .iter()
         .map(|r| r.evaluations_used + r.confirmation_evaluations)
         .sum();
+    // One problem is built once and shared by every row, so its preparation counts once.
     assert_eq!(
         with.total_evaluations,
-        evaluations + production.preparation_evaluations
+        evaluations + production_rows[0].preparation_evaluations
     );
     // The cost survives the row's JSON round trip under its camelCase names.
+    let production = production_rows[0];
+    let cost = production.statistics_cost;
     let json = serde_json::to_value(production).unwrap();
     assert_eq!(
         json["statisticsCost"]["recordPasses"],
