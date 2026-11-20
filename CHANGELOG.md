@@ -21,7 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   manifests, rows and the committed evidence are unchanged. Crate 0.1.55. On the
   synthetic suite the arm was the weakest of the three (worse than
   lamarck-refine in 26 of 27 cells and than CMA-ES in all 27); evidence in
-  `docs/evidence/weight-router-production/`.
+  `docs/evidence/weight-router-production/`. With `productionRefine` set,
+  `summarise_reference` (`--compare-reference`) also pairs AMM with the
+  production arm; on the committed AMM rows AMM was worse in 23 of 27 cells and
+  inconclusive in 4 (`weight-router-production/reference-summary.json`).
 
 - **Plateau and kink diagnosis for the #266 weight bench, plus a saturated
   hard-tanh family (Issue #266).** `lamarck/src/weight_bench/landscape.rs`

@@ -245,6 +245,10 @@ cargo run --release --example weight_router_bench -- OUT_DIR --manifest FILE
 # Predeclared suite plus the opt-in production-refine arm
 cargo run --release --example weight_router_bench -- docs/evidence/weight-router-production --production-refine
 
+# Pair the committed AMM rows with that run, production-refine included
+cargo run --release --example weight_router_bench -- docs/evidence/weight-router-production \
+  --compare-reference docs/evidence/weight-router/amm-runs.jsonl
+
 # Representative comparison on a real creature and corpus
 cargo run --release --example weight_router_bench -- OUT_DIR \
   --creature FILE --training-data DIR \
@@ -656,6 +660,41 @@ and are unchanged; the router column is from the router-era run:
 | tanh | 100 (extrapolation) | 30D | 0.0366 | 0.0368 | 0.0370 | 0.1622 | 0.1963 |
 | tanh | 100 (extrapolation) | 100D | 0.0157 | 0.0139 | 0.0139 | 0.1728 | 0.2134 |
 
+### AMM against `production-refine` (added after Finding 6)
+
+`--compare-reference` was run on the production campaign directory with the
+committed AMM rows, at commit `5006cf6` (crate 0.1.55, clean tree):
+
+```bash
+cargo run --release --example weight_router_bench -- \
+  docs/evidence/weight-router-production \
+  --compare-reference docs/evidence/weight-router/amm-runs.jsonl
+```
+
+It re-runs nothing. It reads the 324 committed AMM rows and the 972 committed
+production-campaign rows, so it adds **no evaluations** to the ledger. When the
+manifest sets `productionRefine`, `summarise_reference` adds a third pair, AMM
+minus `production-refine`. Coverage is 324 of 324 AMM runs, 0 failed. The
+result is
+[`weight-router-production/reference-summary.json`](evidence/weight-router-production/reference-summary.json).
+
+* AMM against `production-refine`: `amm-reference-worse` in 23 of 27 cells and
+  inconclusive in 4 (tanh D=20 10D, relu D=20 30D, relu D=40 30D, hard-tanh
+  D=20 10D; each screening interval spans 0). Pairs (wins / losses):
+  screening 35 / 289, held-out 39 / 285, full window 34 / 290. Mean screening
+  differences run from -0.015 to +0.52 across the 27 cells.
+* The AMM-vs-refine and AMM-vs-CMA-ES comparisons in this file have the same
+  means, medians, paired differences, win/loss counts and verdicts (54 of 54)
+  as the committed `weight-router/reference-summary.json`. Only the bootstrap
+  interval bounds differ, because the extra pair draws from the same bootstrap
+  random stream. Without `productionRefine` the output is unchanged, and the
+  committed reference reproduction tests still pass.
+
+So the ordering on the synthetic suite is CMA-ES, then the refine surrogate,
+then `production-refine`, then AMM. AMM is worse than the production weight
+proposals in most cells and better in none. This is another negative synthetic
+result and changes nothing.
+
 ### AMM on `saturated-hard-tanh` (added after the predeclared run)
 
 AMM was also run on the family with real flat axes (Finding 5), with the same
@@ -746,6 +785,8 @@ production-refine smoke run is likewise uncommitted and counted only in the
 second total. The production-refine campaign's 648 refine and CMA-ES rows repeat
 the committed suite (apart from wall clock), so its evaluations include a second
 run of those arms; the committed total counts them as spent compute.
+`weight-router-production/reference-summary.json` re-uses the committed AMM
+and production rows and made no loss evaluation, so it has no ledger row.
 
 The router-era campaign (crate 0.1.46), whose code was removed, and its
 calibration are in neither total; their counts are in the router-era sections

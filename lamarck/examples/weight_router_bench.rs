@@ -91,6 +91,8 @@
 //! `OUT_DIR/manifest.json` and `OUT_DIR/runs.jsonl` from an earlier run plus
 //! the AMM rows (one `RunRow` JSON per line), writes
 //! `OUT_DIR/reference-summary.json` and prints one verdict line per cell.
+//! When that manifest sets `productionRefine`, the summary also pairs AMM with
+//! the production-refine rows.
 
 use std::fs;
 use std::io::Write;
