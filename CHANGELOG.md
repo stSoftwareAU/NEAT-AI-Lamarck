@@ -222,7 +222,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   by source, target and role (`synapse_type`) and the mirror pairs synapses by
   index, so a creature in which one source feeds an `IF` neuron in two roles is
   refined on the right synapse
-  (`the_refine_arm_refines_a_creature_that_feeds_an_if_neuron_twice`), and
+  (`follow_up_steps_only_the_role_synapse_that_moved`, a unit test in
+  `lamarck/src/weight_bench/refine.rs`), and
   `lamarck_refine` returns only errors from `obj.eval`. At `5c9ba38` (clean
   tree), `cargo run --release --example weight_router_bench -- /tmp/wrb-266/main`
   finished 648/648 runs, 0 failed, 1,631,615 evaluations, and its `runs.jsonl`
