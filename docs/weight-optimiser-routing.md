@@ -9,7 +9,8 @@ made**. AMM (arXiv 2611.06879) is **not ported and not reimplemented**. It was
 run as an offline reference arm through its authors' implementation and lost in
 all 27 cells (see [AMM reference results](#amm-reference-results)). The full method has now been read and pinned to
 [arXiv:2611.06879v1](https://arxiv.org/pdf/2611.06879v1). The refinement control
-is a simplified surrogate, **not the production candidate pipeline**, though
+is a simplified surrogate, **not the production candidate pipeline** (the opt-in
+`production-refine` arm is the one that drives that pipeline), though
 its mirror twin and follow-up probes call the production `mirror.rs` and
 `followup.rs` helpers (crate 0.1.53, rows identical to the committed ones, re-run
 at `5c9ba38`); the
@@ -18,7 +19,8 @@ reported margins do not establish superiority over current Lamarck refinement.
 **The router and its landscape probes have been removed.** They never beat
 CMA-ES alone (see [Findings](#findings)), so they did not earn their
 maintenance cost, and the issue ports only winning probes or routers. The
-current code runs two in-process arms, refinement and CMA-ES, on paired
+current code runs two in-process arms by default, refinement and CMA-ES, plus
+the opt-in `production-refine` arm (see [Finding 6](#findings)), on paired
 validation seeds with no calibration phase. The committed `manifest.json`,
 `summary.json` and `reference-summary.json` in
 [`docs/evidence/weight-router/`](evidence/weight-router/summary.json) are
@@ -58,6 +60,7 @@ alone.
 |-----|------------|
 | `lamarck-refine` | A simplified random-axis surrogate on a fixed weight set, not a call to `generate_candidate_batch`. Each round picks an axis and a delta drawn like the Random strategy (uniform in `±RANDOM_DELTA_HALF_WIDTH`, `0.05`, from `candidates.rs`, zero excluded), builds the `-delta` twin of `x + delta` with `mirror::signed_perturbation` and `mirror::mirror_candidate` (the twin is skipped when `mirror_candidate` refuses it or when `signed_perturbation` finds no single-weight change), and accepts the better one only if it strictly improves. After an accept it plans the #219 follow-up probes with `followup::plan_probes` (`STEP_FRACTIONS` `[0.5, -0.5, 1.0]` of the winning move), evaluates each through `followup::probe_candidate` (a refused probe is skipped) and takes the best strict improvement. A twin or probe that the hard weight limit (`limit_weight_scale`, 100000 by default) would clamp, or whose step is below `plank_constant` (1e-7), is refused, and a round whose twin is refused spends one evaluation instead of two. Since issue #285 the follow-up helpers identify a synapse by source, target and role (`synapse_type`), and the mirror pairs synapses by index, so a creature in which one source feeds an `IF` neuron in two roles is refined on the right synapse; `lamarck_refine` returns only errors from `obj.eval`. |
 | `cma-es` | Full-covariance (mu/mu_w, lambda)-CMA-ES, written in-repo with no third-party dependency. Strategy parameters are Hansen's tutorial defaults (arXiv:1604.00772); the eigendecomposition is a cyclic Jacobi method. Initial per-coordinate standard deviation `CMA_SIGMA0 = 0.05`. This equals the surrogate's uniform half-width numerically, but CMA-ES moves all coordinates and the search radii are not matched. |
+| `production-refine` (opt-in) | Drives the real production generator `generate_candidate_batch` (`PRODUCTION_BATCH` = 16 candidates per round, `scale_quotas: false`, no learning signal, no ranked sources, default mirror policy) on one focus neuron per round, in round-robin order over the distinct targets of the selected synapses. Focus and incoming statistics come from `collect_focus_stats` and `collect_incoming_source_stats`, and observations from `generate_statistics` over the screening records (written to a temporary `0.bin`). It evaluates only admissible candidates (changes to the selected weights only; structural, bias and out-of-set weight proposals are skipped), accepts the best strict improvement, and stops early with budget unused when a whole focus cycle yields nothing admissible. Enabled by manifest `productionRefine: true` or the example flag `--production-refine`; code in `lamarck/src/weight_bench/production.rs`. |
 | `router` (removed; router-era run only) | Spent `2 * probe_axes + 1` evaluations probing the landscape, then ran `lamarck-refine` or `cma-es` on the remaining budget. The probe was charged to the **same** budget. The chosen arm re-evaluated the start, one further counted evaluation. |
 | AMM (reference only) | Adaptive Multi Mode, run offline through its authors' reference implementation, not reimplemented here and not ported. It needs a known budget and a finite box, spends a counted part of the budget on online probes and routes the rest among several engines. See [AMM reference](#amm-reference). |
 
@@ -239,6 +242,9 @@ cargo run --release --example weight_router_bench -- OUT_DIR --smoke
 # A different, validated manifest
 cargo run --release --example weight_router_bench -- OUT_DIR --manifest FILE
 
+# Predeclared suite plus the opt-in production-refine arm
+cargo run --release --example weight_router_bench -- docs/evidence/weight-router-production --production-refine
+
 # Representative comparison on a real creature and corpus
 cargo run --release --example weight_router_bench -- OUT_DIR \
   --creature FILE --training-data DIR \
@@ -407,6 +413,12 @@ columns are the router-era run's router verdicts.
 | hard-tanh | 100 (extrapolation) | 30D | 0.0017 [-0.004, 0.0079] | 0.0034 | inconclusive | inconclusive | inconclusive |
 | hard-tanh | 100 (extrapolation) | 100D | -0.0033 [-0.0055, -0.0013] | -0.0051 | cma-es-better | inconclusive | router-better |
 
+**Production-refine arm (opt-in).** The run that adds the production generator
+is committed in
+[`docs/evidence/weight-router-production/summary.json`](evidence/weight-router-production/summary.json)
+(972 of 972 runs, 0 failed, 2,431,738 evaluations, commit `11b7953`); see
+[Finding 6](#findings).
+
 ## Findings
 
 1. **CMA-ES beat the random-axis surrogate in 18 of 27 synthetic cells** with
@@ -563,6 +575,36 @@ columns are the router-era run's router verdicts.
    cargo test --test weight_bench_landscape
    ```
 
+6. **Negative finding: the production generator, restricted to the selected
+   weights, was the weakest arm.** The opt-in `production-refine` arm was run
+   on the predeclared suite with `--production-refine` at commit `11b7953`
+   (crate 0.1.55, clean tree): 972 of 972 runs, 0 failed, 2,431,738
+   evaluations, 503 s wall on a shared host (indicative only); evidence in
+   `docs/evidence/weight-router-production/`. The 648 `lamarck-refine` and
+   `cma-es` rows equal the committed `weight-router/runs.jsonl` apart from wall
+   clock. Each comparison is paired (12 validation seeds x 27 cells = 324
+   pairs); the difference is production minus the other arm, so lower loss is
+   better and a positive value means production is worse.
+
+   * Against `lamarck-refine`: `production-refine-worse` in 26 of 27 cells and
+     inconclusive in 1 (tanh, D=100, 100D, screening mean +0.00012). Pairs
+     (wins / losses): screening 12 / 312, held-out 24 / 300, full window
+     23 / 301. Mean screening differences ran from +0.002 to +0.27, largest at
+     10D (+0.17 to +0.26).
+   * Against `cma-es`: `production-refine-worse` in all 27 cells. Pairs
+     (wins / losses): screening 3 / 321, held-out 15 / 309, full window
+     10 / 314.
+   * 8 of the 324 production rows stopped early with budget unused (nothing
+     admissible in a whole focus cycle); the rest used the full budget.
+   * A smoke run (`--smoke --production-refine`, 3 runs, 760 evaluations) was
+     made first and is not committed.
+
+   On the synthetic suite the production generator, restricted to the selected
+   weights, is the weakest of the three arms at every budget. This is a
+   negative synthetic finding, not evidence about a representative model, and
+   it does not test structural or bias proposals, which the bench excludes by
+   design. No default or production change follows.
+
 ## AMM reference results
 
 Coverage was 324 of 324 AMM validation runs completed, 0 failed, and 855,000
@@ -688,15 +730,21 @@ confirmation evaluations. No calibration was run by the current code.
 | `saturated-hard-tanh` arms (refine, CMA-ES) | `weight-router-landscape/saturated/summary.json` | 216 runs | 0 | 543,852 | `8badaf5` |
 | AMM reference, `saturated-hard-tanh` | `weight-router-landscape/saturated/reference-summary.json` | 108 runs | 0 | 285,000 | `84096bb` |
 | Landscape diagnosis | `weight-router-landscape/landscape-summary.json` | 144 problems | 0 | 51,744 | `8e79db7` |
-| **Committed total** | | | 0 | 3,367,211 | |
+| Predeclared synthetic suite (refine, CMA-ES, production-refine) | `weight-router-production/summary.json` | 972 runs | 0 | 2,431,738 | `11b7953` |
+| **Committed total** | | | 0 | 5,798,949 | |
 | Reproduction re-run, predeclared suite (refine, CMA-ES; crate 0.1.53) | not committed; rows equal `weight-router/runs.jsonl` | 648 runs | 0 | 1,631,615 | `5c9ba38` |
 | Reproduction re-run, `saturated-hard-tanh` (refine, CMA-ES; crate 0.1.53) | not committed; rows equal `weight-router-landscape/saturated/runs.jsonl` | 216 runs | 0 | 543,852 | `5c9ba38` |
-| **Total including reproduction re-runs** | | | 0 | 5,542,678 | |
+| Smoke run, `--smoke --production-refine` | not committed | 3 runs | 0 | 760 | `11b7953` |
+| **Total including reproduction re-runs** | | | 0 | 7,975,176 | |
 
 The two reproduction re-runs checked that routing the refine arm through the
 production mirror and follow-up helpers left every committed row unchanged. They
 produced no new evidence, so they are outside the committed total, but their
-evaluations are spent compute and are counted in the second total.
+evaluations are spent compute and are counted in the second total. The
+production-refine smoke run is likewise uncommitted and counted only in the
+second total. The production-refine campaign's 648 refine and CMA-ES rows repeat
+the committed suite (apart from wall clock), so its evaluations include a second
+run of those arms; the committed total counts them as spent compute.
 
 The router-era campaign (crate 0.1.46), whose code was removed, and its
 calibration are in neither total; their counts are in the router-era sections
@@ -714,10 +762,13 @@ hand-wrote its mirrors and follow-up steps. Since crate 0.1.53 (commit
 `5c9ba38`) it builds the twin with `mirror::mirror_candidate` and its probes with
 `followup::plan_probes` and `followup::probe_candidate`, with identical committed
 rows. It still does not call `generate_candidate_batch`, nor use the production
-focus/statistics/learning pipeline or its statistical and backprop proposals.
+focus/statistics/learning pipeline or its statistical and backprop proposals;
+the opt-in `production-refine` arm does call it (Finding 6), restricted to the
+selected weights and without a learning signal.
 Since issue #285 the follow-up helpers identify a synapse by source, target and role, so a creature that feeds one `IF` neuron from the same source in two roles is refined on the right synapse. Its uniform half-width and CMA-ES's coordinate standard
-deviation also define different search radii. The archived comparison therefore
-has a **surrogate baseline**, not baseline equivalence. Correcting that baseline
+deviation also define different search radii. The archived comparison of the two default arms therefore
+has a **surrogate baseline**, not baseline equivalence; the synthetic
+comparison against the production generator is Finding 6. Correcting that baseline
 changes the protocol and needs fresh validation data; the archived results must
 not select parameters for the corrected experiment.
 
@@ -779,8 +830,13 @@ from routine feature CI and are not representative optimisation measurements.
 
 ## Outstanding
 
-* The comparison against the actual production refinement pipeline and a frozen
-  representative model/corpus campaign, including full authoritative confirmation.
+* The synthetic comparison against the production generator is done and
+  negative (Finding 6). What remains is a frozen representative model/corpus
+  campaign that includes the production arm, with full authoritative
+  confirmation.
+* Keep `production-refine` opt-in only, as the harness for that representative
+  comparison; remove it if the representative run does not use it or confirms
+  the synthetic negative result.
 * Plateau axes among the free weights on a representative problem. The
   predeclared synthetic suite has none (Findings 4 and 5); only the added
   `saturated-hard-tanh` family has them by construction (Finding 5).

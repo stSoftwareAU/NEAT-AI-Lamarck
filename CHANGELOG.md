@@ -18,7 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unused. It runs only when `Manifest::production_refine` is set
   (`weight_router_bench --production-refine`), adding production-vs-refine and
   production-vs-CMA-ES comparisons. The field is omitted when false, so default
-  manifests, rows and the committed evidence are unchanged. Crate 0.1.55.
+  manifests, rows and the committed evidence are unchanged. Crate 0.1.55. On the
+  synthetic suite the arm was the weakest of the three (worse than
+  lamarck-refine in 26 of 27 cells and than CMA-ES in all 27); evidence in
+  `docs/evidence/weight-router-production/`.
 
 - **Plateau and kink diagnosis for the #266 weight bench, plus a saturated
   hard-tanh family (Issue #266).** `lamarck/src/weight_bench/landscape.rs`

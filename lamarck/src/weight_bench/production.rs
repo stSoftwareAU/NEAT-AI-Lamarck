@@ -78,8 +78,13 @@ impl TempCorpus {
 
 impl Drop for TempCorpus {
     fn drop(&mut self) {
-        // Best effort: a destructor cannot report, and the directory is ours alone.
-        let _ = std::fs::remove_dir_all(&self.path);
+        // A destructor cannot return an error, so report a failed clean-up as a warning.
+        if let Err(e) = std::fs::remove_dir_all(&self.path) {
+            crate::log::warn(&format!(
+                "could not remove temporary corpus {}: {e}",
+                self.path.display()
+            ));
+        }
     }
 }
 
