@@ -1,44 +1,37 @@
 ## Summary
 
-Most of #266's weight benchmark is already on Develop (#282, #283). This PR
-closes one reuse gap. The `lamarck-refine` arm
-(`lamarck/src/weight_bench/refine.rs`) used to build its antithetic twin and its
-follow-up probes with hand-written copies of `mirror.rs` and `followup.rs`. It
-now calls the production helpers: `mirror::signed_perturbation` and
-`mirror::mirror_candidate` build the `-delta` twin, and `followup::plan_probes`
-and `followup::probe_candidate` build the follow-up probes. The arm therefore
-inherits their refusals (the hard weight limit and the plank constant). Both
-committed suites were re-run at `5c9ba38` and reproduced every committed row,
-so no evidence file and no reported result changes. The re-runs' 2,175,467
-evaluations are now counted in the routing doc's compute ledger.
+Most of #266's weight benchmark is already on Develop (#282, #283, #293). This
+PR removes the one thing that stopped the plateau and kink check from running
+on a real model: `weight_bench::landscape::diagnose_manifest` refused any
+manifest that declares a `corpus`. It now builds each corpus problem exactly as
+the arm run does, through a new shared `build_manifest_problem` that
+`build_one` also calls. It returns `LandscapeDiagnosis { rows,
+corpus_fingerprint }`, and `weight_router_bench --landscape` accepts
+`--creature`/`--training-data` and writes `corpusFingerprint` into
+`landscape-summary.json`. Synthetic output is unchanged, so the committed
+landscape evidence still reproduces.
 
-This is the work of the stalled PR #287, carried onto current Develop, with two
-differences. First, #287's guard that refused any creature with a repeated
-`(from, to)` pair is gone: since #285 the follow-up helpers match a synapse by
-source, target and role, so that guard would have rejected valid `IF`
-creatures. Second, the provenance sentences that #287's review flagged (the
-arms "unchanged" since `f0a7b4c`) are corrected.
-
-The refinement arm is still a random-axis surrogate, not the production
-candidate pipeline, and no representative run has been made. Part of #266.
+No representative run has been made, and the refinement arm is still a
+random-axis surrogate rather than the production candidate pipeline.
+Part of #266.
 
 ## Spec
 
 ### Intent and Rationale
 
-- The issue says "Reuse existing mechanisms", and the routing doc recorded that `refine.rs` "manually recreates mirrors and follow-up steps". Calling the production helpers removes that second copy and keeps the arm's predeclared protocol on the committed suites.
-- #285 (merged) made `plan_probes` and `probe_candidate` identify a synapse by `(from, to, synapse_type)`, and `signed_perturbation` pairs synapses by index. So no bench-side guard is needed for an `IF` neuron fed twice by one source.
+- The routing doc's Outstanding list said the landscape diagnosis "refuses corpus manifests, so it cannot yet diagnose a representative problem", and that it should be removed if the representative run does not use it. Neither plateau axes on a representative problem nor the keep-or-remove decision can be settled while the tool refuses the corpus. This change makes both decidable at the owner's representative run.
+- Problems are built by the same function the arm run uses, so a diagnosis describes the very weights the arms optimise.
 
 ### Essential Design Decisions
 
-- The RNG draw order (axis, then a nonzero delta), the `remaining() >= 2` loop, start-first evaluation and the tie-break (plus wins ties) are kept, so the committed rows still reproduce. Limits come from `BackpropConfig::default()` (`limit_weight_scale` 100000, `plank_constant` 1e-7).
-- When `signed_perturbation` or `mirror_candidate` refuses a twin, the twin is not evaluated, so that round spends one evaluation instead of two. A refused follow-up probe is skipped. The `+delta` point itself is not limit-checked, as before.
-- `WeightObjective` gains `creature_at` (which `loss_on` now uses) and `synapse_indices`, and `BudgetedObjective` gains `objective()`. `refine.rs` uses all three to hand creatures to the helpers. Production code (`followup.rs`) changes only a doc comment.
+- `diagnose_manifest` still runs `validate()` and the budget-multiple check before any file I/O. A corpus that cannot be loaded is a hard error, as in `run_manifest`. A problem that fails to build (for example, D larger than the creature's synapse count) is recorded on its row, as before.
+- `corpusFingerprint` is written only for a corpus manifest. `formatVersion` stays 4, so synthetic summaries are byte-for-byte the old shape.
+- The return type changed from `Vec<LandscapeRow>` to `LandscapeDiagnosis` so that the corpus fingerprint is returned with the rows. It is computed by the same `fingerprint` that `run_manifest` uses. `recordsFnv1a64` hashes the records already loaded for the rows. `creatureFnv1a64` hashes the creature file read a second time, so a creature file changed between the two reads would not be detected. `run_manifest` has the same gap.
 
 ### Undiscoverable Facts
 
-- PRs #284 and #287 carried this reuse change and were closed when their review-fix lanes stalled. #287's one blocking review finding was the stale provenance sentences fixed here.
-- The twin is now `x - ((x + delta) - x)` rather than `x - delta`, and the probes come from the realised move. That is not bit-identical by construction, but the re-runs below gave identical rows.
+- No production creature/corpus pair is available on this host. Private inputs stay out of this checkout, so the representative diagnosis is an owner step.
+- The worker's periodic checkpoint committed this change as `c055cfd` ("WIP checkpoint"), not under a hand-written message.
 
 ## Evidence
 
@@ -46,59 +39,81 @@ Backend/CLI only; no UI file touched.
 
 ```mermaid
 flowchart LR
-    R[seeded axis + delta] --> P[plus point]
-    P --> S[mirror::signed_perturbation]
-    S --> M[mirror::mirror_candidate]
-    M -->|Some| T[evaluate twin]
-    M -->|None: limit or plank| K[skip twin, 1 evaluation]
-    T --> A{strict improvement?}
-    K --> A
-    A -->|yes| F["followup::plan_probes + probe_candidate<br/>(matched by from, to, role)"]
-    F --> E[evaluate the probes not refused, keep best]
+    M[manifest] --> V[validate + tightest multiple]
+    V --> L[load_manifest_corpus]
+    L --> F[fingerprint]
+    L --> B["build_manifest_problem<br/>(shared with build_one)"]
+    B --> D[diagnose_specs → rows]
+    F --> S[LandscapeDiagnosis]
+    D --> S
+    S --> J["landscape-summary.json<br/>(+ corpusFingerprint for a corpus)"]
 ```
 
-- **Main suite.** `cargo run --release --example weight_router_bench -- /tmp/wrb-266/main` from `lamarck/` at `5c9ba38` (clean tree, crate 0.1.53) printed `runs 648/648 completed (0 failed); 1631615 evaluations`. Its `runs.jsonl` equals the committed `docs/evidence/weight-router/runs.jsonl` row by row as parsed JSON: 648 of 648.
-- **Saturated suite.** The same binary with `--manifest ../docs/evidence/weight-router-landscape/saturated/manifest.json` printed `runs 216/216 completed (0 failed); 543852 evaluations`. All 216 rows equal `docs/evidence/weight-router-landscape/saturated/runs.jsonl`.
-- Commits after `5c9ba38` change only docs and remove one test, so these re-runs hold for the head's code.
+- **End-to-end CLI run.** The command was `cargo run --release --example weight_router_bench -- /tmp/s266/out --creature creature.json --training-data data --screening-records 128 --held-out-records 96 --max-records 600 --landscape`, run on a scratch copy of the test fixture corpus (8 inputs, 36 synapses, 600 records), outside the repo.
+  - It exited 0 and printed `Corpus D=20 (12 problems, 0 failed): ... smooth 240 ...` and `problems 12/36 completed (24 failed)`.
+  - The D=40 and D=100 rows recorded `"error":"invalid configuration: dimension 40 exceeds the creature's 36 synapses"`.
+  - The summary carried `corpusFingerprint` `{creatureFnv1a64: b00aff5a27adcce9, recordsFnv1a64: bba066ccf65b5309, records: 600}` with `formatVersion` 4.
+- **CLI refusal.** `--smoke --landscape` exited 1 with `--landscape takes the default or --manifest manifest, or a corpus (--creature and --training-data), and no --smoke or reference flags`.
+- **Red before the fix.** Against the unchanged code, `landscape_diagnoses_a_corpus_manifest` failed with `InvalidConfig("the landscape diagnosis needs a synthetic manifest, not a corpus")`.
 
 ## Acceptance Criteria
 
 <!-- vibe-spec-review inputs="diff+issue-body" -->
 
-- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `docs/evidence/weight-router/reference-summary.json`, `lamarck/src/weight_bench/refine.rs` — reviewer: partial — reason: AMM ran offline against both arms on fixed synthetic screening records and lost every comparison, but the refinement arm is still a random-axis surrogate. It does not call `generate_candidate_batch` or the focus/statistics/backprop pipeline, so this is not yet "the current refinement method".
+- **partial** — Use AMM as an offline reference against the current refinement method and CMA-ES on fixed deterministic screening records. — evidence: `docs/evidence/weight-router/reference-summary.json`, `lamarck/src/weight_bench/refine.rs` — reviewer: partial — reason: the refinement arm is a random-axis surrogate that does not call `generate_candidate_batch`, so "the current refinement method" is only approximated.
 - **met** — Optimise 20–100 influential weights with budgets 10D, 30D, 100D; mark D>40 as extrapolation requiring validation. — evidence: `predeclared_manifest`, `is_extrapolation`, `docs/evidence/weight-router/manifest.json` — reviewer: met
-- **met** — Count landscape probes within the budget. — evidence: `lamarck/tests/weight_bench_landscape.rs::diagnosis_draws_its_probes_from_the_tightest_budget`; every twin and probe goes through `BudgetedObjective::eval` (`lamarck/tests/weight_bench.rs::the_refine_arm_skips_a_refused_twin`) — reviewer: met
-- **partial** — Test plateaus/kinks and activation families, then full/held-out confirmation. — evidence: `lamarck/tests/weight_bench_landscape.rs::tanh_axes_are_smooth_and_relu_and_hard_tanh_axes_kink`, `docs/evidence/weight-router/summary.json` — reviewer: partial — reason: plateaus exist only in `saturated-hard-tanh`, which was added after the predeclared run; held-out and full-window checks are synthetic only, and full authoritative confirmation on a representative corpus is outstanding.
+- **met** — Count landscape probes within the budget. — evidence: `lamarck/tests/weight_bench_landscape.rs::diagnosis_draws_its_probes_from_the_tightest_budget`, `lamarck/tests/weight_bench.rs::landscape_diagnoses_a_corpus_manifest` (81 probes of a 200 budget) — reviewer: met
+- **partial** — Test plateaus/kinks and activation families, then full/held-out confirmation. — evidence: `lamarck/tests/weight_bench.rs::landscape_diagnoses_a_corpus_manifest`, `docs/evidence/weight-router-landscape/` — reviewer: partial — reason: the diagnosis can now run on a corpus, but no representative diagnosis or full authoritative confirmation has been made.
 - **met** — Port only winning probes/router to Rust after measurement; no topology optimisation or unverified third-party dependency added by default. — evidence: router removed in #282; the only `Cargo.lock` change is the crate's own version — reviewer: met
 - **met** — Read and pin the full method before reproducing it — evidence: `docs/evidence/weight-router/method-check.json`, `scripts/check-amm-method.py` — reviewer: met
-- **partial** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms; if functionality already exists, this issue still owns the missing controlled comparison rather than a second implementation. — evidence: `lamarck/src/weight_bench/refine.rs` (`mirrored_pair`, `follow_up_points`) — reviewer: partial — reason: inspection and reuse are done, with no second implementation, but the controlled comparison against the production refinement pipeline that this issue owns is still missing; the axis/step draw is the bench's own and `generate_candidate_batch` is bypassed.
-- **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change. — evidence: `lamarck/src/followup.rs` changes only a doc comment; the new accessors are additive and `creature_at` clones — reviewer: met
-- **partial** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `docs/weight-optimiser-routing.md` (Predeclared protocol; Compute ledger, which now also counts the two 0.1.53 reproduction re-runs, 2,175,467 evaluations, total 5,542,678) — reviewer: partial — reason: no representative model or data versions are selected or frozen, no overall wall-clock ceiling was set, the full-window veto was added after format 2 results were seen, and the method check, fixtures and unlogged development/smoke runs are not counted.
-- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks. Research runs are separate from routine feature CI. — evidence: `lamarck/tests/weight_bench.rs::the_refine_arm_skips_a_refused_twin`, `lamarck/tests/weight_bench.rs::the_refine_arm_skips_a_refused_follow_up_probe`, the unit tests in `lamarck/src/weight_bench/refine.rs`, and `./quality.sh` (see Test Plan) — reviewer: met
-- **met** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — evidence: How to run in `docs/weight-optimiser-routing.md`; committed `runs.jsonl` files reproduced at `5c9ba38` — reviewer: met
-- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: the hand-written copies are deleted; `docs/weight-optimiser-routing.md` says the "representative run on the private corpus remains unperformed" — reviewer: met — reason: the reviewer said met "with a caveat" (the landscape diagnosis is kept although nothing routes on it, and its removal is deferred to Outstanding). I depart to partial for that reason: the decision to keep or remove it waits on a representative run, and none has been made.
-- **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private. — evidence: the new fixtures are generic toy creatures — reviewer: met
-- **met** — Leave unassigned until an implementer actively starts. `work-on` authorises the investigation, not skipping prerequisite verification. — evidence: this run inspected merged #282/#283/#285 and closed #287 before changing code — reviewer: missing — reason: the reviewer said "not judgeable from a diff"; it is a process rule and the run followed it.
-- **unrequested** — public accessors `WeightObjective::synapse_indices`, `WeightObjective::creature_at`, `BudgetedObjective::objective` — reviewer: unrequested — reason: the helper reuse needs creatures; `refine.rs` is their caller.
-- **unrequested** — crate version 0.1.52 → 0.1.53 (`lamarck/Cargo.toml`, `Cargo.lock`) — reviewer: unrequested — reason: `CONTRIBUTING.md` requires a patch bump for changes under `lamarck/src/`.
-- **unrequested** — provenance rewording in `CHANGELOG.md` and `docs/weight-optimiser-routing.md` — reviewer: unrequested — reason: the code change made the old "arms unchanged" sentences false (#287's review finding).
-- **unrequested** — the `IF`-twice unit test `follow_up_steps_only_the_role_synapse_that_moved` — reviewer: unrequested — reason: it pins that the reused helpers step the right synapse on a creature #285 made valid for them.
+- **partial** — First inspect current code, merged work and repository instructions. Reuse existing mechanisms; if functionality already exists, this issue still owns the missing controlled comparison rather than a second implementation. — evidence: `lamarck/src/weight_bench/experiment.rs` (`build_manifest_problem` shared by `build_one` and `diagnose_manifest`; `load_manifest_corpus` and `fingerprint` reused) — reviewer: met — reason: the reviewer rated this diff's reuse met but noted that the refine control still does not reuse `generate_candidate_batch`. I keep it partial because this criterion also owns that missing controlled comparison.
+- **met** — Opt-in experiment only; preserve ordinary behaviour, interfaces, immutable parents and full authoritative acceptance. No automatic deployment or default change. — evidence: changes are confined to `weight_bench` and its example; `run.rs` and the production pipeline are untouched — reviewer: met
+- **partial** — Predeclare controls, seeds, sample size, compute limits and success/failure criteria. Identify code/model/data versions; separate calibration from untouched validation and count all preparation/search costs. — evidence: `docs/weight-optimiser-routing.md` (Predeclared protocol; Compute ledger); `corpusFingerprint` now identifies the model and records of a landscape run — reviewer: partial — reason: no representative manifest is frozen, no model/data versions are selected, no overall wall-clock ceiling is set, and the earlier development and smoke runs are not counted.
+- **met** — Provide deterministic positive/negative correctness tests for new behaviour and pass the repository's normal quality checks. Research runs are separate from routine feature CI. — evidence: `lamarck/tests/weight_bench.rs::landscape_diagnoses_a_corpus_manifest`, `lamarck/tests/weight_bench_landscape.rs::landscape_refuses_an_unloadable_corpus_and_invalid_manifests`, `./quality.sh` (see Test Plan) — reviewer: met — reason: the reviewer could not run the gate and noted that the CLI refusal has no automated test. The gate was run here and passed, and the CLI refusal was exercised by hand (see Evidence).
+- **partial** — Deliver a reproducible command/manifest and machine-readable results with paired distributions, uncertainty, failures and actual coverage. Fixtures alone do not demonstrate an optimisation benefit. — evidence: How to run in `docs/weight-optimiser-routing.md` (now including the corpus `--landscape` command) — reviewer: partial — reason: the synthetic results are reproducible, but representative coverage is 0 runs.
+- **partial** — Record negative findings and remove optional code that does not earn its maintenance cost. Do not claim success before representative runs. — evidence: `docs/weight-optimiser-routing.md` Outstanding — reviewer: partial — reason: the keep-or-remove decision on the landscape diagnosis still waits on a representative run. This diff adds a small public type to it so that run can use it.
+- **met** — Keep public implementation and fixtures application-agnostic; private corpora/results and operational integration remain private. — evidence: the corpus test writes a generic fixture to a temporary directory — reviewer: met
+- **met** — Leave unassigned until an implementer actively starts. `work-on` authorises the investigation, not skipping prerequisite verification. — evidence: this run inspected merged #293 and the Outstanding list before changing code — reviewer: missing — reason: the reviewer said "not assessable from the diff"; it is a process rule, and the run followed it.
+- **unrequested** — `diagnose_manifest` now returns `LandscapeDiagnosis` (newly exported) instead of `Vec<LandscapeRow>` — reviewer: unrequested — reason: the bench-only API change is needed to return the corpus fingerprint together with the rows.
+- **unrequested** — crate version 0.1.53 → 0.1.54 (`lamarck/Cargo.toml`, `Cargo.lock`) and the CHANGELOG entry — reviewer: unrequested — reason: `CONTRIBUTING.md` requires a patch bump and a changelog entry for changes under `lamarck/src/`.
 
 ## Standards Review
 
 <!-- vibe-standards-review inputs="diff+CODING-STANDARDS.md" -->
 
-- **clean** — No violations. The repository has no `CODING-STANDARDS.md`; the review used `CONTRIBUTING.md` and `README.md`, which document no review-only rules. Checked: version bump and `Cargo.lock` agree (0.1.53, not behind Develop); the CHANGELOG entry sits under Unreleased/Changed; every cited test exists; no existing test expectation changed (only the `use` list); `the_refine_arm_skips_a_refused_twin` and `the_refine_arm_skips_a_refused_follow_up_probe` fail against the old arm; doc claims on defaults, refusals and role matching match the head. Optional notes acted on: the integration test `the_refine_arm_refines_a_creature_that_feeds_an_if_neuron_twice` could not fail (its `best <= start` always holds, and it passed on Develop), so it was removed and the CHANGELOG now cites the unit test that discriminates. Not acted on: the `+delta` point is never limit-checked (unchanged, and documented).
+- **clean** — No violations. The repository has no `CODING-STANDARDS.md`; the review used `CONTRIBUTING.md` and `README.md`, which document no review-only rules. Checked:
+  - The version bump and `Cargo.lock` agree (0.1.54, not behind Develop), and the CHANGELOG entry is under Unreleased/Changed.
+  - The docs no longer say the diagnosis is synthetic-only.
+  - The CLI wiring builds the corpus manifest before `landscape()`.
+  - The renamed refusal test's new `corpus creature missing.json` expectation fails if the old refusal returns.
+  - The new corpus test fails if the synthetic builder or the refusal is restored.
+  - No cited test is missing and no workflow changed.
+
+  Optional notes: the one long rustdoc line on `diagnose_manifest` was re-wrapped in a follow-up comment-only commit. Not acted on: a CHANGELOG phrase that does not say corpus output is also format 4, and the generic name `fingerprint` for a `pub(super)` function.
 
 ## Test Plan
 
-- Added in `lamarck/tests/weight_bench.rs`:
-  - `the_refine_arm_skips_a_refused_twin` and `the_refine_arm_skips_a_refused_follow_up_probe`, each with a positive control.
-  - `the_refine_arm_reproduces_its_committed_rows`, which pins 8 of the 324 committed refine rows and is expected green before and after the change.
-- Added as unit tests in `lamarck/src/weight_bench/refine.rs`: `twin_straddles_x_on_the_chosen_axis`, `twin_is_refused_past_the_hard_weight_limit`, `twin_is_refused_below_the_plank_constant`, `follow_up_steps_around_the_winning_move`, `follow_up_drops_a_probe_past_the_hard_limit` and `follow_up_steps_only_the_role_synapse_that_moved`. The last uses an `IF` neuron fed by `input-0` as condition (0.5) and positive (1.5), and asserts the three probes leave axis 0 at 0.5 and put axis 1 at 1.8, 1.6, 1.9. Read against the pre-#285 `followup.rs`, first-match lookup would size the probes from the condition synapse and step axis 0, so the test fails there; this was not executed.
-- No existing test was edited apart from the `use` list in `lamarck/tests/weight_bench.rs`, so no assertion was removed.
-- On `b15af4c`: `cargo test -p neat_ai_lamarck --test weight_bench` 29 passed, 1 ignored (already ignored); `cargo test -p neat_ai_lamarck --lib weight_bench::refine` 6 passed; `./quality.sh < /dev/null` exited 0 ("All quality checks passed!", 1018 tests passed, 0 failed). `markdownlint-cli2` reported 0 issues on the edited docs; `scripts/spell-check.sh` found no typos.
-- Docs read and updated: `docs/weight-optimiser-routing.md` (status paragraph, `lamarck-refine` Arms row, the three AMM provenance sentences, "Compute ledger" (adds the two 0.1.53 reproduction re-runs and a total that includes them), "Controls and remaining experiment", "Verification and process failures") and `CHANGELOG.md`. After the ledger edit, `markdownlint-cli2` reported 0 issues on that doc; `scripts/spell-check.sh` could not run because `codespell` is not installed on this host. `README.md` does not mention the refine arm.
+- Added `lamarck/tests/weight_bench.rs::landscape_diagnoses_a_corpus_manifest`. Its fixture is the existing generic corpus (`corpus_fixture`). It asserts:
+  - one `Corpus` row at D=20, seed 1001, with no error, 20 classified axes, 81 evaluations and a budget of 200;
+  - that the row equals `diagnose` of the `problem_from_corpus` problem, with matching `preparation_evaluations`;
+  - a fingerprint with `records` 600 that equals `run_manifest`'s.
+
+  It failed before the fix (see Evidence) and passes after it.
+- Edited `lamarck/tests/weight_bench_landscape.rs`:
+  - The old `landscape_refuses_corpus_and_invalid_manifests` asserted that a corpus manifest is refused. The issue's plateau/kink criterion on a representative problem makes that refusal obsolete. It is renamed `landscape_refuses_an_unloadable_corpus_and_invalid_manifests` and now asserts that the specific `corpus creature missing.json` error is returned for a missing creature file. The empty-seeds refusal is kept unchanged.
+  - `landscape_command_total_counts_preparation_once_per_problem` additionally asserts `corpus_fingerprint == None` for a synthetic manifest.
+  - Every other edit only appends `.rows`, so no assertion was removed. `committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau` still checks that the synthetic rows equal the committed evidence.
+- On the final code (`c055cfd`; the later commit re-wraps one doc comment, after which `cargo fmt --check` and `cargo doc --no-deps` passed):
+  - `cargo test --test weight_bench --test weight_bench_landscape`: 30 passed and 1 ignored (already ignored), and 18 passed.
+  - `cargo test --lib weight_bench`: 14 passed.
+  - `cargo clippy --all-targets -- -D warnings`: clean.
+  - `./quality.sh < /dev/null`: exited 0 with "All quality checks passed!" (1019 tests passed, 0 failed).
+  - markdownlint: 0 issues on `CHANGELOG.md` and `docs/weight-optimiser-routing.md`; `scripts/spell-check.sh` found no typos.
+- Docs read and updated:
+  - `docs/weight-optimiser-routing.md`: How to run gains the corpus `--landscape` command, Finding 5 gains a corpus paragraph, and the Outstanding bullet is rewritten.
+  - The `weight_router_bench.rs` module doc and the `diagnose_manifest` rustdoc are updated.
+  - `CHANGELOG.md` is updated.
+  - After editing, a grep for `refus\w* corpus`, `synthetic.only` and `synthetic manifest` found no stale claim. `README.md` does not mention the landscape diagnosis.
 
 ## Merge verification
 
@@ -106,10 +121,10 @@ flowchart LR
 
 ## Not done
 
-- Representative runs on a production creature and corpus. None is available on this host, and private inputs stay out of this checkout, so no optimisation benefit is claimed.
-- A refinement arm on the production candidate pipeline (`generate_candidate_batch` with focus/statistics/backprop).
-- Removing or justifying the landscape diagnosis. Its keep-or-remove decision depends on whether a representative run uses it.
-- A predeclared overall wall-clock ceiling, and costing the method check and the development and smoke runs. Those runs were not logged.
-- `scripts/test-amm-reference.py` was not re-run; nothing it drives changed.
+- **Representative runs:** none on a production creature and corpus, for either the arms or the landscape diagnosis. No optimisation benefit is claimed.
+- **Production pipeline:** there is no refinement arm on the production candidate pipeline (`generate_candidate_batch` with focus/statistics/backprop). That changes the protocol and needs fresh validation data.
+- **Landscape diagnosis:** the keep-or-remove decision waits on the representative run.
+- **Compute and costing:** no overall wall-clock ceiling is predeclared, and the earlier development and smoke runs are not costed.
+- **Untested:** the CLI flag refusal has no automated test; it was checked by hand only.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

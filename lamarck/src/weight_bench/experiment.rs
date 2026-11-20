@@ -305,7 +305,9 @@ fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> String {
 }
 
 /// Fingerprint the creature file and the records actually loaded from it.
-fn fingerprint(corpus: &LoadedCorpus<'_>) -> Result<Option<CorpusFingerprint>, BenchError> {
+pub(super) fn fingerprint(
+    corpus: &LoadedCorpus<'_>,
+) -> Result<Option<CorpusFingerprint>, BenchError> {
     let Some((spec, (creature, packed))) = corpus else {
         return Ok(None);
     };
@@ -431,6 +433,25 @@ pub(super) fn load_manifest_corpus(m: &Manifest) -> Result<LoadedCorpus<'_>, Ben
     }
 }
 
+/// Build one manifest problem: the corpus problem, or the synthetic one.
+pub(super) fn build_manifest_problem(
+    corpus: &LoadedCorpus<'_>,
+    family: Family,
+    dimension: usize,
+    seed: u64,
+) -> Result<Problem, BenchError> {
+    match corpus {
+        Some((spec, (creature, packed))) => {
+            problem_from_corpus(creature, packed, spec, dimension, seed)
+        }
+        None => build_problem(&ProblemSpec {
+            family,
+            dimension,
+            seed,
+        }),
+    }
+}
+
 /// Build one (problem, objective) pair exactly as the experiment does.
 pub(super) fn build_one(
     corpus: &LoadedCorpus<'_>,
@@ -438,16 +459,7 @@ pub(super) fn build_one(
     dimension: usize,
     seed: u64,
 ) -> Result<(Problem, WeightObjective), BenchError> {
-    let problem = match corpus {
-        Some((spec, (creature, packed))) => {
-            problem_from_corpus(creature, packed, spec, dimension, seed)?
-        }
-        None => build_problem(&ProblemSpec {
-            family,
-            dimension,
-            seed,
-        })?,
-    };
+    let problem = build_manifest_problem(corpus, family, dimension, seed)?;
     let objective = WeightObjective::new(
         problem.creature.clone(),
         problem.synapse_indices.clone(),

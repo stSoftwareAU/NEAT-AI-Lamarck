@@ -25,9 +25,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::experiment::Manifest;
+use super::experiment::{
+    CorpusFingerprint, Manifest, build_manifest_problem, fingerprint, load_manifest_corpus,
+};
 use super::objective::{BenchError, BudgetedObjective, PLATEAU_REL_TOL, WeightObjective};
-use super::suite::{Family, Problem, ProblemSpec, build_problem};
+use super::suite::{Family, Problem, ProblemSpec};
 use crate::candidates::RANDOM_DELTA_HALF_WIDTH;
 
 /// Second differences no larger than this fraction of the base loss (floored
@@ -161,8 +163,9 @@ impl ShapeCounts {
 ///
 /// A failed problem has `error` set, zero shapes and a zero
 /// `plateau_free_axes`, and keeps the evaluations it actually spent. One whose
-/// [`build_problem`] failed reports `preparation_evaluations` 0, because a
-/// failed build does not expose how much of its selection scan ran.
+/// [`build_problem`](super::suite::build_problem) failed reports
+/// `preparation_evaluations` 0, because a failed build does not expose how much
+/// of its selection scan ran.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LandscapeRow {
@@ -353,23 +356,39 @@ fn manifest_specs(m: &Manifest) -> Vec<ProblemSpec> {
     specs
 }
 
-/// Diagnose every (family, dimension, validation seed) problem of a synthetic
-/// manifest, in manifest order, with [`build_problem`] (see
-/// [`diagnose_specs`]), each from a budget of the manifest's smallest budget
-/// multiple times the dimension. Only an invalid or corpus manifest is an error; a
-/// problem that fails is recorded on its row.
-pub fn diagnose_manifest(m: &Manifest) -> Result<Vec<LandscapeRow>, BenchError> {
+/// What [`diagnose_manifest`] measured.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LandscapeDiagnosis {
+    /// One row per (family, dimension, validation seed) problem, in manifest order.
+    pub rows: Vec<LandscapeRow>,
+    /// The creature file and records a corpus manifest's problems came from;
+    /// `None` for a synthetic manifest.
+    pub corpus_fingerprint: Option<CorpusFingerprint>,
+}
+
+/// Diagnose every (family, dimension, validation seed) problem of a manifest,
+/// in manifest order (see [`diagnose_specs`]), each from a budget of the
+/// manifest's smallest budget multiple times the dimension. Each problem is
+/// built as the arm run builds it: with
+/// [`build_problem`](super::suite::build_problem) for a synthetic manifest, or
+/// from the manifest's creature and records for a corpus manifest. Only an
+/// invalid manifest or a corpus that cannot be loaded is an error; a problem
+/// that fails to build or diagnose is recorded on its row.
+pub fn diagnose_manifest(m: &Manifest) -> Result<LandscapeDiagnosis, BenchError> {
     m.validate()?;
-    if m.corpus.is_some() {
-        return Err(BenchError::InvalidConfig(
-            "the landscape diagnosis needs a synthetic manifest, not a corpus".into(),
-        ));
-    }
     let tightest =
         m.budget_multiples.iter().copied().min().ok_or_else(|| {
             BenchError::InvalidConfig("the manifest has no budget multiples".into())
         })?;
-    Ok(diagnose_specs(&manifest_specs(m), tightest, build_problem))
+    let corpus = load_manifest_corpus(m)?;
+    let corpus_fingerprint = fingerprint(&corpus)?;
+    let rows = diagnose_specs(&manifest_specs(m), tightest, |spec| {
+        build_manifest_problem(&corpus, spec.family, spec.dimension, spec.seed)
+    });
+    Ok(LandscapeDiagnosis {
+        rows,
+        corpus_fingerprint,
+    })
 }
 
 /// Planned versus diagnosed problems.

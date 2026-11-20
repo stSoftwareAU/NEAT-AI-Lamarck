@@ -34,11 +34,13 @@
 //! `--held-out-records` (default 512) are held out, and the rest of the window
 //! is the full set. The window needs screening + held-out records.
 //!
-//! Landscape diagnosis (synthetic manifests only, i.e. the default or
-//! `--manifest`; refused with `--smoke`, corpus flags or the reference flags):
+//! Landscape diagnosis (the default or `--manifest` manifest, or a corpus via
+//! `--creature` and `--training-data` or a manifest declaring `corpus`; refused
+//! with `--smoke` or the reference flags):
 //!
 //! ```text
 //! weight_router_bench OUT_DIR [--manifest FILE] --landscape
+//! weight_router_bench OUT_DIR --creature FILE --training-data DIR [record flags] --landscape
 //! ```
 //!
 //! builds every (family, dimension, validation seed) problem of the manifest,
@@ -56,13 +58,14 @@
 //! `diagnosisBudgetMultiple`, and `budget` on each row and cell); a problem
 //! whose `1 + 4D` probes exceed it records `BudgetExhausted` as its `error`.
 //! These fields are landscape summary format 4 (crate 0.1.50), the format of
-//! the committed landscape evidence.
+//! the committed landscape evidence. With a corpus the summary also carries
+//! `corpusFingerprint`, as `summary.json` does; the key is omitted otherwise.
 //! A problem that cannot be built or diagnosed is recorded, not fatal: its row
 //! carries `error` (null on success) and zero shapes, its cell counts it in
 //! `failures`, and the summary's `coverage` gives planned, completed and failed
-//! problems. As for the arm run, failures still exit 0; only an invalid or
-//! corpus manifest is an error. It runs no arm and does not write
-//! `OUT_DIR/manifest.json`.
+//! problems. As for the arm run, failures still exit 0; only an invalid
+//! manifest or an unloadable corpus is an error. It runs no arm and does not
+//! write `OUT_DIR/manifest.json`.
 //!
 //! AMM reference arm (offline; the optimiser itself is `scripts/amm-reference.py`):
 //!
@@ -226,7 +229,8 @@ fn compare_reference(out_dir: &Path, amm_rows: &Path) -> Result<(), String> {
 fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
     let provenance = Provenance::probe()?;
     let started = Instant::now();
-    let rows = diagnose_manifest(manifest).map_err(|e| e.to_string())?;
+    let diagnosis = diagnose_manifest(manifest).map_err(|e| e.to_string())?;
+    let rows = diagnosis.rows;
     let wall_clock_seconds = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
     let cells = summarise_landscape(manifest, &rows);
     let coverage = landscape_coverage(manifest, &rows);
@@ -256,6 +260,11 @@ fn landscape(out_dir: &Path, manifest: &Manifest) -> Result<(), String> {
         "cells": cells,
     });
     if let Some(object) = summary.as_object_mut() {
+        // A corpus diagnosis names the exact model and records; a synthetic one
+        // is fixed by the crate version and the manifest seeds.
+        if let Some(fp) = &diagnosis.corpus_fingerprint {
+            object.insert("corpusFingerprint".into(), json!(fp));
+        }
         provenance.insert_into(object);
     }
     let summary_path = out_dir.join("landscape-summary.json");
@@ -350,10 +359,8 @@ fn run() -> Result<(), String> {
             other => out_dir = PathBuf::from(other),
         }
     }
-    if landscape_only
-        && (smoke || serve || compare.is_some() || creature.is_some() || training_data.is_some())
-    {
-        return Err("--landscape needs a synthetic manifest (the default or --manifest) and no --smoke, corpus or reference flags".into());
+    if landscape_only && (smoke || serve || compare.is_some()) {
+        return Err("--landscape takes the default or --manifest manifest, or a corpus (--creature and --training-data), and no --smoke or reference flags".into());
     }
     let mut manifest = match (manifest, smoke) {
         (Some(_), true) => return Err("--manifest and --smoke are mutually exclusive".into()),

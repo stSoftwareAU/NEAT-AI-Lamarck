@@ -199,7 +199,9 @@ fn landscape_command_total_counts_preparation_once_per_problem() {
         vec![20, 40],
         vec![1001, 1002],
     );
-    let rows = diagnose_manifest(&m).unwrap();
+    let diagnosis = diagnose_manifest(&m).unwrap();
+    assert_eq!(diagnosis.corpus_fingerprint, None);
+    let rows = diagnosis.rows;
     assert_eq!(rows.len(), 8);
     assert!(rows.iter().all(|r| r.preparation_evaluations == 145));
     assert_eq!(
@@ -332,7 +334,7 @@ fn failed_problems_are_recorded_and_counted_not_fatal() {
     );
 
     // Every other row is exactly what the unfaulted run produces.
-    let clean = diagnose_manifest(&m).unwrap();
+    let clean = diagnose_manifest(&m).unwrap().rows;
     assert!(clean.iter().all(|r| r.error.is_none()));
     let mut others = 0;
     for (row, expected) in rows.iter().zip(&clean) {
@@ -380,7 +382,7 @@ fn a_clean_run_covers_every_planned_problem() {
         vec![20],
         vec![1001, 1002],
     );
-    let rows = diagnose_manifest(&m).unwrap();
+    let rows = diagnose_manifest(&m).unwrap().rows;
     assert_eq!(rows, diagnose_specs(&specs_of(&m), 10, build_problem));
     assert_eq!(
         landscape_coverage(&m, &rows),
@@ -424,7 +426,7 @@ fn axis_shapes_are_deterministic() {
 #[test]
 fn landscape_rows_and_cells_serialise_in_camel_case() {
     let m = manifest(vec![Family::SaturatedHardTanh], vec![20, 40], vec![1001]);
-    let rows = diagnose_manifest(&m).unwrap();
+    let rows = diagnose_manifest(&m).unwrap().rows;
     assert_eq!(rows.len(), 2);
     let value = serde_json::to_value(&rows[1]).unwrap();
     for key in [
@@ -465,7 +467,7 @@ fn landscape_rows_and_cells_serialise_in_camel_case() {
 }
 
 #[test]
-fn landscape_refuses_corpus_and_invalid_manifests() {
+fn landscape_refuses_an_unloadable_corpus_and_invalid_manifests() {
     let mut m = manifest(vec![Family::Corpus], vec![20], vec![1001]);
     m.corpus = Some(CorpusSpec {
         creature: "missing.json".into(),
@@ -474,10 +476,12 @@ fn landscape_refuses_corpus_and_invalid_manifests() {
         held_out_records: 1,
         max_records: 2,
     });
-    assert!(matches!(
-        diagnose_manifest(&m),
-        Err(BenchError::InvalidConfig(_))
-    ));
+    match diagnose_manifest(&m) {
+        Err(BenchError::InvalidConfig(msg)) => {
+            assert!(msg.contains("corpus creature missing.json"), "{msg}");
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
     let empty = manifest(vec![Family::Tanh], vec![20], vec![]);
     assert!(matches!(
         diagnose_manifest(&empty),
@@ -641,7 +645,7 @@ fn committed_landscape_evidence_is_reproduced_and_shows_the_saturated_plateau() 
         .filter(|r| r.seed == m.validation_seeds[0])
         .cloned()
         .collect();
-    assert_eq!(diagnose_manifest(&first_seed).unwrap(), expected);
+    assert_eq!(diagnose_manifest(&first_seed).unwrap().rows, expected);
 }
 
 #[test]
@@ -652,7 +656,7 @@ fn diagnosis_draws_its_probes_from_the_tightest_budget() {
         vec![1001, 1002],
     );
     m.budget_multiples = vec![30, 10, 100];
-    let rows = diagnose_manifest(&m).unwrap();
+    let rows = diagnose_manifest(&m).unwrap().rows;
     assert_eq!(rows.len(), 8);
     for row in &rows {
         let budget = 10 * row.dimension;

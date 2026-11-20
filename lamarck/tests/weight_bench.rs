@@ -9,8 +9,8 @@ use neat_ai_lamarck::weight_bench::suite::{
 };
 use neat_ai_lamarck::weight_bench::{
     Arm, BenchError, BudgetedObjective, CMA_SIGMA0, Manifest, RunRow, WeightObjective,
-    build_problem, cma_es, is_extrapolation, lamarck_refine, predeclared_manifest, run_arm,
-    run_manifest, select_influential,
+    build_problem, cma_es, diagnose, diagnose_manifest, is_extrapolation, lamarck_refine,
+    predeclared_manifest, run_arm, run_manifest, select_influential,
 };
 
 fn problem(family: Family, seed: u64) -> (Problem, WeightObjective) {
@@ -465,6 +465,34 @@ fn corpus_manifest_runs_within_budget() {
             Some(o.loss_on(&start, &p.held_out).unwrap())
         );
     }
+}
+
+#[test]
+fn landscape_diagnoses_a_corpus_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = corpus_spec(dir.path(), 128, 96);
+    let m = corpus_manifest(spec.clone());
+    let d = diagnose_manifest(&m).unwrap();
+    assert_eq!(d.rows.len(), 1);
+    let row = &d.rows[0];
+    assert_eq!(row.family, Family::Corpus);
+    assert_eq!(row.dimension, 20);
+    assert_eq!(row.seed, 1001);
+    assert_eq!(row.error, None);
+    assert_eq!(row.shapes.total(), 20);
+    assert_eq!(row.evaluations, 81);
+    assert_eq!(row.budget, Some(200));
+    // Wiring check: the row is the diagnosis of the problem the arm run builds.
+    let (creature, packed) = load_corpus(&spec).unwrap();
+    let p = problem_from_corpus(&creature, &packed, &spec, 20, 1001).unwrap();
+    assert_eq!(*row, diagnose(&p, 200).unwrap());
+    assert_eq!(row.preparation_evaluations, p.preparation_evaluations);
+    let fingerprint = d.corpus_fingerprint.as_ref().unwrap();
+    assert_eq!(fingerprint.records, 600);
+    assert_eq!(
+        d.corpus_fingerprint,
+        run_manifest(&m).unwrap().corpus_fingerprint
+    );
 }
 
 /// Each row's confirmation losses are taken at the best point its arm found:

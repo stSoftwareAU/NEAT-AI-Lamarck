@@ -205,6 +205,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The landscape diagnosis now accepts a corpus manifest, so it can run on a
+  representative problem (Issue #266).** `weight_bench::landscape::diagnose_manifest`
+  (crate 0.1.54) no longer refuses a manifest with `corpus` set. It builds each
+  problem exactly as the arm run does (same creature, screening, held-out and
+  full split, and influential-weight selection) and returns
+  `LandscapeDiagnosis { rows, corpus_fingerprint }`, where the fingerprint is
+  `None` for a synthetic manifest. Only an invalid manifest or a corpus that
+  cannot be loaded is an error; a failing problem is still recorded on its row.
+  `weight_router_bench --landscape` takes `--creature FILE --training-data DIR`
+  (with the usual record flags) or a `--manifest` that declares `corpus`, and
+  still refuses `--smoke` and the reference flags. With a corpus,
+  `landscape-summary.json` also carries `corpusFingerprint`; synthetic output
+  is unchanged (format 4). No representative run has been made.
 - **The weight bench's refinement arm now calls the production mirror and
   follow-up helpers (Issue #266).** `lamarck-refine` (`weight_bench/refine.rs`,
   crate 0.1.53, commit `5c9ba38`) builds its `-delta` twin with

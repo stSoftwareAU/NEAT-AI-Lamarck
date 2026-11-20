@@ -243,6 +243,10 @@ cargo run --release --example weight_router_bench -- OUT_DIR --manifest FILE
 cargo run --release --example weight_router_bench -- OUT_DIR \
   --creature FILE --training-data DIR \
   [--screening-records 256] [--held-out-records 512] [--max-records 4096]
+
+# Plateau and kink diagnosis on the same creature and corpus (same optional record flags)
+cargo run --release --example weight_router_bench -- OUT_DIR \
+  --creature FILE --training-data DIR --landscape
 ```
 
 In corpus mode, within the loaded window of T records, the screening records
@@ -539,6 +543,13 @@ columns are the router-era run's router verdicts.
    are synthetic fixtures, so they are a hypothesis for the representative
    run, not evidence about NEAT-AI creatures.
 
+   Since crate 0.1.54 the diagnosis also accepts a corpus manifest and builds
+   each problem exactly as the arm run does. `landscape-summary.json` then
+   carries `corpusFingerprint` (the creature-file and loaded-record FNV-1a
+   hashes and the record count, as in `summary.json`). For a synthetic manifest
+   the output is unchanged (`formatVersion` 4), so the committed evidence above
+   is unaffected.
+
    Reproduce (from `lamarck/`, release build). The arm run reads its manifest
    from outside its `OUT_DIR`, because it writes `OUT_DIR/manifest.json`
    itself. The committed files were written to a scratch directory, so the
@@ -776,7 +787,9 @@ from routine feature CI and are not representative optimisation measurements.
 * Whether `weight_bench::landscape` and `--landscape` earn their keep. Nothing
   routes on the diagnosis; it is kept, opt-in and example-only, because it is
   the only reproducer of the committed plateau and kink evidence (Finding 5).
-  It refuses corpus manifests, so it cannot yet diagnose a representative
-  problem. Remove it if the representative run does not use it.
+  Since crate 0.1.54 it accepts a corpus manifest (or `--creature` and
+  `--training-data`) and records `corpusFingerprint`, so it can diagnose a
+  representative problem, but no representative diagnosis has been run. Remove
+  it if the representative run does not use it.
 * Box-size sensitivity and search-radius controls, predeclared on fresh data.
   No production optimiser or default change is supported by the current evidence.
